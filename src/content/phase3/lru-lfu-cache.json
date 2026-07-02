@@ -1,0 +1,189 @@
+{
+  "id": "phase3_lru-lfu-cache",
+  "title": "LRU and LFU Cache",
+  "phase": 3,
+  "week": 10,
+  "icon": "stack",
+  "tagline": "O(1) get and put with smart eviction — LRU via hashmap + doubly linked list, LFU adding a frequency layer.",
+  "readTime": "~14 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "A **cache** is a fixed-capacity store that keeps the most valuable data close for fast retrieval, discarding old data to make room for new. The challenging part is the **eviction policy** — which item to remove when the cache is full. Two policies dominate real-world systems:\n\n**LRU (Least Recently Used)** evicts the item that has gone the longest without being accessed. The intuition is temporal locality: if you haven't touched something recently, you probably won't need it soon. LRU is the default cache policy for CPU memory caches, OS page replacement, database buffer pools, and web caches.\n\n**LFU (Least Frequently Used)** evicts the item that has been accessed the fewest total times. It is a better model for workloads with stable hot-spot access patterns — frequently accessed items stay forever. The cost is more complex bookkeeping.\n\nBoth policies require **O(1) get and O(1) put** to be practical. Achieving O(1) for LRU requires combining a **hash map** (O(1) key lookup) with a **doubly linked list** (O(1) reordering). LFU adds a second layer of frequency tracking."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  H[\"HashMap\\nkey → node\"]\n  H --> N1[\"node: A\"]\n  H --> N2[\"node: B\"]\n  H --> N3[\"node: C\"]\n  DL[\"Doubly Linked List\\nMRU ← → LRU\"]\n  DL --> DA[\"A (most recent)\"]\n  DA --> DB[\"B\"]\n  DB --> DC[\"C (least recent)\"]\n  N1 -.-> DA\n  N2 -.-> DB\n  N3 -.-> DC",
+      "caption": "LRU cache internals: HashMap gives O(1) node lookup; doubly linked list tracks recency order. Eviction removes the tail (C); access moves a node to the head."
+    },
+    {
+      "type": "analogy",
+      "title": "A Whiteboard and a Sticky-Note Stack",
+      "content": "Imagine you have a whiteboard with space for only 5 sticky notes. Every time you look up a piece of information you move its sticky note to the **top** of the stack. When you need space for a new note you discard the one at the **bottom** — the note you haven't touched longest.\n\nThis is LRU. The hash map is the index on the side of the whiteboard that tells you where each note currently is. Moving a note to the top is O(1) because a doubly linked list lets you splice a node out and prepend it in constant time — no shifting, no scanning. Without the doubly linked list, moving a note to the top would require scanning the entire stack to find it — O(n). Without the hash map, finding the note for a given key would require scanning the list — also O(n). Together, the two data structures give O(1) for every operation."
+    },
+    {
+      "type": "explanation",
+      "content": "**LRU Implementation** uses two structures in tandem:\n1. A `Map<key, DLLNode>` for O(1) lookup by key.\n2. A doubly linked list where the **head** is the most recently used (MRU) and the **tail** is the least recently used (LRU).\n\n**get(key)**: look up the node in the map; if found, move it to the head (mark as most recently used) and return its value; otherwise return -1.\n\n**put(key, value)**: if the key exists, update the node's value and move it to head. If not and capacity is full, delete the map entry for the tail node and remove the tail — then insert a new node at the head and add to the map.\n\nEvery operation — lookup, move-to-front, tail-remove, head-insert — is O(1) with a doubly linked list and hash map.\n\n**LFU Implementation** adds a **frequency dimension**. Every node has a `frequency` counter. The LFU evicts the node with the lowest frequency; among ties, it evicts the least recently used (LRU within that frequency bucket). The canonical O(1) LFU uses:\n- A `Map<key, {value, freq}>` for key lookup.\n- A `Map<freq, LinkedHashSet<key>>` mapping each frequency to the ordered set of keys at that frequency — the LRU ordering within a bucket.\n- A `minFreq` variable tracking the current minimum frequency.\n\n**get(key)**: increment the key's frequency, move it from its old frequency bucket to the new one, update `minFreq` if needed.\n\n**put(key, value)**: if at capacity, evict the LRU key from the `minFreq` bucket, then insert the new key at frequency 1 and set `minFreq = 1`.\n\nLFU has higher implementation complexity and potentially worse performance for one-time-access items (a scan over a large dataset floods the cache with frequency-1 items). LRU is simpler and covers most real-world use cases."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n  [*] --> Empty\n  Empty --> Partial: put(key,val)\\ncapacity not full\n  Partial --> Partial: get(key)\\nmove to MRU\n  Partial --> Full: put until cap\n  Full --> Full: get(key)\\nmove to MRU\n  Full --> Full: put(new key)\\nevict LRU tail\\ninsert at head",
+      "caption": "LRU cache state machine: get always moves the accessed node to MRU position; put on a full cache evicts the LRU tail before inserting the new node at the head."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// LRU Cache — O(1) get and put\nclass LRUCache {\n  #cap;\n  #map;   // key -> node\n  #head;  // dummy MRU sentinel\n  #tail;  // dummy LRU sentinel\n\n  constructor(capacity) {\n    this.#cap  = capacity;\n    this.#map  = new Map();\n    this.#head = { key: null, val: null, prev: null, next: null };\n    this.#tail = { key: null, val: null, prev: null, next: null };\n    this.#head.next = this.#tail;\n    this.#tail.prev = this.#head;\n  }\n\n  #remove(node) {\n    node.prev.next = node.next;\n    node.next.prev = node.prev;\n  }\n\n  #insertFront(node) {\n    node.next       = this.#head.next;\n    node.prev       = this.#head;\n    this.#head.next.prev = node;\n    this.#head.next      = node;\n  }\n\n  // O(1)\n  get(key) {\n    if (!this.#map.has(key)) return -1;\n    const node = this.#map.get(key);\n    this.#remove(node);\n    this.#insertFront(node);\n    return node.val;\n  }\n\n  // O(1)\n  put(key, val) {\n    if (this.#map.has(key)) {\n      const node = this.#map.get(key);\n      node.val   = val;\n      this.#remove(node);\n      this.#insertFront(node);\n    } else {\n      if (this.#map.size === this.#cap) {\n        const lru = this.#tail.prev;  // evict LRU\n        this.#remove(lru);\n        this.#map.delete(lru.key);\n      }\n      const node = { key, val, prev: null, next: null };\n      this.#insertFront(node);\n      this.#map.set(key, node);\n    }\n  }\n}\n\nconst lru = new LRUCache(3);\nlru.put(1, 'a'); lru.put(2, 'b'); lru.put(3, 'c');\nconsole.log(lru.get(1));   // 'a'  — 1 becomes MRU, order: 1,3,2\nlru.put(4, 'd');            // evict LRU (2), order: 4,1,3\nconsole.log(lru.get(2));   // -1   — 2 was evicted\nconsole.log(lru.get(3));   // 'c'  — 3 becomes MRU, order: 3,4,1\nconsole.log(lru.get(4));   // 'd'",
+      "explanation": "Dummy head and tail sentinels eliminate null-checks in `#remove` and `#insertFront` — every node always has both neighbours. The Map stores direct node references, so get and put are truly O(1): one map lookup, two pointer adjustments."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// LFU Cache — O(1) get and put\nclass LFUCache {\n  #cap; #minFreq;\n  #keyMap;   // key -> {value, freq}\n  #freqMap;  // freq -> Set<key> (insertion-order = LRU within freq)\n\n  constructor(capacity) {\n    this.#cap     = capacity;\n    this.#minFreq = 0;\n    this.#keyMap  = new Map();\n    this.#freqMap = new Map();\n  }\n\n  #incrFreq(key) {\n    const entry = this.#keyMap.get(key);\n    const f     = entry.freq;\n    this.#freqMap.get(f).delete(key);\n    if (this.#freqMap.get(f).size === 0) {\n      this.#freqMap.delete(f);\n      if (this.#minFreq === f) this.#minFreq++;\n    }\n    entry.freq++;\n    if (!this.#freqMap.has(entry.freq)) this.#freqMap.set(entry.freq, new Set());\n    this.#freqMap.get(entry.freq).add(key);\n  }\n\n  // O(1)\n  get(key) {\n    if (!this.#keyMap.has(key)) return -1;\n    this.#incrFreq(key);\n    return this.#keyMap.get(key).value;\n  }\n\n  // O(1)\n  put(key, value) {\n    if (this.#cap <= 0) return;\n    if (this.#keyMap.has(key)) {\n      this.#keyMap.get(key).value = value;\n      this.#incrFreq(key);\n      return;\n    }\n    if (this.#keyMap.size >= this.#cap) {\n      const lfuBucket = this.#freqMap.get(this.#minFreq);\n      const evict     = lfuBucket.values().next().value; // oldest in min-freq bucket\n      lfuBucket.delete(evict);\n      this.#keyMap.delete(evict);\n    }\n    this.#keyMap.set(key, { value, freq: 1 });\n    if (!this.#freqMap.has(1)) this.#freqMap.set(1, new Set());\n    this.#freqMap.get(1).add(key);\n    this.#minFreq = 1; // new key always has freq 1\n  }\n}\n\n// LRU vs LFU comparison:\n// Sequence: put(1,a) put(2,b) put(3,c) get(1) get(1) put(4,d)\n// LRU evicts: 2 (least recently used)\n// LFU evicts: 3 (freq 0 vs 1's freq 2, 2's freq 0 — 2 or 3 tie, LRU within → 2)\n// LFU is better when access patterns have stable hot keys (1 accessed twice)\n\nconst lfu = new LFUCache(3);\nlfu.put(1,'a'); lfu.put(2,'b'); lfu.put(3,'c');\nlfu.get(1); lfu.get(1); // freq[1]=2, freq[2]=freq[3]=0 (1 put each)\nlfu.put(4,'d');          // evict min-freq bucket (freq=1): first inserted = 2\nconsole.log(lfu.get(2)); // -1 (evicted)\nconsole.log(lfu.get(3)); // 'c' (still present, freq 1)",
+      "explanation": "JavaScript's `Set` maintains insertion order and `values().next().value` retrieves the oldest key in O(1). This gives each frequency bucket the LRU ordering for tie-breaking. When `minFreq` bucket becomes empty after `#incrFreq`, incrementing `minFreq` is valid only when the trigger was a get/put-update — new insertions always reset `minFreq = 1`."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**LRU is the single most common cache design question in system design interviews.** The key insight to state immediately: you need two data structures — a hash map for O(1) lookup and a doubly linked list for O(1) recency reordering. A singly linked list cannot splice in O(1). An array cannot reorder in O(1). JavaScript's `Map` iterates in insertion order, so `Map` alone can simulate LRU — evict `map.keys().next().value` (oldest entry) — but understanding the doubly-linked-list approach shows deeper systems knowledge."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "LRU (Least Recently Used) evicts the item untouched longest; LFU (Least Frequently Used) evicts the item accessed fewest total times.",
+        "O(1) LRU requires a HashMap (O(1) key lookup) combined with a doubly linked list (O(1) move-to-front and tail removal) — neither structure alone achieves both.",
+        "Dummy head and tail sentinels simplify doubly linked list operations by eliminating null checks at the boundaries.",
+        "O(1) LFU requires three data structures: a key→{value,freq} map, a freq→Set(keys) map for bucketing, and a minFreq variable tracking which bucket to evict from.",
+        "LRU suits temporal-locality workloads (web caches, OS page tables, CPU caches); LFU suits stable hot-spot workloads but is harder to implement and can be polluted by one-time large scans."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Why does an LRU cache use a doubly linked list rather than a singly linked list?",
+      "type": "mcq",
+      "options": [
+        "Doubly linked lists use less memory than singly linked lists",
+        "Removing a node from the middle of the list requires O(1) access to the previous node — impossible with a singly linked list without scanning",
+        "Doubly linked lists allow faster hash map lookups",
+        "Singly linked lists do not support head insertion"
+      ],
+      "correct": 1,
+      "explanation": "When a node is accessed (get) it must be moved to the head. Splicing a node out requires updating the previous node's next pointer and the next node's prev pointer — both available in O(1) in a doubly linked list. With a singly linked list, finding the previous node requires O(n) traversal."
+    },
+    {
+      "id": "q2",
+      "question": "What is the purpose of dummy head and tail sentinel nodes in an LRU implementation?",
+      "type": "mcq",
+      "options": [
+        "They store metadata about cache capacity and hit rate",
+        "They eliminate null-pointer checks — every real node always has both neighbours",
+        "They act as the MRU and LRU items respectively",
+        "They are required to make the HashMap work with the linked list"
+      ],
+      "correct": 1,
+      "explanation": "Without sentinels, insert-at-head and remove-from-tail must special-case empty lists (null.prev, null.next). With dummy nodes, every real node always has a non-null prev and next, so the pointer rewiring code is identical for all positions — simpler and less error-prone."
+    },
+    {
+      "id": "q3",
+      "question": "In an LRU cache of capacity 3 with operations: put(1), put(2), put(3), get(1), put(4). Which key is evicted?",
+      "type": "mcq",
+      "options": ["1", "2", "3", "4"],
+      "correct": 1,
+      "explanation": "After put(1,2,3) the order is [3,2,1] (3=MRU, 1=LRU). get(1) moves 1 to MRU: [1,3,2]. put(4) at capacity evicts the LRU tail: 2. Order becomes [4,1,3]."
+    },
+    {
+      "id": "q4",
+      "question": "What three data structures are needed for an O(1) LFU cache?",
+      "type": "mcq",
+      "options": [
+        "Min-heap, hash map, and sorted array",
+        "key→{value,freq} map, freq→ordered-set-of-keys map, and a minFreq variable",
+        "Two doubly linked lists and a hash map",
+        "Priority queue, hash map, and doubly linked list"
+      ],
+      "correct": 1,
+      "explanation": "The key→{value,freq} map gives O(1) value and frequency lookup. The freq→ordered-set map groups keys by frequency and provides O(1) access to the oldest key in the minimum-frequency bucket. minFreq tracks which frequency bucket to evict from without scanning all buckets."
+    },
+    {
+      "id": "q5",
+      "question": "Why must minFreq be reset to 1 whenever a new key is inserted in an LFU cache?",
+      "type": "mcq",
+      "options": [
+        "New keys must always be evicted first",
+        "New keys always start with frequency 1, which is always the lowest possible frequency",
+        "Resetting minFreq prevents overflow of the frequency counter",
+        "JavaScript Sets do not support frequency tracking"
+      ],
+      "correct": 1,
+      "explanation": "A newly inserted key has frequency 1 — the minimum possible value. Even if an existing key has frequency 1, the new key was inserted more recently (LRU tie-breaking). Setting minFreq = 1 ensures the next eviction correctly targets the frequency-1 bucket."
+    },
+    {
+      "id": "q6",
+      "question": "Under what access pattern does LFU outperform LRU?",
+      "type": "mcq",
+      "options": [
+        "A sequential scan through a large dataset (each key accessed exactly once)",
+        "A stable hot-spot pattern where a small number of keys are accessed repeatedly over time",
+        "A random access pattern where every key is equally likely",
+        "A pattern where the most recently accessed key is always needed next"
+      ],
+      "correct": 1,
+      "explanation": "LFU protects frequently accessed keys from eviction even if they haven't been accessed very recently. In a stable hot-spot pattern (e.g. a popular product page hit thousands of times), LFU keeps it in cache indefinitely. LRU might evict it after a brief cold period."
+    },
+    {
+      "id": "q7",
+      "question": "What is the time complexity of get and put in a properly implemented LRU cache using a HashMap and doubly linked list?",
+      "type": "mcq",
+      "options": ["O(log n)", "O(1) amortised", "O(1) worst case", "O(n) worst case for put when cache is full"],
+      "correct": 2,
+      "explanation": "Both operations are O(1) worst case: get does one Map lookup plus two pointer updates; put does one Map lookup, one Map insert/update, one node creation, and a constant number of pointer updates — all O(1). Eviction is also O(1) because the LRU node is always at the tail."
+    },
+    {
+      "id": "q8",
+      "question": "Which of the following is a real-world system that uses an LRU eviction policy?",
+      "type": "mcq",
+      "options": [
+        "A database transaction log — uses FIFO, not LRU",
+        "Redis with maxmemory-policy=allkeys-lru — evicts least recently accessed keys",
+        "A Bloom filter — uses probabilistic membership, not eviction",
+        "A Union-Find structure — does not cache data"
+      ],
+      "correct": 1,
+      "explanation": "Redis supports several eviction policies including allkeys-lru (evict any key by LRU) and volatile-lru (evict keys with TTL by LRU). This is configured via maxmemory-policy and is one of the most common LRU applications in backend engineering."
+    },
+    {
+      "id": "q9",
+      "question": "What is the 'cache pollution' problem that can affect LFU more than LRU?",
+      "type": "mcq",
+      "options": [
+        "Hash collisions that slow down lookups in the frequency map",
+        "A large one-time scan that fills the cache with frequency-1 items, blocking new hot items from entering",
+        "Concurrent writes that corrupt frequency counters in multi-threaded environments",
+        "The minFreq variable going out of sync with actual frequencies"
+      ],
+      "correct": 1,
+      "explanation": "LFU keeps keys based on total access count. A sequential full-table scan — where every record is accessed exactly once — fills the LFU cache with frequency-1 items. These items then compete with genuinely hot items on an equal footing, displacing them. LRU handles this better because scan items are immediately marked 'least recently used' after access."
+    },
+    {
+      "id": "q10",
+      "question": "In JavaScript, can a plain `Map` simulate a basic LRU cache without a custom doubly linked list?",
+      "type": "mcq",
+      "options": [
+        "No — JavaScript Map has no ordering guarantee",
+        "Yes — JavaScript Map iterates in insertion order, so the first key returned by map.keys() is always the oldest (LRU)",
+        "Yes — but only for caches with capacity less than 100",
+        "No — Map operations are O(n), making it unsuitable for caches"
+      ],
+      "correct": 1,
+      "explanation": "JavaScript's Map is specified to iterate in insertion order. For LRU, you can delete-and-re-insert a key on access (promoting it to newest), and evict via `map.keys().next().value` (the oldest key). This gives a clean LRU implementation without a custom linked list — though it has slightly higher constant factors than the DLL approach."
+    }
+  ]
+}

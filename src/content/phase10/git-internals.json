@@ -1,0 +1,196 @@
+{
+  "id": "phase10_git-internals",
+  "title": "Git Internals",
+  "phase": 10,
+  "week": 36,
+  "icon": "gear",
+  "tagline": "Understand Git's object model — blobs, trees, commits, and the DAG — so merges, rebases, and refs are never magic again.",
+  "readTime": "~17 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Most developers use Git as a black box: `add`, `commit`, `push`, and pray. But Git's power — and the reason its error messages make sense once you understand them — lies in a beautifully simple **content-addressable object store**.\n\nEvery piece of data Git tracks is stored as one of four object types: **blob** (file content), **tree** (directory), **commit** (snapshot + metadata), and **tag**. Commits form a **Directed Acyclic Graph (DAG)**: each commit points to its parent(s), so history is just a chain of snapshots connected by SHA-1 hashes. **Refs** (branches, tags, `HEAD`) are simply named pointers into that graph. The **staging area (index)** is a prepared snapshot waiting to become the next commit. Understanding these three ideas — object store, DAG, refs — demystifies merge conflicts, rebases, and `git reflog` entirely."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    WD[\"Working Directory\\n(files on disk)\"]\n    IDX[\"Staging Area / Index\\n(next snapshot)\"]\n    OBJ[\"Object Store\\n(.git/objects)\"]\n    BLOB[\"blob\\nfile content\"]\n    TREE[\"tree\\ndirectory listing\"]\n    CMT[\"commit\\ntree + parent + message\"]\n    REF[\"refs / HEAD\\nnamed pointers\"]\n    WD -->|\"git add\"| IDX\n    IDX -->|\"git commit\"| OBJ\n    OBJ --> BLOB\n    OBJ --> TREE\n    OBJ --> CMT\n    CMT -->|\"pointed to by\"| REF",
+      "caption": "Git's three-stage architecture: working directory → staging area → object store. Refs are lightweight pointers into the commit DAG."
+    },
+    {
+      "type": "analogy",
+      "title": "A Library with Immutable Books",
+      "content": "Imagine a library where every book is given a unique catalogue number derived from its exact content — change one word and it gets a new number. That's Git's **object store**: every blob (file snapshot) and tree (directory snapshot) is hashed with SHA-1 and stored once. Identical files share the same hash — no duplication.\n\nA **commit** is like a library catalogue entry: 'On this date, the bookshelf looked like *this* (tree), and it followed from catalogue entry *that* (parent commit).' The **DAG** is the sequence of catalogue entries over time — always forward-pointing, never cyclical.\n\n**Branches** are sticky notes placed on a catalogue entry. When you commit, the sticky note moves forward automatically. **HEAD** is a special sticky note pointing to whichever note you are currently on. `git checkout` moves HEAD; `git commit` moves the current branch's sticky note."
+    },
+    {
+      "type": "explanation",
+      "content": "**Blobs** store raw file content — no filename, no path. The same content in two directories produces one blob. This is why Git is efficient: only *changed* file contents produce new blobs.\n\n**Trees** record the structure of a directory: a list of (mode, name, SHA-1) entries pointing to blobs (files) or other trees (sub-directories). Every commit captures the full root tree, but unchanged subtrees reuse their existing SHA-1.\n\n**Commits** tie everything together: a pointer to a root tree, a pointer to the parent commit(s), author/committer metadata, a timestamp, and a message. Because the commit SHA-1 is derived from all of this, *any* change to history — rewriting a message, amending a commit, rebasing — produces a **new SHA-1**. History is immutable by nature.\n\n**The DAG** means commits form a graph where edges go from child to parent. Merges create a commit with *two* parents. Rebasing replays commits onto a new base, producing new SHA-1s (even if the diff is identical).\n\n**Refs and HEAD:** A branch (`main`, `feature/x`) is a file in `.git/refs/heads/` containing a single SHA-1. `HEAD` is a file pointing either to a branch (`ref: refs/heads/main`) or directly to a commit hash (detached HEAD). `git commit` writes a new commit, then updates the current branch file to that new SHA-1.\n\n**Staging (the Index):** `git add` hashes the file and writes a blob to the object store, then records the blob SHA in the index. `git commit` reads the index, builds a tree, writes a commit. This is why you can `git add` partial changes — the index is your *draft* snapshot.\n\n**Merge vs. Rebase:** A merge creates a new merge commit with two parents, preserving full history. A rebase replays commits one by one onto a target, producing a linear history but new SHA-1s. Both integrate changes; the difference is the resulting graph shape and SHA-1 stability."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"commit A\"]\n    B[\"commit B\"]\n    C[\"commit C\\nfeature\"]\n    M[\"merge commit M\\n2 parents: B + C\"]\n    R[\"commit C'\\nrebased onto B\"]\n    A --> B\n    A --> C\n    B --> M\n    C --> M\n    B --> R\n    M -. \"merge\" .- M\n    R -. \"rebase\" .- R",
+      "caption": "Merge preserves both parents (non-linear history). Rebase replays C onto B as C' (linear history, new SHA-1). Same end diff — different graph."
+    },
+    {
+      "type": "code_example",
+      "language": "bash",
+      "label": "Runtime",
+      "code": "# ── Inspect the object store ────────────────────────────────────\ngit init demo && cd demo\necho 'hello git' > hello.txt\ngit add hello.txt\n\n# See the blob SHA that was stored\ngit ls-files --stage\n# 100644 8d0e41234f24b6da002d962a26c2495ea16a425f 0  hello.txt\n\n# Inspect the blob\ngit cat-file -t 8d0e41  # => blob\ngit cat-file -p 8d0e41  # => hello git\n\ngit commit -m \"initial commit\"\n\n# Inspect the commit object\ngit cat-file -p HEAD\n# tree  <tree-sha>\n# author ...\n# committer ...\n# initial commit\n\n# Inspect the tree\ngit cat-file -p HEAD^{tree}\n# 100644 blob 8d0e41...  hello.txt\n\n# ── Refs and HEAD ───────────────────────────────────────────────\ncat .git/HEAD          # ref: refs/heads/main\ncat .git/refs/heads/main  # <commit-sha>\n\n# ── Staging area tricks ─────────────────────────────────────────\necho 'line 1' > file.txt\necho 'line 2' >> file.txt\ngit add file.txt              # stage both lines\necho 'line 3' >> file.txt     # add another line (NOT staged yet)\ngit diff                      # shows unstaged line 3\ngit diff --cached             # shows staged lines 1-2\ngit commit -m \"stage snapshot, not working dir\"\n\n# ── Merge vs rebase ─────────────────────────────────────────────\n# Merge (preserves history)\ngit checkout -b feature main\ngit commit -m \"feature work\"\ngit checkout main\ngit merge feature             # creates merge commit\n\n# Rebase (linear history, NEW sha-1s)\ngit checkout feature\ngit rebase main               # replays feature commits onto main\n# Rule: only rebase local / unshared commits — never rebase shared history",
+      "explanation": "`git cat-file -p` lets you inspect any object by its SHA-1 prefix. The index holds staged blobs. `diff` vs `diff --cached` shows the two gaps: working-dir-vs-index and index-vs-last-commit. Rebase rewrites SHA-1s — never rebase commits already pushed to a shared remote."
+    },
+    {
+      "type": "code_concept",
+      "language": "bash",
+      "label": "Concept",
+      "code": "# ── reflog: the safety net ──────────────────────────────────────\n# Every time HEAD moves, Git logs it in .git/logs/HEAD\ngit reflog\n# HEAD@{0}: commit: add feature\n# HEAD@{1}: checkout: moving from main to feature\n# HEAD@{2}: commit: initial commit\n\n# Recover a \"lost\" commit after bad reset:\ngit reset --hard HEAD~3      # oops — moved back 3 commits\ngit reflog                   # find the lost SHA\ngit checkout -b rescue <sha> # branch off the lost commit\n\n# ── Lightweight vs annotated tags ──────────────────────────────\ngit tag v1.0                  # lightweight — just a ref file pointing to commit\ngit tag -a v1.0 -m \"release\" # annotated — its own object (type: tag) with tagger info\ngit cat-file -t v1.0          # commit (lightweight) vs tag (annotated)\n\n# ── git stash internals ─────────────────────────────────────────\n# stash creates a special commit off a refs/stash ref\ngit stash                     # saves working dir + index as commits\ngit stash list                # stash@{0}: WIP on main: abc1234 message\ngit stash pop                 # re-applies and drops stash@{0}\n\n# ── Packfiles: how Git compresses storage ───────────────────────\n# After many objects, Git packs them into binary packfiles:\ngit gc                        # triggers pack generation\nls .git/objects/pack/         # *.pack  *.idx\n# Objects are delta-compressed inside packfiles — similar blobs share diffs",
+      "explanation": "`git reflog` is your time machine — it records every HEAD movement, including resets and rebases. Annotated tags are first-class objects; lightweight tags are just refs. `git stash` is secretly a commit. Packfiles are how Git keeps repositories compact by delta-compressing similar blobs."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Golden rule: SHA-1 = content address.** If two commits have the same SHA-1, they are byte-for-byte identical — history, tree, everything. If they differ, they have different SHA-1s. This means you can verify the integrity of an entire repository history with one hash. It also means `git rebase` genuinely creates *new commits* — never mutate shared history after pushing."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Blobs** store raw file content by SHA-1 hash; **trees** map names to blobs/subtrees; **commits** link a tree to parent commit(s) plus metadata.",
+        "**The DAG** makes history immutable: any edit (amend, rebase) produces a new SHA-1, leaving the original untouched in the object store.",
+        "**Refs** (branches, tags) are lightweight files containing a SHA-1; **HEAD** points to the current branch or commit (detached HEAD).",
+        "**The staging area (index)** is a prepared snapshot — `git add` hashes content into the object store; `git commit` builds a tree from the index.",
+        "**Merge** creates a two-parent commit preserving full history; **rebase** replays commits for linear history — never rebase shared remote history."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does a Git **blob** object store?",
+      "type": "mcq",
+      "options": [
+        "A directory listing mapping filenames to SHA-1 hashes",
+        "Raw file content, identified by SHA-1 of that content",
+        "A snapshot of the entire repository at a point in time",
+        "Metadata about the author and timestamp of a change"
+      ],
+      "correct": 1,
+      "explanation": "A blob stores raw file content only — no filename or path. The SHA-1 is derived from the content, so identical content across different files produces one shared blob."
+    },
+    {
+      "id": "q2",
+      "question": "What does a Git **commit** object contain?",
+      "type": "mcq",
+      "options": [
+        "A compressed tarball of all changed files",
+        "A diff patch relative to the parent commit",
+        "A pointer to a root tree, parent commit SHA(s), author info, and message",
+        "A list of staged files and their blob hashes"
+      ],
+      "correct": 2,
+      "explanation": "A commit object contains: root tree SHA, parent commit SHA(s), author, committer, timestamp, and message. It does NOT store diffs — Git computes diffs on demand by comparing trees."
+    },
+    {
+      "id": "q3",
+      "question": "What is `HEAD` in Git?",
+      "type": "mcq",
+      "options": [
+        "The first commit in the repository",
+        "A file pointing to the currently checked-out branch or commit",
+        "A tag marking the latest stable release",
+        "The root tree object of the latest commit"
+      ],
+      "correct": 1,
+      "explanation": "HEAD is a file in `.git/HEAD` that points to the current branch ref (e.g. `ref: refs/heads/main`) or directly to a commit SHA in detached HEAD state."
+    },
+    {
+      "id": "q4",
+      "question": "You run `git add file.txt` then edit `file.txt` again without a second `git add`. What does `git commit` capture?",
+      "type": "mcq",
+      "options": [
+        "The latest on-disk version of file.txt",
+        "No changes — Git sees the file is dirty and aborts",
+        "The version of file.txt that was staged with `git add`",
+        "A diff between the staged and current on-disk versions"
+      ],
+      "correct": 2,
+      "explanation": "`git commit` snapshots the index (staging area), not the working directory. The second edit is visible in `git diff` but not in `git diff --cached`, so it is excluded from the commit."
+    },
+    {
+      "id": "q5",
+      "question": "Why does `git rebase` produce new SHA-1 hashes even when the file changes are identical?",
+      "type": "mcq",
+      "options": [
+        "Rebase compresses blobs differently than merge",
+        "The commit object contains a new parent SHA — changing the input changes the hash",
+        "Git randomly salts SHA-1 to avoid collisions",
+        "Rebase stores diffs instead of snapshots, which changes the format"
+      ],
+      "correct": 1,
+      "explanation": "A commit's SHA-1 is derived from its content: tree, parent SHA, author, timestamp, and message. Rebase changes the parent SHA (and potentially the timestamp), so the output hash changes even if the file diff is identical."
+    },
+    {
+      "id": "q6",
+      "question": "What distinguishes a merge commit from a regular commit?",
+      "type": "mcq",
+      "options": [
+        "A merge commit stores a unified diff of both branches",
+        "A merge commit has two or more parent pointers",
+        "A merge commit is stored as a tag object, not a commit object",
+        "A merge commit can only be created with `git merge --squash`"
+      ],
+      "correct": 1,
+      "explanation": "A merge commit is a regular commit object with two (or more) parent SHA-1 pointers — one for each branch being merged. This is what makes the DAG non-linear at that point."
+    },
+    {
+      "id": "q7",
+      "question": "What is `git reflog` primarily used for?",
+      "type": "mcq",
+      "options": [
+        "Displaying the list of remote branches",
+        "Recovering commits that appear lost after a hard reset or bad rebase",
+        "Showing the diff of the last commit",
+        "Listing all tags in the repository"
+      ],
+      "correct": 1,
+      "explanation": "Reflog records every movement of HEAD locally. If you reset --hard too far or delete a branch, reflog shows the SHA-1 you were on before, letting you recover the commit."
+    },
+    {
+      "id": "q8",
+      "question": "Which command lets you inspect the content of any Git object by its SHA-1?",
+      "type": "mcq",
+      "options": [
+        "git show-object",
+        "git inspect",
+        "git cat-file -p",
+        "git log --objects"
+      ],
+      "correct": 2,
+      "explanation": "`git cat-file -p <sha>` pretty-prints the content of any object (blob, tree, commit, tag). `-t` prints the type. This is the primary tool for exploring Git's object store directly."
+    },
+    {
+      "id": "q9",
+      "question": "An annotated tag differs from a lightweight tag in that it:",
+      "type": "mcq",
+      "options": [
+        "Points to a branch instead of a commit",
+        "Is stored as its own object with tagger name, date, and message",
+        "Cannot be pushed to a remote",
+        "Automatically triggers a CI pipeline"
+      ],
+      "correct": 1,
+      "explanation": "An annotated tag (`git tag -a`) creates a `tag` object in the object store with its own SHA-1, containing the tagger, date, and message. A lightweight tag is just a ref file pointing directly to a commit."
+    },
+    {
+      "id": "q10",
+      "question": "Which statement about Git packfiles is correct?",
+      "type": "mcq",
+      "options": [
+        "Packfiles store only the latest version of each file to save space",
+        "Packfiles delta-compress similar objects, storing only differences between similar blobs",
+        "Packfiles replace the object store entirely and disable `git cat-file`",
+        "Packfiles are created on every `git commit` automatically"
+      ],
+      "correct": 1,
+      "explanation": "Packfiles delta-compress similar blobs (e.g. successive versions of the same file) so only the delta is stored, not full copies. They are created by `git gc` or during fetch/push operations, not on every commit."
+    }
+  ]
+}

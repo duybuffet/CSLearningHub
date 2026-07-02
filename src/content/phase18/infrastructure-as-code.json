@@ -1,0 +1,199 @@
+{
+  "id": "phase18_infrastructure-as-code",
+  "title": "Infrastructure as Code",
+  "phase": 18,
+  "week": 55,
+  "icon": "network",
+  "tagline": "Treat servers like software — version-controlled, peer-reviewed, and reproducible infrastructure that eliminates snowflake environments forever.",
+  "readTime": "~13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Before Infrastructure as Code (IaC), provisioning a server meant clicking through a web console, running ad-hoc shell commands, and hoping the person who built the staging server documented their steps. The result was **snowflake servers** — unique, hand-crafted machines that worked mysteriously and were impossible to reproduce exactly. 'It works in staging but not production' was the inevitable outcome.\n\nIaC changes this by expressing infrastructure in **declarative configuration files** that are version-controlled, code-reviewed, and applied automatically. Terraform, AWS CloudFormation, and Pulumi let you define an entire cloud environment — VPCs, EC2 instances, databases, IAM roles, DNS records — in files committed to git. Running `terraform apply` provisions exactly that environment, identically, every time. If you make a mistake, `git revert` and re-apply. If you need a second identical environment for a new region, copy the files and change the variables."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  DEV[\"Developer\"] -->|\"writes\"| TF[\"Terraform .tf files\"]\n  TF -->|\"git commit + PR\"| GIT[\"Git Repository\"]\n  GIT -->|\"CI pipeline runs\"| PLAN[\"terraform plan\\n(dry run diff)\"]\n  PLAN -->|\"human review + approve\"| APPLY[\"terraform apply\"]\n  APPLY --> AWS[\"AWS / GCP / Azure\"]\n  AWS -->|\"real state\"| STATE[\"terraform.tfstate\"]\n  STATE -->|\"compared on next plan\"| PLAN",
+      "caption": "IaC workflow: code is version-controlled and reviewed before being applied. Terraform compares desired state (config files) with actual state (tfstate) to compute the minimal set of changes needed."
+    },
+    {
+      "type": "analogy",
+      "title": "Baking From a Recipe",
+      "content": "Clicking through the AWS console to build infrastructure is like eyeballing ingredients when baking — you might get a good result once, but replicating it exactly is nearly impossible. **Infrastructure as Code is the written recipe**: precise amounts, exact steps, reproducible by anyone. Give the recipe to ten bakers (CI pipelines) and you get ten identical cakes (environments).\n\nTerraform's **state file** is the baker's notes — it tracks what was actually baked last time, so the next run only adjusts what changed (add a pinch of salt) rather than starting from scratch. **Idempotency** means running the recipe twice when nothing changed produces the same cake, not two cakes."
+    },
+    {
+      "type": "explanation",
+      "content": "**Declarative vs imperative**: Declarative IaC describes the **desired end state** ('I want 3 EC2 instances of type t3.medium'). The tool figures out how to get there. Imperative scripting describes **steps** ('run this AWS CLI command, then this one'). Declarative is safer because re-running an apply is idempotent — running it ten times produces the same result as running it once.\n\n**Terraform** is the dominant IaC tool. It uses HashiCorp Configuration Language (HCL). You define **providers** (AWS, GCP, Azure), **resources** (VPCs, instances, buckets), **variables** (parameterized values), and **outputs** (exported values like the load balancer DNS name). `terraform plan` previews changes; `terraform apply` executes them; `terraform destroy` tears everything down.\n\n**State**: Terraform maintains a `terraform.tfstate` file that records the real-world resources it has created. On every `plan` and `apply`, Terraform compares config (desired) with state (actual) to compute the minimal diff. **Remote state** (S3 + DynamoDB lock for AWS) is essential for teams — prevents two engineers from running apply simultaneously (state corruption), and stores state outside a laptop that could be lost.\n\n**Idempotency**: Applying the same Terraform config twice should produce no changes the second time. This property is fundamental — CI pipelines can safely re-apply config on every merge to main, ensuring drift (manual console changes) is detected and corrected.\n\n**Immutable infrastructure**: Rather than SSHing into servers to update them ('pets'), IaC encourages replacing servers entirely when changes are needed ('cattle'). New AMI → new Terraform config → `apply` → new instances created → old ones destroyed. No patching in place, no configuration drift. This is the principle behind blue/green deployments and Kubernetes rolling updates.\n\n**Modules**: Terraform supports reusable modules — a parameterized template for common patterns like a VPC with subnets, or an ECS cluster. Teams publish internal module registries so every project uses the same battle-tested VPC pattern rather than each engineer inventing their own."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  subgraph TerraformCycle[\"Terraform Workflow\"]\n    WRITE[\"Write .tf config\"] -->|\"preview changes\"| PLAN[\"terraform plan\"]\n    PLAN -->|\"no changes needed\"| DONE[\"Already in desired state\"]\n    PLAN -->|\"changes shown\"| REVIEW[\"Human review\"]\n    REVIEW -->|\"approved\"| APPLY[\"terraform apply\"]\n    APPLY -->|\"updates\"| STATE[\"tfstate\"]\n    APPLY -->|\"provisions\"| CLOUD[\"Cloud Resources\"]\n    STATE -->|\"drift detected\"| PLAN\n  end",
+      "caption": "The Terraform lifecycle: write config, plan (dry run), review, apply. State is updated after apply. On the next plan, Terraform detects any drift between state and real-world resources."
+    },
+    {
+      "type": "code_example",
+      "language": "yaml",
+      "label": "Runtime",
+      "code": "# main.tf — Terraform configuration for a web application stack\n# (HCL syntax rendered here as yaml-adjacent for readability)\n\nterraform {\n  required_providers {\n    aws = { source = \"hashicorp/aws\", version = \"~> 5.0\" }\n  }\n  backend \"s3\" {\n    bucket         = \"my-terraform-state-bucket\"\n    key            = \"prod/main.tfstate\"\n    region         = \"us-east-1\"\n    dynamodb_table = \"terraform-lock\"  # prevent concurrent applies\n    encrypt        = true\n  }\n}\n\nprovider \"aws\" { region = var.aws_region }\n\n# --- Variables (parameterize for dev/staging/prod reuse) ---\nvariable \"aws_region\" { default = \"us-east-1\" }\nvariable \"instance_count\" { default = 2 }\nvariable \"env\" { description = \"deployment environment\" }\n\n# --- Resources ---\nresource \"aws_instance\" \"web\" {\n  count         = var.instance_count\n  ami           = \"ami-0c02fb55956c7d316\"  # Amazon Linux 2023\n  instance_type = \"t3.micro\"\n  subnet_id     = aws_subnet.private.id\n  vpc_security_group_ids = [aws_security_group.web.id]\n  tags = { Name = \"web-${var.env}-${count.index}\", Env = var.env }\n}\n\n# --- Output the load balancer DNS for the deployment pipeline ---\noutput \"lb_dns\" {\n  value = aws_lb.main.dns_name\n}",
+      "explanation": "Variables parameterize the same config for dev/staging/prod — only the `var.env` and `var.instance_count` differ. The S3 backend with DynamoDB locking enables team collaboration safely. Outputs expose values (like the LB DNS name) to downstream systems without manual console copying."
+    },
+    {
+      "type": "code_concept",
+      "language": "bash",
+      "label": "Concept",
+      "code": "# Essential Terraform CLI workflow\n\n# 1. Initialize — download providers, configure backend\nterraform init\n\n# 2. Validate — check HCL syntax\nterraform validate\n\n# 3. Plan — preview what will change (always review before apply)\nterraform plan -var=\"env=production\" -out=tfplan\n# Output shows: + create  ~ update  - destroy\n\n# 4. Apply — execute the plan (use saved plan for CI reproducibility)\nterraform apply tfplan\n\n# 5. Output — retrieve values exported by output blocks\nterraform output lb_dns\n\n# 6. State inspection — debug what Terraform knows about resources\nterraform state list\nterraform state show aws_instance.web[0]\n\n# 7. Import — bring an existing resource under Terraform management\nterraform import aws_s3_bucket.existing my-existing-bucket-name\n\n# 8. Destroy — tear down all managed resources (careful in production)\nterraform destroy -var=\"env=staging\""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Never run `terraform apply` directly on production from a developer laptop.** Always use a CI/CD pipeline (GitHub Actions, Atlantis) that: runs `plan` on every PR for review, requires human approval before `apply`, uses remote state with locking, and stores the plan artifact so `apply` executes exactly what was reviewed. Manual console changes after IaC adoption cause **drift** — the state file no longer matches reality, leading to unexpected destroys on the next apply."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Declarative IaC** describes desired state; the tool (Terraform) computes and applies the diff — idempotent, reproducible, and auditable.",
+        "**Terraform state** tracks what was actually provisioned; remote state (S3 + DynamoDB) is required for teams to prevent concurrent apply conflicts.",
+        "**Idempotency** means applying the same config twice produces no changes — safe for CI/CD pipelines to apply on every merge.",
+        "**Immutable infrastructure** replaces servers rather than modifying them in place, eliminating configuration drift and enabling reliable rollbacks.",
+        "**Variables and modules** enable reusing the same config across dev, staging, and production environments with only parameterized differences.",
+        "Always **`terraform plan` before `apply`** and route applies through a CI pipeline with human review — never apply directly from a laptop to production."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does it mean for Infrastructure as Code to be declarative?",
+      "type": "mcq",
+      "options": [
+        "You write shell scripts that run AWS CLI commands in sequence",
+        "You describe the desired end state; the tool figures out how to achieve it",
+        "You must declare every variable before using it in a script",
+        "The infrastructure is declared in a spreadsheet and provisioned by an operator"
+      ],
+      "correct": 1,
+      "explanation": "Declarative means you specify WHAT you want ('3 EC2 instances'), not HOW to create it. Terraform figures out which API calls to make. This is idempotent — running it again when nothing changes makes no changes."
+    },
+    {
+      "id": "q2",
+      "question": "What is Terraform state (tfstate) used for?",
+      "type": "mcq",
+      "options": [
+        "Storing secrets and database credentials securely",
+        "Recording which cloud resources Terraform has created, so it can compute diffs on future plans",
+        "Locking the configuration file to prevent concurrent edits",
+        "Caching provider plugins to speed up terraform init"
+      ],
+      "correct": 1,
+      "explanation": "The state file maps configuration resources to real-world cloud resource IDs. On each `plan`, Terraform compares config (desired) with state (last known actual) to determine what to create, update, or destroy."
+    },
+    {
+      "id": "q3",
+      "question": "Why should Terraform state be stored in a remote backend (e.g., S3) rather than locally?",
+      "type": "mcq",
+      "options": [
+        "Local tfstate files are not valid JSON and cannot be read",
+        "Remote state enables team collaboration with locking to prevent two engineers from applying simultaneously",
+        "AWS requires state files to be in S3 for compliance reasons",
+        "Local state causes terraform plan to run 10x slower"
+      ],
+      "correct": 1,
+      "explanation": "Local state is dangerous for teams: if two engineers apply simultaneously, the state file is corrupted. Remote state (S3 + DynamoDB for AWS) provides a single source of truth and distributed locking."
+    },
+    {
+      "id": "q4",
+      "question": "Immutable infrastructure means:",
+      "type": "mcq",
+      "options": [
+        "Servers cannot be resized after creation",
+        "Configuration changes are applied by replacing servers rather than modifying them in place",
+        "Terraform configuration files are read-only after the first apply",
+        "Production environments cannot be changed without a security audit"
+      ],
+      "correct": 1,
+      "explanation": "Immutable infrastructure treats servers as disposable ('cattle, not pets'). Rather than SSHing to patch a server, you bake a new image, update the Terraform config, and apply — new servers are created, old ones destroyed. No configuration drift, no 'works on one server but not another'."
+    },
+    {
+      "id": "q5",
+      "question": "What does `terraform plan` do?",
+      "type": "mcq",
+      "options": [
+        "Applies all infrastructure changes immediately",
+        "Shows a dry-run diff of what will be created, updated, or destroyed without making any changes",
+        "Validates HCL syntax for errors",
+        "Generates the state file from existing cloud resources"
+      ],
+      "correct": 1,
+      "explanation": "`terraform plan` compares the desired config with the current state and shows the diff (+ create, ~ update, - destroy) without modifying anything. It is always run before apply to review what will change."
+    },
+    {
+      "id": "q6",
+      "question": "Terraform variables (var.*) are primarily used to:",
+      "type": "mcq",
+      "options": [
+        "Store sensitive secrets directly in the .tf config files",
+        "Parameterize configs so the same template can be used for dev, staging, and production",
+        "Declare the order in which resources are created",
+        "Import existing resources from the cloud console"
+      ],
+      "correct": 1,
+      "explanation": "Variables parameterize configs — the same VPC or EC2 config can be applied to dev (1 instance) and production (10 instances) by passing different variable values. This enforces DRY and ensures environment parity."
+    },
+    {
+      "id": "q7",
+      "question": "What is a 'snowflake server' in the context of infrastructure management?",
+      "type": "mcq",
+      "options": [
+        "A server running in a cold data center for lower cooling costs",
+        "A unique, hand-configured server that cannot be reliably reproduced",
+        "A server dedicated to data analytics workloads",
+        "A read-only replica database for reporting queries"
+      ],
+      "correct": 1,
+      "explanation": "A snowflake server is unique — built through ad-hoc manual steps that were never documented. It works but cannot be reproduced reliably. IaC eliminates snowflakes by making all configuration explicit, versioned, and repeatable."
+    },
+    {
+      "id": "q8",
+      "question": "Infrastructure drift occurs when:",
+      "type": "mcq",
+      "options": [
+        "Terraform state becomes larger than 1 GB",
+        "Manual changes are made to cloud resources outside of Terraform, causing state to diverge from reality",
+        "Network latency causes Terraform to timeout during apply",
+        "Two Terraform providers are declared in the same configuration"
+      ],
+      "correct": 1,
+      "explanation": "Drift happens when someone makes a manual change (clicking the console, running AWS CLI) that is not reflected in the Terraform config or state. The next `terraform plan` detects the divergence, which may result in unexpected resource updates or destroys."
+    },
+    {
+      "id": "q9",
+      "question": "Terraform outputs are used to:",
+      "type": "mcq",
+      "options": [
+        "Print debug logs during terraform apply",
+        "Export values from the configuration (e.g., load balancer DNS name) for use by other systems or users",
+        "Store backup copies of the state file",
+        "Define the order in which resources are destroyed"
+      ],
+      "correct": 1,
+      "explanation": "Outputs expose values computed during apply (load balancer ARN, database endpoint, bucket name) so they can be retrieved via `terraform output` or consumed by downstream pipelines without manual console lookups."
+    },
+    {
+      "id": "q10",
+      "question": "Why is applying Terraform directly from a developer's laptop to production considered a bad practice?",
+      "type": "mcq",
+      "options": [
+        "Terraform requires a production license to run on local machines",
+        "Laptops cannot connect to cloud provider APIs",
+        "No peer review of the plan, risk of applying local uncommitted changes, and no audit trail",
+        "Terraform apply is too slow on laptop hardware to complete before timeout"
+      ],
+      "correct": 2,
+      "explanation": "Local applies bypass code review (the plan may include unapproved changes), can apply uncommitted local edits, and leave no audit trail in CI/CD logs. A CI pipeline with `plan` review and approved `apply` is the safe standard."
+    }
+  ]
+}

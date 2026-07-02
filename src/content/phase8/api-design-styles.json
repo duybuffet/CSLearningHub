@@ -1,0 +1,198 @@
+{
+  "id": "phase8_api-design-styles",
+  "title": "API Design Styles",
+  "phase": 8,
+  "week": 31,
+  "icon": "architecture",
+  "tagline": "REST, GraphQL, gRPC — picking the right API style shapes how clients talk to your system for years.",
+  "readTime": "~13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "APIs are contracts. Once clients depend on them, changing them is expensive. The three dominant styles — **REST**, **GraphQL**, and **gRPC** — each optimize for different trade-offs: simplicity vs flexibility, human-readability vs performance, loose coupling vs strong typing.\n\nMost engineers learn REST first, reach for GraphQL when over-fetching hurts, and discover gRPC when latency between internal services becomes a bottleneck. Understanding why each style exists — and what breaks when you pick the wrong one — is a core senior-engineer skill."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Client[\"Client\"]\n  Client -->|\"GET /users/42\"| REST[\"REST API\"]\n  Client -->|\"query { user(id:42) }\"| GQL[\"GraphQL API\"]\n  Client -->|\"GetUser(id=42)\"| GRPC[\"gRPC Service\"]\n  REST --> DB1[\"SQL / JSON Response\"]\n  GQL --> DB2[\"Resolver Layer\"]\n  GRPC --> DB3[\"Protobuf Response\"]",
+      "caption": "Three styles, three wire formats: REST uses URL + HTTP verb + JSON, GraphQL uses a query language over a single endpoint, gRPC uses binary Protobuf over HTTP/2."
+    },
+    {
+      "type": "analogy",
+      "title": "Ordering at a Restaurant",
+      "content": "**REST** is a fixed menu: each dish has a name and a price. You order exactly what the menu offers — you cannot ask for 'the burger but only the patty'. **GraphQL** is a build-your-own bowl: you specify exactly which ingredients you want, and the kitchen assembles it. **gRPC** is a direct walkie-talkie to the kitchen — terse, fast, no pleasantries, binary shorthand only the kitchen staff understands. Perfect for back-of-house coordination; bad for explaining to a customer what is available."
+    },
+    {
+      "type": "explanation",
+      "content": "**REST** (Representational State Transfer) maps resources to URLs and operations to HTTP verbs: `GET /orders/99`, `POST /orders`, `PATCH /orders/99`, `DELETE /orders/99`. It is **stateless** — each request carries all required context. REST is the dominant public API style because it is simple, cacheable (GET responses), and universally tooled. The trade-off is **over-fetching** (getting fields the client does not need) and **under-fetching** (needing multiple round-trips to assemble a view).\n\n**GraphQL** solves over/under-fetching with a typed query language. Clients declare exactly what data they need in a single request; the server resolves it. One endpoint, one request, only the fields you asked for. This shines for mobile clients on slow networks and for aggregating data from multiple backend sources. The cost: a more complex server (resolver graph), caching is harder (queries are POST bodies, not cacheable URLs), and N+1 database queries are a common pitfall if resolvers are naive.\n\n**gRPC** uses Protocol Buffers (Protobuf) — a binary, strongly-typed schema language — over HTTP/2. It is **10x smaller** on the wire than JSON and supports streaming (server-push, bidirectional). The schema is the contract: `.proto` files generate type-safe clients and servers in any language. gRPC is ideal for **internal service-to-service communication** where latency matters and both sides are controlled. It is a poor fit for browser clients (browsers cannot speak raw HTTP/2 gRPC without a proxy) or public APIs that need human-readable payloads.\n\n**Versioning** keeps APIs stable as they evolve. REST conventions: URL versioning (`/v1/`, `/v2/`) for breaking changes, headers (`API-Version: 2024-01`) for minor variants. GraphQL evolves the schema non-breakingly by adding optional fields and deprecating old ones — never remove a field without a deprecation cycle. gRPC evolves via field numbers in Protobuf: add new fields, never reuse a field number.\n\n**Pagination** is critical at scale. REST uses `?page=2&limit=20` (offset-based, simple but inconsistent under writes) or cursor-based (`?after=eyJpZCI6OTl9`, stable under concurrent writes). GraphQL standardizes cursor pagination via the Relay Connection spec. gRPC uses server-side streaming or page tokens in response messages."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C as Mobile Client\n  participant GQL as GraphQL API\n  participant US as User Service\n  participant OS as Order Service\n  C->>GQL: query { user(id:42) { name orders { id total } } }\n  GQL->>US: resolve user(42)\n  US-->>GQL: { id:42, name:\"Ana\" }\n  GQL->>OS: resolve orders(userId:42)\n  OS-->>GQL: [{ id:99, total:120 }]\n  GQL-->>C: { user: { name:\"Ana\", orders:[...] } }",
+      "caption": "GraphQL fans out to multiple services but returns a single response to the client — one round-trip regardless of how many data sources are involved."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// REST vs GraphQL vs gRPC — side-by-side fetch patterns\n\n// --- REST: multiple round-trips for related data ---\nasync function getUserWithOrdersREST(userId) {\n  const user = await fetch(`/v1/users/${userId}`).then(r => r.json());\n  // Under-fetching: need a second call for orders\n  const orders = await fetch(`/v1/users/${userId}/orders`).then(r => r.json());\n  return { ...user, orders }; // assembled client-side\n}\n\n// --- GraphQL: one request, exactly the fields needed ---\nasync function getUserWithOrdersGQL(userId) {\n  const query = `\n    query GetUser($id: ID!) {\n      user(id: $id) {\n        name\n        email\n        orders { id total status }\n      }\n    }\n  `;\n  const res = await fetch('/graphql', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ query, variables: { id: userId } }),\n  });\n  const { data } = await res.json();\n  return data.user; // one trip, exact shape\n}\n\n// --- REST pagination with cursor ---\nasync function fetchOrdersCursor(after = null) {\n  const url = `/v1/orders?limit=20${after ? '&after=' + after : ''}`;\n  const { data, next_cursor } = await fetch(url).then(r => r.json());\n  return { data, next_cursor }; // stable across concurrent inserts\n}",
+      "explanation": "REST requires two round-trips to assemble user + orders. GraphQL collapses them into one query that returns exactly the requested fields. Cursor pagination avoids the 'row shift' problem that plagues offset-based pagination when new records are inserted mid-scroll."
+    },
+    {
+      "type": "code_concept",
+      "language": "protobuf",
+      "label": "Concept",
+      "code": "// user.proto — gRPC service definition (Protobuf 3)\nsyntax = \"proto3\";\n\npackage user;\n\n// The schema is the contract — generated clients are type-safe\nservice UserService {\n  rpc GetUser (GetUserRequest) returns (UserResponse);\n  rpc ListOrders (ListOrdersRequest) returns (stream OrderResponse); // server streaming\n}\n\nmessage GetUserRequest {\n  int64 id = 1;   // field numbers are stable across versions — never reuse\n}\n\nmessage UserResponse {\n  int64  id    = 1;\n  string name  = 2;\n  string email = 3;\n  // Add new optional fields here without breaking old clients\n}\n\nmessage ListOrdersRequest {\n  int64 user_id    = 1;\n  string page_token = 2; // cursor for pagination\n}\n\nmessage OrderResponse {\n  int64  id    = 1;\n  double total = 2;\n  string status = 3;\n}"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "The most common API design mistake is picking GraphQL for a public API to avoid versioning, then discovering that caching breaks because every query is a POST. REST with proper HTTP caching headers often outperforms GraphQL for read-heavy public surfaces. Use GraphQL where clients genuinely have heterogeneous data needs — like a super-app with 10 different screens pulling different field subsets."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**REST** maps resources to URLs and operations to HTTP verbs — simple, cacheable, and universally tooled, but prone to over/under-fetching.",
+        "**GraphQL** lets clients declare exactly the data they need in one request — ideal for mobile and aggregation, but caching and N+1 queries require extra care.",
+        "**gRPC** uses binary Protobuf over HTTP/2 — dramatically smaller payloads and streaming support, best for internal service-to-service calls.",
+        "**API versioning** strategies differ by style: URL segments for REST, schema evolution for GraphQL, field numbers for Protobuf — never break existing clients silently.",
+        "**Cursor-based pagination** is preferred over offset pagination at scale because it stays consistent when rows are inserted or deleted between pages."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the core problem that GraphQL was designed to solve compared to REST?",
+      "type": "mcq",
+      "options": [
+        "REST cannot support authentication",
+        "Over-fetching and under-fetching — clients getting too much or too little data per request",
+        "REST is too slow because it uses TCP",
+        "REST does not support pagination"
+      ],
+      "correct": 1,
+      "explanation": "REST endpoints return fixed shapes, forcing clients to either receive fields they do not need (over-fetching) or make multiple requests to assemble a view (under-fetching). GraphQL lets clients specify exactly the fields they want in a single query."
+    },
+    {
+      "id": "q2",
+      "question": "Why is gRPC generally NOT recommended for public browser-facing APIs?",
+      "type": "mcq",
+      "options": [
+        "gRPC does not support authentication",
+        "gRPC responses are not JSON so they cannot be parsed",
+        "Browsers cannot speak raw HTTP/2 gRPC without a translation proxy",
+        "gRPC only supports GET requests"
+      ],
+      "correct": 2,
+      "explanation": "Browsers expose the Fetch API, which does not give direct control over HTTP/2 framing needed for gRPC. A proxy like gRPC-Web or a REST transcoding layer is required, adding complexity. gRPC shines for server-to-server calls where both sides are controlled."
+    },
+    {
+      "id": "q3",
+      "question": "In REST API versioning, URL versioning (/v1/, /v2/) is typically used for:",
+      "type": "mcq",
+      "options": [
+        "Minor additive changes like adding optional fields",
+        "Breaking changes where the old contract can no longer be maintained",
+        "Internal service-to-service calls only",
+        "Switching from JSON to XML responses"
+      ],
+      "correct": 1,
+      "explanation": "URL versioning creates a completely separate surface (/v2/) that can break compatibility with /v1/ while keeping old clients working. Minor, additive changes (new optional fields) should be backward-compatible and do not require a version bump."
+    },
+    {
+      "id": "q4",
+      "question": "What is the N+1 query problem in GraphQL?",
+      "type": "mcq",
+      "options": [
+        "GraphQL requires N+1 network round-trips for N resources",
+        "Naive resolvers issue one DB query per item in a list, causing N queries for N items instead of one batched query",
+        "GraphQL limits responses to N+1 fields per query",
+        "The GraphQL endpoint can only handle N+1 concurrent connections"
+      ],
+      "correct": 1,
+      "explanation": "If a list resolver returns 100 users and each user's orders resolver fires a separate DB query, that is 101 queries (1 + 100). The fix is DataLoader — a batching utility that groups individual resolver calls into a single batched query."
+    },
+    {
+      "id": "q5",
+      "question": "Why is cursor-based pagination preferred over offset-based pagination for large, frequently-updated datasets?",
+      "type": "mcq",
+      "options": [
+        "Cursors are always faster because they use an index",
+        "Offset pagination requires the client to know the total count",
+        "Offset pagination shifts rows when new records are inserted, causing duplicates or skipped items across pages",
+        "Cursor pagination works only with GraphQL"
+      ],
+      "correct": 2,
+      "explanation": "With offset pagination, if a new record is inserted at position 5 while a client fetches page 2, every subsequent record shifts by one — the client sees a duplicate or misses an item. Cursors point to a stable record position that does not shift."
+    },
+    {
+      "id": "q6",
+      "question": "In Protobuf (gRPC), why should you never reuse a field number?",
+      "type": "mcq",
+      "options": [
+        "Protobuf field numbers must be globally unique across all services",
+        "Old clients use field numbers to deserialize bytes — reusing a number with a different type corrupts deserialization",
+        "Field numbers above 15 are reserved for Google internal use",
+        "Reusing field numbers triggers a compilation error in all languages"
+      ],
+      "correct": 1,
+      "explanation": "Protobuf encodes fields by number, not name. If you delete field 3 (a string) and add a new field 3 (an int), old clients that still have the old schema will misinterpret the bytes, causing silent data corruption."
+    },
+    {
+      "id": "q7",
+      "question": "Which HTTP method is correctly paired with its REST semantic?",
+      "type": "mcq",
+      "options": [
+        "PUT — retrieve a resource without side effects",
+        "POST — idempotent full replacement of a resource",
+        "PATCH — partial update of an existing resource",
+        "DELETE — create a new resource"
+      ],
+      "correct": 2,
+      "explanation": "PATCH applies a partial update — only the fields provided are changed. PUT replaces the entire resource. POST creates a resource (not idempotent). DELETE removes a resource. Mixing these semantics causes client caching and retry bugs."
+    },
+    {
+      "id": "q8",
+      "question": "A mobile app needs to display a dashboard combining user profile, recent orders, and loyalty points from three separate backend services. Which API style minimizes round-trips?",
+      "type": "mcq",
+      "options": [
+        "REST — call each service endpoint separately",
+        "gRPC — use bidirectional streaming",
+        "GraphQL — one query that resolves data from all three services",
+        "REST with polling every 5 seconds"
+      ],
+      "correct": 2,
+      "explanation": "GraphQL's resolver graph can fan out to multiple backend services and aggregate the results into a single response for the client. The mobile app makes one request; the GraphQL layer handles the three downstream calls internally."
+    },
+    {
+      "id": "q9",
+      "question": "Why are GET requests in REST considered cacheable but GraphQL queries generally are not?",
+      "type": "mcq",
+      "options": [
+        "REST responses are always smaller than GraphQL responses",
+        "GraphQL queries are sent as POST bodies — HTTP caches key on URL, not request body",
+        "GraphQL uses HTTP/2 which disables caching",
+        "REST responses include a Cache-Control header automatically"
+      ],
+      "correct": 1,
+      "explanation": "HTTP caches (CDNs, browser cache) key on the URL. REST GET /users/42 is uniquely cacheable. GraphQL queries sent as POST to /graphql all share the same URL — the cache has no way to distinguish them, so it cannot cache by default."
+    },
+    {
+      "id": "q10",
+      "question": "Server-side streaming in gRPC is best suited for which use case?",
+      "type": "mcq",
+      "options": [
+        "Single-request, single-response lookups like GetUser",
+        "Sending a large file upload from client to server",
+        "A client subscribing to a live feed of stock prices from the server",
+        "Replacing REST pagination with cursor tokens"
+      ],
+      "correct": 2,
+      "explanation": "Server-side streaming allows the server to push multiple messages in response to a single client request — ideal for real-time feeds, log tailing, or any scenario where the server produces data over time without the client polling."
+    }
+  ]
+}

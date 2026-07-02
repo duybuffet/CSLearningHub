@@ -1,0 +1,198 @@
+{
+  "id": "phase7_caching-and-search-stores",
+  "title": "Caching and Search Stores",
+  "phase": 7,
+  "week": 26,
+  "icon": "database",
+  "tagline": "Redis for sub-millisecond speed, eviction policies for memory control, and inverted indexes for full-text search at scale.",
+  "readTime": "~12 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Not every read needs to hit the database. **Caching** stores frequently-read results in a faster layer — typically RAM — so subsequent requests skip the expensive database query entirely. **Redis** is the dominant in-memory data store: it supports rich data types (strings, hashes, lists, sets, sorted sets), sub-millisecond latency, and built-in expiry (TTL).\n\nFull-text search is a different problem — finding documents that contain a phrase across millions of records. Relational `LIKE '%keyword%'` performs a full scan and can't rank results. **Elasticsearch** (and its open-source fork OpenSearch) uses an **inverted index** to map every token to the list of documents containing it, enabling fast keyword lookup with relevance scoring."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Client Request\"] --> B{\"Cache hit?\"}\n  B -->|\"Yes\"| C[\"Return from Redis\\n< 1 ms\"]\n  B -->|\"No\"| D[\"Query Database\\n10 - 100 ms\"]\n  D --> E[\"Store in Redis\\nwith TTL\"]\n  E --> F[\"Return to client\"]\n  C --> F",
+      "caption": "Cache-aside pattern: check Redis first, fall back to the database on a miss, and populate the cache for future requests."
+    },
+    {
+      "type": "analogy",
+      "title": "The Whiteboard Menu and the Recipe Book",
+      "content": "Imagine a busy restaurant. The full recipe book (database) is thorough but slow to look up. The whiteboard by the counter (Redis cache) lists today's specials — pre-made answers to the most common questions. When a customer asks for today's soup, the server reads the whiteboard instantly. If the whiteboard doesn't list it, they check the recipe book and write the answer on the whiteboard for next time. The whiteboard has limited space (memory), so old items are erased (eviction) when new ones arrive."
+    },
+    {
+      "type": "explanation",
+      "content": "**Redis data types** go beyond simple key-value pairs. **Strings** store scalars, counters (`INCR`), or serialized JSON. **Hashes** store field-value pairs (like a row), ideal for session data. **Lists** are ordered sequences supporting push/pop from both ends — useful for queues. **Sets** store unique members with O(1) membership tests and support unions/intersections. **Sorted sets (ZSETs)** assign each member a float score, enabling leaderboards and time-windowed rate limiting. **Streams** (added in Redis 5) are append-only logs for event sourcing.\n\n**Eviction policies** determine which keys Redis removes when `maxmemory` is reached. `noeviction` returns errors when full — use only if you can guarantee the cache never grows past `maxmemory`. `allkeys-lru` evicts the least-recently-used key across all keys — the most common production choice. `volatile-lru` evicts only keys with a TTL set. `allkeys-lfu` evicts the least-frequently-used key, better than LRU for access patterns with hot-cold skew. `volatile-ttl` evicts keys with the shortest remaining TTL first.\n\n**Cache patterns**: **Cache-aside** (lazy loading) — application checks cache, misses go to DB, then populate cache. **Write-through** — writes update the cache and database synchronously, keeping them in sync at the cost of write latency. **Write-behind** (write-back) — writes go to cache first, database is updated asynchronously, improving write latency but risking data loss on cache crash.\n\n**Inverted index** is the core data structure behind full-text search. During indexing, each document is tokenized (split into terms), and each term maps to a **posting list** — the list of document IDs containing it. To search for `\"fast database\"`, the engine looks up both terms' posting lists and intersects them. Elasticsearch extends this with **TF-IDF** or **BM25** scoring to rank results by relevance, analyzers for stemming and stop-word removal, and sharding for horizontal scale."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Document 1\\nfast database\"] --> B[\"Tokenize\"]\n  C[\"Document 2\\nfast query engine\"] --> B\n  D[\"Document 3\\ndatabase query\"]\n  D --> B\n  B --> E[\"Inverted Index\"]\n  E --> F[\"fast: doc1, doc2\"]\n  E --> G[\"database: doc1, doc3\"]\n  E --> H[\"query: doc2, doc3\"]\n  I[\"Search: fast database\"] --> J[\"Intersect doc1,doc2 AND doc1,doc3\"]\n  J --> K[\"Result: doc1\"]",
+      "caption": "Inverted index: each token maps to a posting list of document IDs. A multi-term search intersects posting lists and ranks by relevance score."
+    },
+    {
+      "type": "code_example",
+      "language": "sql",
+      "label": "Runtime",
+      "code": "-- Redis commands via redis-cli (not SQL, but shown as comments)\n-- STRING: cache a serialized user profile for 300 seconds\n-- SET user:1001 '{\"id\":1001,\"name\":\"Alice\"}' EX 300\n-- GET user:1001\n\n-- HASH: store session data\n-- HSET session:abc123 user_id 1001 role admin expires_at 1720000000\n-- HGETALL session:abc123\n-- HGET session:abc123 role\n\n-- SORTED SET: leaderboard - score is points, member is user id\n-- ZADD leaderboard 4200 \"user:1001\"\n-- ZADD leaderboard 3800 \"user:1002\"\n-- ZREVRANGE leaderboard 0 9 WITHSCORES   -- top 10\n\n-- INCR: atomic counter for rate limiting (no race conditions)\n-- INCR rate:user:1001:2024010112   -- key = user + hour bucket\n-- EXPIRE rate:user:1001:2024010112 3600\n\n-- SET with NX (only if not exists) for distributed lock\n-- SET lock:payment:order_99 process_id NX EX 30\n-- Returns OK if lock acquired, nil if already held",
+      "explanation": "Redis commands are O(1) for GET/SET/HGET and O(log n) for sorted set operations. `EX` sets a TTL in seconds — always set TTLs on cached data to prevent stale data accumulation. `NX` (set-if-not-exists) with `EX` is the foundation of distributed locking (Redlock pattern)."
+    },
+    {
+      "type": "code_concept",
+      "language": "sql",
+      "label": "Concept",
+      "code": "-- Redis eviction policy comparison\n-- Policy           | Evicts            | Best for\n-- --------------   | ----------------- | ---------------------------\n-- noeviction       | Nothing (errors)  | Critical data that must not be lost\n-- allkeys-lru      | Least recently used (any key) | General-purpose cache\n-- volatile-lru     | LRU among TTL keys| Mixed cache + durable store\n-- allkeys-lfu      | Least frequently used | Skewed access (hot/cold data)\n-- volatile-ttl     | Shortest TTL first| Explicit expiry management\n\n-- Elasticsearch index mapping (JSON, not SQL)\n-- PUT /products\n-- { \"mappings\": { \"properties\": {\n--     \"name\":        { \"type\": \"text\", \"analyzer\": \"english\" },\n--     \"category\":    { \"type\": \"keyword\" },\n--     \"price\":       { \"type\": \"float\" },\n--     \"description\": { \"type\": \"text\" }\n-- } } }\n--\n-- Search query (BM25 scoring)\n-- POST /products/_search\n-- { \"query\": { \"multi_match\": {\n--     \"query\": \"fast wireless keyboard\",\n--     \"fields\": [\"name^3\", \"description\"]  -- name boosted 3x\n-- } } }\n\n-- Cache invalidation strategies\n-- 1. TTL expiry: simplest, accepts brief staleness\n-- 2. Event-driven: DB write triggers cache DELETE (pub/sub)\n-- 3. Write-through: cache updated in same transaction as DB"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "The two hardest problems in caching are **cache invalidation** (keeping the cache consistent with the source of truth) and **cache stampede** (many requests hitting the DB simultaneously when a popular key expires). Use a short TTL plus write-through invalidation for consistency, and **probabilistic early expiration** or a **mutex lock** (Redis `SET NX`) to prevent stampedes on high-traffic keys."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Redis** is an in-memory data store supporting strings, hashes, lists, sets, sorted sets, and streams — each with O(1) to O(log n) operations and optional TTL.",
+        "**Eviction policies** (`allkeys-lru`, `volatile-lru`, `allkeys-lfu`) control which keys Redis removes when memory is full; choose based on your access pattern.",
+        "**Cache-aside** (lazy loading) is the most common pattern: check cache, miss goes to DB, result stored with TTL. **Write-through** keeps cache and DB in sync on writes.",
+        "**Inverted index** maps each token to a posting list of document IDs; search engines intersect posting lists and rank results using BM25 scoring.",
+        "**Cache stampede** occurs when a popular key expires and many requests hit the database simultaneously — mitigate with distributed locks or probabilistic early refresh."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What Redis data type would you use to implement a leaderboard where users are ranked by score?",
+      "type": "mcq",
+      "options": [
+        "String",
+        "Hash",
+        "List",
+        "Sorted Set"
+      ],
+      "correct": 3,
+      "explanation": "Redis Sorted Sets (ZSETs) assign each member a numeric score. ZREVRANGE retrieves members in descending score order, making them perfect for leaderboards with O(log n) insert and O(log n + k) range queries."
+    },
+    {
+      "id": "q2",
+      "question": "Which Redis eviction policy is the best general-purpose choice for a cache where all keys are equally likely to become stale?",
+      "type": "mcq",
+      "options": [
+        "noeviction",
+        "volatile-ttl",
+        "allkeys-lru",
+        "volatile-lru"
+      ],
+      "correct": 2,
+      "explanation": "allkeys-lru evicts the least-recently-used key from any key in the database when memory is full. It works well when you want Redis to act purely as a cache and any key can be evicted safely."
+    },
+    {
+      "id": "q3",
+      "question": "In the cache-aside pattern, what happens on a cache miss?",
+      "type": "mcq",
+      "options": [
+        "The request fails with an error",
+        "The application queries the database and writes the result to the cache",
+        "The cache automatically queries the database",
+        "The request is queued until the cache is refreshed"
+      ],
+      "correct": 1,
+      "explanation": "In cache-aside (lazy loading), the application is responsible for reading from the database on a cache miss, then writing the result to the cache with a TTL so future requests hit the cache."
+    },
+    {
+      "id": "q4",
+      "question": "What is an inverted index?",
+      "type": "mcq",
+      "options": [
+        "An index that stores rows in reverse insertion order",
+        "A mapping from each token to the list of documents containing that token",
+        "A B+ tree index sorted in descending key order",
+        "A hash map of document IDs to their full content"
+      ],
+      "correct": 1,
+      "explanation": "An inverted index maps each unique token (word) to a posting list of document IDs containing it. During search, the engine looks up terms in this index and intersects posting lists to find matching documents."
+    },
+    {
+      "id": "q5",
+      "question": "Why is `LIKE '%keyword%'` a poor substitute for full-text search on a large table?",
+      "type": "mcq",
+      "options": [
+        "LIKE does not support strings longer than 255 characters",
+        "LIKE with a leading wildcard cannot use indexes and requires a full table scan",
+        "LIKE is case-sensitive and misses stemmed variants",
+        "LIKE only works on VARCHAR columns, not TEXT"
+      ],
+      "correct": 1,
+      "explanation": "A leading wildcard (`%keyword`) prevents index usage, forcing a sequential scan of every row. On millions of rows this is extremely slow. Full-text search engines pre-build inverted indexes for fast token lookups."
+    },
+    {
+      "id": "q6",
+      "question": "What is a cache stampede?",
+      "type": "mcq",
+      "options": [
+        "A cache that grows beyond its maxmemory limit",
+        "Many concurrent requests hitting the database simultaneously when a popular cached key expires",
+        "A cache that returns stale data after a database update",
+        "Redis restarting and losing all in-memory data"
+      ],
+      "correct": 1,
+      "explanation": "When a popular key expires, many requests find no cache entry at the same time and all proceed to query the database simultaneously, causing a spike in DB load. Solutions include distributed locks or probabilistic early expiration."
+    },
+    {
+      "id": "q7",
+      "question": "Which Redis command atomically increments a counter with no race conditions?",
+      "type": "mcq",
+      "options": [
+        "SET key (GET key + 1)",
+        "INCR key",
+        "UPDATE key SET value = value + 1",
+        "APPEND key 1"
+      ],
+      "correct": 1,
+      "explanation": "INCR is a single atomic Redis command that reads and increments the value. Because Redis is single-threaded for command execution, INCR cannot race with other INCR commands on the same key."
+    },
+    {
+      "id": "q8",
+      "question": "In Elasticsearch, what does BM25 determine?",
+      "type": "mcq",
+      "options": [
+        "The order in which shards are queried",
+        "The relevance score that ranks documents in search results",
+        "The compression algorithm for stored documents",
+        "The maximum number of results returned per query"
+      ],
+      "correct": 1,
+      "explanation": "BM25 (Best Match 25) is a ranking function that scores documents based on term frequency in the document and inverse document frequency across the corpus. Higher scores mean more relevant documents appear first."
+    },
+    {
+      "id": "q9",
+      "question": "What is the difference between write-through and write-behind caching?",
+      "type": "mcq",
+      "options": [
+        "Write-through updates the database first; write-behind updates the cache first",
+        "Write-through updates cache and database synchronously; write-behind updates cache first and database asynchronously",
+        "Write-through is for reads; write-behind is for writes",
+        "Write-through uses Redis; write-behind uses a separate message queue"
+      ],
+      "correct": 1,
+      "explanation": "Write-through keeps cache and DB in sync by writing both on every update (higher write latency but no risk of loss). Write-behind acknowledges the write after updating the cache, then persists to DB asynchronously (lower latency but risk of data loss if the cache crashes before the async write)."
+    },
+    {
+      "id": "q10",
+      "question": "What Redis command implements a distributed lock by setting a key only if it does not already exist?",
+      "type": "mcq",
+      "options": [
+        "SET key value XX EX 30",
+        "SETNX key value",
+        "SET key value NX EX 30",
+        "GETSET key value"
+      ],
+      "correct": 2,
+      "explanation": "SET key value NX EX 30 sets the key only if it does not exist (NX = Not eXists) and automatically expires it after 30 seconds (EX). This is the recommended atomic distributed lock pattern, superior to the older SETNX + EXPIRE two-command approach."
+    }
+  ]
+}

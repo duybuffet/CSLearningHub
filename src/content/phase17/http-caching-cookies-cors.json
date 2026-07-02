@@ -1,0 +1,199 @@
+{
+  "id": "phase17_http-caching-cookies-cors",
+  "title": "HTTP Caching, Cookies & CORS",
+  "phase": 17,
+  "week": 52,
+  "icon": "network",
+  "tagline": "Cache-Control directives, ETags, cookie security flags (SameSite/HttpOnly/Secure), and CORS preflight — the HTTP features that control performance and security for every web request.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Three HTTP features define much of the performance and security of web applications: **HTTP Caching** stores responses to avoid redundant network requests; **Cookies** persist state across the stateless HTTP protocol; and **CORS** (Cross-Origin Resource Sharing) controls which origins can read responses from your server.\n\nGetting these wrong has real consequences: mis-configured caching serves stale data to users or fetches the same asset thousands of times; insecure cookies enable session hijacking and CSRF attacks; broken CORS blocks legitimate API calls or, worse, opens your API to unauthorized cross-origin access. Understanding the mechanisms — not just the headers — is what separates debugging from guessing."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Browser requests /api/data\"] --> B{\"Cache has entry?\"}\n    B -->|\"No\"| C[\"Fetch from server\"]\n    B -->|\"Yes\"| D{\"Is it fresh?\"}\n    D -->|\"Yes (max-age not expired)\"| E[\"Return cached response\"]\n    D -->|\"No (stale)\"| F[\"Conditional GET (If-None-Match / If-Modified-Since)\"]\n    F --> G{\"Server response\"}\n    G -->|\"304 Not Modified\"| H[\"Update cache TTL, return cached body\"]\n    G -->|\"200 OK (new content)\"| I[\"Store new response, return to browser\"]",
+      "caption": "HTTP cache decision tree: fresh cache = no network. Stale cache = conditional GET. 304 reuses the cached body; 200 replaces it."
+    },
+    {
+      "type": "analogy",
+      "title": "Caching as a Library Desk, Cookies as a Library Card",
+      "content": "**Caching** is like a library where books are stored at the front desk:\n- `Cache-Control: max-age=3600` means 'this book is definitely current for 1 hour — no need to check with the publisher'.\n- `ETag` is the book's edition number. After expiry, the librarian calls the publisher: 'I have edition #42 — is there a newer one?' If not, the publisher says '304 — keep it'.\n- `no-store` means 'do not keep this book at all — always go to the publisher'.\n- `no-cache` means 'keep the book, but always call the publisher to verify it's still current before giving it out'.\n\n**Cookies** are your library card — they identify you on every visit without re-authentication. But if someone steals your library card (`HttpOnly` off), they can check out books as you. `Secure` ensures the card is only shown in a secure building (HTTPS). `SameSite=Strict` means you only show your card to this specific library, preventing other websites from using it on your behalf."
+    },
+    {
+      "type": "explanation",
+      "content": "**HTTP Caching**: The `Cache-Control` response header is the primary caching directive. `max-age=N` means the response is fresh for N seconds — no network request needed. `s-maxage` overrides `max-age` for shared (proxy/CDN) caches. `no-cache` stores the response but requires revalidation before use. `no-store` prevents any caching. `immutable` tells browsers the content will never change at this URL (safe for content-hashed assets). `public` allows CDNs to cache; `private` limits caching to the browser only.\n\n**ETags and Last-Modified** enable conditional requests. The server includes `ETag: \"v2\"` in a response. When the cache expires, the browser sends `If-None-Match: \"v2\"`. If the resource hasn't changed, the server returns `304 Not Modified` with no body — saving bandwidth. `Last-Modified` / `If-Modified-Since` serves the same purpose using timestamps.\n\n**Cookies**: Set by the server with `Set-Cookie` header. Key security attributes: `HttpOnly` prevents JavaScript from reading the cookie (blocks XSS cookie theft). `Secure` transmits the cookie only over HTTPS. `SameSite=Strict` blocks the cookie from being sent on cross-site requests (strong CSRF protection). `SameSite=Lax` (browser default) allows the cookie for top-level navigations (GET links) but blocks it for cross-site sub-resource requests. `SameSite=None; Secure` explicitly allows cross-site use (required for third-party cookies like auth embedded in iframes).\n\n**CORS**: Browsers enforce the Same-Origin Policy — scripts can only read responses from the same origin (protocol + domain + port). CORS relaxes this with server-controlled headers. A **simple request** (GET/POST with safe headers) gets a `Access-Control-Allow-Origin` header in the response — if it matches, the browser allows the JS to read it. A **preflight request** is sent first for non-simple requests: the browser sends an `OPTIONS` request to ask if the actual request is permitted before sending it."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant B as Browser\n    participant S as API Server\n    Note over B: app.example.com wants PUT /api/data\n    B->>S: OPTIONS /api/data\n    Note over B,S: Preflight (non-simple method)\n    B->>S: Origin: app.example.com\n    B->>S: Access-Control-Request-Method: PUT\n    B->>S: Access-Control-Request-Headers: Authorization\n    S->>B: 204 No Content\n    S->>B: Access-Control-Allow-Origin: app.example.com\n    S->>B: Access-Control-Allow-Methods: PUT\n    S->>B: Access-Control-Allow-Headers: Authorization\n    S->>B: Access-Control-Max-Age: 86400\n    B->>S: PUT /api/data (actual request)\n    S->>B: 200 OK",
+      "caption": "CORS preflight: browser sends OPTIONS to verify the server permits the cross-origin request, then proceeds with the actual request. Max-Age caches the preflight result."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── Reading Cache-Control and ETag in browser ─────────────────\nasync function fetchWithCacheInfo(url) {\n  const res = await fetch(url);\n  console.log('Cache-Control:', res.headers.get('cache-control'));\n  console.log('ETag:', res.headers.get('etag'));\n  console.log('Age:', res.headers.get('age')); // seconds since cached by CDN\n  return res.json();\n}\n\n// ── Forcing cache bypass ──────────────────────────────────────\nasync function fetchFresh(url) {\n  return fetch(url, { cache: 'no-store' });\n  // Other fetch cache modes:\n  // 'default'      — browser default cache behavior\n  // 'no-cache'     — always revalidate (conditional GET)\n  // 'force-cache'  — use cache even if stale\n  // 'reload'       — bypass cache, but update it with response\n  // 'no-store'     — never cache the response\n}\n\n// ── Cookie management (document.cookie is low-level) ─────────\nfunction setCookie(name, value, options = {}) {\n  const {\n    maxAge   = 3600,\n    path     = '/',\n    secure   = true,\n    sameSite = 'Strict',\n  } = options;\n  // HttpOnly cannot be set from JS (that's the point)\n  document.cookie = [\n    `${encodeURIComponent(name)}=${encodeURIComponent(value)}`,\n    `Max-Age=${maxAge}`,\n    `Path=${path}`,\n    secure   ? 'Secure'              : '',\n    `SameSite=${sameSite}`,\n  ].filter(Boolean).join('; ');\n}\n\nfunction getCookie(name) {\n  const match = document.cookie\n    .split('; ')\n    .find(row => row.startsWith(encodeURIComponent(name) + '='));\n  return match ? decodeURIComponent(match.split('=')[1]) : null;\n}\n\nfunction deleteCookie(name) {\n  // Set Max-Age=0 to expire immediately\n  document.cookie = `${encodeURIComponent(name)}=; Max-Age=0; Path=/`;\n}\n\n// ── CORS credential requests ──────────────────────────────────\n// By default, fetch() does NOT send cookies cross-origin\n// To include cookies: set credentials: 'include'\n// Server must respond with Access-Control-Allow-Credentials: true\n// AND Access-Control-Allow-Origin must be a specific origin (not *)\nconst res = fetch('https://api.example.com/profile', {\n  credentials: 'include',\n});\n\nconsole.log('HTTP Caching, Cookies, and CORS examples loaded');\n",
+      "explanation": "The Fetch API's `cache` option controls browser cache behavior per-request. For CORS requests with cookies, `credentials: 'include'` is required — but the server must respond with a specific origin in `Access-Control-Allow-Origin` (not `*`) and `Access-Control-Allow-Credentials: true`. `HttpOnly` cookies cannot be set or read by JavaScript — they are only sent automatically by the browser on matching requests."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── Cache-Control directive reference ─────────────────────────\nconst CACHE_CONTROL = {\n  'max-age=N':        'Fresh for N seconds (browser + CDN)',\n  's-maxage=N':       'Overrides max-age for shared/CDN caches only',\n  'no-cache':         'Store but always revalidate before use',\n  'no-store':         'Never cache — always fetch fresh',\n  'private':          'Browser cache only (not CDN/proxies)',\n  'public':           'Any cache (CDN, proxy) may store this',\n  'immutable':        'Content will NEVER change — skip revalidation',\n  'must-revalidate':  'Must revalidate when stale (no serving stale)',\n  'stale-while-revalidate=N': 'Serve stale while revalidating in background',\n};\n\n// Cache strategy by resource type:\nconst CACHE_STRATEGIES = {\n  'HTML (index.html)':         'no-cache or max-age=0 (always revalidate)',\n  'JS/CSS with hash (app.a1b2.js)': 'max-age=31536000, immutable',\n  'API responses':             'no-store OR short max-age + ETag',\n  'Images with versioned URL': 'max-age=31536000, immutable',\n  'Fonts':                     'max-age=31536000, immutable',\n};\n\n// ── Cookie security attributes ────────────────────────────────\nconst COOKIE_FLAGS = {\n  HttpOnly:         'JS cannot read — prevents XSS token theft',\n  Secure:           'HTTPS only — prevents network interception',\n  'SameSite=Strict':'Never sent cross-site — strongest CSRF protection',\n  'SameSite=Lax':   'Sent on top-level navigation GET only (browser default)',\n  'SameSite=None':  'Sent cross-site — MUST also set Secure',\n  'Max-Age=N':      'Expires in N seconds (preferred over Expires)',\n  'Domain=.x.com':  'Sent to x.com and all subdomains',\n  'Path=/':         'Sent for all paths on the domain',\n};\n\n// ── CORS headers reference ────────────────────────────────────\nconst CORS_HEADERS = {\n  // Response headers (server sets these):\n  'Access-Control-Allow-Origin':      '* or specific origin',\n  'Access-Control-Allow-Methods':     'GET, POST, PUT, DELETE, PATCH',\n  'Access-Control-Allow-Headers':     'Content-Type, Authorization, X-Custom',\n  'Access-Control-Allow-Credentials': 'true (if cookies/auth needed)',\n  'Access-Control-Max-Age':           'Seconds to cache preflight result',\n  'Access-Control-Expose-Headers':    'Headers JS is allowed to read',\n};\n",
+      "explanation": "Content-hashed assets (app.a1b2c3.js) should use max-age=31536000 with immutable — browsers never revalidate them. Index.html should use no-cache so users always get the latest version. API responses usually should not be cached (no-store) or use short TTLs with ETags for efficient revalidation."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Three must-have cookie flags for session cookies**: `HttpOnly` (prevents JS from reading it — defeats XSS-based session theft), `Secure` (HTTPS only — prevents interception), and `SameSite=Strict` or `SameSite=Lax` (prevents CSRF). A session cookie missing any of these flags is a security vulnerability. For authentication cookies in modern apps, the safest pattern is server-set `HttpOnly; Secure; SameSite=Strict` — the cookie is invisible to JavaScript and automatically sent only to your origin over HTTPS."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**`Cache-Control: max-age`** tells browsers and CDNs how long a response is fresh. Content-hashed assets should use `max-age=31536000, immutable`. HTML entry points should use `no-cache` so changes are always picked up.",
+        "**ETags** enable conditional requests — the browser sends `If-None-Match` and receives `304 Not Modified` (no body) if unchanged, saving bandwidth while ensuring freshness.",
+        "**Cookie security flags**: `HttpOnly` blocks JS access (stops XSS token theft), `Secure` limits to HTTPS, and `SameSite=Strict/Lax` prevents CSRF. All three are required for session cookies.",
+        "**CORS preflight** (`OPTIONS` request) is sent automatically by the browser before non-simple cross-origin requests. Servers must respond with the appropriate `Access-Control-Allow-*` headers. Cache preflights with `Access-Control-Max-Age` to avoid redundant OPTIONS requests.",
+        "**`credentials: 'include'`** in fetch is required to send cookies cross-origin, but the server must respond with a specific `Access-Control-Allow-Origin` (not `*`) and `Access-Control-Allow-Credentials: true`."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does `Cache-Control: no-cache` mean?",
+      "type": "mcq",
+      "options": [
+        "Never cache this response",
+        "Store the response but always revalidate with the server before using it",
+        "Cache for 0 seconds (immediately stale)",
+        "Only cache on the browser, not on CDNs"
+      ],
+      "correct": 1,
+      "explanation": "no-cache stores the response in cache but requires a conditional request (If-None-Match or If-Modified-Since) to revalidate before serving it. If the server returns 304, the cached body is used. no-store means never cache at all. They are commonly confused."
+    },
+    {
+      "id": "q2",
+      "question": "Which Cache-Control value is appropriate for a content-hashed JavaScript bundle (e.g., `app.a1b2c3.js`)?",
+      "type": "mcq",
+      "options": [
+        "no-store",
+        "no-cache",
+        "max-age=3600",
+        "max-age=31536000, immutable"
+      ],
+      "correct": 3,
+      "explanation": "Content-hashed assets change their filename when content changes, so the URL itself is the cache busting mechanism. They can be cached forever (max-age=31536000 = 1 year) with immutable (which tells browsers to skip revalidation). This maximizes cache hits and avoids any network requests for unchanged assets."
+    },
+    {
+      "id": "q3",
+      "question": "What is the purpose of the `HttpOnly` cookie flag?",
+      "type": "mcq",
+      "options": [
+        "Ensures the cookie is only sent over HTTP, not HTTPS",
+        "Prevents JavaScript from reading the cookie, protecting against XSS-based session theft",
+        "Limits the cookie to HTTP/1.1 connections",
+        "Makes the cookie accessible only to the HTTP server, not the browser"
+      ],
+      "correct": 1,
+      "explanation": "HttpOnly cookies cannot be read or modified by JavaScript (document.cookie won't show them). This prevents XSS attacks from stealing session tokens. The cookie is still automatically sent by the browser on matching requests. The Secure flag (not HttpOnly) controls HTTPS-only transmission."
+    },
+    {
+      "id": "q4",
+      "question": "When does a browser send a CORS preflight (`OPTIONS`) request?",
+      "type": "mcq",
+      "options": [
+        "On every cross-origin request",
+        "Only when the request uses a non-simple method or headers, and is cross-origin",
+        "Only when the server explicitly requests it",
+        "Only for POST requests with JSON body"
+      ],
+      "correct": 1,
+      "explanation": "Browsers skip preflight for 'simple' requests: GET/POST/HEAD with only safe headers (Accept, Content-Type: text/plain, etc.). Non-simple requests — PUT/DELETE/PATCH, any custom headers (Authorization, X-Custom), or Content-Type: application/json cross-origin — trigger a preflight OPTIONS request first to ask the server for permission."
+    },
+    {
+      "id": "q5",
+      "question": "What HTTP status code does a server return when a cached resource has NOT changed (ETag revalidation)?",
+      "type": "mcq",
+      "options": [
+        "200 OK with empty body",
+        "204 No Content",
+        "304 Not Modified",
+        "200 OK with the full resource"
+      ],
+      "correct": 2,
+      "explanation": "304 Not Modified tells the browser the resource hasn't changed since the version in cache. No response body is sent — the browser reuses the cached body. This saves bandwidth while ensuring the cache is up-to-date. The browser updates the cache entry's freshness lifetime."
+    },
+    {
+      "id": "q6",
+      "question": "Why can't `Access-Control-Allow-Origin: *` be used with `Access-Control-Allow-Credentials: true`?",
+      "type": "mcq",
+      "options": [
+        "Wildcards are not supported in CORS headers",
+        "Allowing credentials with any origin would let any site make authenticated requests on behalf of the user, which is a security risk browsers block",
+        "The * wildcard applies only to GET requests",
+        "Credentials require the SameSite=None cookie flag which conflicts with *"
+      ],
+      "correct": 1,
+      "explanation": "Allowing credentials (cookies, auth headers) with a wildcard origin would mean ANY website could make authenticated cross-origin requests using the user's cookies. Browsers explicitly block this combination — if credentials: 'include', the server must specify the exact origin. The wildcard intentionally cannot be used with credentials."
+    },
+    {
+      "id": "q7",
+      "question": "What does `SameSite=Lax` (the browser default) allow?",
+      "type": "mcq",
+      "options": [
+        "Cookies sent on all cross-origin requests including sub-resources like images and XHR",
+        "Cookies sent only on same-site requests",
+        "Cookies sent on top-level cross-site navigation (GET links) but not cross-site sub-resource requests",
+        "Cookies sent only over HTTPS"
+      ],
+      "correct": 2,
+      "explanation": "SameSite=Lax allows cookies on top-level navigations (user clicking a link to your site from another site — GET request). It blocks cookies on cross-site sub-resource requests (iframes, AJAX, images from other sites). SameSite=Strict blocks ALL cross-site sending. SameSite=None allows everything but requires Secure."
+    },
+    {
+      "id": "q8",
+      "question": "What does the `Access-Control-Max-Age` response header do?",
+      "type": "mcq",
+      "options": [
+        "Sets how long the cached resource can be used",
+        "Caches the preflight response so the browser doesn't send OPTIONS before every non-simple request",
+        "Sets the maximum age for cookies set in the same response",
+        "Limits how long the CORS policy is valid on the server"
+      ],
+      "correct": 1,
+      "explanation": "Access-Control-Max-Age caches the preflight (OPTIONS) response for the specified number of seconds. During this time, browsers skip the OPTIONS request for matching non-simple requests to the same origin. This improves performance by avoiding an extra round-trip on every API call."
+    },
+    {
+      "id": "q9",
+      "question": "Which caching directive should HTML entry points (like `index.html`) use?",
+      "type": "mcq",
+      "options": [
+        "max-age=31536000, immutable",
+        "no-store",
+        "no-cache (or max-age=0, must-revalidate)",
+        "public, max-age=3600"
+      ],
+      "correct": 2,
+      "explanation": "HTML entry points should use no-cache so browsers always revalidate with the server. If the content hasn't changed, the server returns 304 (fast, no bandwidth wasted). If it has changed (new asset hashes after deployment), the browser gets the new HTML. Using max-age caching on index.html can cause users to get stale HTML pointing to old (possibly deleted) assets."
+    },
+    {
+      "id": "q10",
+      "question": "What is the Same-Origin Policy?",
+      "type": "mcq",
+      "options": [
+        "A rule that cookies are only sent to the same domain",
+        "A browser security rule that restricts scripts from reading responses from a different origin (protocol + domain + port)",
+        "An HTTP spec requiring all requests to originate from the same server",
+        "A CDN policy that only caches content from the origin server"
+      ],
+      "correct": 1,
+      "explanation": "The Same-Origin Policy prevents JavaScript on page A from reading HTTP responses from origin B, where origin = protocol + domain + port. This protects users from malicious sites reading their data from banking/email sites. CORS is the mechanism servers use to opt specific cross-origins into being able to read their responses."
+    }
+  ]
+}

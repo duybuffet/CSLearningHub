@@ -1,0 +1,199 @@
+{
+  "id": "phase18_docker-and-containers",
+  "title": "Docker and Containers",
+  "phase": 18,
+  "week": 55,
+  "icon": "network",
+  "tagline": "Package once, run anywhere — containers solve the 'works on my machine' problem by bundling code and its entire runtime into a portable image.",
+  "readTime": "~13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "For decades, deploying software meant wrestling with environment differences: the developer's Mac ran Python 3.9 but production ran 3.7; a missing system library crashed a release at midnight; staging worked but production did not. Docker solved this in 2013 by introducing **containers** — isolated, portable units that bundle an application and every dependency it needs into a single artifact called an **image**.\n\nContainers are not virtual machines. They share the host OS kernel and start in milliseconds rather than minutes. A Docker image is built from a `Dockerfile` — a reproducible recipe — and stored in a **registry** like Docker Hub or AWS ECR. When you run an image, Docker creates a container: a live, isolated process with its own filesystem, networking, and process namespace. The same image runs identically on a developer's laptop, a CI server, and a production Kubernetes cluster."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  DF[\"Dockerfile\"] -->|\"docker build\"| IMG[\"Image\\n(read-only layers)\"]\n  IMG -->|\"docker push\"| REG[\"Registry\\n(Docker Hub / ECR)\"]\n  REG -->|\"docker pull\"| HOST[\"Host Machine\"]\n  HOST -->|\"docker run\"| C1[\"Container 1\\n(running process)\"]\n  HOST -->|\"docker run\"| C2[\"Container 2\\n(isolated copy)\"]\n  IMG -.->|\"writable layer added\"| C1",
+      "caption": "Build → Push → Pull → Run: the Dockerfile produces an immutable image stored in a registry. Each `docker run` creates an isolated container that adds a thin writable layer on top of the shared read-only image."
+    },
+    {
+      "type": "analogy",
+      "title": "Shipping Container Analogy",
+      "content": "Before standardized shipping containers, every port had to handle every possible cargo differently — barrels, crates, livestock, loose grain. Loading and unloading was slow, error-prone, and port-specific. The standardized steel shipping container changed everything: pack your goods inside, and any crane, ship, or truck worldwide handles the standard box identically.\n\nDocker containers are the software equivalent. Pack your Node.js app, its npm modules, its config files, and its exact Node version into a container image. Any machine with Docker — a MacBook, an Ubuntu server, a cloud VM — runs it identically. The **host OS** is the port; the **container runtime** is the crane; the **image** is the standard steel box."
+    },
+    {
+      "type": "explanation",
+      "content": "**Images and layers**: A Docker image is a stack of read-only layers. Each `Dockerfile` instruction (`FROM`, `COPY`, `RUN`) creates a new layer. Layers are **cached** — if the first 5 layers haven't changed, Docker reuses them and only rebuilds from the changed instruction. This makes builds fast. Ordering matters: put frequently-changing steps (like `COPY . .`) late in the file so stable layers (like `npm install`) are cached.\n\n**Namespaces and cgroups**: Linux provides the kernel primitives containers depend on. **Namespaces** isolate what a process can see — its own PID space, network interfaces, filesystem mount points, and hostname. **cgroups** (control groups) limit what a process can consume — CPU, memory, I/O. Docker configures these kernel features so each container believes it is alone on the machine, yet they all share the same kernel.\n\n**Containers vs VMs**: A VM runs a full guest OS (2+ GB, boots in ~30-60s). A container shares the host kernel and contains only application code and dependencies (often 50-300 MB, starts in milliseconds). VMs offer stronger isolation (separate kernel); containers offer density and speed. In practice, production systems often use both: VMs provide the secure boundary, containers pack workloads inside them.\n\n**Registries**: Images are pushed to and pulled from registries. Docker Hub is the public default. AWS ECR, GCR, and GitHub Container Registry are private alternatives. An image tag like `nginx:1.25-alpine` identifies the registry (Docker Hub implicit), image name (`nginx`), and version tag (`1.25-alpine`). **Always pin a specific tag in production** — `nginx:latest` changes without notice and breaks reproducibility.\n\n**Docker Compose**: For multi-container local development, `docker-compose.yml` defines all services, their images, port mappings, environment variables, and volumes. `docker compose up` starts the entire stack with one command."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  subgraph Image[\"Docker Image layers\"]\n    L1[\"Layer 1: FROM node:18-alpine\"]\n    L2[\"Layer 2: WORKDIR + COPY package.json\"]\n    L3[\"Layer 3: RUN npm ci\"]\n    L4[\"Layer 4: COPY . .\"]\n    L5[\"Layer 5: CMD node server.js\"]\n  end\n  subgraph Container[\"Running Container\"]\n    WL[\"Writable layer\\n(ephemeral)\"]\n    L5\n  end\n  L1 --> L2 --> L3 --> L4 --> L5 --> WL",
+      "caption": "Image layer ordering: stable layers (base image, npm install) come first and are cached. The frequently-changing application code (COPY . .) is copied last, limiting cache invalidation to only the final layers."
+    },
+    {
+      "type": "code_example",
+      "language": "dockerfile",
+      "label": "Runtime",
+      "code": "# Dockerfile — production-ready Node.js application\n# Uses multi-stage build to keep the final image small\n\n# --- Stage 1: Build dependencies ---\nFROM node:18-alpine AS deps\nWORKDIR /app\n# Copy only package files first — maximizes cache hit for npm install\nCOPY package.json package-lock.json ./\nRUN npm ci --only=production\n\n# --- Stage 2: Final image ---\nFROM node:18-alpine AS runner\nWORKDIR /app\n\n# Security: run as non-root user\nRUN addgroup -S appgroup && adduser -S appuser -G appgroup\n\n# Copy only what the app needs from the build stage\nCOPY --from=deps /app/node_modules ./node_modules\nCOPY . .\n\nUSER appuser\n\n# Document the port (does NOT publish it — that happens at docker run)\nEXPOSE 3000\n\n# Use exec form to receive OS signals correctly (enables graceful shutdown)\nCMD [\"node\", \"server.js\"]",
+      "explanation": "Multi-stage builds use a separate stage for dependency installation, then copy only the production artifacts into the final image. This keeps the image small (no dev tools, no build cache) and runs as a non-root user for security. The exec-form CMD ensures PID 1 receives SIGTERM for graceful shutdown."
+    },
+    {
+      "type": "code_concept",
+      "language": "yaml",
+      "label": "Concept",
+      "code": "# docker-compose.yml — local development multi-container stack\nversion: \"3.9\"\nservices:\n  api:\n    build: ./api          # build from local Dockerfile\n    ports:\n      - \"3000:3000\"        # host:container port mapping\n    environment:\n      DATABASE_URL: postgres://user:pass@db:5432/myapp\n      REDIS_URL: redis://cache:6379\n    depends_on:\n      - db\n      - cache\n    volumes:\n      - ./api:/app         # mount source for hot reload\n      - /app/node_modules  # keep container node_modules separate\n\n  db:\n    image: postgres:15-alpine\n    environment:\n      POSTGRES_USER: user\n      POSTGRES_PASSWORD: pass\n      POSTGRES_DB: myapp\n    volumes:\n      - pg_data:/var/lib/postgresql/data  # persist DB between restarts\n\n  cache:\n    image: redis:7-alpine\n    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru\n\nvolumes:\n  pg_data:"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "Never store secrets (database passwords, API keys) as `ENV` instructions in a Dockerfile — they are baked into the image and visible in `docker history` and any registry push. Use environment variables passed at runtime (`docker run -e`, `docker compose` `.env` file, or Kubernetes Secrets). In production, use a secrets manager (AWS Secrets Manager, Vault) and inject values at startup."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Containers** share the host OS kernel via namespaces and cgroups — they start in milliseconds and are far lighter than VMs, but VMs offer stronger isolation.",
+        "**Images** are stacks of read-only layers built from a Dockerfile; each instruction adds a layer that is cached and reused across builds.",
+        "**Layer ordering** matters: put stable instructions (base image, dependency installation) early; put frequently-changing code (COPY . .) late to maximize cache hits.",
+        "**Multi-stage builds** keep final images small by building in one stage and copying only the necessary artifacts into the production image.",
+        "**Registries** (Docker Hub, ECR) store and distribute images; always pin specific version tags in production to ensure reproducibility.",
+        "**Never embed secrets in Dockerfiles** — inject them as runtime environment variables or via a secrets manager."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the primary technical difference between a Docker container and a virtual machine?",
+      "type": "mcq",
+      "options": [
+        "Containers run on Windows; VMs run on Linux",
+        "Containers share the host OS kernel; VMs run a complete guest OS",
+        "VMs start faster because they skip the OS boot sequence",
+        "Containers require more RAM because they include a full OS"
+      ],
+      "correct": 1,
+      "explanation": "Containers use Linux namespaces and cgroups to isolate processes within the same kernel. VMs use a hypervisor to emulate hardware and run a separate guest OS. This makes containers start in milliseconds and use far less memory."
+    },
+    {
+      "id": "q2",
+      "question": "In a Dockerfile, why should `COPY . .` (copying application code) come AFTER `RUN npm install`?",
+      "type": "mcq",
+      "options": [
+        "npm requires source code to be present before installing dependencies",
+        "Docker requires all COPY instructions before RUN instructions",
+        "Placing code copy late maximizes cache: npm install is only re-run when package.json changes, not every code change",
+        "The OS must be configured before application files are copied"
+      ],
+      "correct": 2,
+      "explanation": "Docker invalidates the cache at the first changed layer and rebuilds all subsequent layers. If code is copied before npm install, every code change triggers a full npm install. Copying package.json first and running npm install lets Docker cache that expensive layer."
+    },
+    {
+      "id": "q3",
+      "question": "What Linux kernel feature limits a container's CPU and memory usage?",
+      "type": "mcq",
+      "options": [
+        "Namespaces — isolate resource visibility",
+        "cgroups (control groups) — limit resource consumption",
+        "iptables — control network resource allocation",
+        "seccomp — filter system call resource usage"
+      ],
+      "correct": 1,
+      "explanation": "cgroups (control groups) is the kernel feature that enforces resource limits: max CPU share, max memory, I/O bandwidth. Namespaces control what a process can SEE (its own network, PID space, filesystem). Both together make container isolation work."
+    },
+    {
+      "id": "q4",
+      "question": "A multi-stage Docker build primarily helps by:",
+      "type": "mcq",
+      "options": [
+        "Running tests in parallel across multiple CPU cores",
+        "Copying only the final production artifacts into a small image, excluding build tools and dev dependencies",
+        "Enabling the container to run on multiple operating systems simultaneously",
+        "Caching each stage's output in a separate registry"
+      ],
+      "correct": 1,
+      "explanation": "Multi-stage builds use one stage for compilation/dependency installation (with full tooling) and copy only the output (binaries, node_modules, static assets) into a minimal final image. This produces smaller, more secure images without dev tooling."
+    },
+    {
+      "id": "q5",
+      "question": "Using `nginx:latest` as a base image in production is risky because:",
+      "type": "mcq",
+      "options": [
+        "The `latest` tag is not supported by Docker Hub",
+        "The `latest` tag changes whenever a new version is released, breaking reproducible builds",
+        "The `latest` tag always points to a beta pre-release version",
+        "Docker automatically deletes `latest` tags after 30 days"
+      ],
+      "correct": 1,
+      "explanation": "The `latest` tag is a moving pointer — it changes when a new version is published. This means a rebuild tomorrow might use a different nginx version, potentially introducing breaking changes or security regressions. Pin to `nginx:1.25-alpine`."
+    },
+    {
+      "id": "q6",
+      "question": "In `docker-compose.yml`, what does the port mapping `\"3000:3000\"` mean?",
+      "type": "mcq",
+      "options": [
+        "The container uses 3000 MB of RAM limit",
+        "Port 3000 on the host forwards to port 3000 inside the container",
+        "The service is limited to 3000 concurrent connections",
+        "Port 3000 is exposed to other containers in the same network"
+      ],
+      "correct": 1,
+      "explanation": "Port mapping format is `host_port:container_port`. Traffic arriving at port 3000 on the host machine is forwarded into the container's port 3000. Without this mapping, the container port is not accessible from outside the Docker network."
+    },
+    {
+      "id": "q7",
+      "question": "Where should production secrets (database passwords, API keys) be stored relative to the Docker image?",
+      "type": "mcq",
+      "options": [
+        "In ENV instructions in the Dockerfile so they are always available",
+        "In the application's config directory copied via COPY",
+        "Injected at runtime via environment variables or a secrets manager, never baked into the image",
+        "In the image tag name for easy identification"
+      ],
+      "correct": 2,
+      "explanation": "ENV instructions and COPY'd files become part of the image layers and are visible via `docker history`. Anyone with image access can extract secrets. Inject secrets at runtime via `-e` flags, orchestrator Secrets objects, or a secrets manager."
+    },
+    {
+      "id": "q8",
+      "question": "The writable container layer that Docker adds on top of image layers is:",
+      "type": "mcq",
+      "options": [
+        "Persisted automatically to the registry on container stop",
+        "Ephemeral — it is discarded when the container is removed",
+        "Shared across all running containers from the same image",
+        "Encrypted by default for security"
+      ],
+      "correct": 1,
+      "explanation": "Each container gets a thin, ephemeral writable layer. Changes made inside the container (file writes, installs) exist only in that layer. When the container is removed (`docker rm`), the writable layer is discarded. Use volumes for data that must persist."
+    },
+    {
+      "id": "q9",
+      "question": "Which `CMD` form is preferred in production Dockerfiles for correct signal handling?",
+      "type": "mcq",
+      "options": [
+        "Shell form: `CMD node server.js` — simple and readable",
+        "Exec form: `CMD [\"node\", \"server.js\"]` — process runs as PID 1 and receives OS signals",
+        "Either form is identical at runtime",
+        "Entrypoint form: `ENTRYPOINT node server.js`"
+      ],
+      "correct": 1,
+      "explanation": "Shell form (`CMD node server.js`) runs via `/bin/sh -c`, making the shell PID 1. The actual process is a child and may not receive SIGTERM. Exec form runs the process directly as PID 1, so Kubernetes and Docker can send graceful shutdown signals."
+    },
+    {
+      "id": "q10",
+      "question": "A Docker registry (Docker Hub, ECR) serves which purpose in a container workflow?",
+      "type": "mcq",
+      "options": [
+        "It runs containers on behalf of the developer",
+        "It stores and distributes built images so other machines can pull and run them",
+        "It compiles Dockerfiles into images without a local Docker daemon",
+        "It monitors running containers and restarts failed ones"
+      ],
+      "correct": 1,
+      "explanation": "A registry is an image repository. After `docker build` creates an image locally, `docker push` uploads it to the registry. CI/CD pipelines, Kubernetes nodes, and developer machines `docker pull` the image to run it — enabling consistent deployment across environments."
+    }
+  ]
+}

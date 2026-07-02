@@ -1,0 +1,198 @@
+{
+  "id": "phase14_distributed-systems-fundamentals",
+  "title": "Distributed Systems Fundamentals",
+  "phase": 14,
+  "week": 44,
+  "icon": "network",
+  "tagline": "Why we distribute computation across machines, what can go wrong, and why partial failure is the defining challenge of distributed systems.",
+  "readTime": "~13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "A **distributed system** is a collection of independent computers that appear to users as a single coherent system. We distribute for three reasons: **scale** (one machine's CPU/memory/disk is finite), **fault tolerance** (if one node fails, others continue), and **geography** (serve users with low latency globally). But distribution introduces a new class of problem that does not exist on a single machine: **partial failure**.\n\nOn a single machine, something either works or the whole machine crashes — there is no in-between. In a distributed system, some nodes can crash while others keep running, network links can drop messages silently, and a slow response is indistinguishable from a crashed node. These partial failures make distributed programs fundamentally harder to reason about than their single-node counterparts."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Client[\"Client\"] --> LB[\"Load Balancer\"]\n  LB --> N1[\"Node A (healthy)\"]\n  LB --> N2[\"Node B (crashed)\"]\n  LB --> N3[\"Node C (slow)\"]\n  N1 --> DB1[\"DB Shard 1\"]\n  N3 --> DB2[\"DB Shard 2\"]\n  N2 -.->|\"no response\"| DB3[\"DB Shard 3 (partitioned)\"]",
+      "caption": "A distributed cluster where Node B has crashed and Node C is slow — from the client's perspective both look like failures. DB Shard 3 is unreachable due to a network partition."
+    },
+    {
+      "type": "analogy",
+      "title": "The Remote Team",
+      "content": "Imagine a team where some members work from different cities, communicating only by post. If you send a letter and hear nothing back, you don't know whether your colleague received it and is thinking (slow), the letter got lost in transit (packet drop), or your colleague is sick (node crash). You can send the letter again, but then they might process it twice (duplicate delivery). This is exactly the partial-failure problem: **you cannot distinguish a slow response from no response**. Every distributed protocol is ultimately a strategy for making decisions despite this uncertainty."
+    },
+    {
+      "type": "explanation",
+      "content": "**The Eight Fallacies of Distributed Computing** (originally from Peter Deutsch at Sun Microsystems) capture assumptions programmers wrongly make:\n\n1. The network is reliable\n2. Latency is zero\n3. Bandwidth is infinite\n4. The network is secure\n5. Topology doesn't change\n6. There is one administrator\n7. Transport cost is zero\n8. The network is homogeneous\n\nEvery one of these is false in practice. Networks drop packets, add jitter, get partitioned, and change topology during rolling deploys. These fallacies explain why `distributed_sum = node1.sum() + node2.sum()` sometimes returns wrong results — a node might have responded with stale data before crashing mid-operation.\n\n**Failure modes** in distributed systems are richer than in single-node programs. A **crash-stop** failure (node halts permanently) is actually the easiest to handle — you just wait for a timeout. **Byzantine failures** (node sends arbitrary, possibly malicious responses) are the hardest and require quorum-based protocols. Real production systems mostly deal with **crash-recovery** (nodes crash and restart, possibly with stale state) and **omission failures** (messages are dropped).\n\n**Timeouts** are the only mechanism for detecting failure across a network — but they are ambiguous. A timeout means \"I haven't heard back within T seconds,\" not \"the operation failed.\" The operation may have completed successfully on the remote node without the response making it back. This is why **idempotent operations** are so important: safely retrying `PUT /orders/123 {amount: 50}` is fine; retrying `POST /orders {amount: 50}` may create a duplicate order."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Sender\"] -->|\"1. request sent\"| Net[\"Network\"]\n  Net -->|\"2a. message lost\"| X1[\"(dropped)\"]\n  Net -->|\"2b. delivered\"| B[\"Receiver\"]\n  B -->|\"3. response sent\"| Net2[\"Network\"]\n  Net2 -->|\"4a. response lost\"| X2[\"(dropped)\"]\n  Net2 -->|\"4b. response received\"| A",
+      "caption": "A request can be lost before reaching the receiver, or the response can be lost after processing. Both look identical to the sender — hence the need for idempotent retries."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Idempotency key pattern — safe retries in distributed systems\nconst crypto = require('crypto');\n\n// Client generates a unique key per logical operation\nfunction createOrder(cartId, paymentToken) {\n  const idempotencyKey = crypto\n    .createHash('sha256')\n    .update(`order:${cartId}:${paymentToken}`)\n    .digest('hex');\n\n  return fetch('/api/orders', {\n    method: 'POST',\n    headers: {\n      'Content-Type': 'application/json',\n      'Idempotency-Key': idempotencyKey  // server deduplicates on this\n    },\n    body: JSON.stringify({ cartId, paymentToken })\n  });\n}\n\n// Server-side: idempotent handler\nconst processedRequests = new Map(); // in production: Redis or DB table\n\nasync function handleCreateOrder(req, res) {\n  const key = req.headers['idempotency-key'];\n\n  // Return cached response if already processed\n  if (processedRequests.has(key)) {\n    return res.json(processedRequests.get(key));\n  }\n\n  const order = await db.createOrder(req.body);\n  const response = { orderId: order.id, status: 'created' };\n\n  // Cache response before returning (TTL: 24h in production)\n  processedRequests.set(key, response);\n\n  res.status(201).json(response);\n}",
+      "explanation": "The idempotency key is derived deterministically from the operation's logical identity (cart + payment token). If the network drops the response, the client retries with the same key and receives the same response — the order is not duplicated. This pattern is used by Stripe, Braintree, and most payment APIs."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Distributed systems failure taxonomy\n\n// 1. Crash-stop: node halts, never recovers\n//    Detection: timeout + heartbeat absence\n//    Mitigation: replication, automatic failover\n\n// 2. Crash-recovery: node crashes, restarts with disk state\n//    Challenge: in-flight operations lost from memory\n//    Mitigation: write-ahead logs, idempotent replay\n\n// 3. Omission: messages dropped (network unreliable)\n//    Detection: timeout + sequence numbers\n//    Mitigation: retry with exponential backoff + jitter\n\n// 4. Byzantine: node sends arbitrary wrong responses\n//    Detection: requires quorum agreement (3f+1 nodes for f faults)\n//    Mitigation: PBFT, Tendermint (expensive — rarely used in internal systems)\n\n// Retry with exponential backoff + jitter\nasync function retryWithBackoff(fn, maxAttempts = 5) {\n  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt === maxAttempts) throw err;\n      const base = Math.min(1000 * 2 ** attempt, 30000);\n      const jitter = Math.random() * base * 0.3;\n      await new Promise(r => setTimeout(r, base + jitter));\n    }\n  }\n}"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "Always add **jitter** to retry backoff. If 10,000 clients all back off by exactly the same amount after a failure, they storm the server simultaneously at the retry moment — a thundering herd. Randomizing the delay by ±30% staggers retries and prevents re-overloading a recovering service."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Partial failure** — some nodes crash while others continue — is the defining challenge of distributed systems and does not exist on single machines.",
+        "**The Eight Fallacies** (network is reliable, latency is zero, etc.) are all false; good distributed design treats the network as unreliable by default.",
+        "**Timeouts are ambiguous**: a timeout means you haven't heard back, not that the operation failed — the remote node may have completed it successfully.",
+        "**Idempotent operations** enable safe retries: the same request applied twice produces the same result, so clients can retry without fear of duplication.",
+        "**Failure modes** range from crash-stop (simplest) to Byzantine (arbitrary wrong responses) — most production systems design for crash-recovery and omission failures."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the defining characteristic that makes distributed systems fundamentally harder than single-node systems?",
+      "type": "mcq",
+      "options": [
+        "They require more complex programming languages",
+        "Partial failure — some components can fail while others continue operating",
+        "They always have higher latency than single-node systems",
+        "They require specialized hardware not available on commodity servers"
+      ],
+      "correct": 1,
+      "explanation": "On a single machine, failure is total — everything works or the machine crashes. In a distributed system, some nodes can crash while others run, some messages can be dropped while others arrive, creating partial failure states that are uniquely difficult to handle."
+    },
+    {
+      "id": "q2",
+      "question": "According to the Eight Fallacies of Distributed Computing, which assumption do developers most dangerously make?",
+      "type": "mcq",
+      "options": [
+        "The network is reliable",
+        "CPU cycles are cheap",
+        "Memory is unlimited",
+        "Disk I/O is fast"
+      ],
+      "correct": 0,
+      "explanation": "The network is NOT reliable — packets are dropped, connections time out, links go down. The Eight Fallacies were formulated to enumerate every wrong assumption developers commonly make about distributed network environments."
+    },
+    {
+      "id": "q3",
+      "question": "Why are timeouts ambiguous in distributed systems?",
+      "type": "mcq",
+      "options": [
+        "Clocks on different machines run at different speeds",
+        "A timeout only means no response was received — the operation may have completed successfully on the remote node",
+        "Timeouts are not supported in TCP connections",
+        "Network latency makes timeouts impossible to configure correctly"
+      ],
+      "correct": 1,
+      "explanation": "A timeout tells you nothing about what happened on the remote side. The operation may have completed successfully but the response was lost in the network. This ambiguity is why retries must be idempotent — you might be retrying a succeeded operation."
+    },
+    {
+      "id": "q4",
+      "question": "What makes an operation idempotent?",
+      "type": "mcq",
+      "options": [
+        "It completes in constant time regardless of input size",
+        "Applying it multiple times produces the same result as applying it once",
+        "It never fails under any network condition",
+        "It uses atomic transactions to prevent partial updates"
+      ],
+      "correct": 1,
+      "explanation": "Idempotency means f(f(x)) = f(x). Setting a value to 50 is idempotent (setting it to 50 twice still gives 50). Incrementing by 1 is not (incrementing twice gives a different result). Idempotent operations can be safely retried without side effects."
+    },
+    {
+      "id": "q5",
+      "question": "Which failure mode is the most difficult to handle in distributed systems?",
+      "type": "mcq",
+      "options": [
+        "Crash-stop failures",
+        "Network partitions",
+        "Byzantine failures",
+        "Crash-recovery failures"
+      ],
+      "correct": 2,
+      "explanation": "Byzantine failures occur when nodes send arbitrary, incorrect, or malicious responses. Unlike crash failures (where nodes simply stop), Byzantine nodes actively participate with wrong data. Handling them requires quorum protocols (3f+1 nodes for f faults) and is far more expensive."
+    },
+    {
+      "id": "q6",
+      "question": "The idempotency key pattern used by payment APIs like Stripe works by:",
+      "type": "mcq",
+      "options": [
+        "Encrypting the request body so it can only be processed once",
+        "The client sending a unique key per logical operation; the server caches and returns the same response on duplicate requests",
+        "The server generating a token that the client must echo back",
+        "Using a distributed lock that prevents concurrent requests for the same resource"
+      ],
+      "correct": 1,
+      "explanation": "The client derives a deterministic key from the operation's logical identity (e.g., SHA256 of cart ID + payment token). If the client retries with the same key, the server returns the cached response instead of processing again — preventing duplicate orders or charges."
+    },
+    {
+      "id": "q7",
+      "question": "Why should exponential backoff always include random jitter?",
+      "type": "mcq",
+      "options": [
+        "Jitter prevents integer overflow in backoff calculations",
+        "Random delays stagger retries to prevent synchronized client storms overwhelming a recovering server",
+        "Jitter ensures retries use different network paths",
+        "It satisfies cryptographic requirements for secure retransmission"
+      ],
+      "correct": 1,
+      "explanation": "Without jitter, all clients back off by the same amount and retry simultaneously — a thundering herd. Adding ±30% random jitter staggers retries across time, giving the recovering service a smooth ramp-up rather than another spike of load."
+    },
+    {
+      "id": "q8",
+      "question": "Which of the following is NOT one of the primary reasons to build a distributed system?",
+      "type": "mcq",
+      "options": [
+        "Scale beyond a single machine's resource limits",
+        "Achieve fault tolerance so one node's failure doesn't stop the service",
+        "Eliminate the need for software testing",
+        "Serve users globally with low latency"
+      ],
+      "correct": 2,
+      "explanation": "Distribution is motivated by scale, fault tolerance, and geography. It dramatically increases complexity and the surface area for bugs — distributed systems require more rigorous testing, not less."
+    },
+    {
+      "id": "q9",
+      "question": "In a crash-recovery failure model, what is the main challenge compared to crash-stop?",
+      "type": "mcq",
+      "options": [
+        "Crashed nodes cannot be detected via heartbeats",
+        "Recovering nodes restart with potentially stale state from disk, causing inconsistencies",
+        "Recovery requires replacing hardware before the node can rejoin",
+        "Crash-recovery failures always result in data loss"
+      ],
+      "correct": 1,
+      "explanation": "A crash-recovery node restarts from persisted disk state, which may not include in-flight operations that were in memory when it crashed. Other nodes may have moved on. Write-ahead logs and idempotent replay protocols handle this by recording intended operations before executing them."
+    },
+    {
+      "id": "q10",
+      "question": "A POST /orders endpoint that creates a new order on every call is problematic under network retries because:",
+      "type": "mcq",
+      "options": [
+        "POST requests cannot be retried by HTTP clients",
+        "Network retries can trigger the endpoint multiple times, creating duplicate orders",
+        "The server cannot distinguish authenticated from unauthenticated POST requests",
+        "POST requests bypass CDN caching, increasing origin load"
+      ],
+      "correct": 1,
+      "explanation": "POST /orders is not idempotent — each call creates a new order. If the network drops the response after the order is created, the client retries and creates a duplicate. Idempotency keys solve this: the second request with the same key returns the first order's response."
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "id": "phase7_oltp-vs-olap",
+  "title": "OLTP vs OLAP",
+  "phase": 7,
+  "week": 26,
+  "icon": "database",
+  "tagline": "Transactional speed vs analytical power — row stores, columnar storage, data warehouses, and the ETL pipelines that feed them.",
+  "readTime": "~12 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Databases serve two fundamentally different masters. **OLTP (Online Transaction Processing)** handles the rapid, short-lived read/write operations that power applications — inserting an order, looking up a user, updating a balance. **OLAP (Online Analytical Processing)** handles the long-running, read-heavy queries that power business intelligence — summing revenue by region over the past year, computing cohort retention, scanning billions of events.\n\nThe same schema design, storage format, and query pattern that makes OLTP fast makes OLAP slow — and vice versa. This mismatch is why organizations build separate **data warehouses** fed by **ETL (Extract, Transform, Load)** or **ELT** pipelines, and why columnar storage engines like Snowflake, BigQuery, and Redshift exist alongside row-oriented PostgreSQL."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"App Database\\nOLTP\\nPostgres / MySQL\"] -->|\"ETL / ELT\"| B[\"Data Warehouse\\nOLAP\\nSnowflake / BigQuery\"]\n  C[\"Event Streams\\nKafka / Kinesis\"] -->|\"streaming ELT\"| B\n  B --> D[\"BI Tools\\nLooker / Tableau\"]\n  B --> E[\"Ad-hoc SQL\\nData Science\"]",
+      "caption": "OLTP systems handle live application traffic; data flows via ETL/ELT into an OLAP warehouse for analytics and reporting."
+    },
+    {
+      "type": "analogy",
+      "title": "The Shop Counter vs the Accountant's Ledger",
+      "content": "OLTP is the shop counter — cashiers ring up individual transactions fast, one at a time. The database handles thousands of small operations per second, each touching a few rows. OLAP is the accountant running year-end reports — they ignore individual receipts and scan the entire ledger, aggregating millions of rows into summary figures. You wouldn't ask the cashier to run the annual report; you'd give the accountant a photocopy of the ledger (the data warehouse) so they don't slow down the checkout line."
+    },
+    {
+      "type": "explanation",
+      "content": "**Row-oriented storage** (PostgreSQL, MySQL) stores all columns of a row contiguously on disk. This is optimal for OLTP: fetching or updating a complete record (`SELECT * FROM orders WHERE id = 42`) reads exactly one or a few pages. But an analytical query like `SELECT SUM(revenue) FROM orders` must read every row to access the one column it needs — enormous wasted I/O.\n\n**Columnar storage** (Snowflake, BigQuery, Redshift, DuckDB, Apache Parquet) stores each column's values contiguously. `SELECT SUM(revenue)` reads only the revenue column, skipping all other columns. Compression ratios are also dramatically higher because adjacent values in the same column are similar (e.g., all `status` values are a handful of strings). Columnar storage makes range scans and aggregations 10–100× faster but makes single-row lookups slower.\n\n**Data warehouses** are purpose-built OLAP systems. They denormalize data into a **star schema**: a central **fact table** (orders, events, page views) storing measurable metrics, surrounded by **dimension tables** (customers, products, dates) storing descriptive attributes. JOINs in a star schema are always from the fact table to dimension tables — predictable, optimizer-friendly, and cacheable.\n\n**ETL (Extract, Transform, Load)** pipelines pull data from source systems, clean and reshape it (transform), and load it into the warehouse. **ELT (Extract, Load, Transform)** flips the order — raw data is loaded first, then transformed inside the warehouse using SQL. ELT has become dominant with cloud warehouses because compute inside the warehouse is cheap and transformations can be versioned as SQL with tools like **dbt**.\n\n**Partitioning and clustering** are key warehouse optimizations. Partitioning splits a table into physical segments by a column (typically a date); queries with a date filter only read the relevant partitions — **partition pruning**. Clustering sorts data within each partition by additional columns, enabling further block pruning."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  F[\"Fact Table\\norders\\norder_id, customer_id,\\nproduct_id, date_id, revenue\"]\n  F --> C[\"Dim: customers\\ncustomer_id, name, region\"]\n  F --> P[\"Dim: products\\nproduct_id, name, category\"]\n  F --> D[\"Dim: dates\\ndate_id, year, month, quarter\"]",
+      "caption": "Star schema: the fact table holds numeric metrics and foreign keys; dimension tables hold descriptive attributes. Analysts JOIN fact to dims for every report."
+    },
+    {
+      "type": "code_example",
+      "language": "sql",
+      "label": "Runtime",
+      "code": "-- OLTP: fast single-row lookup (row store, index seek)\nSELECT id, status, total_amount\nFROM orders\nWHERE id = 987654;  -- milliseconds via B+ tree index\n\n-- OLAP: aggregate over the full fact table (column store)\n-- Run in BigQuery / Snowflake / DuckDB\nSELECT\n  d.year,\n  d.quarter,\n  c.region,\n  p.category,\n  SUM(f.revenue)      AS total_revenue,\n  COUNT(f.order_id)   AS order_count\nFROM fact_orders      AS f\nJOIN dim_dates        AS d ON f.date_id    = d.date_id\nJOIN dim_customers    AS c ON f.customer_id = c.customer_id\nJOIN dim_products     AS p ON f.product_id  = p.product_id\nWHERE d.year = 2024\nGROUP BY d.year, d.quarter, c.region, p.category\nORDER BY d.quarter, total_revenue DESC;\n\n-- Partition pruning: Snowflake / BigQuery only scan 2024 partitions\n-- if the table is partitioned on date_id or year\nALTER TABLE fact_orders CLUSTER BY (year, region);",
+      "explanation": "The OLTP query is a point lookup — one index seek, negligible I/O. The OLAP query scans millions of rows but columnar storage means only `revenue` and `order_id` bytes are read from disk for the fact table. Clustering on `(year, region)` allows block pruning for the most common filter patterns."
+    },
+    {
+      "type": "code_concept",
+      "language": "sql",
+      "label": "Concept",
+      "code": "-- OLTP vs OLAP comparison\n-- Property           | OLTP                        | OLAP\n-- -----------------  | --------------------------- | ----------------------------\n-- Query type         | Point reads, short writes   | Aggregations, full scans\n-- Rows touched       | 1 – 100 per query           | Millions to billions\n-- Latency target     | < 10 ms                     | Seconds to minutes\n-- Storage format     | Row-oriented                | Columnar\n-- Schema style       | Normalized (3NF)            | Denormalized (star schema)\n-- Primary examples   | PostgreSQL, MySQL, MongoDB  | Snowflake, BigQuery, Redshift\n-- Freshness          | Real-time                   | Near-real-time to daily\n\n-- dbt model example (ELT transform inside warehouse)\n-- models/marts/revenue_by_region.sql\n-- {{ config(materialized='table', partition_by={'field': 'year'}) }}\n-- SELECT\n--   d.year, c.region, SUM(f.revenue) AS total_revenue\n-- FROM {{ ref('fact_orders') }} f\n-- JOIN {{ ref('dim_dates') }} d USING (date_id)\n-- JOIN {{ ref('dim_customers') }} c USING (customer_id)\n-- GROUP BY 1, 2"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "Do not run heavy analytical queries on your OLTP database — they hold locks, starve application queries, and often cause read replicas to lag. Even a simple `SELECT COUNT(*) FROM orders` on 100 M rows can take minutes. Push analytics to a dedicated warehouse or a read replica with a column-store extension like `pg_analytics` or Citus columnar tables."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**OLTP** optimizes for low-latency reads and writes of individual rows; row-oriented storage excels here.",
+        "**OLAP** optimizes for scanning and aggregating millions to billions of rows; columnar storage excels here by reading only needed columns and compressing similar values.",
+        "**Star schema** centers a fact table of metrics around dimension tables of attributes, making warehouse queries predictable and optimizer-friendly.",
+        "**ETL** transforms data before loading; **ELT** loads raw data first and transforms inside the warehouse using SQL — ELT is dominant with cloud warehouses.",
+        "**Partitioning and clustering** let the query engine skip irrelevant data blocks, reducing scanned bytes and cost in column-store warehouses."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Which system is better suited for a query that sums revenue across 500 million orders?",
+      "type": "mcq",
+      "options": [
+        "OLTP row-store database like PostgreSQL",
+        "OLAP columnar warehouse like Snowflake",
+        "A key-value store like Redis",
+        "A document database like MongoDB"
+      ],
+      "correct": 1,
+      "explanation": "OLAP columnar warehouses like Snowflake read only the revenue column from disk, skipping all other columns. This makes full-scan aggregations 10–100× faster than row-stores that must read complete rows."
+    },
+    {
+      "id": "q2",
+      "question": "Why does columnar storage compress better than row-oriented storage?",
+      "type": "mcq",
+      "options": [
+        "Columns use smaller data types than rows",
+        "Adjacent values in a column are similar, making encoding schemes like run-length encoding very effective",
+        "Columnar storage omits NULL values entirely",
+        "Columnar storage uses GZIP by default while row stores do not"
+      ],
+      "correct": 1,
+      "explanation": "A column stores the same field for millions of rows consecutively. Similar values (e.g., a status column with only 'pending'/'shipped'/'delivered') compress dramatically with dictionary encoding or run-length encoding."
+    },
+    {
+      "id": "q3",
+      "question": "In a star schema, the 'fact table' contains:",
+      "type": "mcq",
+      "options": [
+        "Descriptive attributes like customer name and product category",
+        "Numeric metrics and foreign keys to dimension tables",
+        "The schema of all other tables",
+        "Slowly changing dimension history"
+      ],
+      "correct": 1,
+      "explanation": "The fact table stores measurable events (revenue, quantity, clicks) along with foreign keys to dimension tables. It is usually the largest table and is the primary target for aggregation queries."
+    },
+    {
+      "id": "q4",
+      "question": "What is the key difference between ETL and ELT?",
+      "type": "mcq",
+      "options": [
+        "ETL uses SQL; ELT uses Python",
+        "ETL transforms data before loading into the warehouse; ELT loads raw data first then transforms inside the warehouse",
+        "ETL is batch; ELT is streaming",
+        "ETL is used for OLTP; ELT is used for OLAP only"
+      ],
+      "correct": 1,
+      "explanation": "ETL transforms data in a separate processing layer before loading into the target. ELT loads raw data into the warehouse first, leveraging the warehouse's compute power to transform it with SQL — common with dbt."
+    },
+    {
+      "id": "q5",
+      "question": "What is 'partition pruning' in a data warehouse?",
+      "type": "mcq",
+      "options": [
+        "Dropping old partitions to free storage",
+        "Skipping partitions that cannot contain rows matching the query filter",
+        "Merging small partitions into larger ones",
+        "Reindexing partition columns for faster lookups"
+      ],
+      "correct": 1,
+      "explanation": "Partition pruning means the query engine only reads partitions whose date range (or partition key range) overlaps the query filter, skipping all other partitions entirely and dramatically reducing I/O."
+    },
+    {
+      "id": "q6",
+      "question": "A normalized OLTP schema with many joins performs poorly in a data warehouse. The standard fix is:",
+      "type": "mcq",
+      "options": [
+        "Add more indexes to the normalized schema",
+        "Denormalize into a star or snowflake schema",
+        "Run queries on the OLTP primary server",
+        "Partition every table by primary key"
+      ],
+      "correct": 1,
+      "explanation": "Warehouses denormalize data into a star schema — fact tables with prejoined, flattened dimension data. This trades storage for query simplicity and lets the columnar engine avoid expensive runtime joins."
+    },
+    {
+      "id": "q7",
+      "question": "Which tool is most commonly associated with ELT transformations inside a data warehouse?",
+      "type": "mcq",
+      "options": [
+        "Apache Spark",
+        "dbt (data build tool)",
+        "Informatica PowerCenter",
+        "Apache Sqoop"
+      ],
+      "correct": 1,
+      "explanation": "dbt (data build tool) lets analysts write SQL SELECT statements that dbt compiles into CREATE TABLE AS or CREATE VIEW statements inside the warehouse. It popularized ELT by treating SQL transforms as version-controlled code."
+    },
+    {
+      "id": "q8",
+      "question": "Why should heavy analytical queries NOT be run on the OLTP production database?",
+      "type": "mcq",
+      "options": [
+        "OLTP databases cannot parse GROUP BY and aggregation functions",
+        "Analytical scans hold locks, increase I/O load, and starve application queries",
+        "OLTP databases do not support joins across multiple tables",
+        "Analytical queries require column-level permissions unavailable in OLTP"
+      ],
+      "correct": 1,
+      "explanation": "Full table scans for analytics can take minutes, holding shared locks and consuming I/O that application queries need. This causes latency spikes for end users and can cause read replica lag."
+    },
+    {
+      "id": "q9",
+      "question": "A data warehouse table is partitioned by year. A query filters WHERE year = 2024. What happens?",
+      "type": "mcq",
+      "options": [
+        "The query scans all partitions but returns only 2024 rows",
+        "The query only reads the 2024 partition, skipping all other years",
+        "The query fails because partitioned tables require partition key in SELECT",
+        "Partitioning has no effect on analytical queries"
+      ],
+      "correct": 1,
+      "explanation": "Partition pruning allows the engine to identify that only the 2024 partition can contain matching rows. All other partitions are skipped, reducing data scanned to a fraction of the total table size."
+    },
+    {
+      "id": "q10",
+      "question": "A row-oriented database must read a full 8 KB page to access one column value. A columnar store avoids this because:",
+      "type": "mcq",
+      "options": [
+        "Columnar stores use smaller page sizes of 1 KB",
+        "All values for a single column are stored together, so reading that column reads only its bytes",
+        "Columnar stores keep all columns in memory and never read from disk",
+        "Columnar stores compress each row individually so only that row is decompressed"
+      ],
+      "correct": 1,
+      "explanation": "Columnar storage places all values for column C contiguously on disk. A query needing only column C reads only C's storage footprint, skipping bytes for all other columns — a massive I/O reduction for wide tables."
+    }
+  ]
+}

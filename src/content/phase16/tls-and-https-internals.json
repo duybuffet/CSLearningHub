@@ -1,0 +1,194 @@
+{
+  "id": "phase16_tls-and-https-internals",
+  "title": "TLS & HTTPS Internals",
+  "phase": 16,
+  "week": 49,
+  "icon": "gear",
+  "tagline": "Inside the TLS 1.3 handshake: certificates, PKI trust chains, cipher suite negotiation, and how forward secrecy is achieved on every HTTPS connection.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Every HTTPS connection begins with a **TLS handshake** — a protocol that establishes authenticated, encrypted communication in as little as one round trip. TLS (Transport Layer Security) sits between the TCP and HTTP layers, transparent to application logic. By the time your first `GET /` request leaves the browser, TLS has already: verified the server's identity via a certificate, negotiated cryptographic algorithms, and derived symmetric session keys that encrypt everything that follows.\n\nUnderstanding TLS internals is essential for diagnosing connection failures, configuring servers securely, understanding certificate errors, and appreciating why **HTTPS** is not optional for any production service. TLS 1.3 (2018) made the handshake faster, eliminated weak cipher suites, and mandated **forward secrecy** — meaning intercepted traffic cannot be decrypted even if the server's private key is later stolen."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    Note over C,S: TLS 1.3 Full Handshake (1 RTT)\n    C->>S: ClientHello [TLS version, ciphers, key_share(ECDHE public key)]\n    S->>C: ServerHello [chosen cipher, key_share(server ECDHE public key)]\n    S->>C: Certificate [server cert chain]\n    S->>C: CertificateVerify [signature over handshake with private key]\n    S->>C: Finished [HMAC over handshake transcript]\n    Note over C,S: Client derives session keys from ECDHE shared secret\n    C->>S: Finished [HMAC over handshake transcript]\n    Note over C,S: Encrypted application data flows\n    C->>S: GET /api/data HTTP/1.1\n    S->>C: 200 OK + encrypted response",
+      "caption": "TLS 1.3 completes the handshake in 1 RTT. The server sends its certificate and Finished message in one flight; the client only needs one reply before application data can flow."
+    },
+    {
+      "type": "analogy",
+      "title": "Passport Control and a Sealed Envelope",
+      "content": "Imagine arriving at a foreign border crossing. The border officer (server) shows you their **government-issued passport** (TLS certificate). You check the photo and the official stamp (Certificate Authority signature) — it matches the government you trust (your browser's root CA store). You're now confident you're talking to the real country's official.\n\nNext, you and the officer both perform a **secret dice roll** in a way that outsiders watching can't deduce (Diffie-Hellman key exchange). From these dice rolls, you independently calculate the same 6-digit code — your **session key**. All future communication is written in a cipher using that code. Even if someone recorded your entire conversation and later obtained the officer's master credentials, they couldn't decode the session: the 6-digit code was derived from ephemeral dice rolls that no longer exist. This is **forward secrecy**."
+    },
+    {
+      "type": "explanation",
+      "content": "**X.509 Certificates** bind a public key to an identity (domain name, organization). A certificate contains: the subject's domain (`CN=example.com`), the subject's public key, validity period, and a **digital signature** from a Certificate Authority (CA). Your browser ships with ~150 pre-trusted root CA certificates (Mozilla, Google, Apple, Microsoft maintain their own trust stores). CAs sign intermediate certificates, which sign end-entity (leaf) certificates — forming a **PKI chain of trust**.\n\n**Certificate Verification** on the client side: (1) Check the chain of signatures from leaf → intermediate → root CA (must all be valid signatures). (2) Check the leaf certificate's `Subject Alternative Names` (SANs) include the requested domain. (3) Check the validity period (`notBefore`, `notAfter`). (4) Check **revocation** via CRL (Certificate Revocation List) or OCSP (Online Certificate Status Protocol) — has the CA revoked this cert before expiry? (5) Verify no mismatch with certificate transparency logs if enforced.\n\n**Cipher Suites** in TLS 1.3 are simplified: only five are supported (vs hundreds in TLS 1.2). The format is `TLS_AES_256_GCM_SHA384` — specifying the symmetric cipher (AES-256-GCM) and HMAC hash (SHA-384). Key exchange always uses ECDHE for forward secrecy (RSA key transport is removed). Authentication always uses the certificate's key algorithm.\n\n**Forward Secrecy (FS)** is achieved via *ephemeral* key exchange: the server generates a fresh ECDHE key pair for each handshake, uses it to derive the session key, then discards it. Even if an attacker records the entire TLS session and later obtains the server's long-term private key (from the certificate), they cannot derive the session keys — those were derived from the ephemeral ECDHE keys that no longer exist. In TLS 1.2, cipher suites with `ECDHE` or `DHE` prefix (e.g., `ECDHE-RSA-AES256-GCM-SHA384`) provide FS; suites with `RSA` only (key transport) do not.\n\n**OCSP Stapling** improves performance: instead of the client making a separate OCSP request to the CA during every TLS handshake (adding latency and leaking which sites you visit to the CA), the server periodically fetches the OCSP response and *staples* it to the TLS handshake. The client verifies the stapled response (signed by the CA) without any extra round trip."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Root CA\\n(self-signed, in browser trust store)\"] --> B[\"Intermediate CA\\n(signed by Root CA)\"]\n    B --> C[\"Leaf Certificate\\nexample.com\\n(signed by Intermediate CA)\"]\n    C --> D[\"Verification Steps\"]\n    D --> E[\"1. Signature chain valid?\"]\n    D --> F[\"2. Domain matches SAN?\"]\n    D --> G[\"3. Not expired?\"]\n    D --> H[\"4. Not revoked? (OCSP)\"]",
+      "caption": "PKI trust chain: browsers trust root CAs pre-installed by the OS/browser vendor; leaf certificates are verified by walking the chain and checking four properties."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "import https from 'node:https';\nimport tls from 'node:tls';\nimport fs from 'node:fs';\n\n// ── 1. Inspect TLS connection details programmatically ────────\nfunction inspectTLS(hostname, port = 443) {\n  return new Promise((resolve, reject) => {\n    const socket = tls.connect({ host: hostname, port, servername: hostname }, () => {\n      const cert = socket.getPeerCertificate(true);\n      const protocol = socket.getProtocol();\n      const cipher = socket.getCipher();\n\n      resolve({\n        protocol,                                    // e.g., 'TLSv1.3'\n        cipher: cipher.name,                         // e.g., 'TLS_AES_256_GCM_SHA384'\n        subject: cert.subject?.CN,                   // e.g., 'example.com'\n        issuer: cert.issuer?.O,                      // e.g., 'Let's Encrypt'\n        validFrom: cert.valid_from,\n        validTo: cert.valid_to,\n        fingerprint: cert.fingerprint256,\n        subjectAltNames: cert.subjectaltname,         // SAN list\n      });\n      socket.destroy();\n    });\n    socket.on('error', reject);\n  });\n}\n\n// ── 2. HTTPS server with secure TLS configuration ────────────\nfunction createSecureServer(certPath, keyPath) {\n  const options = {\n    cert: fs.readFileSync(certPath),\n    key:  fs.readFileSync(keyPath),\n    minVersion: 'TLSv1.2',             // Reject TLS 1.0 and 1.1\n    ciphers: [\n      'TLS_AES_256_GCM_SHA384',        // TLS 1.3 (automatic if minVersion allows)\n      'TLS_CHACHA20_POLY1305_SHA256',\n      'ECDHE-ECDSA-AES256-GCM-SHA384', // TLS 1.2 with forward secrecy\n      'ECDHE-RSA-AES256-GCM-SHA384',\n    ].join(':'),\n    honorCipherOrder: true,             // Server picks cipher, not client\n  };\n\n  const server = https.createServer(options, (req, res) => {\n    // Security headers every HTTPS response should include\n    res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');\n    res.setHeader('X-Content-Type-Options', 'nosniff');\n    res.setHeader('X-Frame-Options', 'DENY');\n    res.setHeader('Content-Security-Policy', \"default-src 'self'\");\n    res.writeHead(200, { 'Content-Type': 'application/json' });\n    res.end(JSON.stringify({ status: 'secure' }));\n  });\n\n  return server;\n}\n\n// ── 3. Certificate expiry monitoring ─────────────────────────\nasync function checkCertExpiry(hostname) {\n  const info = await inspectTLS(hostname);\n  const expiresAt = new Date(info.validTo);\n  const daysLeft = Math.floor((expiresAt - Date.now()) / (86400 * 1000));\n  console.log(`${hostname}: expires in ${daysLeft} days (${info.validTo})`);\n  if (daysLeft < 30) console.warn('WARNING: Certificate expiring soon!');\n  return daysLeft;\n}\n\n// checkCertExpiry('example.com').catch(console.error);",
+      "explanation": "The `tls.connect()` API lets you inspect a live TLS connection: protocol version, cipher suite, and full certificate details including the trust chain. When configuring an HTTPS server, `minVersion: 'TLSv1.2'` rejects legacy TLS 1.0/1.1 clients. The cipher list should prefer ECDHE suites for forward secrecy. The `Strict-Transport-Security` header with a long `max-age` instructs browsers to always use HTTPS for the domain, preventing SSL-stripping attacks."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── TLS 1.2 vs TLS 1.3 comparison ────────────────────────────\n//\n// Feature               │ TLS 1.2               │ TLS 1.3\n// ──────────────────────┼───────────────────────┼──────────────────────────\n// Handshake RTTs        │ 2 RTT                 │ 1 RTT (0-RTT for resumed)\n// Cipher suites         │ Hundreds (incl. weak) │ 5 (all AEAD + FS)\n// Key exchange          │ RSA or ECDHE          │ ECDHE only (FS mandatory)\n// Encryption of cert    │ No (cert in plaintext)│ Yes (cert encrypted)\n// Deprecated features   │ Compression, renegot. │ Removed entirely\n// Handshake encryption  │ Partial               │ Full (after ServerHello)\n\n// ── Certificate types and use cases ──────────────────────────\nconst CERT_TYPES = {\n  'DV (Domain Validated)':         'Proves domain control only. Issued in minutes. Let\\'s Encrypt. Sufficient for most sites.',\n  'OV (Organization Validated)':   'CA verifies organization identity. Shows company name in cert. Days to issue.',\n  'EV (Extended Validation)':      'Rigorous org verification. Previously showed green bar in browsers. Weeks to issue.',\n  'Wildcard (*.example.com)':      'Covers all subdomains at one level. Cannot cover sub-subdomains.',\n  'SAN (Subject Alternative Name)':'Single cert covers multiple domains: example.com, www.example.com, api.example.com',\n};\n\n// ── Common TLS errors and their causes ───────────────────────\nconst TLS_ERRORS = {\n  'ERR_CERT_AUTHORITY_INVALID':  'Self-signed cert or CA not in browser trust store',\n  'ERR_CERT_DATE_INVALID':       'Certificate expired or not yet valid (check server clock sync)',\n  'ERR_CERT_COMMON_NAME_INVALID':'Domain name does not match any SAN in the certificate',\n  'ERR_SSL_PROTOCOL_ERROR':      'TLS version mismatch or cipher suite incompatibility',\n  'UNABLE_TO_VERIFY_LEAF_SIGNATURE': 'Incomplete chain — server did not send intermediate cert',\n  'DEPTH_ZERO_SELF_SIGNED_CERT': 'Leaf certificate is self-signed with no CA chain',\n};\n\n// ── HSTS preload checklist ─────────────────────────────────────\n// 1. Set: Strict-Transport-Security: max-age=63072000; includeSubDomains; preload\n// 2. Ensure ALL subdomains support HTTPS (includeSubDomains applies recursively)\n// 3. Submit to https://hstspreload.org — browsers hard-code your domain as HTTPS-only\n// WARNING: Once preloaded, removing HTTPS from any subdomain breaks it for ALL browsers",
+      "explanation": ""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Use automated certificate management**: Let's Encrypt + ACME protocol (via `certbot`, `caddy`, or cloud load balancer auto-renewal) eliminates the #1 cause of HTTPS outages — certificate expiry. Set up monitoring (alert at 30 days remaining). For internal services, **mTLS** (mutual TLS) allows both the server *and* client to present certificates — useful for service-to-service authentication in microservices. Tools like `openssl s_client -connect host:443` or `ssllabs.com/ssltest` instantly reveal your TLS configuration and grade."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**TLS 1.3 handshake** completes in 1 RTT: the client sends its ECDHE key share in ClientHello; the server replies with its key share, certificate, and Finished in one flight. Both sides derive symmetric session keys from the ECDHE exchange.",
+        "**X.509 certificates** bind a public key to a domain, signed by a CA. Browsers verify the full chain (leaf → intermediate → trusted root), the domain match in SANs, validity period, and revocation status.",
+        "**Forward secrecy** is mandated in TLS 1.3 via ephemeral ECDHE: session keys are derived from ephemeral key pairs that are discarded after the handshake, so past sessions are safe even if the server's long-term private key is compromised.",
+        "**TLS 1.3** eliminates hundreds of weak TLS 1.2 cipher suites, allows only five AEAD cipher suites, encrypts the certificate in transit, and removes features like renegotiation and compression.",
+        "**PKI trust chains** enable strangers to authenticate each other: the server's certificate is signed by an intermediate CA, which is signed by a root CA pre-installed in your OS/browser trust store."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "How many round trips does a TLS 1.3 full handshake require before application data can flow?",
+      "type": "mcq",
+      "options": ["0 RTT", "1 RTT", "2 RTT", "3 RTT"],
+      "correct": 1,
+      "explanation": "TLS 1.3 requires exactly 1 RTT for a full handshake: the client sends ClientHello with a key_share in the first flight; the server responds with ServerHello, Certificate, CertificateVerify, and Finished all in one flight. The client sends Finished and can then immediately send application data. TLS 1.2 required 2 RTTs."
+    },
+    {
+      "id": "q2",
+      "question": "What is the purpose of the 'Subject Alternative Names' (SAN) field in a TLS certificate?",
+      "type": "mcq",
+      "options": [
+        "It lists the CA's alternate contact names for certificate disputes",
+        "It specifies alternative encryption algorithms if the primary one fails",
+        "It lists all the domain names (and optionally IPs) that the certificate is valid for",
+        "It provides backup public keys if the primary key is compromised"
+      ],
+      "correct": 2,
+      "explanation": "The Subject Alternative Names (SAN) extension lists all domains and IP addresses the certificate is valid for. Browsers match the requested hostname against the SAN list. The old CN (Common Name) field is no longer used for domain validation. A single certificate can cover multiple domains (e.g., example.com, www.example.com, api.example.com) or wildcard domains (*.example.com)."
+    },
+    {
+      "id": "q3",
+      "question": "Why does TLS 1.3 mandate forward secrecy while TLS 1.2 made it optional?",
+      "type": "mcq",
+      "options": [
+        "Forward secrecy is only important for government communications",
+        "TLS 1.3 removed RSA key transport (which lacked FS) and requires ECDHE for all key exchanges",
+        "TLS 1.2 achieved forward secrecy through certificate pinning",
+        "Forward secrecy was patented in 2018, so TLS 1.3 was first to legally use it"
+      ],
+      "correct": 1,
+      "explanation": "In TLS 1.2, RSA key transport cipher suites (where the client encrypts a pre-master secret with the server's RSA public key) were common but provided no forward secrecy — an attacker who records traffic and later obtains the server's private key can decrypt all past sessions. TLS 1.3 completely removed these suites, requiring ECDHE for all key exchanges, making forward secrecy mandatory."
+    },
+    {
+      "id": "q4",
+      "question": "What does a Certificate Authority (CA) cryptographically attest when it signs a certificate?",
+      "type": "mcq",
+      "options": [
+        "That the website's content is safe and malware-free",
+        "That the website owner has verified their identity and the public key in the certificate belongs to them",
+        "That the website's server is running the latest security patches",
+        "That all traffic to the website will be encrypted"
+      ],
+      "correct": 1,
+      "explanation": "A CA's signature on a certificate attests that the CA has verified the certificate applicant controls the domain (for DV certs) or additionally verified organizational identity (OV/EV). Crucially, it binds the public key in the certificate to that identity — so clients can trust that a server presenting this certificate and possessing the matching private key is genuinely the claimed domain owner."
+    },
+    {
+      "id": "q5",
+      "question": "What is OCSP stapling and why is it an improvement over standard OCSP?",
+      "type": "mcq",
+      "options": [
+        "OCSP stapling pins a certificate permanently, preventing revocation",
+        "The server fetches and attaches the CA's OCSP revocation response to the TLS handshake, avoiding a separate client request to the CA",
+        "OCSP stapling compresses the certificate chain to reduce handshake size",
+        "The client caches OCSP responses locally to reduce CA server load"
+      ],
+      "correct": 1,
+      "explanation": "Without OCSP stapling, the client must make a separate HTTP request to the CA's OCSP responder during every TLS handshake, adding latency and revealing which sites the client visits to the CA. With OCSP stapling, the server periodically fetches and caches the signed OCSP response, then attaches (staples) it to the TLS handshake. The client verifies the CA-signed response without any extra round trip."
+    },
+    {
+      "id": "q6",
+      "question": "What TLS error indicates that the server's certificate chain is incomplete?",
+      "type": "mcq",
+      "options": [
+        "ERR_CERT_DATE_INVALID",
+        "ERR_CERT_AUTHORITY_INVALID",
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "ERR_SSL_PROTOCOL_ERROR"
+      ],
+      "correct": 2,
+      "explanation": "UNABLE_TO_VERIFY_LEAF_SIGNATURE typically means the server did not send the intermediate CA certificate(s) that bridge from the leaf certificate to a trusted root CA. Browsers cannot automatically fetch intermediate certs in all cases — servers must send the complete chain (leaf + all intermediates). ERR_CERT_AUTHORITY_INVALID means the root CA is not trusted; ERR_CERT_DATE_INVALID means the cert is expired."
+    },
+    {
+      "id": "q7",
+      "question": "How does an ephemeral ECDHE key exchange provide forward secrecy?",
+      "type": "mcq",
+      "options": [
+        "The ECDHE session key is encrypted with multiple symmetric keys",
+        "Fresh ECDHE key pairs are generated per session and discarded after the handshake, so past sessions cannot be decrypted even with the server's long-term private key",
+        "ECDHE uses a different algorithm each session, making pattern analysis impossible",
+        "The server stores session keys encrypted under a hardware security module that never exports keys"
+      ],
+      "correct": 1,
+      "explanation": "In ECDHE, the server generates a fresh ephemeral key pair for every handshake, uses it to derive the session keys, then immediately discards the ephemeral private key. Session keys are derived only from the ephemeral ECDHE exchange (not from the server's long-term private key). If an attacker records encrypted sessions and later steals the long-term private key, they still cannot derive the discarded ephemeral keys or the session keys."
+    },
+    {
+      "id": "q8",
+      "question": "What does the `Strict-Transport-Security` header with `preload` accomplish?",
+      "type": "mcq",
+      "options": [
+        "It forces the browser to preload the site's resources over HTTPS before the user visits",
+        "It allows the site to be hardcoded into browsers' HSTS preload list so they never attempt HTTP connections to it",
+        "It preloads the TLS certificate into browser cache for faster handshakes",
+        "It requires the server to send OCSP responses preloaded in every response"
+      ],
+      "correct": 1,
+      "explanation": "HSTS preloading allows site owners to submit their domain to browser vendors' preload lists. Browsers ship with these lists, so even a first-ever visit to the domain goes directly to HTTPS — there is no initial HTTP request that could be intercepted by an SSL-stripping attack. The `preload` directive signals consent; actual submission is done at hstspreload.org. This is permanent and difficult to undo, so all subdomains must also support HTTPS."
+    },
+    {
+      "id": "q9",
+      "question": "Which certificate type covers all subdomains of a domain at one level?",
+      "type": "mcq",
+      "options": [
+        "Extended Validation (EV) certificate",
+        "SAN certificate with explicit domain list",
+        "Wildcard certificate (*.example.com)",
+        "Root CA certificate"
+      ],
+      "correct": 2,
+      "explanation": "A wildcard certificate for *.example.com covers all subdomains at exactly one level: www.example.com, api.example.com, mail.example.com — but NOT sub.sub.example.com. SAN certificates can cover specific domains listed explicitly, including multiple unrelated domains. EV certificates are about identity validation level, not domain coverage. Root CA certificates are self-signed and used for the trust hierarchy."
+    },
+    {
+      "id": "q10",
+      "question": "In TLS 1.3, when is the server's certificate encrypted during the handshake?",
+      "type": "mcq",
+      "options": [
+        "The certificate is never encrypted in TLS 1.3 — it must be public",
+        "The certificate is encrypted from the very first message",
+        "The certificate is sent encrypted after the ServerHello establishes a handshake key",
+        "The certificate is only encrypted if the client requests privacy via an extension"
+      ],
+      "correct": 2,
+      "explanation": "In TLS 1.3, the ServerHello contains the server's ECDHE key share, which the client uses to immediately derive a 'handshake key.' All subsequent handshake messages — including the Certificate and CertificateVerify — are encrypted under this handshake key. This protects the server's identity from network observers even during the handshake. In TLS 1.2, certificates were sent in plaintext."
+    }
+  ]
+}

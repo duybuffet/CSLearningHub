@@ -1,0 +1,194 @@
+{
+  "id": "phase16_authentication-and-authorization",
+  "title": "Authentication & Authorization",
+  "phase": 16,
+  "week": 49,
+  "icon": "gear",
+  "tagline": "AuthN vs AuthZ, sessions vs JWTs, the OAuth 2.0 authorization code flow, and role-based access control for securing modern web applications.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "**Authentication (AuthN)** answers: *Who are you?* — it verifies identity by checking credentials (password, biometric, hardware token). **Authorization (AuthZ)** answers: *What are you allowed to do?* — given a proven identity, it determines which resources and actions are permitted. Confusing the two is a common source of security vulnerabilities: a system that authenticates correctly but authorizes incorrectly exposes the wrong data to the right user.\n\nEvery stateful web session and every stateless JWT token, every OAuth redirect and every API key, is an implementation of these two concerns. Modern systems increasingly delegate authentication to **identity providers** (Google, GitHub, corporate SSO) via protocols like **OAuth 2.0** and **OpenID Connect (OIDC)**, reducing the attack surface of rolling your own credential management while providing a better user experience."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"User\"] --> B[\"Login endpoint\"]\n    B --> C{\"AuthN\\nWho are you?\"}\n    C --> |\"Valid credentials\"| D[\"Identity confirmed\"]\n    C --> |\"Invalid\"| E[\"401 Unauthorized\"]\n    D --> F{\"AuthZ\\nWhat can you do?\"}\n    F --> |\"Has permission\"| G[\"200 OK + Resource\"]\n    F --> |\"No permission\"| H[\"403 Forbidden\"]",
+      "caption": "Authentication (AuthN) and Authorization (AuthZ) are sequential gates: identity must be established before permissions can be evaluated."
+    },
+    {
+      "type": "analogy",
+      "title": "Hotel Key Cards and Room Access Lists",
+      "content": "Checking into a hotel is **authentication**: you show your ID and reservation, the desk clerk verifies you are who you claim to be, and issues you a key card. The key card itself is your **session token** (or JWT) — it proves you've been authenticated without you repeating the check-in process at every door.\n\n**Authorization** is what the key card actually unlocks: your assigned room, the gym, the executive lounge (if you're a premium guest), but not other guests' rooms or the staff-only areas. The hotel's door access system checks your card against a **policy** — not just 'is this a valid key card?' but 'is this key card authorized for *this* door?'\n\n**OAuth 2.0** is like valet parking: you give the valet a *limited* key that only unlocks the car and starts it — not your house, briefcase, or trunk. You're delegating *limited* access to a third party (the valet / the app) without giving them your master credentials."
+    },
+    {
+      "type": "explanation",
+      "content": "**Session-based authentication** stores state on the server. After login, the server creates a session record (in memory or a database like Redis), assigns it a random opaque session ID, and sets it as an `HttpOnly; Secure; SameSite=Strict` cookie. On each request, the server looks up the session ID, finds the session data, and knows who the user is. Session management is straightforward but requires server-side storage that must scale with users and support session invalidation.\n\n**JWT (JSON Web Token)** is a signed, self-contained token: `base64url(header).base64url(payload).signature`. The payload contains **claims** — `sub` (subject/user ID), `exp` (expiration), `iat` (issued at), and custom claims like roles. The server signs the JWT with a secret (HS256/HMAC) or private key (RS256/ES256); the client includes it in every request (`Authorization: Bearer <token>`). The server verifies the signature — no database lookup required. The trade-off: JWTs cannot be invalidated before expiry (no server-side state), so keep them short-lived (15 minutes) and pair with refresh tokens. Never store JWTs in `localStorage` — use `HttpOnly` cookies to prevent XSS theft.\n\n**OAuth 2.0** is an *authorization* framework for delegating access. The most important flow is the **Authorization Code Flow**: the user is redirected to the authorization server, authenticates there, and is redirected back with an authorization code. Your server exchanges the code for an access token (server-to-server, never exposed in URLs). The `state` parameter prevents CSRF; **PKCE** (Proof Key for Code Exchange) prevents code interception in mobile/SPA apps. OAuth 2.0 issues access tokens; **OpenID Connect (OIDC)** adds an `id_token` (a JWT with user identity claims), enabling authentication on top of OAuth.\n\n**RBAC (Role-Based Access Control)** assigns users to roles (admin, editor, viewer), and roles to permissions (read:articles, write:articles, delete:users). Authorization checks resolve to: 'does this user's role set include a role that grants the requested permission?' Simpler to manage than ACLs (per-user permissions) but less granular than ABAC (Attribute-Based Access Control) which evaluates arbitrary attributes and policies."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant U as User (Browser)\n    participant A as Your App\n    participant AS as Authorization Server\n    participant RS as Resource Server\n    Note over U,A: OAuth 2.0 Authorization Code Flow\n    U->>A: Click \"Login with Google\"\n    A->>U: Redirect to AS with [client_id, redirect_uri, scope, state, code_challenge]\n    U->>AS: User authenticates and grants consent\n    AS->>U: Redirect to redirect_uri with [code, state]\n    U->>A: Deliver code + state to your server\n    Note over A: Verify state matches (CSRF protection)\n    A->>AS: POST /token [code, client_secret, code_verifier]\n    AS->>A: access_token + id_token + refresh_token\n    A->>RS: GET /userinfo [Authorization: Bearer access_token]\n    RS->>A: User profile data",
+      "caption": "OAuth 2.0 Authorization Code Flow with PKCE: the authorization code is exchanged server-side, keeping tokens out of the browser's URL bar and history."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "import jwt from 'jsonwebtoken';\nimport { randomBytes, timingSafeEqual } from 'node:crypto';\n\n// ── 1. JWT: issue and verify ──────────────────────────────────\nconst JWT_SECRET = process.env.JWT_SECRET || randomBytes(32).toString('hex');\n\nfunction issueAccessToken(userId, roles) {\n  return jwt.sign(\n    { sub: userId, roles },             // Payload (claims)\n    JWT_SECRET,\n    { expiresIn: '15m', issuer: 'api.example.com', audience: 'web-app' }\n  );\n}\n\nfunction verifyAccessToken(token) {\n  try {\n    return jwt.verify(token, JWT_SECRET, {\n      issuer: 'api.example.com',\n      audience: 'web-app',\n    });                                  // Throws if expired, invalid signature, or wrong issuer/audience\n  } catch (err) {\n    return null;                         // Return null, never expose error details to client\n  }\n}\n\nconst token = issueAccessToken('user-123', ['editor']);\nconsole.log('Token:', token.split('.')[0] + '...');\nconsole.log('Payload:', verifyAccessToken(token));\n\n// ── 2. RBAC middleware for Express ───────────────────────────\nconst ROLE_PERMISSIONS = {\n  admin:  ['read:any', 'write:any', 'delete:any'],\n  editor: ['read:any', 'write:own'],\n  viewer: ['read:any'],\n};\n\nfunction requirePermission(permission) {\n  return (req, res, next) => {\n    const authHeader = req.headers.authorization;\n    if (!authHeader?.startsWith('Bearer ')) {\n      return res.status(401).json({ error: 'Missing or malformed Authorization header' });\n    }\n\n    const token = authHeader.slice(7);\n    const payload = verifyAccessToken(token);\n    if (!payload) return res.status(401).json({ error: 'Invalid or expired token' });\n\n    const userPermissions = (payload.roles || []).flatMap(role => ROLE_PERMISSIONS[role] || []);\n    if (!userPermissions.includes(permission)) {\n      return res.status(403).json({ error: 'Insufficient permissions' }); // AuthZ failure\n    }\n\n    req.user = payload;  // Attach decoded payload for downstream handlers\n    next();\n  };\n}\n\n// Route examples:\n// app.get('/articles',        requirePermission('read:any'),   listArticles);\n// app.post('/articles',       requirePermission('write:own'),  createArticle);\n// app.delete('/articles/:id', requirePermission('delete:any'), deleteArticle);\n\n// ── 3. OAuth 2.0 state + PKCE generation (for SPA/mobile) ────\nimport { createHash } from 'node:crypto';\n\nfunction generatePKCE() {\n  const verifier  = randomBytes(32).toString('base64url');          // code_verifier (secret, stored locally)\n  const challenge = createHash('sha256').update(verifier).digest('base64url'); // code_challenge (sent to AS)\n  const state     = randomBytes(16).toString('hex');                // CSRF protection\n  return { verifier, challenge, state };\n}\n\nconst pkce = generatePKCE();\nconsole.log('PKCE verifier:', pkce.verifier.slice(0, 20) + '...');\nconsole.log('PKCE challenge:', pkce.challenge.slice(0, 20) + '...');",
+      "explanation": "JWT best practices: always set `expiresIn` (15 minutes for access tokens, 7–30 days for refresh tokens); set `issuer` and `audience` and verify them — this prevents tokens issued for one service being accepted by another. The RBAC middleware separates AuthN (verify token signature) from AuthZ (check permissions) clearly. PKCE (Proof Key for Code Exchange) is now required by OAuth 2.1 for all public clients: the `code_verifier` is stored locally and sent during token exchange; the `code_challenge` (SHA-256 of verifier) is sent to the authorization server so it can verify the exchange is by the same client that started the flow."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── Session vs JWT comparison ─────────────────────────────────\n//\n// Property          │ Server Session            │ JWT\n// ──────────────────┼───────────────────────────┼──────────────────────────\n// State location    │ Server (Redis/DB)         │ Client (cookie or memory)\n// Revocation        │ Instant (delete session)  │ Wait for expiry (or blacklist)\n// Scalability       │ Requires shared store     │ Stateless — any server verifies\n// Size              │ Session ID only (~32 bytes)│ 200-500 bytes\n// Sensitive data    │ Stored server-side        │ Encoded in token (don't put secrets!)\n// Recommended for   │ Traditional web apps      │ APIs, microservices, mobile\n\n// ── JWT anatomy ──────────────────────────────────────────────\nconst JWT_EXAMPLE = {\n  header:  { alg: 'HS256', typ: 'JWT' },\n  payload: {\n    sub: 'user-123',          // Subject (user ID)\n    iss: 'api.example.com',   // Issuer\n    aud: 'web-app',           // Audience\n    iat: 1700000000,          // Issued At (Unix timestamp)\n    exp: 1700000900,          // Expiration (15 min later)\n    roles: ['editor'],        // Custom claim\n    // NEVER include: passwords, secrets, PII beyond what's needed\n  },\n  // signature = HMAC-SHA256(base64url(header) + '.' + base64url(payload), secret)\n};\n\n// ── OAuth 2.0 grant types and when to use each ───────────────\nconst OAUTH_FLOWS = {\n  'Authorization Code + PKCE': 'Web apps, SPAs, mobile — any user-facing flow (recommended)',\n  'Client Credentials':        'Machine-to-machine (backend services, cron jobs — no user)',\n  'Device Code':               'TV/CLI/IoT devices with limited input capability',\n  'Implicit (DEPRECATED)':     'Never use — tokens exposed in URL fragment; replaced by Auth Code + PKCE',\n  'Password (DEPRECATED)':     'Never use — user credentials sent to third-party app',\n};\n\n// ── Common authorization bugs ─────────────────────────────────\n// 1. IDOR (Insecure Direct Object Reference)\n//    GET /invoices/42 — check that req.user owns invoice 42, not just that they're authenticated\n// 2. Horizontal privilege escalation\n//    User A accessing User B's data by changing an ID in the request\n// 3. Missing authorization on secondary endpoints\n//    /api/admin/export checked, but /api/admin/export.csv not checked\n// 4. JWT algorithm confusion\n//    Never accept alg:'none' — always whitelist expected algorithms in jwt.verify()",
+      "explanation": ""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**JWT storage**: store JWTs in `HttpOnly; Secure; SameSite=Strict` cookies, not `localStorage` or `sessionStorage`. `localStorage` is accessible to any JavaScript on the page — a single XSS vulnerability exposes all tokens. `HttpOnly` cookies cannot be read by JavaScript. Use short-lived access tokens (15 min) and longer-lived refresh tokens. **Always verify the `alg` header** when validating JWTs — explicitly whitelist `HS256` or `RS256`; never accept `alg: 'none'` which skips signature verification entirely."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Authentication (AuthN)** verifies identity (who are you?); **Authorization (AuthZ)** enforces permissions (what can you do?). A 401 status means authentication failed; 403 means authorization failed.",
+        "**Sessions** store state server-side (easy revocation, requires shared store); **JWTs** are self-contained and stateless (scales easily, but cannot be revoked before expiry — keep them short-lived).",
+        "**OAuth 2.0 Authorization Code Flow** with PKCE delegates authentication to an identity provider securely: the authorization code is exchanged server-to-server, tokens never appear in browser URLs, and PKCE prevents code interception attacks.",
+        "**RBAC** assigns users to roles and roles to permissions, providing a manageable authorization model. Always check ownership (IDOR protection) in addition to role permissions.",
+        "**Never store JWTs in localStorage** — use `HttpOnly; Secure` cookies. Always whitelist the `alg` header in JWT verification and never accept `alg: 'none'`."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "A user is logged in but tries to access an admin page they don't have permission for. What HTTP status should the server return?",
+      "type": "mcq",
+      "options": ["401 Unauthorized", "403 Forbidden", "404 Not Found", "400 Bad Request"],
+      "correct": 1,
+      "explanation": "403 Forbidden is returned when the user is authenticated (identity is known) but is not authorized to access the resource. 401 Unauthorized means authentication is required or credentials are invalid. Returning 404 for hidden admin pages is sometimes used to avoid revealing the page exists, but 403 is semantically correct when the user is authenticated."
+    },
+    {
+      "id": "q2",
+      "question": "What is the primary advantage of JWTs over server-side sessions for API authentication?",
+      "type": "mcq",
+      "options": [
+        "JWTs are encrypted so their contents are always secret",
+        "JWTs can be instantly revoked without any server-side state",
+        "JWTs are stateless — any server can verify them without a shared database lookup",
+        "JWTs are smaller than session cookies, reducing request overhead"
+      ],
+      "correct": 2,
+      "explanation": "JWTs are self-contained: the signature allows any server with the secret (or public key) to verify the token without consulting a shared session store. This is ideal for microservices and horizontally scaled APIs. The trade-off is that JWTs cannot be instantly revoked — you must wait for expiry or maintain a token blacklist, negating some of the stateless benefit."
+    },
+    {
+      "id": "q3",
+      "question": "In the OAuth 2.0 Authorization Code Flow, why is the authorization code exchanged server-to-server rather than in the browser?",
+      "type": "mcq",
+      "options": [
+        "Browsers do not support POST requests to authorization servers",
+        "To keep the client_secret out of the browser and prevent access tokens from appearing in browser history or logs",
+        "The authorization server requires a static IP address to accept the exchange",
+        "Server-to-server exchange bypasses TLS for faster token delivery"
+      ],
+      "correct": 1,
+      "explanation": "The authorization code is a short-lived, single-use value that appears in the browser URL (potentially logged). The actual access token exchange happens server-side, where the client_secret can be kept confidential. This prevents tokens from appearing in browser history, server logs, or referrer headers. For SPAs and mobile apps without a backend, PKCE replaces the client_secret for secure exchange."
+    },
+    {
+      "id": "q4",
+      "question": "What does PKCE (Proof Key for Code Exchange) prevent in OAuth 2.0?",
+      "type": "mcq",
+      "options": [
+        "Cross-site request forgery (CSRF) during the authorization flow",
+        "Authorization code interception attacks where a malicious app steals the code",
+        "JWT token replay attacks after the access token is issued",
+        "SQL injection in the authorization server's user database"
+      ],
+      "correct": 1,
+      "explanation": "PKCE prevents authorization code interception: in mobile/SPA apps, a malicious app could register the same redirect URI and steal the authorization code from the redirect. With PKCE, the legitimate client sends a code_challenge (SHA-256 of a random verifier) to the authorization server, and must prove knowledge of the verifier during token exchange. A code stolen by a malicious app is useless without the verifier."
+    },
+    {
+      "id": "q5",
+      "question": "What is an IDOR (Insecure Direct Object Reference) vulnerability?",
+      "type": "mcq",
+      "options": [
+        "Using predictable sequential IDs in database primary keys",
+        "Failing to check whether the authenticated user is authorized to access the specific resource identified by the ID in the request",
+        "Storing user IDs in plaintext in the JWT payload",
+        "Using integer IDs instead of UUIDs, enabling enumeration attacks"
+      ],
+      "correct": 1,
+      "explanation": "IDOR occurs when an application uses user-supplied identifiers to access objects without verifying the requesting user is authorized for that specific object. For example, `GET /invoices/42` should check that the authenticated user owns invoice 42, not just that they're authenticated. Changing the ID to 43 should not return another user's invoice. RBAC alone does not prevent IDOR — ownership checks are also required."
+    },
+    {
+      "id": "q6",
+      "question": "Why is storing JWTs in localStorage considered a security risk?",
+      "type": "mcq",
+      "options": [
+        "localStorage is cleared on browser restart, causing frequent logouts",
+        "localStorage cannot store strings longer than 512 bytes",
+        "Any JavaScript on the page (including injected XSS payloads) can read localStorage",
+        "localStorage is not encrypted at rest on the user's device"
+      ],
+      "correct": 2,
+      "explanation": "localStorage is accessible to any JavaScript running on the page — same-origin or injected via XSS. A single XSS vulnerability allows an attacker to steal all tokens from localStorage and use them to impersonate the user. HttpOnly cookies cannot be read by JavaScript at all, so even a successful XSS attack cannot steal the token (though other attacks may still be possible)."
+    },
+    {
+      "id": "q7",
+      "question": "What is the 'alg:none' JWT vulnerability?",
+      "type": "mcq",
+      "options": [
+        "A JWT without an expiry claim that is valid indefinitely",
+        "An attack where a forged JWT with no signature is accepted if the library is not configured to require signature verification",
+        "A brute-force attack on JWTs using the 'none' algorithm for faster computation",
+        "A JWT signed with an empty string key instead of a proper secret"
+      ],
+      "correct": 1,
+      "explanation": "The 'alg:none' attack exploits libraries that accept unsigned JWTs if the header declares 'alg: none'. An attacker can craft a JWT with any payload (e.g., admin role), set 'alg: none', remove the signature, and some libraries will accept it as valid. Always whitelist allowed algorithms explicitly (e.g., only 'HS256' or 'RS256') and reject tokens with unexpected algorithm values."
+    },
+    {
+      "id": "q8",
+      "question": "In RBAC, what is the difference between 'read:any' and 'read:own' permissions?",
+      "type": "mcq",
+      "options": [
+        "read:any allows reading from any database table; read:own restricts to the user's assigned table",
+        "read:any allows reading all resources of a type; read:own restricts reading to resources owned by the requesting user",
+        "read:any reads all fields; read:own reads only the fields the user created",
+        "read:any is for authenticated users; read:own is for anonymous users"
+      ],
+      "correct": 1,
+      "explanation": "In RBAC permission naming conventions, 'read:any' means the role can read any resource of that type regardless of ownership, while 'read:own' means the user can only read resources they own or created. An editor might have 'write:own' (edit their articles) but not 'write:any' (edit anyone's articles). This distinction is enforced at the application logic level by checking resource ownership alongside role permissions."
+    },
+    {
+      "id": "q9",
+      "question": "What is the recommended access token lifetime for JWTs, and why?",
+      "type": "mcq",
+      "options": [
+        "24 hours — balances security and user convenience",
+        "7 days — matches the typical session length of web applications",
+        "15 minutes or less — limits the window of exposure if a token is stolen",
+        "Infinite — refresh tokens handle revocation when needed"
+      ],
+      "correct": 2,
+      "explanation": "Short-lived access tokens (15 minutes) limit the damage from token theft: even if an attacker obtains a token, it expires quickly. Paired with longer-lived refresh tokens (7–30 days, stored securely, rotated on use), this provides good security without requiring frequent re-authentication. The refresh token can be revoked server-side if needed, providing a revocation mechanism."
+    },
+    {
+      "id": "q10",
+      "question": "What OAuth 2.0 grant type should be used for machine-to-machine API calls between backend services?",
+      "type": "mcq",
+      "options": [
+        "Authorization Code Flow — same as user-facing flows",
+        "Implicit Flow — fastest for server-to-server calls",
+        "Resource Owner Password Credentials — servers can directly pass credentials",
+        "Client Credentials Flow — designed for server-to-server with no user context"
+      ],
+      "correct": 3,
+      "explanation": "The Client Credentials Flow is designed for machine-to-machine communication where there is no user involved. The client (backend service) authenticates directly with the authorization server using its client_id and client_secret, and receives an access token representing the service itself (not a user). The Authorization Code Flow is for user-delegated access; Implicit and Password flows are deprecated in OAuth 2.1."
+    }
+  ]
+}

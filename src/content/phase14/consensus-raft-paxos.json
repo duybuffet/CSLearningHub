@@ -1,0 +1,198 @@
+{
+  "id": "phase14_consensus-raft-paxos",
+  "title": "Consensus: Raft and Paxos",
+  "phase": 14,
+  "week": 44,
+  "icon": "network",
+  "tagline": "How distributed nodes agree on a single value despite failures — the algorithms that power etcd, ZooKeeper, and every replicated database.",
+  "readTime": "~14 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "**Consensus** is the problem of getting multiple nodes to agree on a single value — even when some nodes crash or messages are lost. It is the foundational primitive of distributed systems: leader election, replicated state machines, distributed transactions, and configuration management all reduce to consensus. If you can solve consensus, you can build virtually any fault-tolerant distributed system on top of it.\n\n**Paxos** (Lamport, 1989) was the first practical consensus algorithm, notorious for being correct but famously difficult to understand and implement. **Raft** (Ongaro and Ousterhout, 2014) was designed explicitly for understandability — same guarantees as Paxos, dramatically clearer design. Raft is used in etcd (Kubernetes), CockroachDB, TiKV, and Consul."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  C1[\"Client\"] --> L[\"Leader (Node 1)\"]\n  L -->|\"AppendEntries RPC\"| F1[\"Follower (Node 2)\"]\n  L -->|\"AppendEntries RPC\"| F2[\"Follower (Node 3)\"]\n  F1 -->|\"success ack\"| L\n  F2 -->|\"success ack\"| L\n  L -->|\"commit confirmed to client\"| C1\n  L -.->|\"Node 4 (crashed)\"| Dead[\"(no response)\"]",
+      "caption": "Raft log replication: the leader sends AppendEntries to all followers. It commits after receiving acknowledgment from a majority quorum (here: 3 of 4 nodes, tolerating 1 failure)."
+    },
+    {
+      "type": "analogy",
+      "title": "The Election and the Notary",
+      "content": "Imagine a small town that must agree on a mayor (**leader election**) and on new laws (**log replication**). The election: whoever gets more than half the votes wins — **quorum**. No candidate with fewer than half can claim victory, so there can only ever be one mayor at a time (**safety**). If the mayor dies mid-term, a new election is held — **leader election on failure**. For laws, the mayor proposes, at least half the council must sign before the law takes effect (**quorum commit**). A new mayor always gets the council's records and learns all previously signed laws (**log sync**) before making new ones — ensuring no law is lost during leadership transitions."
+    },
+    {
+      "type": "explanation",
+      "content": "**Raft** decomposes consensus into three sub-problems: **leader election**, **log replication**, and **safety**.\n\n**Leader Election**: Raft nodes are always in one of three states: *follower*, *candidate*, or *leader*. Followers expect heartbeats from the leader. If no heartbeat arrives within an **election timeout** (150–300ms, randomized), a follower becomes a candidate and starts a new election term, requesting votes from peers. A node votes for at most one candidate per term (first-come-first-served). A candidate becomes leader upon receiving votes from a **majority** (quorum = ⌊N/2⌋ + 1 for N nodes). Randomized timeouts prevent split votes — nodes rarely start elections simultaneously.\n\n**Log Replication**: All client requests go to the leader. The leader appends the command to its log and sends **AppendEntries** RPCs to all followers. An entry is **committed** once a majority of nodes have written it to their logs. The leader then applies the entry to its state machine and responds to the client. Followers apply committed entries in order, keeping their state machines identical to the leader's.\n\n**Safety**: Raft guarantees that committed entries are never lost. A candidate can only win an election if its log is at least as up-to-date as the majority — preventing a lagging node from becoming leader and overwriting committed entries. This is enforced by each voter rejecting candidates whose log is less up-to-date than the voter's own.\n\n**Paxos** achieves the same guarantees via two phases. **Phase 1 (Prepare)**: a proposer sends a Prepare(n) message with a ballot number n to a majority of acceptors. Acceptors promise not to accept ballots below n and return any previously accepted value. **Phase 2 (Accept)**: the proposer sends Accept(n, v) where v is either the highest previously accepted value (from phase 1 responses) or the proposer's own value. An acceptor accepts if it hasn't promised a higher ballot. Once a majority accept, the value is chosen. Multi-Paxos adds an optimization: after the first round, a stable leader skips phase 1 for subsequent proposals — effectively becoming Raft.\n\n**Quorum** is the minimum number of nodes that must agree for an operation to proceed. For a cluster of N nodes, quorum = ⌊N/2⌋ + 1. A 3-node cluster tolerates 1 failure; a 5-node cluster tolerates 2. Running with an even number of nodes (4) does not improve fault tolerance over an odd number (3) — both tolerate 1 failure."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C as Candidate\n  participant F1 as Follower 1\n  participant F2 as Follower 2\n  C->>F1: RequestVote(term=5, lastLogIndex=42)\n  C->>F2: RequestVote(term=5, lastLogIndex=42)\n  F1-->>C: VoteGranted(term=5)\n  F2-->>C: VoteGranted(term=5)\n  Note over C: Majority reached — becomes Leader\n  C->>F1: AppendEntries(term=5, heartbeat)\n  C->>F2: AppendEntries(term=5, heartbeat)\n  F1-->>C: Success\n  F2-->>C: Success",
+      "caption": "Raft leader election: candidate sends RequestVote to peers. After receiving majority votes, it becomes leader and begins sending heartbeat AppendEntries to suppress new elections."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Simplified Raft node state machine (illustrative, not production)\nconst FOLLOWER = 'follower';\nconst CANDIDATE = 'candidate';\nconst LEADER = 'leader';\n\nclass RaftNode {\n  constructor(id, peers) {\n    this.id = id;\n    this.peers = peers;          // array of peer node handles\n    this.state = FOLLOWER;\n    this.currentTerm = 0;\n    this.votedFor = null;\n    this.log = [];               // [{term, command}, ...]\n    this.commitIndex = -1;\n    this.electionTimeout = this.randomElectionTimeout();\n  }\n\n  randomElectionTimeout() {\n    // Randomized: 150-300ms prevents split votes\n    return 150 + Math.random() * 150;\n  }\n\n  // Called when election timeout fires with no heartbeat received\n  startElection() {\n    this.state = CANDIDATE;\n    this.currentTerm += 1;\n    this.votedFor = this.id; // vote for self\n    let votes = 1;\n    const majority = Math.floor(this.peers.length / 2) + 1;\n    const lastLog = this.log[this.log.length - 1] || { term: 0, index: -1 };\n\n    const votePromises = this.peers.map(peer =>\n      peer.requestVote({\n        term: this.currentTerm,\n        candidateId: this.id,\n        lastLogIndex: this.log.length - 1,\n        lastLogTerm: lastLog.term\n      })\n    );\n\n    Promise.allSettled(votePromises).then(results => {\n      for (const result of results) {\n        if (result.status === 'fulfilled' && result.value.voteGranted) {\n          votes++;\n        }\n      }\n      if (votes >= majority && this.state === CANDIDATE) {\n        this.becomeLeader();\n      }\n    });\n  }\n\n  becomeLeader() {\n    this.state = LEADER;\n    console.log(`Node ${this.id} became leader for term ${this.currentTerm}`);\n    // Begin sending heartbeat AppendEntries to maintain authority\n    this.heartbeatInterval = setInterval(() => this.sendHeartbeats(), 50);\n  }\n\n  sendHeartbeats() {\n    this.peers.forEach(peer => peer.appendEntries({\n      term: this.currentTerm,\n      leaderId: this.id,\n      entries: [],              // empty = heartbeat\n      leaderCommit: this.commitIndex\n    }));\n  }\n}",
+      "explanation": "This illustrates Raft's core state machine. The randomized election timeout (150-300ms) is Raft's key mechanism for preventing split votes — nodes rarely start elections simultaneously. A node wins by collecting votes from a majority before its own timeout fires again. The 50ms heartbeat interval keeps followers from starting spurious elections."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Consensus algorithm comparison\n\n// RAFT\n// - Designed for understandability\n// - Strong leader: all reads/writes go through leader\n// - Log replication: leader appends, followers replicate\n// - Leader election: randomized timeouts prevent split votes\n// - Used by: etcd, CockroachDB, TiKV, Consul, RethinkDB\n\n// PAXOS\n// - Designed for correctness proof\n// - No persistent leader concept (Multi-Paxos adds one)\n// - Two phases: Prepare (ballot) + Accept (value)\n// - More flexible but harder to implement correctly\n// - Used by: Google Chubby, Google Spanner (modified)\n\n// QUORUM MATH\n// N=3: quorum=2, tolerates 1 failure\n// N=5: quorum=3, tolerates 2 failures\n// N=7: quorum=4, tolerates 3 failures\n// Rule: quorum = Math.floor(N / 2) + 1\n\n// EVEN vs ODD nodes:\nconst quorum = n => Math.floor(n / 2) + 1;\nconsole.log(quorum(3)); // 2 — tolerates 1 failure\nconsole.log(quorum(4)); // 3 — tolerates 1 failure (same!)\nconsole.log(quorum(5)); // 3 — tolerates 2 failures\n// Prefer odd cluster sizes — 4 nodes is no better than 3 for fault tolerance\n\n// KEY SAFETY PROPERTY (both Raft and Paxos):\n// At most one leader per term — two leaders cannot both commit different values\n// for the same log index. Quorum intersection guarantees this: any two majorities\n// share at least one node that would reject the second leader's ballot."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Never run consensus clusters with even numbers of nodes.** A 4-node cluster requires quorum of 3, tolerating only 1 failure — identical to a 3-node cluster. But a 4-node cluster costs 33% more. Always use 3, 5, or 7 nodes. Going beyond 7 nodes adds network overhead (more RPCs per commit) without proportional fault-tolerance improvement — most production clusters use 3 or 5 nodes."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Consensus** is the problem of getting N nodes to agree on one value despite failures; it underpins leader election, replicated logs, and distributed transactions.",
+        "**Raft** decomposes consensus into leader election, log replication, and safety — designed for understandability, with the same guarantees as Paxos.",
+        "**Leader election** uses randomized timeouts so nodes rarely start elections simultaneously; a candidate wins by collecting votes from a strict majority (quorum).",
+        "**Quorum = ⌊N/2⌋ + 1**: a 3-node cluster tolerates 1 failure; a 5-node cluster tolerates 2. Use odd-numbered cluster sizes — 4 nodes is no better than 3.",
+        "**Paxos** achieves consensus in two phases (prepare + accept); Multi-Paxos optimizes by electing a stable leader that skips phase 1, converging toward Raft's design."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the consensus problem in distributed systems?",
+      "type": "mcq",
+      "options": [
+        "How to compress data consistently across all nodes",
+        "How to get multiple nodes to agree on a single value despite node failures and message loss",
+        "How to ensure all nodes have the same clock time",
+        "How to route requests to the closest available server"
+      ],
+      "correct": 1,
+      "explanation": "Consensus is the fundamental problem of getting distributed nodes to agree on a single value even when some nodes crash or messages are dropped. It is the building block for leader election, replicated state machines, and distributed transactions."
+    },
+    {
+      "id": "q2",
+      "question": "Raft's randomized election timeout primarily prevents:",
+      "type": "mcq",
+      "options": [
+        "Leader overload from too many client requests",
+        "Split votes where multiple candidates start elections simultaneously and no one wins",
+        "Network partitions from isolating the leader",
+        "Followers from falling too far behind the leader's log"
+      ],
+      "correct": 1,
+      "explanation": "If all nodes used the same fixed timeout, they would all start elections simultaneously after a leader failure, splitting votes and requiring multiple rounds. Randomizing timeouts (e.g., 150-300ms) staggers elections so one node typically gets a head start and wins before others time out."
+    },
+    {
+      "id": "q3",
+      "question": "In Raft, an entry in the log is considered committed when:",
+      "type": "mcq",
+      "options": [
+        "The leader has written it to its own log",
+        "All followers have acknowledged it",
+        "A majority of nodes (quorum) have written it to their logs",
+        "The client has received a successful response"
+      ],
+      "correct": 2,
+      "explanation": "Raft commits an entry once a majority (quorum) of nodes have replicated it. This ensures the entry survives any future leader election — any new leader must have the majority's log, and quorums overlap, so the new leader will always have the committed entry."
+    },
+    {
+      "id": "q4",
+      "question": "For a 5-node Raft cluster, what is the quorum size and how many node failures can be tolerated?",
+      "type": "mcq",
+      "options": [
+        "Quorum of 2, tolerates 3 failures",
+        "Quorum of 3, tolerates 2 failures",
+        "Quorum of 4, tolerates 1 failure",
+        "Quorum of 5, tolerates 0 failures"
+      ],
+      "correct": 1,
+      "explanation": "Quorum = floor(5/2) + 1 = 3. With 5 nodes and quorum of 3, the cluster can continue as long as at least 3 nodes are operational, meaning 2 failures can be tolerated."
+    },
+    {
+      "id": "q5",
+      "question": "Why is running a consensus cluster with 4 nodes instead of 3 generally a poor choice?",
+      "type": "mcq",
+      "options": [
+        "Raft does not support even-numbered cluster sizes",
+        "A 4-node cluster requires quorum of 3, tolerating only 1 failure — same as a 3-node cluster but at higher cost",
+        "Four nodes cause too many network messages per commit round",
+        "Paxos is required for even-numbered clusters"
+      ],
+      "correct": 1,
+      "explanation": "A 4-node cluster needs quorum of 3 (floor(4/2)+1=3), which tolerates 1 failure. A 3-node cluster also needs quorum of 2, tolerating 1 failure. Both tolerate exactly 1 failure, but the 4-node cluster adds a node (and cost) without improving fault tolerance."
+    },
+    {
+      "id": "q6",
+      "question": "In Paxos Phase 1 (Prepare), what does an acceptor return to the proposer?",
+      "type": "mcq",
+      "options": [
+        "A commitment to accept the proposer's value",
+        "A promise not to accept lower ballot numbers, plus any previously accepted value",
+        "A rejection if the ballot number is not the highest ever seen",
+        "The current leader's identity so the proposer can defer to it"
+      ],
+      "correct": 1,
+      "explanation": "In Paxos Phase 1, acceptors respond with: (1) a promise to reject future Prepare messages with lower ballot numbers, and (2) the highest-ballot value they have already accepted, if any. The proposer uses these responses to determine if a value has already been chosen."
+    },
+    {
+      "id": "q7",
+      "question": "Which production systems use Raft as their consensus algorithm?",
+      "type": "mcq",
+      "options": [
+        "MySQL replication and PostgreSQL streaming replication",
+        "etcd, CockroachDB, and Consul",
+        "Apache Kafka and RabbitMQ",
+        "Redis Cluster and MongoDB replica sets"
+      ],
+      "correct": 1,
+      "explanation": "etcd (used in Kubernetes), CockroachDB, TiKV (TiDB), and Consul all implement Raft. Kafka uses its own ISR (In-Sync Replicas) protocol, MongoDB uses a Raft-like protocol, and Redis Cluster uses a different approach without strict consensus."
+    },
+    {
+      "id": "q8",
+      "question": "What is the key safety property that prevents two Raft leaders from committing conflicting entries at the same log index?",
+      "type": "mcq",
+      "options": [
+        "Leaders use a distributed lock to prevent concurrent writes",
+        "Any two quorums must share at least one node, preventing two candidates from both winning the same election",
+        "The network enforces single-leader semantics at the switch level",
+        "Followers reject AppendEntries from any node that is not the current leader"
+      ],
+      "correct": 1,
+      "explanation": "Quorum intersection is the key: any two majorities in a cluster of N nodes share at least one node. A node can only vote for one candidate per term. Therefore, two candidates cannot both achieve quorum in the same term — at most one leader can exist per term."
+    },
+    {
+      "id": "q9",
+      "question": "A Raft candidate can only win an election if:",
+      "type": "mcq",
+      "options": [
+        "It has been a follower for at least one full election timeout",
+        "Its log is at least as up-to-date as the voter's log",
+        "It has the lowest node ID among all candidates",
+        "The previous leader explicitly nominated it"
+      ],
+      "correct": 1,
+      "explanation": "Raft's election restriction: a voter rejects a RequestVote if its own log is more up-to-date than the candidate's (by comparing last log term, then last log index). This ensures the new leader always has all committed entries — a node with a stale log cannot win."
+    },
+    {
+      "id": "q10",
+      "question": "Multi-Paxos optimizes Classic Paxos by:",
+      "type": "mcq",
+      "options": [
+        "Eliminating the need for a majority quorum on each decision",
+        "Electing a stable leader that skips Phase 1 for subsequent proposals in the same term",
+        "Using cryptographic proofs instead of ballot numbers to prevent conflicts",
+        "Running Phase 1 and Phase 2 in parallel to reduce latency"
+      ],
+      "correct": 1,
+      "explanation": "Classic Paxos runs two phases for every single decision. Multi-Paxos elects a distinguished leader (via Phase 1 with a high ballot number) and then skips Phase 1 for all subsequent proposals, only running Phase 2. This is essentially what Raft does — Multi-Paxos and Raft converge on the same design."
+    }
+  ]
+}

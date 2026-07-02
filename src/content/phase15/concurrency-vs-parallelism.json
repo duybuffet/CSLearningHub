@@ -1,0 +1,196 @@
+{
+  "id": "phase15_concurrency-vs-parallelism",
+  "title": "Concurrency vs Parallelism",
+  "phase": 15,
+  "week": 47,
+  "icon": "os",
+  "tagline": "Dealing with many things vs doing many things at once",
+  "readTime": "13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "**Concurrency** and **parallelism** are among the most misunderstood terms in computing. Rob Pike, co-creator of Go, put it clearly: *concurrency is about dealing with lots of things at once; parallelism is about doing lots of things at once*. The distinction matters enormously when designing systems — getting it wrong leads to either deadlocks, wasted cores, or bottlenecks that no amount of hardware can fix.\n\nA single-core CPU can be highly concurrent (rapidly switching between tasks) yet never parallel. A poorly designed multi-core program can be parallel yet not concurrent — running multiple copies of a sequential program. The real art is knowing which property you need and designing your system to exploit it."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Task Execution Strategy\"] --> B[\"Concurrent\"]\n  A --> C[\"Parallel\"]\n  B --> D[\"Single Core\\nTime-sliced\"]\n  B --> E[\"Multi Core\\nInterleaved\"]\n  C --> F[\"Multi Core\\nSimultaneous\"]\n  D --> G[\"Event Loop / Coroutines\"]\n  E --> H[\"OS Thread Scheduling\"]\n  F --> I[\"Worker Threads / Processes\"]",
+      "caption": "Concurrency is a program design property; parallelism is a runtime execution property. Both can coexist."
+    },
+    {
+      "type": "analogy",
+      "title": "The Coffee Shop Analogy",
+      "content": "Imagine a **barista** (single CPU core) serving a queue of customers. While the espresso machine runs for Customer A (I/O wait), the barista takes Customer B's order — this is **concurrency**. One person, multiple tasks in progress, interleaved intelligently.\n\nNow imagine **two baristas** each simultaneously pulling a shot for a different customer. Both shots extract at the same instant on two machines — this is **parallelism**. Two workers, two tasks, genuinely simultaneous.\n\nA coffee shop with two baristas who also interleave tasks is *both* concurrent and parallel — the goal most modern systems aim for. Amdahl's Law, however, warns us: if 20% of the workflow *must* be sequential (e.g., the single cash register), adding a hundred baristas can only ever deliver a 5× speedup, not 100×."
+    },
+    {
+      "type": "explanation",
+      "title": "Amdahl's Law and the Limits of Parallelism",
+      "content": "**Amdahl's Law** quantifies the theoretical maximum speedup achievable by parallelizing a program. If a fraction `p` of work is parallelizable and `(1-p)` must remain sequential, adding `N` cores gives:\n\n`Speedup = 1 / ((1 - p) + p/N)`\n\nAs N → ∞, speedup approaches `1 / (1 - p)`. If only 5% of your program is sequential, the theoretical ceiling is 20×, no matter how many cores you add. This is why profiling for the sequential bottleneck is the *first* step in any parallelization effort.\n\n**Gustafson's Law** offers an optimistic counterpoint: as problem size grows, the parallelizable fraction typically increases. Large scientific simulations, rendering farms, and ML training jobs benefit enormously from scale because their sequential setup cost stays constant while their parallel workload grows.\n\nIn practice, deciding between **concurrency** and **parallelism** comes down to the workload type:\n- **I/O-bound** tasks (network calls, file reads) benefit from concurrency — while one task waits, another runs. A single thread with async I/O can handle thousands of connections.\n- **CPU-bound** tasks (compression, cryptography, video encoding) require parallelism — multiple cores crunching data simultaneously. More threads than cores cause context-switch overhead with diminishing returns."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  WL[\"Workload\"] --> IO[\"I/O-Bound\"]\n  WL --> CPU[\"CPU-Bound\"]\n  IO --> C1[\"Use Concurrency\"]\n  IO --> C2[\"Async / Event Loop\"]\n  CPU --> P1[\"Use Parallelism\"]\n  CPU --> P2[\"Worker Threads / Processes\"]\n  C1 --> R1[\"High throughput\\nlow memory\"]\n  P1 --> R2[\"Max throughput\\ncores × speedup\"]",
+      "caption": "Match the concurrency model to the workload: async event loops for I/O, parallel workers for CPU."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\nconst os = require('os');\n\n// Demonstrates: I/O-bound favors concurrency, CPU-bound favors parallelism\n\nif (isMainThread) {\n  const CORES = os.cpus().length;\n  console.log(`Available cores: ${CORES}`);\n\n  // --- I/O-BOUND: concurrency with async (single thread handles many) ---\n  async function simulateIO(id) {\n    // In a real app: await fetch(...) or fs.promises.readFile(...)\n    await new Promise(r => setTimeout(r, 50)); // simulate network latency\n    return `IO task ${id} done`;\n  }\n\n  async function runIOBound() {\n    const start = Date.now();\n    // 10 tasks, ~50ms each, run concurrently — total ≈ 50ms, not 500ms\n    const results = await Promise.all(\n      Array.from({ length: 10 }, (_, i) => simulateIO(i))\n    );\n    console.log(`I/O-bound: ${results.length} tasks in ${Date.now() - start}ms`);\n  }\n\n  // --- CPU-BOUND: parallelism with workers (N cores × throughput) ---\n  function runCPUBound() {\n    const start = Date.now();\n    const promises = Array.from({ length: CORES }, (_, i) =>\n      new Promise((resolve, reject) => {\n        const w = new Worker(__filename, { workerData: { chunk: i, total: CORES } });\n        w.on('message', resolve);\n        w.on('error', reject);\n      })\n    );\n    Promise.all(promises).then(results => {\n      console.log(`CPU-bound: ${results.length} workers in ${Date.now() - start}ms`);\n    });\n  }\n\n  runIOBound().then(runCPUBound);\n} else {\n  // Worker: CPU-intensive work (sum large range)\n  const { chunk, total } = workerData;\n  const size = 2e7;\n  const start = Math.floor((size / total) * chunk);\n  const end = Math.floor((size / total) * (chunk + 1));\n  let sum = 0;\n  for (let i = start; i < end; i++) sum += i;\n  parentPort.postMessage({ chunk, sum });\n}",
+      "explanation": "Two patterns side-by-side: `Promise.all` achieves concurrency for I/O-bound tasks on one thread — 10 tasks finish in ~50ms instead of 500ms. `worker_threads` achieves parallelism for CPU-bound work — one worker per core, genuinely simultaneous. Mixing both gives you a system that is concurrent *and* parallel."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Amdahl's Law modeled in JS\nfunction amdahlSpeedup(parallelFraction, numCores) {\n  // parallelFraction: 0.0 to 1.0 (portion that can be parallelized)\n  const sequential = 1 - parallelFraction;\n  return 1 / (sequential + parallelFraction / numCores);\n}\n\n// Example: 80% of work is parallelizable\nconst p = 0.8;\nfor (const cores of [1, 2, 4, 8, 16, 32, 64, Infinity]) {\n  const s = amdahlSpeedup(p, cores);\n  console.log(`Cores: ${cores === Infinity ? '∞' : cores.toString().padStart(2)}, Speedup: ${s.toFixed(2)}x`);\n}\n// Cores:  1, Speedup: 1.00x\n// Cores:  2, Speedup: 1.67x\n// Cores:  8, Speedup: 3.08x\n// Cores: 64, Speedup: 4.71x\n// Cores:  ∞, Speedup: 5.00x  ← hard ceiling at 1/(1-0.8)"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Practical heuristic:** Before reaching for parallel threads, first *maximize concurrency* in your sequential code — async I/O, batching, pipelining. These have zero synchronization overhead. Only parallelize CPU-bound bottlenecks you've confirmed with a profiler. Parallelism adds coordination cost (locks, channels, merging) that can erase the gain if the workload is too small."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Concurrency** is a program design property — multiple tasks can make progress; **parallelism** is a runtime property — tasks actually execute simultaneously on multiple cores.",
+        "**I/O-bound** tasks benefit from concurrency (async/event loop); **CPU-bound** tasks require parallelism (multiple threads/processes).",
+        "**Amdahl's Law** caps the speedup from parallelism at `1 / (1 - p)` where `p` is the parallelizable fraction — the sequential bottleneck always wins.",
+        "A single-core system can be concurrent (via time-slicing) but never truly parallel; a poorly coordinated multi-core system can be parallel but fail at concurrency.",
+        "Profile first: measure where time is actually spent before adding parallelism — coordination overhead frequently erases the theoretical gain on small workloads."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Which statement best describes the difference between concurrency and parallelism?",
+      "type": "mcq",
+      "options": [
+        "Concurrency requires multiple CPU cores; parallelism only needs one",
+        "Concurrency means tasks make progress by interleaving; parallelism means tasks run at the same instant on multiple cores",
+        "Parallelism is a design property; concurrency is a hardware property",
+        "They are synonyms used interchangeably in modern systems"
+      ],
+      "correct": 1,
+      "explanation": "Concurrency is about structure — multiple tasks can progress, possibly interleaved on one core. Parallelism is about simultaneous execution on multiple cores. A program can have either, both, or neither."
+    },
+    {
+      "id": "q2",
+      "question": "Amdahl's Law states that if 10% of a program is sequential, the maximum speedup with unlimited cores is:",
+      "type": "mcq",
+      "options": [
+        "10×",
+        "Unlimited — more cores always help",
+        "90×",
+        "Approximately 10× (1 / 0.1)"
+      ],
+      "correct": 3,
+      "explanation": "With p = 0.9 parallelizable, the ceiling is 1 / (1 - 0.9) = 1 / 0.1 = 10×. The 10% sequential portion becomes the permanent bottleneck regardless of core count."
+    },
+    {
+      "id": "q3",
+      "question": "A web server handles 1000 simultaneous HTTP connections on a single OS thread using async I/O. This is an example of:",
+      "type": "mcq",
+      "options": [
+        "Parallelism",
+        "Concurrency",
+        "Both parallelism and concurrency",
+        "Neither — one thread cannot handle multiple connections"
+      ],
+      "correct": 1,
+      "explanation": "Handling many connections on one thread by interleaving while waiting on I/O is the definition of concurrency. No parallel execution occurs — the single thread switches between in-flight requests as I/O completes."
+    },
+    {
+      "id": "q4",
+      "question": "Which workload type benefits MOST from adding more CPU cores?",
+      "type": "mcq",
+      "options": [
+        "A web server waiting on database queries",
+        "A chat application handling WebSocket connections",
+        "A video encoder compressing 4K footage",
+        "A file watcher monitoring directory changes"
+      ],
+      "correct": 2,
+      "explanation": "Video encoding is CPU-bound: it performs intensive computation continuously. Adding cores lets multiple frames compress simultaneously. The other examples are I/O-bound and gain little from additional cores."
+    },
+    {
+      "id": "q5",
+      "question": "Rob Pike's formulation 'concurrency is about dealing with many things at once' emphasizes that concurrency is primarily:",
+      "type": "mcq",
+      "options": [
+        "A hardware feature",
+        "A program structure / design property",
+        "A synonym for threading",
+        "Only possible with OS-level support"
+      ],
+      "correct": 1,
+      "explanation": "Pike's point is that concurrency is a way of *designing* a program to handle multiple tasks — it says nothing about whether they run simultaneously. A well-structured concurrent program can run on one core."
+    },
+    {
+      "id": "q6",
+      "question": "What does Gustafson's Law suggest about large-scale parallel workloads?",
+      "type": "mcq",
+      "options": [
+        "The sequential fraction grows as problem size increases",
+        "Parallelism cannot improve performance beyond Amdahl's limit",
+        "As problem size grows, the parallelizable fraction increases, allowing near-linear scaling",
+        "More cores always reduce performance due to coordination overhead"
+      ],
+      "correct": 2,
+      "explanation": "Gustafson's Law observes that larger problems have a higher fraction of parallelizable work while sequential setup cost stays constant. This allows scaling much closer to N× on N cores than Amdahl's Law implies."
+    },
+    {
+      "id": "q7",
+      "question": "Using `Promise.all` in Node.js to fetch data from 5 APIs simultaneously is:",
+      "type": "mcq",
+      "options": [
+        "Parallel execution using 5 threads",
+        "Concurrent execution on a single thread",
+        "Sequential execution one after another",
+        "Multi-process execution"
+      ],
+      "correct": 1,
+      "explanation": "`Promise.all` fires all 5 requests concurrently — they're all 'in flight' at once — but Node.js handles them on a single event loop thread. The OS network stack handles actual I/O asynchronously in the background."
+    },
+    {
+      "id": "q8",
+      "question": "Why does adding more threads than available CPU cores hurt CPU-bound performance?",
+      "type": "mcq",
+      "options": [
+        "Extra threads consume too much RAM",
+        "The OS cannot schedule more than one thread per process",
+        "Context-switch overhead increases without additional compute capacity",
+        "CPU-bound tasks cannot use threads at all"
+      ],
+      "correct": 2,
+      "explanation": "With more threads than cores, the OS must time-slice threads on the same core. Each context switch saves/restores register state with no new computation happening. For CPU-bound work this is pure overhead."
+    },
+    {
+      "id": "q9",
+      "question": "A program has 95% parallelizable work. According to Amdahl's Law, the maximum speedup with 20 cores is closest to:",
+      "type": "mcq",
+      "options": [
+        "20×",
+        "10.3×",
+        "5×",
+        "19×"
+      ],
+      "correct": 1,
+      "explanation": "Speedup = 1 / (0.05 + 0.95/20) = 1 / (0.05 + 0.0475) = 1 / 0.0975 ≈ 10.3×. The 5% sequential portion limits us well below the core count."
+    },
+    {
+      "id": "q10",
+      "question": "Which approach should you take FIRST when trying to speed up a slow program?",
+      "type": "mcq",
+      "options": [
+        "Add worker threads immediately",
+        "Switch from a single process to multiple processes",
+        "Profile the program to identify the actual bottleneck",
+        "Rewrite in a lower-level language"
+      ],
+      "correct": 2,
+      "explanation": "Profiling first reveals whether the bottleneck is sequential logic, I/O, or CPU work. Adding parallelism to the wrong part of the code wastes engineering effort and may not improve performance at all."
+    }
+  ]
+}

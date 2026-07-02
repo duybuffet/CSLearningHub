@@ -1,0 +1,198 @@
+{
+  "id": "phase7_transaction-isolation-levels",
+  "title": "Transaction Isolation Levels",
+  "phase": 7,
+  "week": 26,
+  "icon": "database",
+  "tagline": "Dirty reads, phantom rows, and the spectrum of isolation that keeps concurrent transactions from stepping on each other.",
+  "readTime": "~12 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "When hundreds of transactions run concurrently, they can interfere in subtle ways. One transaction might read a row that another hasn't committed yet — a **dirty read**. A repeated query inside the same transaction might return different rows — a **non-repeatable read**. A range query might suddenly see new rows inserted by another transaction — a **phantom read**.\n\nSQL defines four **isolation levels** — Read Uncommitted, Read Committed, Repeatable Read, and Serializable — each trading concurrency for correctness. Modern databases like PostgreSQL implement these using **Multi-Version Concurrency Control (MVCC)**, which lets readers and writers proceed simultaneously without blocking each other by maintaining multiple row versions."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant T1 as \"Transaction 1\"\n  participant DB as \"Database\"\n  participant T2 as \"Transaction 2\"\n  T1->>DB: \"BEGIN\"\n  T2->>DB: \"BEGIN\"\n  T1->>DB: \"UPDATE balance = 500 (uncommitted)\"\n  T2->>DB: \"SELECT balance\"\n  DB-->>T2: \"500 (dirty read!)\"\n  T1->>DB: \"ROLLBACK\"\n  Note over T2: \"T2 read data that never existed\"",
+      "caption": "Dirty read: T2 sees T1's uncommitted change. If T1 rolls back, T2 has operated on phantom data."
+    },
+    {
+      "type": "analogy",
+      "title": "The Whiteboard in the Meeting Room",
+      "content": "Imagine two colleagues sharing a whiteboard. Under Read Uncommitted, you can read your colleague's half-finished scribbles before they're done — dangerous if they erase it all. Read Committed lets you only read what's been confirmed written with a marker. Repeatable Read means you take a photo of the board at the start; you always see that snapshot even if someone erases and rewrites. Serializable locks the room door — only one person writes at a time, perfectly consistent but slower."
+    },
+    {
+      "type": "explanation",
+      "content": "**Read Uncommitted** is the weakest level. A transaction can see uncommitted changes from others. This allows dirty reads and is almost never used in production because it can expose data that may be rolled back.\n\n**Read Committed** is the default in PostgreSQL and most RDBMS. Each statement sees only rows committed before *that statement* began. Dirty reads are prevented, but **non-repeatable reads** are possible — two identical SELECTs in the same transaction may return different values if another transaction committed between them.\n\n**Repeatable Read** takes a snapshot at the start of the transaction. Every SELECT in the transaction sees the same version of committed data from that point. This prevents non-repeatable reads. PostgreSQL's implementation also prevents **phantom reads** (unlike the SQL standard, which only requires Serializable to prevent them).\n\n**Serializable** is the strictest level. Transactions execute as if they ran one after the other, even when concurrent. It catches anomalies that MVCC snapshots miss — for example, two transactions reading the same rows then each deciding to insert based on what they saw. PostgreSQL implements this with **Serializable Snapshot Isolation (SSI)**, tracking read/write dependencies and aborting cycles.\n\n**MVCC (Multi-Version Concurrency Control)** is the engine behind most modern isolation. Instead of locking rows during reads, the database keeps old row versions in an undo log or version chain. A reader gets a consistent snapshot without blocking writers; a writer creates a new row version without blocking readers. Postgres's `xmin`/`xmax` transaction IDs on each row tuple implement this. Dead row versions are cleaned up by the **autovacuum** process."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Read Uncommitted\"] -->|\"+ Dirty read prevention\"| B[\"Read Committed\"]\n  B -->|\"+ Non-repeatable read prevention\"| C[\"Repeatable Read\"]\n  C -->|\"+ Phantom read prevention\"| D[\"Serializable\"]\n  A -.- E[\"Most concurrent\\nLeast correct\"]\n  D -.- F[\"Most correct\\nLeast concurrent\"]",
+      "caption": "Each level adds a guarantee at the cost of some concurrency. Most systems default to Read Committed."
+    },
+    {
+      "type": "code_example",
+      "language": "sql",
+      "label": "Runtime",
+      "code": "-- Set isolation level for a single transaction (PostgreSQL)\nBEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ;\n  -- Both SELECTs see the same snapshot regardless of concurrent writes\n  SELECT balance FROM accounts WHERE id = 1;  -- returns 1000\n  -- (another tx commits balance = 900 here)\n  SELECT balance FROM accounts WHERE id = 1;  -- still returns 1000\nCOMMIT;\n\n-- Demonstrate phantom read scenario (Read Committed, no protection)\nBEGIN;\n  SELECT COUNT(*) FROM orders WHERE status = 'pending';  -- returns 5\n  -- (another tx INSERTs a new pending order and commits)\n  SELECT COUNT(*) FROM orders WHERE status = 'pending';  -- returns 6 (phantom!)\nCOMMIT;\n\n-- Serializable: aborts on conflict instead of returning stale data\nBEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE;\n  SELECT SUM(balance) FROM accounts;  -- reads snapshot\n  INSERT INTO audit_log(total) VALUES (/* computed total */);\nCOMMIT;\n-- May raise: ERROR: could not serialize access due to concurrent update\n-- Retry the transaction on serialization failure",
+      "explanation": "Repeatable Read locks your snapshot so repeated reads return identical results. Serializable goes further — if another transaction's writes would change what you read, Postgres aborts your transaction with a serialization error that you must retry. Always handle `ERROR 40001` (serialization_failure) with retry logic."
+    },
+    {
+      "type": "code_concept",
+      "language": "sql",
+      "label": "Concept",
+      "code": "-- Anomaly reference table\n-- Isolation Level     | Dirty Read | Non-Repeatable | Phantom\n-- ------------------  | ---------- | -------------- | -------\n-- Read Uncommitted    |  Possible  |   Possible     | Possible\n-- Read Committed      | Prevented  |   Possible     | Possible\n-- Repeatable Read     | Prevented  |  Prevented     | Possible*\n-- Serializable        | Prevented  |  Prevented     | Prevented\n-- (* PostgreSQL Repeatable Read also prevents phantoms in practice)\n\n-- MVCC visibility rule (simplified)\n-- A row version is visible to transaction T if:\n--   xmin (creator tx) is committed AND xmin < T.snapshot_xid\n--   AND (xmax (deleter tx) is NOT committed OR xmax > T.snapshot_xid)\n\n-- Check current isolation level\nSHOW transaction_isolation;\n\n-- Set default isolation level for a session\nSET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED;"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "Most applications work correctly with **Read Committed** (the default). Upgrade to **Repeatable Read** when a transaction reads data multiple times and decisions depend on consistency across those reads — for example, generating a financial report. Use **Serializable** only when correctness is critical and you have retry logic for serialization failures. Avoid Read Uncommitted entirely."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Dirty reads** occur when a transaction sees uncommitted changes; prevented by Read Committed and higher.",
+        "**Non-repeatable reads** occur when the same row returns different values in one transaction; prevented by Repeatable Read and higher.",
+        "**Phantom reads** occur when a repeated range query returns new rows inserted by another transaction; prevented by Serializable (and in practice by PostgreSQL's Repeatable Read).",
+        "**MVCC** avoids read/write locking by keeping multiple row versions — readers get a consistent snapshot without blocking writers.",
+        "**Serializable Snapshot Isolation (SSI)** detects read/write dependency cycles and aborts transactions to prevent anomalies; design retry logic around `ERROR 40001`."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Which isolation level allows a transaction to read uncommitted changes from another transaction?",
+      "type": "mcq",
+      "options": [
+        "Read Committed",
+        "Repeatable Read",
+        "Read Uncommitted",
+        "Serializable"
+      ],
+      "correct": 2,
+      "explanation": "Read Uncommitted is the weakest level and permits dirty reads — seeing changes that another transaction has not yet committed and may still roll back."
+    },
+    {
+      "id": "q2",
+      "question": "Transaction T1 reads the same row twice and gets different values because T2 committed between the two reads. This anomaly is called:",
+      "type": "mcq",
+      "options": [
+        "Dirty read",
+        "Phantom read",
+        "Lost update",
+        "Non-repeatable read"
+      ],
+      "correct": 3,
+      "explanation": "A non-repeatable read happens when the same SELECT within one transaction returns different data for an existing row because another committed transaction modified it between the two reads."
+    },
+    {
+      "id": "q3",
+      "question": "What is a phantom read?",
+      "type": "mcq",
+      "options": [
+        "Reading a row that was deleted mid-transaction",
+        "Seeing a new row in a repeated range query that wasn't there before",
+        "Two transactions reading the same row at the same time",
+        "A read that returns NULL instead of the actual value"
+      ],
+      "correct": 1,
+      "explanation": "Phantom reads occur when a transaction repeats a range query (e.g., WHERE status = 'pending') and sees new rows inserted and committed by another transaction between the two reads."
+    },
+    {
+      "id": "q4",
+      "question": "What is the default isolation level in PostgreSQL?",
+      "type": "mcq",
+      "options": [
+        "Read Uncommitted",
+        "Read Committed",
+        "Repeatable Read",
+        "Serializable"
+      ],
+      "correct": 1,
+      "explanation": "PostgreSQL defaults to Read Committed, which prevents dirty reads but allows non-repeatable reads. This is also the default for most relational databases."
+    },
+    {
+      "id": "q5",
+      "question": "How does MVCC allow readers and writers to proceed concurrently?",
+      "type": "mcq",
+      "options": [
+        "It queues all reads behind writes so they see final state",
+        "It maintains multiple row versions so readers get a snapshot without blocking writers",
+        "It copies the entire table to a read buffer on transaction start",
+        "It uses shared locks that readers and writers both acquire"
+      ],
+      "correct": 1,
+      "explanation": "MVCC stores multiple versions of each row. Readers access a consistent snapshot based on transaction IDs without acquiring row locks, so they never block writers and vice versa."
+    },
+    {
+      "id": "q6",
+      "question": "A transaction at Serializable isolation level fails with 'could not serialize access due to concurrent update'. What should the application do?",
+      "type": "mcq",
+      "options": [
+        "Escalate to a higher isolation level",
+        "Retry the entire transaction",
+        "Report the error to the user and abort",
+        "Switch to Read Committed for the retry"
+      ],
+      "correct": 1,
+      "explanation": "Serialization failures (SQLSTATE 40001) are expected with Serializable isolation. The correct response is to retry the transaction from the beginning; the retry will usually succeed."
+    },
+    {
+      "id": "q7",
+      "question": "Which isolation level takes a snapshot at the START of the transaction rather than at each statement?",
+      "type": "mcq",
+      "options": [
+        "Read Uncommitted",
+        "Read Committed",
+        "Repeatable Read",
+        "All levels take a per-statement snapshot"
+      ],
+      "correct": 2,
+      "explanation": "Repeatable Read captures a snapshot when the transaction begins. All subsequent reads see data as of that moment, preventing non-repeatable reads regardless of concurrent commits."
+    },
+    {
+      "id": "q8",
+      "question": "What PostgreSQL background process cleans up dead MVCC row versions?",
+      "type": "mcq",
+      "options": [
+        "WAL writer",
+        "Checkpoint process",
+        "Autovacuum",
+        "Background writer"
+      ],
+      "correct": 2,
+      "explanation": "Autovacuum reclaims space occupied by dead row versions (tuples whose xmax transaction has committed) that are no longer visible to any active transaction."
+    },
+    {
+      "id": "q9",
+      "question": "A financial report transaction reads account balances, computes totals, and inserts them into an audit table. Which isolation level is most appropriate?",
+      "type": "mcq",
+      "options": [
+        "Read Uncommitted — fastest reads",
+        "Read Committed — default is good enough",
+        "Repeatable Read — consistent snapshot for all reads",
+        "No isolation needed for read-only transactions"
+      ],
+      "correct": 2,
+      "explanation": "Repeatable Read ensures all SELECT statements in the transaction see the same snapshot, so aggregates computed across multiple queries are consistent even as other transactions commit."
+    },
+    {
+      "id": "q10",
+      "question": "Under Read Committed, two identical SELECT COUNT(*) queries in the same transaction can return different values. Why?",
+      "type": "mcq",
+      "options": [
+        "Read Committed allows dirty reads from other transactions",
+        "Each statement gets a fresh snapshot, so committed inserts between queries are visible",
+        "COUNT(*) bypasses the transaction isolation mechanism",
+        "The query planner caches the first result incorrectly"
+      ],
+      "correct": 1,
+      "explanation": "Read Committed takes a new snapshot per statement, not per transaction. If another transaction inserts and commits rows between your two COUNT queries, the second query will see those rows."
+    }
+  ]
+}

@@ -1,0 +1,199 @@
+{
+  "id": "phase18_serverless-computing",
+  "title": "Serverless Computing",
+  "phase": 18,
+  "week": 55,
+  "icon": "network",
+  "tagline": "No servers to manage, no idle costs, infinite scale on demand — and the trade-offs every architect must understand before going serverless.",
+  "readTime": "~12 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Serverless computing does not mean no servers exist — it means **you don't manage them**. The cloud provider provisions, patches, scales, and decommissions infrastructure automatically in response to events. You write a function, upload it, and it runs when triggered — whether once a day or a million times per second.\n\n**Function as a Service (FaaS)** is the serverless model popularized by AWS Lambda (2014), Google Cloud Functions, and Azure Functions. You provide a handler function; the platform handles execution environment, scaling to zero when idle, and scaling out to handle concurrency automatically. Combined with event-driven architecture, serverless enables highly cost-efficient workloads that are truly **pay-per-invocation** — zero traffic means zero cost."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  subgraph Events[\"Event Sources\"]\n    HTTP[\"HTTP Request\\n(API Gateway)\"]\n    S3E[\"S3 Object Upload\"]\n    SQS[\"SQS Message\"]\n    CRON[\"Scheduled Cron\"]\n  end\n  subgraph Lambda[\"AWS Lambda\"]\n    WARM[\"Warm Container\\n(reused)\"]\n    COLD[\"Cold Start\\n(new container)\"]\n  end\n  HTTP --> Lambda\n  S3E --> Lambda\n  SQS --> Lambda\n  CRON --> Lambda\n  Lambda -->|\"response\"| HTTP\n  Lambda -->|\"writes to\"| DB[\"DynamoDB / S3\"]\n  COLD -.->|\"becomes\"| WARM",
+      "caption": "Event-driven invocation: Lambda functions are triggered by HTTP, S3 events, queues, or schedules. A cold start creates a new container; subsequent invocations reuse the warm container — much faster."
+    },
+    {
+      "type": "analogy",
+      "title": "Taxi vs Car Ownership",
+      "content": "Running a traditional server is like **owning a car**: you pay insurance and maintenance 24/7 whether the car is moving or parked. When demand spikes, you're stuck — you only have one car. Serverless is like **Uber**: you request a ride when you need it, pay only for the trip, and Uber automatically sends more cars when demand surges. You never worry about maintenance, and 10,000 passengers can all get rides simultaneously because Uber manages the fleet.\n\nThe catch: Uber has a **pickup wait time** (cold start). For immediate rides, owning a car (dedicated server) is faster. For unpredictable, bursty demand where idle time would waste money, Uber (serverless) wins decisively."
+    },
+    {
+      "type": "explanation",
+      "content": "**FaaS model**: You write a handler function with a specific signature (`event, context` in Lambda). The platform executes it in a managed runtime (Node.js 20, Python 3.12, Java 21, etc.) on demand. Each invocation is independent — functions are stateless by design. State lives in external services: DynamoDB, S3, Redis, or RDS.\n\n**Cold starts**: When Lambda has no warm container for a function, it must create one: pull the runtime image, initialize the execution environment, and load your code. This adds 100ms–2s of latency on the first invocation (or after a period of inactivity). Subsequent invocations reuse the warm container (milliseconds). Languages with heavy runtimes (Java, .NET) have longer cold starts than lightweight runtimes (Node.js, Python, Go). **Provisioned Concurrency** pre-warms containers to eliminate cold starts at a fixed cost.\n\n**Event-driven triggers**: Lambda integrates natively with AWS services. S3 file upload → resize image. API Gateway HTTP request → return JSON. SQS message → process order. DynamoDB stream → sync data. EventBridge cron → nightly report. This composability is what makes serverless powerful: you wire AWS services together with small functions rather than building monolithic processors.\n\n**Pros of serverless**:\n- **No infrastructure management**: no OS patching, no capacity planning, no load balancer configuration\n- **Auto-scaling**: from 0 to 10,000 concurrent executions automatically\n- **True pay-per-use**: AWS Lambda's free tier includes 1 million requests/month; beyond that, ~$0.20 per million invocations plus compute time\n- **High availability by default**: Lambda runs across multiple AZs automatically\n\n**Cons and limitations**:\n- **Cold starts**: latency-sensitive applications (< 50ms P99) are incompatible with cold starts unless using provisioned concurrency\n- **Execution limits**: Lambda max timeout is 15 minutes; memory max is 10 GB; not for long-running processes\n- **Statelessness**: you cannot store state in the function's memory between invocations — external state adds latency and complexity\n- **Vendor lock-in**: Lambda functions deeply integrated with SQS, DynamoDB, and API Gateway are hard to migrate to another cloud or on-premises\n- **Debugging complexity**: distributed traces across many short-lived functions require dedicated tooling (AWS X-Ray, Datadog)\n\n**When to use serverless**: event processing, file transformations, webhooks, scheduled tasks, API backends with spiky traffic patterns. **When not to**: latency-critical APIs requiring < 50ms response, workloads running continuously 24/7 (a server is cheaper), or applications needing persistent TCP connections."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant Client as Client\n  participant AGW as API Gateway\n  participant L as Lambda\n  participant DB as DynamoDB\n  Client->>AGW: POST /orders\n  AGW->>L: invoke handler\n  note over L: Cold start if no warm container\n  L->>DB: putItem order\n  DB-->>L: success\n  L-->>AGW: 201 Created\n  AGW-->>Client: 201 response\n  Client->>AGW: GET /orders/123\n  AGW->>L: invoke handler\n  note over L: Warm container reused\n  L->>DB: getItem order\n  DB-->>L: item\n  L-->>AGW: 200 OK\n  AGW-->>Client: 200 response",
+      "caption": "The first request may incur a cold start; the immediate second request reuses the warm container. API Gateway handles HTTP routing; Lambda handles business logic; DynamoDB persists state — no server to manage."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// AWS Lambda handler — Node.js 20 runtime\n// Triggered by API Gateway POST /orders\n\nimport { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';\nimport { randomUUID } from 'crypto';\n\n// Initialize clients OUTSIDE the handler for warm container reuse\n// (client creation is expensive — do it once per container lifetime)\nconst dynamo = new DynamoDBClient({ region: process.env.AWS_REGION });\n\nexport const handler = async (event) => {\n  try {\n    const body = JSON.parse(event.body ?? '{}');\n\n    // Validate input\n    if (!body.productId || !body.quantity) {\n      return {\n        statusCode: 400,\n        body: JSON.stringify({ error: 'productId and quantity required' }),\n      };\n    }\n\n    const orderId = randomUUID();\n    const timestamp = new Date().toISOString();\n\n    // Persist to DynamoDB — Lambda is stateless, state lives externally\n    await dynamo.send(new PutItemCommand({\n      TableName: process.env.ORDERS_TABLE,\n      Item: {\n        orderId:   { S: orderId },\n        productId: { S: body.productId },\n        quantity:  { N: String(body.quantity) },\n        createdAt: { S: timestamp },\n        userId:    { S: event.requestContext.authorizer.claims.sub },\n      },\n    }));\n\n    return {\n      statusCode: 201,\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ orderId, createdAt: timestamp }),\n    };\n  } catch (err) {\n    console.error('Order creation failed:', err);\n    return {\n      statusCode: 500,\n      body: JSON.stringify({ error: 'Internal server error' }),\n    };\n  }\n};",
+      "explanation": "The DynamoDB client is initialized outside the handler — this runs once per container lifecycle and is reused across warm invocations, avoiding expensive reconnection per request. The handler is stateless: all state goes to DynamoDB. Environment variables (`ORDERS_TABLE`) avoid hardcoding resource names, enabling the same code to run in dev, staging, and production."
+    },
+    {
+      "type": "code_concept",
+      "language": "yaml",
+      "label": "Concept",
+      "code": "# serverless.yml (Serverless Framework) — declarative Lambda + API Gateway config\nservice: orders-api\n\nprovider:\n  name: aws\n  runtime: nodejs20.x\n  region: us-east-1\n  memorySize: 512       # MB — also affects CPU allocation\n  timeout: 10           # seconds (max 900)\n  environment:\n    ORDERS_TABLE: !Ref OrdersTable\n\nfunctions:\n  createOrder:\n    handler: src/orders.handler\n    events:\n      - httpApi:\n          path: /orders\n          method: POST\n    # Optional: eliminate cold starts for critical paths\n    # provisionedConcurrency: 5\n\n  processOrderQueue:\n    handler: src/processor.handler\n    events:\n      - sqs:\n          arn: !GetAtt OrdersQueue.Arn\n          batchSize: 10      # process up to 10 messages per invocation\n\nresources:\n  Resources:\n    OrdersTable:\n      Type: AWS::DynamoDB::Table\n      Properties:\n        TableName: orders-prod\n        BillingMode: PAY_PER_REQUEST  # serverless pricing for DB too\n        AttributeDefinitions:\n          - { AttributeName: orderId, AttributeType: S }\n        KeySchema:\n          - { AttributeName: orderId, KeyType: HASH }"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "For cost estimation: a Lambda function using 512 MB memory running 100ms per invocation at 10 million requests/month costs approximately **$8/month** (after free tier). An equivalent always-on `t3.micro` EC2 instance costs **$8.50/month** but handles unlimited requests. Serverless wins at low or spiky traffic; dedicated servers win at sustained high throughput. Always model your traffic pattern before choosing."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Serverless/FaaS** means no server management — the provider handles execution environments, scaling, patching, and high availability automatically.",
+        "**Event-driven triggers** (HTTP, S3, SQS, cron) invoke functions on demand; functions are stateless and scale from 0 to thousands of concurrent executions automatically.",
+        "**Cold starts** add 100ms–2s latency when no warm container exists; use Provisioned Concurrency to eliminate cold starts for latency-critical paths.",
+        "**Pay-per-invocation** pricing is extremely cost-effective for spiky or low-traffic workloads; sustained high-throughput workloads may cost more than always-on servers.",
+        "**Initialize expensive resources** (DB clients, HTTP connections) outside the handler so they are reused across warm invocations.",
+        "**Use serverless for** event processing, webhooks, scheduled tasks, and spiky API traffic; **avoid it for** latency-critical sub-50ms paths, long-running jobs, or workloads with continuous sustained load."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does 'serverless' actually mean in the context of AWS Lambda?",
+      "type": "mcq",
+      "options": [
+        "The code runs without any underlying hardware",
+        "Servers exist but are fully managed by the cloud provider — you don't provision or maintain them",
+        "The application has no server-side code, only frontend",
+        "Functions are executed directly on the user's browser"
+      ],
+      "correct": 1,
+      "explanation": "Serverless does not mean no servers — it means you don't manage them. AWS provisions, scales, patches, and retires the containers that run your Lambda functions automatically."
+    },
+    {
+      "id": "q2",
+      "question": "What is a Lambda 'cold start'?",
+      "type": "mcq",
+      "options": [
+        "A Lambda function triggered by a scheduled cron job at a specific time",
+        "The latency penalty (100ms-2s) when Lambda must initialize a new container for a function with no warm instance",
+        "A Lambda function running in a cold storage region for lower cost",
+        "The process of loading a Lambda deployment package from S3"
+      ],
+      "correct": 1,
+      "explanation": "A cold start occurs when no warm container exists for a function — Lambda must create a new execution environment, pull the runtime, and initialize the function. Subsequent requests reuse the warm container with millisecond overhead."
+    },
+    {
+      "id": "q3",
+      "question": "Why should a DynamoDB client be initialized OUTSIDE the Lambda handler function?",
+      "type": "mcq",
+      "options": [
+        "DynamoDB clients cannot be used inside async functions",
+        "Code outside the handler runs once per container lifetime and is reused across warm invocations, avoiding repeated initialization cost",
+        "AWS requires database connections to be established before handler registration",
+        "Initializing inside the handler causes memory leaks in Lambda"
+      ],
+      "correct": 1,
+      "explanation": "Code outside the handler runs during the container initialization (once per cold start). On warm invocations, the same container is reused, so the already-initialized client is available immediately without reconnecting — significantly reducing per-invocation latency."
+    },
+    {
+      "id": "q4",
+      "question": "AWS Lambda functions are stateless. What does this mean for data persistence?",
+      "type": "mcq",
+      "options": [
+        "Lambda cannot process write requests, only reads",
+        "In-memory data between invocations is not guaranteed to persist — state must be stored in external services (DynamoDB, S3, RDS)",
+        "Lambda automatically saves function state to the /tmp directory",
+        "Stateless means no input parameters can be passed to the function"
+      ],
+      "correct": 1,
+      "explanation": "Lambda containers may be reused or replaced at any time. You cannot rely on in-memory state persisting between invocations. All durable state must be stored externally in databases (DynamoDB, RDS), object storage (S3), or caches (ElastiCache)."
+    },
+    {
+      "id": "q5",
+      "question": "Which workload pattern benefits MOST from serverless pricing?",
+      "type": "mcq",
+      "options": [
+        "A video streaming service with 10 million concurrent viewers 24/7",
+        "A webhook endpoint that receives 500 requests per day with unpredictable timing",
+        "A real-time trading platform requiring sub-10ms response latency",
+        "A batch job running continuously processing sensor data"
+      ],
+      "correct": 1,
+      "explanation": "500 requests/day is extremely bursty and low-volume. A serverless function costs nearly nothing (well within free tier), while an always-on server would cost $8-20/month idling 99.9% of the time. Serverless economics shine for low-frequency, unpredictable traffic."
+    },
+    {
+      "id": "q6",
+      "question": "Provisioned Concurrency in AWS Lambda is used to:",
+      "type": "mcq",
+      "options": [
+        "Limit the number of simultaneous Lambda invocations to control costs",
+        "Pre-warm a specified number of Lambda containers to eliminate cold starts for latency-critical paths",
+        "Provision dedicated EC2 instances for Lambda functions requiring more than 10 GB RAM",
+        "Enable Lambda to connect to resources inside a private VPC"
+      ],
+      "correct": 1,
+      "explanation": "Provisioned Concurrency keeps a specified number of Lambda containers initialized and ready. Invocations hitting these containers have no cold start. It comes at a fixed cost (you pay for the provisioned concurrency even if idle), trading cost for consistent low latency."
+    },
+    {
+      "id": "q7",
+      "question": "A Lambda function has a maximum execution timeout of:",
+      "type": "mcq",
+      "options": [
+        "30 seconds — HTTP API Gateway hard limit",
+        "5 minutes — designed for microservices response times",
+        "15 minutes — suitable for batch processing but not long-running jobs",
+        "24 hours — designed for end-of-day batch processing"
+      ],
+      "correct": 2,
+      "explanation": "AWS Lambda's maximum execution timeout is 15 minutes (900 seconds). For jobs requiring longer execution, use AWS Fargate (containerized tasks), AWS Batch, or Step Functions to orchestrate multiple shorter Lambda invocations."
+    },
+    {
+      "id": "q8",
+      "question": "Event-driven architecture with Lambda means a function is invoked:",
+      "type": "mcq",
+      "options": [
+        "On a fixed polling interval (every 1 second) regardless of events",
+        "Only when an explicit HTTP request is received",
+        "In response to a configured trigger event (S3 upload, SQS message, HTTP request, cron schedule, etc.)",
+        "Continuously as a daemon process"
+      ],
+      "correct": 2,
+      "explanation": "Lambda functions are reactive — they run ONLY when an event triggers them. This is the core model: no event = no execution = no cost. Triggers include API Gateway (HTTP), S3 (file events), SQS (queue messages), DynamoDB Streams, EventBridge (cron/rules), and more."
+    },
+    {
+      "id": "q9",
+      "question": "Which is a significant operational disadvantage of serverless architecture?",
+      "type": "mcq",
+      "options": [
+        "Serverless functions cannot be written in Node.js or Python",
+        "Vendor lock-in — deep integration with AWS services makes migration difficult",
+        "Serverless does not support concurrent execution",
+        "Lambda functions require a dedicated EC2 instance to run"
+      ],
+      "correct": 1,
+      "explanation": "A Lambda function wired to API Gateway, SQS, DynamoDB, and EventBridge is deeply coupled to AWS-specific services and invocation patterns. Migrating to GCP or a self-hosted environment requires significant rearchitecting."
+    },
+    {
+      "id": "q10",
+      "question": "For a continuously running process that handles 10,000 requests per minute 24/7, serverless is likely:",
+      "type": "mcq",
+      "options": [
+        "The cheapest option because pay-per-request pricing scales down at high volume",
+        "More expensive than a dedicated server because sustained high throughput costs more than always-on compute",
+        "The best choice because Lambda auto-scales to 10,000 concurrent executions",
+        "Free because Lambda's free tier includes 1 million requests per month"
+      ],
+      "correct": 1,
+      "explanation": "At sustained high throughput, per-invocation pricing adds up quickly. 10,000 req/min × 60 × 24 × 30 = 432 million requests/month. At $0.20/million, that's $86/month in requests alone, plus compute time cost — much more than a few `t3.medium` instances running the same workload."
+    }
+  ]
+}

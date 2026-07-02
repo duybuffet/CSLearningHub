@@ -1,0 +1,199 @@
+{
+  "id": "phase8_consistent-hashing",
+  "title": "Consistent Hashing",
+  "phase": 8,
+  "week": 29,
+  "icon": "architecture",
+  "tagline": "The algorithm that lets you add or remove servers from a distributed system without reshuffling all your data.",
+  "readTime": "~12 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "When you distribute data across multiple servers, you need a rule for deciding which server owns which key. The naive approach — `server = hash(key) % N` — works fine until `N` changes. Add or remove one server and nearly every key maps to a different server, causing a **massive cache miss storm** or requiring a full data migration.\n\n**Consistent hashing** solves this by arranging both servers and keys on a circular **hash ring**. Adding or removing a server only remaps the keys that were owned by that server — roughly `1/N` of all keys — leaving the rest untouched. This property makes consistent hashing the foundational algorithm behind distributed caches (Redis Cluster, Memcached), distributed databases (Cassandra, DynamoDB), and load balancers that need session affinity without sticky sessions."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Ring[\"Hash Ring 0..2^32\"] --> S1[\"Server A at hash 100\"]\n  Ring --> S2[\"Server B at hash 200\"]\n  Ring --> S3[\"Server C at hash 300\"]\n  K1[\"Key X hash=120\"] -->|\"clockwise to B\"| S2\n  K2[\"Key Y hash=250\"] -->|\"clockwise to C\"| S3\n  K3[\"Key Z hash=320\"] -->|\"clockwise wraps to A\"| S1",
+      "caption": "The hash ring maps servers and keys to the same 0..2^32 circular space. A key is owned by the first server encountered moving clockwise from the key's hash position. Key Z wraps around and is owned by Server A."
+    },
+    {
+      "type": "analogy",
+      "title": "The Circular Seating Chart",
+      "content": "Imagine a round table with numbered seats from 0 to 359 (degrees). Servers sit at specific seats. Each guest (key) sits at their numbered seat and their host is the first server clockwise from them. If a server leaves, only the guests between the departing server and the previous server need to find a new host — everyone else keeps the same host. **Virtual nodes** are like a server reserving multiple seats around the table — Server A holds seats 45, 120, 240 — ensuring no one server is ever overwhelmed by getting a large arc of guests when others have small arcs."
+    },
+    {
+      "type": "explanation",
+      "content": "**How the hash ring works**: hash the server identifier (hostname + port) to a position on a ring of integers (typically 0 to 2^32−1). For each key, hash it to the same space, then walk clockwise around the ring to find the first server — that server owns the key. The ring is circular, so the last server's arc wraps around to the first.\n\n**Adding a server**: place it on the ring at its hash position. Only keys that fall between the new server and its predecessor move to the new server — approximately `1/N` of total keys. All other keys are unaffected.\n\n**Removing a server**: its keys are taken over by the next server clockwise. Again only `~1/N` keys are affected.\n\n**The problem with basic consistent hashing**: with a small number of servers the positions are likely to be uneven — one server might own a 60% arc while another owns 5%. This creates **hot spots**: the server with the large arc handles far more load than the others.\n\n**Virtual nodes** (vnodes) solve this. Instead of placing each server at one ring position, each server is hashed to **V positions** (typically V=100–200). These virtual nodes are distributed around the ring, so each server is responsible for many small, interleaved arcs. The effective load on each server becomes roughly equal regardless of the actual server hash positions. When a server is added, it takes a few virtual-node arcs from many existing servers; when removed, its arcs are distributed across many servers — spreading the migration load evenly.\n\n**Uses in real systems**:\n- **Distributed caches**: Redis Cluster uses a simpler fixed 16,384-slot scheme; Twemproxy and Memcached clients use consistent hashing to shard keys across nodes.\n- **Distributed databases**: Cassandra uses a token ring (consistent hashing) to assign partition responsibility. DynamoDB's internal partitioning is based on consistent hashing principles.\n- **Load balancing**: consistent hashing load balancers route the same client (by IP or session ID) to the same backend server without server-side sticky session state."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C as Client\n  participant LB as Consistent Hash LB\n  participant S1 as Server A\n  participant S2 as Server B\n  participant S3 as Server C\n  C->>LB: request key=user:42\n  LB->>LB: hash(user:42) = 173\n  LB->>LB: walk ring clockwise from 173\n  LB->>LB: next node = Server B at 200\n  LB->>S2: forward request\n  S2-->>C: response\n  Note over LB: Adding Server D at 180 only remaps keys 100..180 from B to D",
+      "caption": "A consistent hashing load balancer hashes the request key, walks the ring clockwise to find the owning server, and forwards. Adding Server D at position 180 only moves keys between 100 and 180 from Server B — all other keys stay on their current servers."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Consistent hash ring with virtual nodes (JavaScript)\nimport { createHash } from 'crypto';\n\nclass ConsistentHashRing {\n  constructor(virtualNodes = 150) {\n    this.virtualNodes = virtualNodes;\n    this.ring = new Map();      // hash position → server name\n    this.sortedKeys = [];       // sorted array of ring positions\n  }\n\n  _hash(key) {\n    return parseInt(\n      createHash('md5').update(key).digest('hex').slice(0, 8),\n      16\n    ); // 0..2^32\n  }\n\n  addServer(server) {\n    for (let i = 0; i < this.virtualNodes; i++) {\n      const vkey = `${server}#vnode${i}`;\n      const pos = this._hash(vkey);\n      this.ring.set(pos, server);\n      this.sortedKeys.push(pos);\n    }\n    this.sortedKeys.sort((a, b) => a - b);\n  }\n\n  removeServer(server) {\n    for (let i = 0; i < this.virtualNodes; i++) {\n      const pos = this._hash(`${server}#vnode${i}`);\n      this.ring.delete(pos);\n    }\n    this.sortedKeys = this.sortedKeys.filter(k => this.ring.has(k));\n  }\n\n  getServer(key) {\n    if (this.sortedKeys.length === 0) throw new Error('No servers');\n    const hash = this._hash(key);\n    // Binary search for first position >= hash (clockwise)\n    let lo = 0, hi = this.sortedKeys.length;\n    while (lo < hi) {\n      const mid = (lo + hi) >> 1;\n      if (this.sortedKeys[mid] < hash) lo = mid + 1;\n      else hi = mid;\n    }\n    const pos = this.sortedKeys[lo % this.sortedKeys.length]; // wrap\n    return this.ring.get(pos);\n  }\n}\n\n// Usage\nconst ring = new ConsistentHashRing(150);\n['cache-1', 'cache-2', 'cache-3'].forEach(s => ring.addServer(s));\nconsole.log(ring.getServer('user:42'));   // e.g. 'cache-2'\nconsole.log(ring.getServer('user:100'));  // e.g. 'cache-1'\nring.addServer('cache-4');               // only ~25% of keys remapped\nconsole.log(ring.getServer('user:42'));  // likely still 'cache-2'",
+      "explanation": "Each server is hashed to `virtualNodes` positions on the ring. The `getServer` method uses binary search on the sorted position array to find the first ring position >= the key's hash in O(log V*N) time. Wrapping the index with modulo handles keys that are larger than the last ring position. With 150 virtual nodes per server, load distribution is within ~2% of even across typical workloads."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Key properties of consistent hashing\n\n// 1. Minimal disruption on topology change\n//    N = current servers, adding 1 server remaps ~1/(N+1) keys\n//    Removing 1 server remaps ~1/N keys (taken by successor)\nconst remapFraction = (currentServers) => 1 / (currentServers + 1);\nconsole.log(`Adding server 4 remaps ~${(remapFraction(3) * 100).toFixed(0)}% of keys`);\n// → Adding server 4 remaps ~25% of keys\n\n// 2. Naive modulo hashing for comparison — full remap on any change\nconst naiveServer = (key, n) => hash(key) % n;\n// Adding 1 server: nearly all keys hash to new servers\n\n// 3. Virtual nodes improve load balance\n//    With V=1: possible 60% arc on one server (hot spot)\n//    With V=150: max imbalance ~2-3% in practice\n\n// 4. Replication with consistent hashing\n//    For replication factor R, a key is stored on R consecutive\n//    ring nodes (clockwise from the key's hash position)\nfunction getReplicaServers(ring, key, replicaCount) {\n  const servers = [];\n  const startPos = ring._hash(key);\n  // Walk clockwise, collect R distinct servers\n  for (const pos of ring.sortedKeys) {\n    if (pos >= startPos && !servers.includes(ring.ring.get(pos))) {\n      servers.push(ring.ring.get(pos));\n    }\n    if (servers.length === replicaCount) break;\n  }\n  return servers; // [primary, replica1, replica2]\n}\n\n// 5. Real-world usage\n//    Cassandra: each vnode owns a token range (consistent hashing)\n//    Redis Cluster: 16384 fixed slots (simpler variant)\n//    Nginx / HAProxy: consistent hash upstream directive\n//    Twemproxy (Twitter): consistent hashing for Memcached/Redis sharding",
+      "explanation": ""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "The number of virtual nodes is a tuning parameter. Too few (V=1) causes hot spots — one server might end up with a large arc and 3× the load of others. Too many (V=1000) wastes memory (the ring index grows) and makes add/remove operations slower. **V=100–200** is the common default, giving good load balance (within ~2%) with reasonable memory overhead. Some systems (Cassandra) let operators assign token weights instead of using random virtual nodes, giving fine-grained control over data placement."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Consistent hashing** maps both servers and keys to a circular hash ring. A key is owned by the first server clockwise from its hash position — adding or removing a server remaps only `~1/N` keys, not all of them.",
+        "**Naive modulo hashing** (`hash(key) % N`) remaps nearly all keys when N changes — catastrophic for caches and distributed databases. Consistent hashing is the fix.",
+        "**Virtual nodes** (V replicas per server on the ring) solve the hot-spot problem from uneven server placement. With V=150 each server owns many small interleaved arcs, producing balanced load distribution within ~2–3%.",
+        "**Replication** in consistent hashing stores each key on R consecutive servers clockwise from its position. This is how Cassandra achieves its replication factor without a separate replication coordinator.",
+        "**Used in**: Redis Cluster (fixed slot variant), Cassandra (token ring), Twemproxy (Memcached/Redis sharding), and load balancers that need stateless session affinity."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the main problem with naive modulo hashing (`server = hash(key) % N`) in distributed systems?",
+      "type": "mcq",
+      "options": [
+        "It produces non-uniform distributions that overload one server",
+        "When N changes (server added or removed), nearly all keys map to different servers",
+        "The modulo operation is too slow for high-throughput key lookups",
+        "It cannot handle string keys, only integer keys"
+      ],
+      "correct": 1,
+      "explanation": "With modulo hashing, changing N from 3 to 4 changes `hash(key) % N` for most keys. This invalidates virtually all cache entries simultaneously, causing a thundering-herd cache miss storm. Consistent hashing limits remapping to ~1/N of keys."
+    },
+    {
+      "id": "q2",
+      "question": "On a consistent hash ring, how is the owning server determined for a given key?",
+      "type": "mcq",
+      "options": [
+        "The server with the hash value closest to the key's hash (nearest neighbor)",
+        "The first server encountered moving clockwise from the key's hash position",
+        "A random server selected from those within the same hash bucket",
+        "The server with the lowest current load that is within 10% of the key's hash"
+      ],
+      "correct": 1,
+      "explanation": "Each key hashes to a position on the ring. The algorithm walks clockwise from that position and assigns the key to the first server node found. The ring wraps around, so the server with the largest position also owns keys past the maximum value."
+    },
+    {
+      "id": "q3",
+      "question": "When one server is added to a consistent hash ring containing N servers, approximately what fraction of keys are remapped?",
+      "type": "mcq",
+      "options": [
+        "All keys (100%) must be remapped",
+        "Half the keys (50%) are remapped",
+        "1/(N+1) of keys are remapped",
+        "No keys are remapped — consistent hashing is zero-disruption"
+      ],
+      "correct": 2,
+      "explanation": "The new server takes over the arc between itself and its predecessor on the ring. This arc is approximately 1/(N+1) of the ring, so only that fraction of keys are remapped. All other keys remain on their existing servers."
+    },
+    {
+      "id": "q4",
+      "question": "What problem do virtual nodes solve in consistent hashing?",
+      "type": "mcq",
+      "options": [
+        "Virtual nodes allow a key to be stored on multiple servers simultaneously for redundancy",
+        "Virtual nodes prevent two servers from having the same hash position",
+        "Virtual nodes fix uneven arc distribution that causes some servers to handle disproportionately more load",
+        "Virtual nodes reduce the number of hash collisions in the ring"
+      ],
+      "correct": 2,
+      "explanation": "With few physical positions, one server might randomly land at the start of a large arc and own 60% of the key space. Virtual nodes (many positions per server) distribute each server's responsibility across many small interleaved arcs, producing ~even load across all servers."
+    },
+    {
+      "id": "q5",
+      "question": "With replication factor R=3 in a consistent hashing system, where are a key's replicas stored?",
+      "type": "mcq",
+      "options": [
+        "On three randomly selected servers from the entire cluster",
+        "On the R servers with the lowest current load",
+        "On the R consecutive servers clockwise from the key's ring position",
+        "On the primary server and two servers selected by a separate replica placement algorithm"
+      ],
+      "correct": 2,
+      "explanation": "Consistent hashing supports replication by storing the key on R consecutive distinct servers clockwise from the hash position. The first is the primary; the next R-1 are replicas. This is how Cassandra's replication factor works."
+    },
+    {
+      "id": "q6",
+      "question": "What is the typical recommended range for virtual nodes per server (V) in production systems?",
+      "type": "mcq",
+      "options": [
+        "V=1 to 5 — more virtual nodes add unnecessary complexity",
+        "V=100 to 200 — balances load distribution quality against memory overhead",
+        "V=1000 to 5000 — more virtual nodes always produce better distribution",
+        "V must equal the total number of keys divided by the number of servers"
+      ],
+      "correct": 1,
+      "explanation": "V=100–200 is the common default. It produces load distribution within ~2–3% of ideal. Higher V improves distribution marginally but increases ring index memory and the cost of add/remove operations. V=1 risks significant hot spots."
+    },
+    {
+      "id": "q7",
+      "question": "Which real-world system uses a fixed 16,384-slot variant of consistent hashing?",
+      "type": "mcq",
+      "options": [
+        "Apache Cassandra",
+        "Redis Cluster",
+        "Amazon DynamoDB",
+        "Apache Kafka"
+      ],
+      "correct": 1,
+      "explanation": "Redis Cluster pre-divides the key space into 16,384 fixed hash slots. Each node is responsible for a range of slots. This is a consistent hashing variant — adding a node moves slot ranges (not individual keys) from existing nodes to the new one."
+    },
+    {
+      "id": "q8",
+      "question": "In the consistent hash ring implementation, why is binary search used to find the owning server instead of a linear scan?",
+      "type": "mcq",
+      "options": [
+        "Binary search prevents hash collisions between server positions",
+        "Binary search runs in O(log N) on the sorted position array, which is much faster than O(N) linear scan for large rings",
+        "Binary search is required to handle the circular (wrap-around) property of the ring",
+        "Linear scan does not work when virtual nodes are enabled"
+      ],
+      "correct": 1,
+      "explanation": "With V=150 virtual nodes and many servers, the ring may have thousands of positions. Binary search finds the first position >= the key's hash in O(log V*N) time. Linear scan would be O(V*N) — 100x slower for a 100-server cluster."
+    },
+    {
+      "id": "q9",
+      "question": "A load balancer uses consistent hashing on the client's IP address. What is the benefit over round-robin load balancing?",
+      "type": "mcq",
+      "options": [
+        "Consistent hashing distributes load more evenly than round-robin",
+        "The same client IP always routes to the same backend server, enabling stateless session affinity without server-side sticky sessions",
+        "Consistent hashing prevents a server from receiving requests while it is starting up",
+        "Round-robin requires all servers to be identical; consistent hashing allows heterogeneous servers"
+      ],
+      "correct": 1,
+      "explanation": "Consistent hashing on client IP provides session affinity: a client's requests reliably hit the same backend (which may have warm local caches for that client) without the load balancer storing a session-to-server mapping table. Adding a server only disrupts ~1/N clients."
+    },
+    {
+      "id": "q10",
+      "question": "A cluster has 4 servers. A 5th server is added with consistent hashing (V=150 virtual nodes). Which best describes what happens?",
+      "type": "mcq",
+      "options": [
+        "All 4 existing servers each migrate 25% of their keys to the new server",
+        "The server with the most keys transfers ~20% of the total key space to the new server",
+        "Each of the 4 existing servers loses a portion of its virtual nodes to the 5th server, distributing the migration evenly",
+        "A manual resharding operation is required to move keys to the new server"
+      ],
+      "correct": 2,
+      "explanation": "With V=150 virtual nodes, the new server's 150 positions are spread around the ring. Each takes over a small arc from the server that previously owned that position. The migration is shared across all 4 existing servers approximately equally — roughly 1/5 (20%) of total keys move in total, spread across all existing nodes."
+    }
+  ]
+}

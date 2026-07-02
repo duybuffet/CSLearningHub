@@ -1,0 +1,198 @@
+{
+  "id": "phase14_replication-and-partitioning",
+  "title": "Replication and Partitioning",
+  "phase": 14,
+  "week": 44,
+  "icon": "network",
+  "tagline": "How distributed databases spread data across nodes for fault tolerance and scale — replication strategies and sharding patterns.",
+  "readTime": "~13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Distributed databases use two orthogonal techniques to achieve scale and fault tolerance. **Replication** stores the same data on multiple nodes — so if one node fails, another has a copy. **Partitioning** (sharding) splits data across multiple nodes — so each node holds a subset of the data, enabling storage and throughput to grow horizontally. Most large-scale systems use both: data is partitioned into shards, and each shard is replicated across multiple nodes. Understanding the trade-offs of each strategy determines how well your system handles failures, hotspots, and rebalancing."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Client[\"Client\"] -->|\"all writes\"| Leader[\"Leader (Primary)\"]\n  Leader -->|\"sync/async replicate\"| F1[\"Follower 1\"]\n  Leader -->|\"sync/async replicate\"| F2[\"Follower 2\"]\n  Client2[\"Read Client\"] -->|\"read queries\"| F1\n  Client3[\"Read Client\"] -->|\"read queries\"| F2\n  F1 -.->|\"failover if leader dies\"| Leader2[\"(promoted to leader)\"]",
+      "caption": "Leader-follower replication: all writes go to the leader; followers serve reads. On leader failure, a follower is promoted automatically."
+    },
+    {
+      "type": "analogy",
+      "title": "The Library and the Branch Libraries",
+      "content": "**Replication** is like having a main library and several branch libraries with copies of every book. If the main library burns down (node failure), the branches still have all the books (fault tolerance). Branches can serve readers simultaneously (read scale). But when a new edition arrives, it takes time for all branches to get their copy — during that lag, a reader at one branch might get an older edition (replication lag, eventual consistency). **Partitioning** is like splitting the collection: branch A holds books A-M, branch B holds N-Z. No single branch has everything, but together they hold more books than any single building could (storage scale). The risk: if everyone suddenly wants books starting with 'S', branch B gets overwhelmed (hotspot)."
+    },
+    {
+      "type": "explanation",
+      "content": "**Leader-follower replication** (also called primary-replica or master-slave) designates one node as the leader that accepts all writes. The leader replicates changes to followers, which serve read queries. **Synchronous replication** waits for at least one follower to confirm before acknowledging the write — strong durability but higher write latency. **Asynchronous replication** acknowledges immediately and replicates in the background — lower latency but risk of data loss if the leader crashes before replicating. Most systems use a hybrid: one synchronous follower for durability, rest asynchronous for performance.\n\n**Multi-leader replication** allows multiple nodes to accept writes concurrently. This improves write availability (useful across data centers where a WAN write to a distant leader is slow) but introduces **write conflicts**: two leaders accept different writes to the same record. Conflicts must be resolved — common strategies include last-write-wins (LWW, prone to data loss), merge functions, or CRDT-based automatic resolution. Multi-leader is used in multi-region deployments (CouchDB, active-active setups).\n\n**Leaderless replication** (Dynamo-style, used in Cassandra and DynamoDB) has no single leader — any node can accept writes. Consistency is achieved through **quorum reads and writes**: with N replicas, require W write acknowledgments and R read responses such that W + R > N. This ensures read and write sets overlap, guaranteeing at least one node has the latest value. With N=3, W=2, R=2: tolerates 1 failed node on both reads and writes.\n\n**Partitioning strategies**:\n- **Range partitioning**: records are sorted by key; each partition holds a range (A-M, N-Z). Efficient for range scans but creates hotspots if writes cluster in one range (e.g., timestamp keys where all recent writes go to the last partition).\n- **Hash partitioning**: a hash function maps each key to a partition number uniformly, distributing load evenly. Eliminates hotspots but destroys sort order — range queries require scanning all partitions.\n- **Consistent hashing**: nodes are arranged on a virtual ring; each key maps to the nearest node clockwise. Adding/removing nodes only requires moving ~1/N of the keys (versus rehashing all keys with modulo hashing). Used by DynamoDB, Cassandra, and Redis Cluster.\n\n**Rebalancing**: when nodes are added or removed, data must be redistributed. Good strategies: fixed number of partitions (Elasticsearch, Kafka — many more partitions than nodes; moving whole partitions on node change), or dynamic partitioning (HBase — split large partitions, merge small ones). Rebalancing should happen gradually to avoid overwhelming the network."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Key[\"user_id = 12345\"] --> Hash[\"hash(12345) = 847263\"]\n  Hash --> Ring[\"Consistent Hash Ring\"]\n  Ring --> N1[\"Node A (0-300k)\"]\n  Ring --> N2[\"Node B (300k-600k)\"]\n  Ring --> N3[\"Node C (600k-900k)\"]\n  Hash -->|\"847263 maps to Node C\"| N3",
+      "caption": "Consistent hashing maps keys to nodes on a virtual ring. Adding a new node only moves ~1/N keys from neighboring nodes — far less churn than naive modulo hashing."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Consistent hashing implementation (simplified)\nconst crypto = require('crypto');\n\nclass ConsistentHashRing {\n  constructor(virtualNodes = 100) {\n    this.virtualNodes = virtualNodes; // more = better distribution\n    this.ring = new Map();            // hash -> nodeName\n    this.sortedHashes = [];           // sorted array of hashes\n  }\n\n  hash(key) {\n    return parseInt(\n      crypto.createHash('md5').update(key).digest('hex').slice(0, 8),\n      16\n    );\n  }\n\n  addNode(nodeName) {\n    for (let i = 0; i < this.virtualNodes; i++) {\n      const virtualKey = `${nodeName}#${i}`;\n      const h = this.hash(virtualKey);\n      this.ring.set(h, nodeName);\n      this.sortedHashes.push(h);\n    }\n    this.sortedHashes.sort((a, b) => a - b);\n  }\n\n  removeNode(nodeName) {\n    for (let i = 0; i < this.virtualNodes; i++) {\n      const h = this.hash(`${nodeName}#${i}`);\n      this.ring.delete(h);\n    }\n    this.sortedHashes = this.sortedHashes.filter(h => this.ring.has(h));\n  }\n\n  getNode(key) {\n    if (this.sortedHashes.length === 0) throw new Error('Ring is empty');\n    const h = this.hash(key);\n    // Find first hash >= h (clockwise on the ring)\n    const idx = this.sortedHashes.findIndex(pos => pos >= h);\n    const ringPos = idx === -1 ? 0 : idx; // wrap around\n    return this.ring.get(this.sortedHashes[ringPos]);\n  }\n}\n\n// Usage\nconst ring = new ConsistentHashRing(150);\n['node-a', 'node-b', 'node-c'].forEach(n => ring.addNode(n));\n\nconsole.log(ring.getNode('user:1001'));  // e.g., 'node-b'\nconsole.log(ring.getNode('order:555')); // e.g., 'node-a'\n\n// Adding a node only re-routes ~1/N = ~33% of keys\nring.addNode('node-d');\nconsole.log(ring.getNode('user:1001')); // may now be 'node-d'",
+      "explanation": "Virtual nodes (100-150 per physical node) ensure even distribution even with a small number of nodes. Without virtual nodes, three physical nodes might land unevenly on the ring, causing one to handle far more traffic. With 150 virtual nodes each, the distribution is statistically even. Adding node-d inserts its virtual nodes into the ring, pulling approximately 1/4 of keys from neighboring nodes — minimal disruption."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Replication and partitioning strategy selection guide\n\n// REPLICATION TOPOLOGIES:\n// Leader-follower:  simple, read scale, failover built-in\n//   Use: most RDBMS (Postgres, MySQL), MongoDB, Redis Sentinel\n//   Risk: leader is write bottleneck; replication lag on reads\n\n// Multi-leader:     write availability across regions, lower write latency\n//   Use: multi-datacenter active-active, CouchDB, conflict-free mobile sync\n//   Risk: write conflicts require resolution strategy\n\n// Leaderless:       highest availability, no single write bottleneck\n//   Use: Cassandra (W+R>N quorum), DynamoDB, Riak\n//   Risk: eventual consistency by default; sloppy quorum possible\n\n// QUORUM FORMULA (leaderless):\n// N=3, W=2, R=2: W+R=4 > 3 — reads always overlap with writes\n// N=5, W=3, R=3: W+R=6 > 5 — tolerates 2 node failures\n// N=3, W=1, R=1: W+R=2 = N — NOT a quorum; possible stale reads\n\n// PARTITIONING STRATEGIES:\n// Range: good for sorted scans; hotspot risk on sequential keys\n//   Fix hotspot: prefix timestamp keys with random bucket prefix\n\n// Hash: even distribution; no range scans across partitions\n//   Use: user_id, order_id — uniform random-access keys\n\n// Consistent hash: hash + easy rebalancing\n//   Use: cache clusters (Redis), Cassandra, DynamoDB\n//   Virtual nodes (vnodes) improve balance with few physical nodes"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Hotspot prevention for time-series data**: if you use a timestamp as a partition key with range partitioning, all recent writes go to the same partition (the current time range) — a hotspot. Fix it by prefixing the key with a random bucket: `bucket = hash(deviceId) % 8; key = bucket + ':' + timestamp`. This spreads current writes across 8 partitions while still allowing efficient per-device time range queries within a bucket."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Replication** stores copies of data on multiple nodes for fault tolerance and read scale; **partitioning** (sharding) splits data across nodes for storage and write scale — most systems use both.",
+        "**Leader-follower** is the simplest replication topology: all writes to the leader, reads from followers. Synchronous replication improves durability; asynchronous improves latency.",
+        "**Multi-leader** enables writes in multiple data centers but requires conflict resolution; **leaderless** (Dynamo-style) uses quorum reads/writes (W + R > N) for tunable consistency.",
+        "**Consistent hashing** maps keys to nodes on a virtual ring; adding or removing a node only requires moving ~1/N keys, minimizing rebalancing disruption.",
+        "**Hotspots** occur when a partitioning strategy sends disproportionate traffic to one shard — avoid sequential keys with hash partitioning or random bucket prefixes."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the primary purpose of replication in a distributed database?",
+      "type": "mcq",
+      "options": [
+        "To reduce the total amount of data stored",
+        "To store the same data on multiple nodes for fault tolerance and read scale",
+        "To encrypt data at rest across all nodes",
+        "To compress data by storing it in a distributed format"
+      ],
+      "correct": 1,
+      "explanation": "Replication keeps copies of the same data on multiple nodes. If one node fails, another node has the data available. Additionally, multiple replicas can serve read queries simultaneously, increasing read throughput."
+    },
+    {
+      "id": "q2",
+      "question": "In leader-follower replication, synchronous replication provides what benefit at what cost?",
+      "type": "mcq",
+      "options": [
+        "Benefit: lower write latency; Cost: risk of data loss on leader failure",
+        "Benefit: stronger durability guarantee; Cost: higher write latency waiting for follower acknowledgment",
+        "Benefit: eliminates replication lag; Cost: requires all followers to be online",
+        "Benefit: automatic conflict resolution; Cost: more complex network topology"
+      ],
+      "correct": 1,
+      "explanation": "Synchronous replication waits for at least one follower to acknowledge before confirming the write to the client. This ensures durability even if the leader crashes immediately after — the follower has the data. The cost is added write latency (network round trip to follower and back)."
+    },
+    {
+      "id": "q3",
+      "question": "Which replication topology is most appropriate for an application with users in both Europe and North America that needs low write latency in both regions?",
+      "type": "mcq",
+      "options": [
+        "Leader-follower with the leader in one region",
+        "Multi-leader with one leader per region",
+        "Leaderless with quorum reads and writes",
+        "Single-node database with CDN caching"
+      ],
+      "correct": 1,
+      "explanation": "Multi-leader replication places a leader in each region, allowing users to write to their nearest data center. Cross-region replication happens asynchronously. The cost is managing write conflicts between leaders — acceptable for many workloads with proper conflict resolution."
+    },
+    {
+      "id": "q4",
+      "question": "In Cassandra's leaderless replication with N=5 replicas, which quorum configuration provides the strongest consistency?",
+      "type": "mcq",
+      "options": [
+        "W=1, R=1 (W+R=2)",
+        "W=2, R=2 (W+R=4)",
+        "W=3, R=3 (W+R=6)",
+        "W=5, R=5 (W+R=10)"
+      ],
+      "correct": 2,
+      "explanation": "W+R > N ensures the read and write sets overlap — at least one node in the read quorum always has the latest write. W=3, R=3 gives W+R=6 > N=5, providing strong consistency while tolerating 2 node failures. W=5, R=5 would be valid but requires all nodes available."
+    },
+    {
+      "id": "q5",
+      "question": "Why does range partitioning on timestamp keys cause hotspots?",
+      "type": "mcq",
+      "options": [
+        "Timestamps are too large to hash efficiently",
+        "All current writes go to the partition holding the most recent time range, overloading it",
+        "Range partitions cannot be rebalanced without downtime",
+        "Timestamp keys require more storage than other key types"
+      ],
+      "correct": 1,
+      "explanation": "Range partitioning on timestamps means the partition holding the current time range (e.g., today's data) receives all new writes while older partitions sit idle. This is a write hotspot. Fix: prefix keys with a random bucket hash to spread current writes across multiple partitions."
+    },
+    {
+      "id": "q6",
+      "question": "What advantage does consistent hashing have over naive modulo hashing (key % N) for distributing cache keys?",
+      "type": "mcq",
+      "options": [
+        "Consistent hashing produces more uniform distribution for all key types",
+        "Adding or removing a node only requires remapping ~1/N keys instead of most keys",
+        "Consistent hashing supports range scans across nodes",
+        "Consistent hashing eliminates the need for virtual nodes"
+      ],
+      "correct": 1,
+      "explanation": "With modulo hashing (key % N), adding a node changes N, which changes the mapping for almost every key — a massive cache miss storm. Consistent hashing only moves the keys that were assigned to the neighboring node on the ring, approximately 1/N of all keys."
+    },
+    {
+      "id": "q7",
+      "question": "What is the purpose of virtual nodes in consistent hashing?",
+      "type": "mcq",
+      "options": [
+        "To allow a single physical node to accept writes from multiple clients simultaneously",
+        "To improve key distribution by placing each physical node at multiple positions on the hash ring",
+        "To enable cross-datacenter replication without additional network configuration",
+        "To cache hot keys on multiple nodes simultaneously"
+      ],
+      "correct": 1,
+      "explanation": "With only a few physical nodes on the ring, their placement may be uneven and one node might get significantly more keys than others. Virtual nodes (100-150 per physical node) place each node at many ring positions, ensuring statistically uniform distribution even with a small cluster."
+    },
+    {
+      "id": "q8",
+      "question": "In leader-follower replication, what happens to write availability when the leader fails?",
+      "type": "mcq",
+      "options": [
+        "Writes are automatically routed to any available follower with no interruption",
+        "Writes are unavailable until a follower is promoted to leader via failover",
+        "Writes are buffered in the client and replayed after the leader recovers",
+        "Writes are rejected with an error and must be retried by the application"
+      ],
+      "correct": 1,
+      "explanation": "In leader-follower topology, only the leader accepts writes. When the leader fails, a follower must be promoted to leader before writes can resume. Automatic failover detects the failure (via timeout) and promotes the most up-to-date follower, but there is always a brief unavailability window."
+    },
+    {
+      "id": "q9",
+      "question": "Hash partitioning distributes data evenly but has what significant drawback?",
+      "type": "mcq",
+      "options": [
+        "It requires sorting all keys before partitioning",
+        "Range queries must scan all partitions since sorted order is destroyed",
+        "It cannot tolerate node failures without data loss",
+        "Hash computation adds excessive CPU overhead"
+      ],
+      "correct": 1,
+      "explanation": "Hashing destroys sort order — adjacent keys in sort order end up on different partitions. A range query (e.g., 'all orders from March') must be sent to every partition and results merged, rather than efficiently scanning a contiguous range on a single partition as range partitioning allows."
+    },
+    {
+      "id": "q10",
+      "question": "Multi-leader replication's primary challenge compared to leader-follower is:",
+      "type": "mcq",
+      "options": [
+        "It requires more hardware because all leaders must store the complete dataset",
+        "Write conflicts when two leaders accept different updates to the same record concurrently",
+        "Followers cannot serve read queries when multiple leaders exist",
+        "Leaders must synchronize before each write, increasing latency"
+      ],
+      "correct": 1,
+      "explanation": "When two leaders accept concurrent writes to the same key (e.g., user changes their name in both Europe and US regions simultaneously), the system has a conflict. Strategies for resolution include last-write-wins (LWW), merge functions, or CRDTs — but all add complexity absent from single-leader replication."
+    }
+  ]
+}

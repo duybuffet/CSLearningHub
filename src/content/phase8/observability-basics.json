@@ -1,0 +1,198 @@
+{
+  "id": "phase8_observability-basics",
+  "title": "Observability Basics",
+  "phase": 8,
+  "week": 31,
+  "icon": "architecture",
+  "tagline": "Logs, metrics, and traces — the three pillars that let you understand what your system is doing without SSH-ing into production.",
+  "readTime": "~13 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "You cannot fix what you cannot see. A system that works in development and breaks silently in production is not a deployment problem — it is an **observability** problem. Observability is the degree to which you can infer the internal state of a system from its external outputs.\n\nThe three pillars — **logs**, **metrics**, and **traces** — each answer a different question. Logs tell you *what happened*. Metrics tell you *how much* and *how fast*. Traces tell you *where the time went* across a distributed call chain. SLIs and SLOs translate those signals into **user-facing reliability targets**, and alerting wakes you up before users notice."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  App[\"Application\"]\n  App -->|\"structured logs\"| Loki[\"Log Store\\n(Loki / CloudWatch)\"]\n  App -->|\"metrics (counters, histograms)\"| Prom[\"Metrics Store\\n(Prometheus)\"]\n  App -->|\"trace spans\"| Tempo[\"Trace Store\\n(Tempo / Jaeger)\"]\n  Loki --> Grafana[\"Grafana Dashboard\"]\n  Prom --> Grafana\n  Tempo --> Grafana\n  Prom --> Alert[\"Alertmanager\"]",
+      "caption": "The three pillars feed into a unified dashboard (Grafana). Metrics drive alerting rules in Alertmanager, which pages on-call engineers when SLOs are breached."
+    },
+    {
+      "type": "analogy",
+      "title": "The Hospital Monitoring Room",
+      "content": "**Logs** are the nurse's hand-written notes: 'Patient complained of chest pain at 14:23, administered 5mg morphine.' Rich narrative, every event captured, but slow to search across thousands of patients.\n\n**Metrics** are the vital-signs monitors on the wall: heart rate 72 bpm, blood pressure 120/80. Numeric, graphable, alertable — you set an alarm when heart rate exceeds 140. You cannot diagnose *why* from the number alone, but you immediately know *something is wrong*.\n\n**Traces** are the hospital's patient journey map: arrived at ER → triage → X-ray (8 min) → consultation (23 min) → admitted. You see exactly which step took longest and where the handoffs happened. Distributed traces do the same for a request crossing 10 microservices."
+    },
+    {
+      "type": "explanation",
+      "content": "**Logs** are timestamped, structured records of events. Unstructured logs (`console.log('user logged in')`) are hard to query at scale. **Structured logs** emit JSON (`{\"event\":\"user.login\",\"userId\":42,\"durationMs\":12}`) so tools like CloudWatch Insights, Datadog, or Grafana Loki can filter, aggregate, and alert on specific fields. Key practices: include a **correlation ID** (trace ID) on every log line so you can find all logs for a single request; log at the right level (`DEBUG` for dev, `INFO` for normal flow, `WARN` for recoverable issues, `ERROR` for failures).\n\n**Metrics** are numeric measurements sampled over time. Four core types: **Counter** (monotonically increasing — total HTTP requests), **Gauge** (up/down value — current memory usage), **Histogram** (distribution of values — request latency buckets), and **Summary** (pre-computed percentiles). Prometheus is the de-facto standard: services expose a `/metrics` scrape endpoint; Prometheus polls it. Key metrics every API should track: **request rate**, **error rate**, and **latency percentiles (p50, p95, p99)** — the RED method (Rate, Errors, Duration).\n\n**Distributed Traces** follow a single request across multiple services. Each service adds a **span** — a timed unit of work — with a shared **trace ID**. Spans form a tree: the root span is the API gateway, child spans are the downstream service calls. OpenTelemetry (OTel) is the vendor-neutral standard for instrumenting code to emit traces, metrics, and logs. Tools: Jaeger, Zipkin, Tempo, Datadog APM.\n\n**SLI** (Service Level Indicator) is the metric you measure: request success rate, p99 latency, availability percentage. **SLO** (Service Level Objective) is the target for that metric: '99.9% of requests succeed', 'p99 latency < 300ms'. SLOs are the internal engineering contract. **SLA** (Service Level Agreement) is the external, legally binding commitment to customers — always weaker than your internal SLO to give yourself a buffer. **Error budgets** — the allowed failures within the SLO window — are the key tool: if you have a 99.9% availability SLO over 30 days, your error budget is 43.2 minutes of downtime. Burn it and you freeze new deployments until it refills.\n\n**Alerting** should fire on **symptoms, not causes**: alert when p99 latency > 500ms (user-visible), not when CPU > 80% (might be fine). Alert fatigue — too many noisy alerts — is as dangerous as no alerts: engineers stop responding. Use **multi-window, multi-burn-rate alerts** from Google's SRE book to fire fast on severe burns and slow on gradual ones."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C as Client\n  participant GW as API Gateway\n  participant OS as Order Service\n  participant DB as Database\n  Note over C,DB: trace_id=abc123 propagated in headers\n  C->>GW: POST /orders [trace_id=abc123]\n  GW->>OS: forward [span: gateway=12ms]\n  OS->>DB: INSERT order [span: db-write=45ms]\n  DB-->>OS: ok\n  OS-->>GW: 201 [span: order-svc=58ms]\n  GW-->>C: 201 [total=72ms]",
+      "caption": "Each hop adds a span to the trace. The waterfall shows gateway overhead (12ms), order service logic (58ms total), and database write (45ms inside order service) — pinpointing the bottleneck."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Structured logging + manual span timing (Node.js)\nimport { randomUUID } from 'crypto';\n\n// Structured logger — always include traceId for correlation\nfunction log(level, event, fields = {}) {\n  const entry = {\n    timestamp: new Date().toISOString(),\n    level,\n    event,\n    ...fields,\n  };\n  process.stdout.write(JSON.stringify(entry) + '\\n');\n}\n\n// Simple manual span — real code uses OpenTelemetry SDK\nasync function withSpan(spanName, traceId, fn) {\n  const start = Date.now();\n  log('DEBUG', 'span.start', { spanName, traceId });\n  try {\n    const result = await fn();\n    log('INFO', 'span.end', { spanName, traceId, durationMs: Date.now() - start, ok: true });\n    return result;\n  } catch (err) {\n    log('ERROR', 'span.error', { spanName, traceId, durationMs: Date.now() - start, error: err.message });\n    throw err;\n  }\n}\n\n// Usage in an HTTP handler\nasync function createOrderHandler(req, res) {\n  const traceId = req.headers['x-trace-id'] ?? randomUUID();\n  res.setHeader('x-trace-id', traceId); // echo back for client debugging\n\n  try {\n    const order = await withSpan('createOrder', traceId, () =>\n      orderService.create(req.body)\n    );\n    log('INFO', 'order.created', { traceId, orderId: order.id, userId: req.user.id });\n    res.status(201).json(order);\n  } catch (err) {\n    log('ERROR', 'order.failed', { traceId, error: err.message });\n    res.status(500).json({ error: 'Order creation failed' });\n  }\n}",
+      "explanation": "Every log line includes a `traceId` — you can run `grep 'abc123' logs.json` and see the complete story of one request across all log lines. The `withSpan` wrapper captures start/end timing and logs errors at the right level. In production, replace the manual span with the OpenTelemetry Node.js SDK which auto-instruments Express, database clients, and HTTP calls."
+    },
+    {
+      "type": "code_concept",
+      "language": "yaml",
+      "label": "Concept",
+      "code": "# Prometheus alerting rule — alert on symptoms, not causes\ngroups:\n  - name: api_slo_alerts\n    rules:\n\n      # Fast burn: >14x error budget consumed in 1h window → page immediately\n      - alert: HighErrorRateFastBurn\n        expr: |\n          rate(http_requests_total{status=~\"5..\"}[1h])\n          /\n          rate(http_requests_total[1h]) > 0.014\n        for: 2m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Error rate {{ $value | humanizePercentage }} — burning budget fast\"\n\n      # Slow burn: elevated p99 latency sustained for 30m → ticket, not page\n      - alert: HighP99Latency\n        expr: |\n          histogram_quantile(0.99,\n            rate(http_request_duration_seconds_bucket[5m])\n          ) > 0.5\n        for: 30m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"p99 latency {{ $value }}s exceeds 500ms SLO\""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "Start with the RED method before instrumenting everything: **Rate** (requests/sec), **Errors** (error rate), **Duration** (latency percentiles). These three metrics answer 80% of incident questions. Add resource metrics (CPU, memory, DB connections) second. Traces third. In that order — observability debt compounds just like technical debt."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Logs** capture discrete events — use structured JSON with a correlation/trace ID on every line so you can reconstruct a request's story across services.",
+        "**Metrics** are numeric time-series — track Rate, Errors, and Duration (RED method) at minimum; use histograms for latency to compute p95/p99 percentiles.",
+        "**Distributed traces** link spans across services with a shared trace ID, revealing exactly which hop consumed the most latency in a distributed request.",
+        "**SLIs** measure what matters to users; **SLOs** set targets; **error budgets** quantify how much failure is acceptable and gate risky deployments.",
+        "**Alert on symptoms** (user-visible degradation like high error rate or high latency), not causes (CPU or memory), to minimize alert fatigue."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the key difference between an SLI and an SLO?",
+      "type": "mcq",
+      "options": [
+        "SLI is a legal contract with customers; SLO is an internal engineering goal",
+        "SLI is the metric measured (e.g. success rate); SLO is the target for that metric (e.g. 99.9%)",
+        "SLI applies to latency only; SLO applies to availability only",
+        "SLI is set by the product team; SLO is set by the legal team"
+      ],
+      "correct": 1,
+      "explanation": "An SLI (Service Level Indicator) is the specific metric you track — e.g. the percentage of requests that return 2xx. The SLO (Service Level Objective) is the target you commit to — e.g. 'the SLI must be >= 99.9% over a 30-day window'. The SLA is the external customer-facing agreement, usually weaker than the SLO."
+    },
+    {
+      "id": "q2",
+      "question": "Why is structured (JSON) logging preferred over plain-text logging in production systems?",
+      "type": "mcq",
+      "options": [
+        "JSON logs are smaller and compress better than plain text",
+        "JSON logs can be filtered, aggregated, and alerted on specific fields by log tooling without regex parsing",
+        "Plain-text logs cannot include timestamps",
+        "JSON logs are required by the OpenTelemetry specification"
+      ],
+      "correct": 1,
+      "explanation": "Structured logs expose named fields (userId, durationMs, error) that log platforms can index and query directly. Plain-text logs require brittle regex patterns to extract values, which break whenever the log message format changes."
+    },
+    {
+      "id": "q3",
+      "question": "In Prometheus, which metric type is best for measuring HTTP request latency distribution?",
+      "type": "mcq",
+      "options": [
+        "Counter — because latency monotonically increases",
+        "Gauge — because latency can go up or down",
+        "Histogram — because it buckets observations to compute percentiles like p95 and p99",
+        "Summary — because it pre-computes percentiles client-side with no storage overhead"
+      ],
+      "correct": 2,
+      "explanation": "Histograms bucket observations at scrape time (e.g. requests that took <100ms, <200ms, <500ms). Prometheus can then compute quantiles server-side across multiple instances. Summaries compute percentiles on the client, making aggregation across instances incorrect."
+    },
+    {
+      "id": "q4",
+      "question": "What is the purpose of a trace ID (correlation ID) included in every log line?",
+      "type": "mcq",
+      "options": [
+        "It encrypts the log entry to prevent unauthorized access",
+        "It links all log lines from a single request across multiple services, enabling end-to-end reconstruction",
+        "It uniquely identifies the server that processed the request",
+        "It is required by GDPR for audit logging"
+      ],
+      "correct": 1,
+      "explanation": "A trace ID is generated at the entry point (API gateway or client) and propagated in headers through every downstream service. Every log line includes it, so you can grep or query by trace ID to see the complete chronological story of one request across all services."
+    },
+    {
+      "id": "q5",
+      "question": "An error budget of 43.2 minutes per month comes from which SLO?",
+      "type": "mcq",
+      "options": [
+        "99% availability — allows 7.2 hours of downtime per month",
+        "99.9% availability — allows 43.2 minutes of downtime per month",
+        "99.99% availability — allows 4.32 minutes of downtime per month",
+        "99.5% availability — allows 3.6 hours of downtime per month"
+      ],
+      "correct": 1,
+      "explanation": "99.9% availability means 0.1% downtime allowed. 0.001 × 30 days × 24 hours × 60 minutes = 43.2 minutes per month. 99.99% gives 4.32 minutes; 99% gives 7.2 hours. These numbers are important for SLO conversations."
+    },
+    {
+      "id": "q6",
+      "question": "Why should alerts fire on symptoms rather than causes?",
+      "type": "mcq",
+      "options": [
+        "Symptoms are easier to measure than causes",
+        "Cause-based alerts like high CPU often fire without user impact, causing alert fatigue and desensitization",
+        "Symptom-based alerts resolve faster because they point to a specific fix",
+        "Prometheus only supports symptom-based alerting"
+      ],
+      "correct": 1,
+      "explanation": "High CPU (a cause) might not affect users if requests are still fast. Alerting on it creates noise. Alerting on high p99 latency or elevated error rate (symptoms) ensures every page has real user impact, keeping alerts actionable and engineers responsive."
+    },
+    {
+      "id": "q7",
+      "question": "In a distributed trace, what is a 'span'?",
+      "type": "mcq",
+      "options": [
+        "The total duration of a request from client to response",
+        "A single timed unit of work within one service, linked to a parent span via a shared trace ID",
+        "The network latency between two services",
+        "A log entry emitted when a service starts processing a request"
+      ],
+      "correct": 1,
+      "explanation": "A span represents one unit of work — e.g. a database query, an HTTP call to a downstream service, or a function execution — with a start time and duration. Spans form a tree under a root span, all sharing the same trace ID, creating the request's call graph."
+    },
+    {
+      "id": "q8",
+      "question": "The RED method stands for Rate, Errors, and Duration. Which metric is Duration best measured as?",
+      "type": "mcq",
+      "options": [
+        "The mean (average) request latency",
+        "The maximum request latency in the last minute",
+        "Latency percentiles (p50, p95, p99) from a histogram",
+        "Total processing time divided by number of requests"
+      ],
+      "correct": 2,
+      "explanation": "Mean latency is misleading — 99 fast requests and one 10-second outlier give a 'fine' average. p95 and p99 percentiles reveal the tail latency that a subset of real users experience. Histograms make p95/p99 computable across multiple instances in Prometheus."
+    },
+    {
+      "id": "q9",
+      "question": "OpenTelemetry (OTel) solves which operational problem?",
+      "type": "mcq",
+      "options": [
+        "It replaces Prometheus and Grafana with a single unified monitoring tool",
+        "It provides a vendor-neutral instrumentation API so you can switch backends without changing application code",
+        "It automatically detects and fixes performance bottlenecks",
+        "It encrypts all telemetry data in transit"
+      ],
+      "correct": 1,
+      "explanation": "Before OTel, instrumenting for Datadog meant using Datadog's SDK; switching to Jaeger required rewriting instrumentation. OTel defines a standard API — you instrument once and route telemetry to any backend (Datadog, Grafana, Jaeger, Honeycomb) by changing configuration, not code."
+    },
+    {
+      "id": "q10",
+      "question": "When an error budget is exhausted before the end of the SLO window, what is the standard SRE response?",
+      "type": "mcq",
+      "options": [
+        "Roll back all changes made in the current window",
+        "Freeze new feature deployments and focus engineering effort on reliability improvements",
+        "Increase the SLO target to give more budget",
+        "Page the on-call engineer every hour until the budget refills"
+      ],
+      "correct": 1,
+      "explanation": "An exhausted error budget is a signal that the system is too unreliable to absorb more change risk. The standard response is a feature freeze — no new deployments that could worsen reliability — until the budget refills at the start of the next window, while the team addresses the root causes."
+    }
+  ]
+}

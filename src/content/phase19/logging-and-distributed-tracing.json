@@ -1,0 +1,195 @@
+{
+  "id": "phase19_logging-and-distributed-tracing",
+  "title": "Logging & Distributed Tracing",
+  "phase": 19,
+  "week": 58,
+  "icon": "gear",
+  "tagline": "Structured logs, log levels, correlation IDs, distributed tracing spans, and OpenTelemetry — following a request across every service it touches.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "In a monolith, debugging is hard enough — you add a log line and grep the output. In a **distributed system** (microservices, serverless functions, message queues), a single user action might touch a dozen services, each running on a different host, in a different language, writing to a different log file. Finding the root cause of a slow request or an error means stitching together fragments from all those services — without a strategy, this is nearly impossible.\n\n**Structured logging** replaces free-text log lines with machine-readable JSON, making logs searchable and aggregatable. **Correlation IDs** link all log lines from a single user request across every service. **Distributed tracing** goes further: it records the exact timing of every network hop and function call, producing a flame-graph-like trace that shows where time was spent. **OpenTelemetry** is the open standard that unifies all three signals — logs, metrics, and traces — into a vendor-neutral instrumentation layer."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant C as \"Client\"\n    participant A as \"API Gateway\"\n    participant O as \"Order Service\"\n    participant P as \"Payment Service\"\n    participant D as \"Database\"\n    C->>A: \"POST /checkout\\n(trace-id: abc123)\"\n    A->>O: \"createOrder\\n(trace-id: abc123, span: 1)\"\n    O->>P: \"chargeCard\\n(trace-id: abc123, span: 2)\"\n    P->>D: \"INSERT payment\\n(trace-id: abc123, span: 3)\"\n    D-->>P: \"OK\"\n    P-->>O: \"charged\"\n    O-->>A: \"order created\"\n    A-->>C: \"201 Created\"",
+      "caption": "A single trace-id (abc123) flows through every service call, linking all spans into one unified trace for the checkout request."
+    },
+    {
+      "type": "analogy",
+      "title": "The Package Tracking Number",
+      "content": "When you order a parcel online, it gets a **tracking number** the moment it is picked up. Every handler along the route — warehouse, sorting facility, delivery van — scans that number and records a timestamped event: 'received at facility at 09:14', 'dispatched at 09:47', 'out for delivery at 11:22'. If the parcel is late, you look up the tracking number and immediately see which step added unexpected delay.\n\n**The tracking number is the correlation ID** (or trace ID). Each stop is a **span** — a unit of work with a start time, end time, and parent. The chain of scans is the **trace**: a complete picture of the parcel's journey. **Structured logs** are those machine-readable scan events (timestamp, facility, status, parcel ID) — not a human writing 'parcel received somewhere, mid-morning'. **OpenTelemetry** is the standardised scanner hardware and data format: every facility uses the same schema, so the tracking portal can display a unified timeline regardless of which carrier handled each leg."
+    },
+    {
+      "type": "explanation",
+      "content": "**Structured Logging** means emitting log records as JSON objects rather than unstructured strings. Instead of `console.log('User 42 purchased item 7 for $29.99')`, you emit `{\"level\":\"info\",\"timestamp\":\"2024-03-15T14:22:01Z\",\"userId\":42,\"itemId\":7,\"amount\":29.99,\"event\":\"purchase\"}`. The structured form is indexable: you can filter by `userId=42`, aggregate `amount` across all purchases in an hour, and join with trace records.\n\n**Log Levels** create a severity hierarchy that lets you filter signal from noise:\n- `DEBUG`: verbose developer detail, disabled in production.\n- `INFO`: normal operational events (request received, user logged in).\n- `WARN`: unexpected but recoverable situations (retried a failed DB call).\n- `ERROR`: a request failed but the service is still running.\n- `FATAL`/`CRITICAL`: the service cannot continue — imminent crash.\n\n**Correlation IDs** (also called request IDs) are UUIDs generated at the system's entry point (API gateway or the first service) and attached to every log line and outbound request header throughout the call chain. Any log aggregator (Elasticsearch, Loki, CloudWatch Logs) can then retrieve all log lines for a single user request across all services by filtering on the correlation ID.\n\n**Distributed Tracing** adds timing. A **trace** is the complete journey of a request; a **span** is one unit of work within that trace (an HTTP call, a DB query, a cache lookup). Spans have a parent-child relationship — child spans are nested within parent spans. The result is a Gantt-chart-style **flame graph** showing exactly where latency was spent.\n\n**OpenTelemetry (OTel)** is a CNCF open standard that provides vendor-neutral APIs, SDKs, and a collector daemon for all three observability signals: metrics, logs, and traces. Instrument your application once with the OTel SDK; export to any backend (Jaeger, Tempo, Datadog, Honeycomb) by changing a config line, not code."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Trace: checkout\\ntrace-id: abc123\"]\n    A --> B[\"Span 1: API Gateway\\n0ms - 250ms\"]\n    B --> C[\"Span 2: Order Service\\n10ms - 220ms\"]\n    C --> D[\"Span 3: Payment Service\\n20ms - 180ms\"]\n    D --> E[\"Span 4: DB INSERT\\n80ms - 160ms\"]\n    C --> F[\"Span 5: Inventory check\\n15ms - 60ms\"]\n    E --> G[\"Total: 250ms\\nDB INSERT is the bottleneck\"]",
+      "caption": "A trace flame graph: nested spans reveal that the DB INSERT (80ms start, 80ms duration) is the dominant source of latency."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── 1. Structured logging with pino ─────────────────────────────\nimport pino from 'pino';\nimport { randomUUID } from 'crypto';\nimport express from 'express';\n\nconst logger = pino({\n  level: process.env.LOG_LEVEL ?? 'info',\n  // In development, use pino-pretty for human-readable output.\n  // In production, emit raw JSON for log aggregators.\n});\n\nconst app = express();\n\n// 2. Correlation ID middleware — generate or propagate\napp.use((req, res, next) => {\n  // Accept an incoming correlation ID from upstream services\n  // or generate a new one at the entry point.\n  const correlationId = req.headers['x-correlation-id'] ?? randomUUID();\n  res.setHeader('x-correlation-id', correlationId);\n\n  // Bind the correlation ID to every log line in this request\n  req.log = logger.child({ correlationId, path: req.path, method: req.method });\n  next();\n});\n\n// 3. Request logging — structured, not a string\napp.use((req, res, next) => {\n  const start = Date.now();\n  req.log.info({ event: 'request.start' });\n\n  res.on('finish', () => {\n    const durationMs = Date.now() - start;\n    const level = res.statusCode >= 500 ? 'error'\n                : res.statusCode >= 400 ? 'warn' : 'info';\n    req.log[level]({\n      event: 'request.end',\n      statusCode: res.statusCode,\n      durationMs,\n    });\n  });\n  next();\n});\n\n// 4. OpenTelemetry tracing (abridged setup)\n// In a real app, configure this in a separate otel.js loaded before all imports:\n// import { NodeSDK } from '@opentelemetry/sdk-node';\n// import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';\n// const sdk = new NodeSDK({ traceExporter: new OTLPTraceExporter() });\n// sdk.start();\n\nimport { trace, SpanStatusCode } from '@opentelemetry/api';\nconst tracer = trace.getTracer('order-service', '1.0.0');\n\nasync function createOrder(userId, items) {\n  // Creates a span — auto-linked to the active parent span from HTTP context\n  return tracer.startActiveSpan('createOrder', async (span) => {\n    try {\n      span.setAttributes({ 'user.id': userId, 'order.item_count': items.length });\n\n      const payment = await chargeCard(userId, calculateTotal(items));\n      span.addEvent('payment.completed', { paymentId: payment.id });\n\n      span.setStatus({ code: SpanStatusCode.OK });\n      return { orderId: randomUUID(), paymentId: payment.id };\n    } catch (err) {\n      span.recordException(err);\n      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });\n      throw err;\n    } finally {\n      span.end();\n    }\n  });\n}\n\nconsole.log('Order service running with structured logs + OTel tracing');",
+      "explanation": "The correlation ID middleware creates a `child` logger bound to the current request's ID. Every subsequent `req.log.*` call automatically includes `correlationId` in the JSON — no manual threading of the ID through function parameters. The OTel `startActiveSpan` creates a span that is automatically a child of any active span propagated via HTTP headers (`traceparent`), so the trace tree assembles itself without explicit parent references in application code."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── Log levels — when to use which ─────────────────────────────\n// logger.debug({ queryParams }, 'SQL query built');   // Dev only\n// logger.info({ userId, event: 'login' });            // Normal flow\n// logger.warn({ retries: 3, service: 'payments' },   // Recoverable\n//             'Payment retry attempt');\n// logger.error({ err, orderId }, 'Order failed');     // Request failed\n// logger.fatal({ err }, 'Database unreachable');       // Service crashing\n\n// ── Correlation ID propagation to downstream services ───────────\n// When making an outbound HTTP call, forward the correlation ID:\n// await fetch('http://payment-service/charge', {\n//   headers: {\n//     'x-correlation-id': req.headers['x-correlation-id'],\n//     'traceparent': req.headers['traceparent'], // OTel W3C trace context\n//   },\n//   body: JSON.stringify({ userId, amount }),\n// });\n\n// ── Key OTel concepts ───────────────────────────────────────────\n// Trace    — the complete request journey across services\n// Span     — one unit of work (HTTP call, DB query, function)\n// Context  — carries trace/span IDs across async boundaries\n// Exporter — sends spans to a backend (Jaeger, Tempo, Datadog)\n// Collector— OTel daemon that receives, processes, and routes telemetry\n\n// ── Log aggregation stack (common choice) ───────────────────────\n// Logs:   pino → Loki → Grafana\n// Traces: OTel SDK → OTel Collector → Tempo → Grafana\n// All correlated via trace-id in both log records and spans\n\nconsole.log('When trace-id appears in both a log and a span,');\nconsole.log('Grafana can jump from a log line directly to its trace.');"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Never log sensitive data.** Structured logging makes it trivially easy to include entire request or response objects in a log record — but those objects may contain passwords, credit card numbers, or auth tokens. Explicitly allowlist the fields you log rather than spreading entire objects. Also: keep log verbosity environment-aware (`DEBUG` in development, `INFO` in production, `WARN` or higher in high-throughput hot paths) to avoid drowning your log aggregator — and your on-call engineer — in noise."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Structured logging** emits JSON records rather than free-text strings, making logs searchable, filterable, and aggregatable across services.",
+        "**Log levels** (DEBUG < INFO < WARN < ERROR < FATAL) let you filter signal from noise — only emit DEBUG in development and adjust production levels to match throughput requirements.",
+        "**Correlation IDs** are UUIDs generated at the system entry point and forwarded in every outbound request header, linking all log lines for a single user action across every service.",
+        "**Distributed tracing** records nested spans with precise timings, producing a flame graph that shows exactly where latency was spent across service boundaries.",
+        "**OpenTelemetry** provides a vendor-neutral SDK for logs, metrics, and traces — instrument once, export to any backend (Jaeger, Datadog, Honeycomb) by changing configuration."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is the primary advantage of structured (JSON) logging over plain-text logging?",
+      "type": "mcq",
+      "options": [
+        "JSON log files are smaller because JSON compresses better than plain text.",
+        "Structured logs are machine-readable, enabling filtering, indexing, and aggregation by specific fields such as userId or statusCode.",
+        "JSON logging is faster to write because the logger does not format strings.",
+        "Structured logs automatically redact sensitive fields before storage."
+      ],
+      "correct": 1,
+      "explanation": "Plain-text logs require fragile regex to extract fields. JSON logs are natively parsed by log aggregators (Elasticsearch, Loki), allowing precise queries like `statusCode >= 500 AND userId = 42` across billions of records."
+    },
+    {
+      "id": "q2",
+      "question": "Where should a correlation ID be generated in a multi-service system?",
+      "type": "mcq",
+      "options": [
+        "In the database layer, when a transaction is opened.",
+        "Independently in each service, so each service has its own ID.",
+        "At the system's entry point (API gateway or edge service), then propagated via HTTP headers to all downstream services.",
+        "In the frontend browser, appended as a URL query parameter."
+      ],
+      "correct": 2,
+      "explanation": "The correlation ID must be the same for all services handling a single user request. Generating it at the entry point and forwarding it in a standard header (e.g. `x-correlation-id`) ensures all log lines across all services share the same ID and can be correlated."
+    },
+    {
+      "id": "q3",
+      "question": "In distributed tracing, what is the relationship between a trace and a span?",
+      "type": "mcq",
+      "options": [
+        "A span contains multiple traces for a single service.",
+        "A trace is the complete journey of a request; a span is one unit of work within that trace, with parent-child nesting.",
+        "A trace and a span are interchangeable terms for the same concept.",
+        "A span is a collection of traces grouped by time window."
+      ],
+      "correct": 1,
+      "explanation": "A trace has one root span (the entry point request) and zero or more child spans for each downstream call (DB query, service-to-service HTTP call, cache lookup). The nested structure forms a tree that represents the entire call graph with precise timings."
+    },
+    {
+      "id": "q4",
+      "question": "A request spans three services: API Gateway (10ms), Order Service (200ms), Payment Service (150ms). The Order Service span has two children: a Payment Service call (150ms) and an inventory check (40ms). Which span is the performance bottleneck?",
+      "type": "mcq",
+      "options": [
+        "API Gateway — it is the first service and adds to all downstream latency.",
+        "Payment Service — it takes 150ms, the largest single child span duration.",
+        "Order Service — its total span duration is 200ms.",
+        "Inventory check — it runs in parallel with the payment and adds hidden latency."
+      ],
+      "correct": 1,
+      "explanation": "The Payment Service child span (150ms) is the largest single unit of work within the Order Service span (200ms). Optimising the Payment Service call (caching, connection pooling, async pre-charging) would have the greatest impact on overall request latency."
+    },
+    {
+      "id": "q5",
+      "question": "What is the W3C `traceparent` header used for?",
+      "type": "mcq",
+      "options": [
+        "It carries authentication tokens between microservices.",
+        "It propagates the current trace ID and span ID across HTTP boundaries so the receiving service can continue the same trace.",
+        "It is a deprecated Zipkin header replaced by OpenTelemetry.",
+        "It tells the receiving service which log level to use."
+      ],
+      "correct": 1,
+      "explanation": "`traceparent` is the W3C Trace Context standard header format: `00-{traceId}-{parentSpanId}-{flags}`. When a service receives this header, the OTel SDK automatically creates the new span as a child of the referenced parent, assembling the distributed trace tree."
+    },
+    {
+      "id": "q6",
+      "question": "Which log level is appropriate for a database connection retry that succeeds on the second attempt?",
+      "type": "mcq",
+      "options": [
+        "DEBUG — it is internal implementation detail.",
+        "INFO — it is a normal operational event.",
+        "WARN — it is unexpected but recoverable; the request ultimately succeeds.",
+        "ERROR — any database failure is a critical error."
+      ],
+      "correct": 2,
+      "explanation": "WARN is for unexpected situations that the system handled gracefully. A retry succeeding is recoverable — the user is not affected — but it signals instability worth monitoring. ERROR would be reserved for a failure where the request cannot be completed."
+    },
+    {
+      "id": "q7",
+      "question": "What is the main role of the OpenTelemetry Collector?",
+      "type": "mcq",
+      "options": [
+        "It generates synthetic traces to test your tracing backend.",
+        "It is a Grafana plugin that renders trace flame graphs.",
+        "It receives telemetry from applications, applies processing (sampling, redaction), and exports to one or more backends.",
+        "It replaces the application SDK — you do not need to instrument your code if you run the Collector."
+      ],
+      "correct": 2,
+      "explanation": "The OTel Collector is a vendor-agnostic proxy daemon. Applications export to the Collector (OTLP protocol); the Collector fans out to backends (Jaeger, Tempo, Datadog). This decouples application code from backend choice and allows centralised sampling and redaction rules."
+    },
+    {
+      "id": "q8",
+      "question": "Why should you avoid logging entire request or response objects?",
+      "type": "mcq",
+      "options": [
+        "Logging full objects increases trace span count in Jaeger.",
+        "Entire objects may contain sensitive data (passwords, tokens, card numbers) that would be written to your log storage and potentially exposed.",
+        "Log aggregators cannot parse nested JSON objects.",
+        "Logging full objects causes log lines to exceed 4 KB, which Loki truncates."
+      ],
+      "correct": 1,
+      "explanation": "Request and response objects routinely contain authentication headers, passwords in form submissions, PII, and payment data. Allowlisting only the fields you need (userId, statusCode, durationMs) prevents accidental exposure of sensitive data in log storage."
+    },
+    {
+      "id": "q9",
+      "question": "When Grafana shows a log line with a `traceId` field, what does this enable?",
+      "type": "mcq",
+      "options": [
+        "Automatic remediation of the error that produced the log line.",
+        "Jump-to-trace: clicking the traceId in the log opens the corresponding distributed trace in the tracing backend (e.g. Tempo) showing the full call graph for that request.",
+        "Automatic grouping of all log lines with the same message into one entry.",
+        "Forwarding the log line to the on-call engineer's PagerDuty account."
+      ],
+      "correct": 1,
+      "explanation": "When both your log records and your traces share the same `traceId`, Grafana can link them. Clicking the trace ID in a log record opens the Tempo (or Jaeger) trace view for that exact request — giving you the full context of what happened and where time was spent."
+    },
+    {
+      "id": "q10",
+      "question": "A `pino.child({ correlationId })` call creates a child logger. What is the effect?",
+      "type": "mcq",
+      "options": [
+        "It creates a new logger that writes to a separate log file for this request.",
+        "It creates a logger that inherits the parent's configuration and automatically includes `correlationId` in every log record without repeating it in each call.",
+        "It reduces the log level for this request to avoid excessive output.",
+        "It forks the current process to handle the request in isolation."
+      ],
+      "correct": 1,
+      "explanation": "A child logger in pino inherits all parent settings (level, transport) and merges the provided bindings into every record it emits. You call `req.log.info({ event: 'payment.processed' })` and the output includes `correlationId` automatically — DRY logging without threading the ID through every function signature."
+    }
+  ]
+}

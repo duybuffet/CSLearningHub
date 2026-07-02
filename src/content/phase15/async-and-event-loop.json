@@ -1,0 +1,196 @@
+{
+  "id": "phase15_async-and-event-loop",
+  "title": "Async & the Event Loop",
+  "phase": 15,
+  "week": 47,
+  "icon": "os",
+  "tagline": "How JavaScript handles thousands of operations on a single thread",
+  "readTime": "15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "JavaScript is single-threaded yet powers servers handling millions of requests and UIs that stay buttery smooth. The secret is the **event loop** — a deceptively simple runtime mechanism that makes non-blocking I/O possible without spawning threads.\n\nUnderstanding the event loop means understanding *exactly* when your code runs. It explains why `setTimeout(fn, 0)` doesn't execute immediately, why `Promise.resolve().then(fn)` runs before the next `setTimeout`, and why long synchronous loops freeze your UI. The execution model progresses from raw **callbacks** → **Promises** → **async/await**, each layer adding abstraction without changing the underlying event loop machinery."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C as \"Call Stack\"\n  participant WA as \"Web APIs / libuv\"\n  participant MQ as \"Microtask Queue\"\n  participant MaQ as \"Macrotask Queue\"\n  participant EL as \"Event Loop\"\n  C->>WA: \"setTimeout(cb, 100)\"\n  C->>WA: \"fetch(url).then(handler)\"\n  Note over C: \"Stack empty\"\n  WA-->>MaQ: \"Timer fires → cb\"\n  WA-->>MQ: \"fetch resolves → handler\"\n  EL->>MQ: \"Drain ALL microtasks first\"\n  MQ-->>C: \"handler() runs\"\n  EL->>MaQ: \"Take ONE macrotask\"\n  MaQ-->>C: \"cb() runs\"",
+      "caption": "The event loop drains the entire microtask queue before picking the next macrotask — Promise handlers always run before setTimeout callbacks."
+    },
+    {
+      "type": "analogy",
+      "title": "The Airport Gate Agent Analogy",
+      "content": "Picture a single **gate agent** (the call stack) at an airport. Passengers (tasks) must be processed one at a time — no two passengers at the counter simultaneously.\n\nWhen a passenger needs a boarding pass printed (I/O), the agent hands the request to the **printer room** (Web APIs / libuv) and takes the *next* passenger from the queue instead of standing idle. When the printer finishes, it puts a slip in the **urgent in-tray** (microtask queue) or the **regular queue** (macrotask queue).\n\nThe agent's rule: after each passenger, *empty the urgent in-tray completely* before touching the regular queue. This is why Promise callbacks (microtasks) always beat `setTimeout` callbacks (macrotasks) — the in-tray is always processed first, no matter how many slips pile up."
+    },
+    {
+      "type": "explanation",
+      "title": "Microtasks, Macrotasks, and the Execution Order",
+      "content": "The event loop processes tasks in a strict order every **tick**:\n\n1. **Execute the current synchronous code** on the call stack until empty.\n2. **Drain the microtask queue completely** — every `Promise.then`, `queueMicrotask`, and `MutationObserver` callback, including any new microtasks enqueued during this phase.\n3. **Execute one macrotask** from the macrotask queue — `setTimeout`, `setInterval`, `setImmediate` (Node.js), I/O callbacks.\n4. **Drain microtasks again** (from step 2).\n5. Repeat from step 3.\n\n**Microtasks**: `Promise.then/catch/finally`, `queueMicrotask()`, `async/await` resumptions. They are processed before the browser/runtime has a chance to render or run other I/O callbacks.\n\n**Macrotasks**: `setTimeout`, `setInterval`, `setImmediate`, I/O completion callbacks, UI events. Only one runs per loop iteration.\n\nThis ordering has real consequences: if you enqueue microtasks in a loop, you can **starve macrotasks** — including browser rendering. A recursive `Promise.resolve().then(...)` chain will block the UI just as surely as a synchronous `while(true)` loop.\n\n**async/await** is syntactic sugar over Promises. `await expr` suspends the async function, returns control to the caller, and schedules the continuation as a microtask when `expr` resolves. No new threads are created — it is purely cooperative scheduling on the event loop."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  S[\"Synchronous Code\"] --> CS[\"Call Stack Empties\"]\n  CS --> MT[\"Microtask Queue?\"]\n  MT -->|\"yes\"| RMT[\"Run ALL Microtasks\"]\n  RMT --> MT\n  MT -->|\"empty\"| MAC[\"Macrotask Queue?\"]\n  MAC -->|\"yes\"| RMAC[\"Run ONE Macrotask\"]\n  RMAC --> CS\n  MAC -->|\"empty\"| WAIT[\"Wait for Events\"]",
+      "caption": "Each event loop tick: sync code → drain all microtasks → one macrotask → repeat. Microtasks always run before the next macrotask."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Demonstrates execution order: sync → microtasks → macrotasks\n\nconsole.log('1: sync start');\n\nsetTimeout(() => console.log('6: macrotask (setTimeout 0)'), 0);\n\nPromise.resolve()\n  .then(() => {\n    console.log('3: microtask (Promise.then #1)');\n    // Enqueuing another microtask inside a microtask:\n    Promise.resolve().then(() => console.log('4: microtask (nested .then)'));\n  })\n  .then(() => console.log('5: microtask (Promise.then #2)'));\n\nqueueMicrotask(() => console.log('2.5: microtask (queueMicrotask)'));\n\nconsole.log('2: sync end');\n\n// Output order:\n// 1: sync start\n// 2: sync end\n// 2.5: microtask (queueMicrotask)\n// 3: microtask (Promise.then #1)\n// 4: microtask (nested .then)          ← drained before macrotask\n// 5: microtask (Promise.then #2)\n// 6: macrotask (setTimeout 0)          ← only after ALL microtasks done\n\n// ---- async/await desugared ----\nasync function fetchData(url) {\n  // 'await' suspends here; event loop can run other microtasks\n  const response = await fetch(url);    // fetch is a Web API (async)\n  const data = await response.json();  // another suspension point\n  return data;                          // resumes as microtask when done\n}\n\n// Equivalent Promise chain:\nfunction fetchDataPromise(url) {\n  return fetch(url)\n    .then(response => response.json())\n    .then(data => data);\n}",
+      "explanation": "The execution order confirms the rule: synchronous code runs first, then all microtasks (including ones enqueued during microtask execution), and only then the macrotask. `async/await` is shown as equivalent to chained `.then()` — identical event loop behavior, cleaner syntax."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Non-blocking I/O pattern: never block the event loop\n\n// BAD: Synchronous file read blocks the entire event loop\n// const data = fs.readFileSync('large-file.csv'); // freezes everything\n\n// GOOD: Async with callback (old style)\nconst fs = require('fs');\nfs.readFile('file.txt', 'utf8', (err, data) => {\n  if (err) throw err;\n  // runs as a macrotask callback when OS signals I/O complete\n  console.log('callback:', data.length, 'bytes');\n});\n\n// BETTER: Async with Promise\nfs.promises.readFile('file.txt', 'utf8')\n  .then(data => console.log('promise:', data.length, 'bytes'))\n  .catch(err => console.error(err));\n\n// BEST: Async/await (same event loop behavior, linear readability)\nasync function processFile() {\n  try {\n    const data = await fs.promises.readFile('file.txt', 'utf8');\n    console.log('async/await:', data.length, 'bytes');\n  } catch (err) {\n    console.error('Error reading file:', err.message);\n  }\n}\n\n// Key insight: all three are equivalent in event loop terms.\n// async/await is NOT faster — it is equally non-blocking, just easier to read."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Watch for microtask starvation:** if you create Promises in a tight loop that resolve immediately (e.g., `while(true) await Promise.resolve()`), you drain the microtask queue forever and the browser never renders a frame. For long-running iterative work, yield back to the macrotask queue with `await new Promise(r => setTimeout(r, 0))` periodically to let the runtime breathe."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "The **event loop** enables non-blocking I/O on a single thread: while the call stack is empty, it picks the next ready task from its queues.",
+        "**Microtasks** (`Promise.then`, `queueMicrotask`, `async/await` resumptions) run before **macrotasks** (`setTimeout`, I/O callbacks) — the entire microtask queue is drained before the next macrotask starts.",
+        "**async/await** is syntactic sugar over Promises; it does not create new threads and has identical event loop semantics to chained `.then()` calls.",
+        "Blocking the call stack with synchronous CPU work (large loops, `readFileSync`) starves the event loop and freezes I/O, UI rendering, and all other tasks.",
+        "**libuv** (Node.js) and browser Web APIs handle actual I/O asynchronously in native threads, posting completion callbacks back to the JS event loop — JS itself never blocks."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "In what order does the event loop process the following: a `setTimeout(fn, 0)` callback (A) and a `Promise.resolve().then(fn)` callback (B) queued at the same time?",
+      "type": "mcq",
+      "options": [
+        "A then B — setTimeout was registered first",
+        "B then A — microtasks run before macrotasks",
+        "Simultaneously — the event loop runs them in parallel",
+        "A then B — setTimeout has higher priority"
+      ],
+      "correct": 1,
+      "explanation": "Promise.then callbacks are microtasks; setTimeout callbacks are macrotasks. The event loop drains ALL microtasks before executing any macrotask, so B always runs before A regardless of registration order."
+    },
+    {
+      "id": "q2",
+      "question": "Which of the following is a microtask source?",
+      "type": "mcq",
+      "options": [
+        "setTimeout",
+        "setInterval",
+        "Promise.then",
+        "setImmediate"
+      ],
+      "correct": 2,
+      "explanation": "`Promise.then/catch/finally` callbacks are microtasks. `setTimeout`, `setInterval`, and `setImmediate` (Node.js) all schedule macrotasks."
+    },
+    {
+      "id": "q3",
+      "question": "What does `await somePromise` do to the currently executing async function?",
+      "type": "mcq",
+      "options": [
+        "Creates a new OS thread to wait for the Promise",
+        "Blocks the entire JavaScript engine until the Promise resolves",
+        "Suspends the function and returns control to the event loop; the function resumes as a microtask when resolved",
+        "Converts the Promise to a synchronous value immediately"
+      ],
+      "correct": 2,
+      "explanation": "`await` suspends only the enclosing async function, not the entire engine. The event loop continues processing other tasks. When the awaited Promise resolves, the continuation is scheduled as a microtask."
+    },
+    {
+      "id": "q4",
+      "question": "Why does `fs.readFileSync('large.csv')` harm a Node.js HTTP server?",
+      "type": "mcq",
+      "options": [
+        "It causes a memory leak",
+        "It blocks the event loop, preventing all other requests from being handled during the read",
+        "Node.js does not support synchronous file reads",
+        "It creates too many OS threads"
+      ],
+      "correct": 1,
+      "explanation": "Synchronous I/O occupies the call stack for the entire duration. Since Node.js has one event loop thread, no other requests, timers, or callbacks can run until `readFileSync` returns."
+    },
+    {
+      "id": "q5",
+      "question": "What is the output of: `console.log('A'); setTimeout(() => console.log('B'), 0); Promise.resolve().then(() => console.log('C')); console.log('D');`",
+      "type": "mcq",
+      "options": [
+        "A D C B",
+        "A B C D",
+        "A D B C",
+        "A C D B"
+      ],
+      "correct": 0,
+      "explanation": "Synchronous code runs first: A, then D. Then microtasks: C (Promise.then). Then macrotask: B (setTimeout 0). Result: A D C B."
+    },
+    {
+      "id": "q6",
+      "question": "libuv (used by Node.js) handles actual file I/O in:",
+      "type": "mcq",
+      "options": [
+        "The JavaScript event loop thread",
+        "The V8 garbage collector",
+        "A native thread pool, posting completion events back to the JS event loop",
+        "A separate Node.js process"
+      ],
+      "correct": 2,
+      "explanation": "libuv maintains a native thread pool (default 4 threads) for file system operations and other blocking OS calls. When complete, it posts a callback event to the JS event loop, which then runs the JS callback."
+    },
+    {
+      "id": "q7",
+      "question": "What risk does creating microtasks inside microtask handlers pose?",
+      "type": "mcq",
+      "options": [
+        "Stack overflow — microtasks use the call stack recursively",
+        "Microtask starvation — the macrotask queue and rendering are blocked indefinitely",
+        "Nothing — microtasks cannot enqueue other microtasks",
+        "Memory leaks — unreferenced Promises accumulate"
+      ],
+      "correct": 1,
+      "explanation": "The event loop drains ALL microtasks before any macrotask. If microtask handlers keep enqueuing new microtasks, the loop never reaches the macrotask queue — blocking timers, I/O callbacks, and browser rendering."
+    },
+    {
+      "id": "q8",
+      "question": "How does `async/await` relate to Promises under the hood?",
+      "type": "mcq",
+      "options": [
+        "async/await bypasses Promises and uses OS threads directly",
+        "async/await is syntactic sugar — the runtime transforms it into equivalent Promise.then chains",
+        "async/await is faster than Promises because it skips the microtask queue",
+        "async/await can only be used for network requests, not arbitrary Promises"
+      ],
+      "correct": 1,
+      "explanation": "The JS engine transforms `async/await` into Promise chains at a lower level. There is no performance difference and no new threading — `await` suspensions are scheduled as microtasks, identical to `.then()` continuations."
+    },
+    {
+      "id": "q9",
+      "question": "Which technique correctly yields control back to the event loop inside a long-running async loop to allow rendering?",
+      "type": "mcq",
+      "options": [
+        "Using synchronous `for` loop instead of `while`",
+        "Calling `clearTimeout()` periodically",
+        "`await new Promise(r => setTimeout(r, 0))` to insert a macrotask checkpoint",
+        "Using `Promise.reject()` between iterations"
+      ],
+      "correct": 2,
+      "explanation": "`await new Promise(r => setTimeout(r, 0))` suspends the async function and schedules its resumption as a macrotask (via setTimeout). This lets the event loop process UI events and renders between iterations."
+    },
+    {
+      "id": "q10",
+      "question": "In Node.js, which queue is processed AFTER all microtasks but BEFORE setTimeout callbacks?",
+      "type": "mcq",
+      "options": [
+        "The macrotask queue",
+        "The `setImmediate` check phase in the libuv event loop",
+        "There is no such queue — setTimeout runs immediately after microtasks",
+        "The promise rejection queue"
+      ],
+      "correct": 1,
+      "explanation": "Node.js's libuv event loop has phases: timers (setTimeout/setInterval), pending I/O, idle, poll, check (setImmediate), close callbacks. `setImmediate` callbacks run in the check phase, after I/O callbacks but the exact ordering vs setTimeout depends on context. Microtasks run between each phase."
+    }
+  ]
+}

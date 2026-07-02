@@ -1,0 +1,199 @@
+{
+  "id": "phase17_dom-and-rendering-pipeline",
+  "title": "DOM & Rendering Pipeline",
+  "phase": 17,
+  "week": 52,
+  "icon": "network",
+  "tagline": "How the browser turns HTML and CSS into pixels: DOM, CSSOM, render tree, layout, paint, compositing, and the true cost of reflow.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "After HTML bytes arrive, the browser must transform them into pixels on screen. This **rendering pipeline** has several distinct phases, each building on the previous one. Understanding this pipeline reveals why certain DOM operations are cheap while others cause expensive reflows, why CSS animations on `transform` and `opacity` are smooth while animating `width` or `top` causes jank, and how the GPU compositor enables 60fps scrolling even on complex pages.\n\n**Key insight**: the browser tries to do as little work as possible. Knowing which CSS properties trigger which pipeline stages lets you write high-performance code by avoiding unnecessary work in the most expensive stages."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"HTML Bytes\"] --> B[\"DOM\"]\n    C[\"CSS Bytes\"] --> D[\"CSSOM\"]\n    B --> E[\"Render Tree\"]\n    D --> E\n    E --> F[\"Layout (Reflow)\"]\n    F --> G[\"Paint (Rasterize)\"]\n    G --> H[\"Composite (GPU)\"]\n    H --> I[\"Screen Frame\"]\n    J[\"JavaScript\"] -->|\"DOM mutations\"| B\n    J -->|\"Style changes\"| D",
+      "caption": "The rendering pipeline: DOM + CSSOM → Render Tree → Layout → Paint → Composite. JavaScript can feed back into DOM/CSSOM, potentially re-triggering expensive stages."
+    },
+    {
+      "type": "analogy",
+      "title": "Rendering as a Printing Press",
+      "content": "Imagine the browser as a newspaper printing press:\n\n- **DOM** is the list of all articles and their structure (headlines, paragraphs, images).\n- **CSSOM** is the style guide: fonts, colors, column widths.\n- **Render Tree** is the final layout blueprint — only visible items, with computed styles applied.\n- **Layout** is the typesetter physically measuring every column and word to fit the page.\n- **Paint** is the ink hitting the paper — rasterizing shapes and text into pixels.\n- **Composite** is stacking multiple printed sheets (layers) in the right order.\n\nIf a reporter changes an article mid-print (**DOM mutation**), the press may need to re-typeset the entire page (**reflow**), re-ink it (**repaint**), and re-stack sheets (**re-composite**). Or, if only a photo's opacity changes, only the compositing step is needed — much cheaper."
+    },
+    {
+      "type": "explanation",
+      "content": "**DOM (Document Object Model)**: The browser parses HTML into a tree of node objects. Every element, text node, and comment is a node. The DOM is a live object model — JavaScript can read and mutate it, and mutations may trigger re-rendering. The DOM does not include display information; it is purely structure.\n\n**CSSOM (CSS Object Model)**: CSS is parsed into a parallel tree. Each node inherits styles from its parent and has computed values resolved (percentages → pixels, `em` → `px`, `inherit` → actual value). CSSOM construction is **render-blocking** — the browser will not render anything until all CSS is downloaded and parsed, because a later stylesheet could change already-parsed styles.\n\n**Render Tree**: Combines DOM and CSSOM, retaining only visible nodes. Elements with `display: none` are excluded. Each node carries its computed visual properties. Pseudo-elements (`::before`, `::after`) appear in the render tree even though they are absent from the DOM.\n\n**Layout (Reflow)**: The browser computes the exact position and size of every render tree node in the viewport coordinate system. This is **expensive** for large trees — it involves recursive descent because a child's size affects its parent. Anything that changes geometry (width, height, padding, margin, font-size, adding/removing DOM nodes) triggers a full or partial reflow.\n\n**Paint (Rasterize)**: Layout boxes are converted to actual pixels in memory — filling colors, drawing text, rendering borders, shadows, images. This happens per layer. Paint is **CPU-intensive** for complex visuals (gradients, shadows, large images).\n\n**Composite**: The compositor thread takes painted layers and assembles the final frame on the **GPU**. GPU compositing is extremely fast. Properties that can be animated on the compositor thread alone — `transform` and `opacity` — never trigger layout or paint, which is why they are the go-to for smooth animations.\n\n**Forced Synchronous Layout** (layout thrashing): reading a layout property (`offsetWidth`, `getBoundingClientRect`) after a DOM write forces the browser to flush pending layout synchronously before returning a value. Alternating reads and writes in a loop is one of the most common performance bugs in JavaScript."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"CSS Property Change\"] --> B{\"Which stage triggered?\"}\n    B -->|\"geometry (width/margin)\"| C[\"Layout → Paint → Composite\"]\n    B -->|\"visual (color/shadow)\"| D[\"Paint → Composite\"]\n    B -->|\"transform/opacity only\"| E[\"Composite only (GPU)\"]\n    C --> F[\"Most expensive\"]\n    D --> G[\"Medium cost\"]\n    E --> H[\"Cheapest — 60fps friendly\"]",
+      "caption": "Which rendering stage a CSS change triggers depends on the property. Use transform/opacity for animations to stay on the compositor thread."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── Layout thrashing: BAD pattern ────────────────────────────\nfunction badResize(elements) {\n  elements.forEach(el => {\n    // READ forces layout flush\n    const width = el.offsetWidth;         // browser must layout now!\n    // WRITE invalidates layout again\n    el.style.width = (width * 2) + 'px';  // invalidates layout\n    // Next iteration: READ again → forces another layout flush\n  });\n  // N elements = N forced synchronous layouts\n}\n\n// ── Batching reads and writes: GOOD pattern ───────────────────\nfunction goodResize(elements) {\n  // Phase 1: batch all reads\n  const widths = elements.map(el => el.offsetWidth);\n\n  // Phase 2: batch all writes\n  elements.forEach((el, i) => {\n    el.style.width = (widths[i] * 2) + 'px';\n  });\n  // Only one layout calculation needed\n}\n\n// ── Use requestAnimationFrame to sync with render frames ──────\nfunction animateWithRAF(el, targetX) {\n  let startTime = null;\n  const duration = 300;\n  const startX = el.getBoundingClientRect().left;\n\n  function step(timestamp) {\n    if (!startTime) startTime = timestamp;\n    const progress = Math.min((timestamp - startTime) / duration, 1);\n    const eased = 1 - Math.pow(1 - progress, 3); // ease-out cubic\n\n    // transform stays on compositor thread — no layout or paint\n    el.style.transform = `translateX(${(targetX - startX) * eased}px)`;\n\n    if (progress < 1) requestAnimationFrame(step);\n  }\n  requestAnimationFrame(step);\n}\n\n// ── Measuring rendering performance ──────────────────────────\nconst obs = new PerformanceObserver(list => {\n  list.getEntries().forEach(entry => {\n    if (entry.duration > 50) {\n      console.warn(`Long task: ${entry.duration.toFixed(1)}ms`, entry);\n    }\n  });\n});\nobs.observe({ type: 'longtask', buffered: true });\n\n// ── will-change hint: promotes element to its own layer ───────\n// Use sparingly — each layer consumes GPU memory\n// el.style.willChange = 'transform';\n// Remove after animation: el.style.willChange = 'auto';\n\nconsole.log('Rendering pipeline examples ready');\n",
+      "explanation": "Layout thrashing — interleaving DOM reads and writes — is a major performance killer. Batch all reads first, then all writes. `requestAnimationFrame` aligns JS execution with the browser's render loop, preventing wasted work on frames that will be discarded. Animating `transform` keeps work on the compositor thread, achieving 60fps without triggering layout or paint."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── CSS properties and which pipeline stages they trigger ─────\n//\n// LAYOUT + PAINT + COMPOSITE (most expensive):\n//   width, height, padding, margin, border, top, left, right,\n//   bottom, font-size, font-family, display, position,\n//   flex-*, grid-*, adding/removing DOM nodes\n//\n// PAINT + COMPOSITE (medium cost, no layout):\n//   color, background-color, border-color, box-shadow,\n//   outline, text-decoration, background-image,\n//   visibility (but not display)\n//\n// COMPOSITE ONLY (cheapest — runs on GPU thread):\n//   transform (translate, scale, rotate)\n//   opacity\n//   filter (on promoted layer)\n//   backdrop-filter\n\n// ── Layout-triggering DOM properties (force sync layout) ──────\nconst LAYOUT_READS = [\n  'offsetTop', 'offsetLeft', 'offsetWidth', 'offsetHeight',\n  'scrollTop', 'scrollLeft', 'scrollWidth', 'scrollHeight',\n  'clientTop', 'clientLeft', 'clientWidth', 'clientHeight',\n  'getComputedStyle()',    // reads ALL computed styles\n  'getBoundingClientRect()',\n  'getClientRects()',\n];\n// Reading any of these after a DOM write = forced synchronous layout\n\n// ── Layers and will-change ────────────────────────────────────\n// Elements get promoted to their own compositor layer when:\n//   - will-change: transform/opacity is set\n//   - transform: translateZ(0) / translate3d(0,0,0) (hack)\n//   - position: fixed/sticky\n//   - <video>, <canvas>, <iframe>\n//\n// Trade-off: each layer uses GPU memory (~texture RAM)\n// Don't promote everything — only elements being animated\n\n// ── ResizeObserver: observe layout changes without polling ────\nconst ro = new ResizeObserver(entries => {\n  for (const entry of entries) {\n    const { width, height } = entry.contentRect;\n    console.log(`Element resized: ${width}x${height}`);\n  }\n});\n// ro.observe(document.querySelector('.my-container'));\n",
+      "explanation": "Reading layout properties (`offsetWidth`, `getBoundingClientRect`, `getComputedStyle`) after a DOM mutation forces the browser to synchronously complete pending layout before returning a value — this is the root cause of layout thrashing. ResizeObserver is the correct API for responding to element size changes without polling or triggering extra layouts."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**The 60fps rule**: each frame has ~16ms budget (1000ms ÷ 60fps). Your JavaScript, layout, paint, and composite must all complete within this budget. Long tasks (>50ms) block the main thread and cause jank. Profiling tip: open Chrome DevTools → Performance tab → record while interacting → look for red triangles on long tasks and purple bars (layout) inside frames. If animations feel janky, check if you are animating a layout-triggering property instead of `transform`."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**DOM + CSSOM → Render Tree → Layout → Paint → Composite** is the rendering pipeline. Each stage feeds the next; changes to DOM or CSS may retrigger stages from the start.",
+        "**Reflow (Layout)** is the most expensive operation — it cascades through the tree and forces all descendants to recalculate positions. Batch DOM writes together and avoid reading layout properties immediately after writing.",
+        "**Layout thrashing** occurs when JS alternates DOM reads and writes in a loop, forcing repeated synchronous layouts. Always batch reads before writes or use `requestAnimationFrame` to defer.",
+        "**`transform` and `opacity`** are the only CSS properties that animate on the compositor thread without triggering layout or paint. Use them for all animations to achieve consistent 60fps.",
+        "**`will-change`** promotes an element to its own GPU layer, eliminating repaint during animation — but each layer consumes GPU memory, so use it sparingly and remove it after animation ends."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Which CSS property change triggers only the Composite stage (cheapest)?",
+      "type": "mcq",
+      "options": [
+        "background-color",
+        "width",
+        "opacity",
+        "padding"
+      ],
+      "correct": 2,
+      "explanation": "opacity (and transform) can be animated purely on the compositor thread — no layout or paint needed. background-color triggers paint but not layout. width and padding trigger layout, paint, and composite — the most expensive path."
+    },
+    {
+      "id": "q2",
+      "question": "What is 'layout thrashing'?",
+      "type": "mcq",
+      "options": [
+        "Writing too many inline styles in JavaScript",
+        "Alternating DOM reads (layout properties) and DOM writes in a loop, causing repeated forced synchronous layouts",
+        "Applying CSS transitions to too many elements simultaneously",
+        "Using too many CSS custom properties (variables)"
+      ],
+      "correct": 1,
+      "explanation": "Layout thrashing occurs when JS reads layout properties (like offsetWidth) after writing to the DOM, forcing the browser to flush and recalculate layout synchronously before returning the value. Repeating this in a loop causes N layout calculations instead of one. Batch all reads first, then all writes."
+    },
+    {
+      "id": "q3",
+      "question": "Why is the CSSOM construction render-blocking?",
+      "type": "mcq",
+      "options": [
+        "CSS files are always larger than HTML files",
+        "The browser cannot render the page without knowing all styles, since a later stylesheet could override earlier ones",
+        "JavaScript must wait for CSSOM before executing",
+        "CSS parsing requires a second CPU core"
+      ],
+      "correct": 1,
+      "explanation": "The browser blocks rendering until all CSS is downloaded and parsed because a stylesheet loaded later could change styles of already-parsed elements. Rendering partial CSS could show incorrect styles. This is why large, unneeded CSS files hurt Time to First Paint significantly."
+    },
+    {
+      "id": "q4",
+      "question": "Which DOM read operation forces a synchronous layout flush?",
+      "type": "mcq",
+      "options": [
+        "element.textContent",
+        "element.getAttribute('class')",
+        "element.getBoundingClientRect()",
+        "element.dataset.value"
+      ],
+      "correct": 2,
+      "explanation": "getBoundingClientRect() (and offsetWidth, offsetHeight, scrollTop, getComputedStyle, etc.) requires up-to-date layout values. If there are pending DOM writes, the browser must flush and complete layout synchronously before returning the result. textContent, getAttribute, and dataset do not require layout information."
+    },
+    {
+      "id": "q5",
+      "question": "What does `will-change: transform` tell the browser?",
+      "type": "mcq",
+      "options": [
+        "Apply a CSS transform immediately",
+        "Promote the element to its own compositor layer so transforms can be applied without triggering layout or paint",
+        "Disable JavaScript animations on the element",
+        "Cache the element's computed styles"
+      ],
+      "correct": 1,
+      "explanation": "will-change hints to the browser that the specified property will be animated, prompting it to promote the element to its own GPU compositing layer. This means transform/opacity changes bypass layout and paint entirely. The cost is GPU memory for each promoted layer — remove will-change after the animation completes."
+    },
+    {
+      "id": "q6",
+      "question": "Elements with `display: none` appear in which tree?",
+      "type": "mcq",
+      "options": [
+        "Both DOM and Render Tree",
+        "DOM only — they are excluded from the Render Tree",
+        "Render Tree only",
+        "Neither DOM nor Render Tree"
+      ],
+      "correct": 1,
+      "explanation": "display: none elements ARE in the DOM (they exist as nodes and can be queried with JavaScript), but they are excluded from the Render Tree because they take up no space and are not painted. visibility: hidden elements ARE in the Render Tree — they take up space but are invisible."
+    },
+    {
+      "id": "q7",
+      "question": "What is the browser's 60fps frame budget in milliseconds?",
+      "type": "mcq",
+      "options": [
+        "~8ms",
+        "~16ms",
+        "~33ms",
+        "~100ms"
+      ],
+      "correct": 1,
+      "explanation": "At 60 frames per second, each frame has 1000ms / 60 ≈ 16.67ms. Within this budget the browser must run JS, perform any layout, paint changed areas, and composite the frame. Tasks exceeding this budget cause dropped frames (jank). The browser actually needs some time for its own housekeeping, leaving ~10ms for JS."
+    },
+    {
+      "id": "q8",
+      "question": "Which API lets you respond to element size changes without polling or triggering extra layouts?",
+      "type": "mcq",
+      "options": [
+        "MutationObserver",
+        "IntersectionObserver",
+        "ResizeObserver",
+        "PerformanceObserver"
+      ],
+      "correct": 2,
+      "explanation": "ResizeObserver fires a callback whenever an observed element's content box size changes, without requiring polling. MutationObserver watches DOM structure/attribute changes. IntersectionObserver detects visibility in the viewport. PerformanceObserver monitors performance timeline entries."
+    },
+    {
+      "id": "q9",
+      "question": "Animating CSS `left` vs. `transform: translateX()` — what is the key difference?",
+      "type": "mcq",
+      "options": [
+        "left is GPU-accelerated; transform is CPU-only",
+        "transform: translateX() only works on block elements",
+        "Animating left triggers layout recalculation each frame; transform only triggers compositing",
+        "They are equivalent in performance since CSS animations run off the main thread"
+      ],
+      "correct": 2,
+      "explanation": "Animating left triggers the full pipeline: layout → paint → composite on every frame. Animating transform: translateX() operates only at the composite stage (GPU), bypassing layout and paint. This is why transform-based animations are smooth at 60fps while left/top animations often cause jank."
+    },
+    {
+      "id": "q10",
+      "question": "What is a Render Tree?",
+      "type": "mcq",
+      "options": [
+        "A copy of the DOM used by the browser's network layer",
+        "The combination of DOM and CSSOM containing only visible nodes with their computed styles",
+        "A virtual DOM maintained by React for diffing",
+        "The list of GPU layers sent to the compositor"
+      ],
+      "correct": 1,
+      "explanation": "The Render Tree is built by combining the DOM and CSSOM. It contains only visible nodes (display: none elements are excluded) and each node has its final computed styles attached. Pseudo-elements (::before, ::after) appear in the Render Tree despite being absent from the DOM. Layout is computed on the Render Tree."
+    }
+  ]
+}

@@ -1,0 +1,194 @@
+{
+  "id": "phase3_bloom-filters",
+  "title": "Bloom Filters",
+  "phase": 3,
+  "week": 10,
+  "icon": "stack",
+  "tagline": "Probabilistic membership in O(k) time and constant space — false positives are possible, false negatives are impossible.",
+  "readTime": "~12 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "A **Bloom filter** is a space-efficient probabilistic data structure that answers membership queries — \"have I seen this item before?\" — with a deliberate trade-off: it may occasionally say \"yes\" when the correct answer is \"no\" (a **false positive**), but it will **never** say \"no\" when the correct answer is \"yes\" (no false negatives). That asymmetry is the entire design.\n\nA Bloom filter uses a **bit array** of m bits and **k independent hash functions**. Each function maps any input to one of the m bit positions. To insert an element, set the k corresponding bits. To query, check all k bits — if every bit is 1, the element is **probably** in the set; if any bit is 0, the element is **definitely not** in the set. No element is ever stored, so a Bloom filter uses constant space relative to the number of insertions — a hash set by comparison grows linearly. This makes Bloom filters invaluable in cache layers, network routing, database optimisations, and anywhere the cost of a false negative is catastrophic but a false positive is merely inconvenient."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  I[\"insert('cat')\"]\n  I --> H1[\"h1('cat') = 2\"]\n  I --> H2[\"h2('cat') = 5\"]\n  I --> H3[\"h3('cat') = 9\"]\n  H1 --> B2[\"bit[2] = 1\"]\n  H2 --> B5[\"bit[5] = 1\"]\n  H3 --> B9[\"bit[9] = 1\"]\n  Q[\"query('dog')\"]\n  Q --> Q1[\"h1('dog') = 1\"]\n  Q1 --> C1[\"bit[1] = 0 → NOT IN SET\"]",
+      "caption": "Inserting 'cat' sets bits 2, 5, 9. Querying 'dog' checks h1('dog')=1 — bit[1] is 0, so 'dog' is definitely not in the set."
+    },
+    {
+      "type": "analogy",
+      "title": "A Nightclub Bouncer with a Punch Card",
+      "content": "Imagine a nightclub bouncer who cannot remember every person they have ever seen but carries a punchcard with 1 000 holes and 3 coloured stamps. When someone enters, the bouncer stamps three positions on the card (determined by the person's face, name, and birthday — the three hash functions). When someone claims to have visited before, the bouncer checks those three positions: if all three are stamped, they are \"probably\" a returning guest; if even one is unstamped, they have definitely never visited.\n\nThe catch: after enough guests, many positions overlap. A new person's three positions might all happen to be stamped by different past guests — a **false positive**. The bouncer waves them in even though they are a first-time visitor. But a genuine returning guest always has their three positions stamped — no false negatives. The larger the punchcard (more bits), the lower the false-positive rate; more stamps per person (more hash functions) can help or hurt depending on the fill level."
+    },
+    {
+      "type": "explanation",
+      "content": "The **false-positive rate** of a Bloom filter with m bits, n inserted elements, and k hash functions is approximately:\n\n`FPR ≈ (1 - e^(-kn/m))^k`\n\nFor given m and n, the optimal number of hash functions that minimises FPR is `k = (m/n) × ln(2) ≈ 0.693 × (m/n)`. The optimal bit-per-element ratio for a target FPR of p is `m/n = -log₂(p) / ln(2) ≈ 1.44 × log₂(1/p)`. To achieve 1% FPR you need about 9.6 bits per element with ~7 hash functions — compare this to storing full 64-byte strings in a hash set.\n\nA Bloom filter can never remove elements because clearing a bit might affect other elements that share it. **Counting Bloom filters** extend each bit to a small counter, enabling deletion at the cost of 3–4× more space. **Cuckoo filters** are a modern alternative that support deletion with similar space efficiency.\n\n**Classic applications**:\n- **Web crawlers** (Google, early) check whether a URL has been crawled before without storing all URLs in memory.\n- **Database query optimisation**: before a disk-expensive join, check the Bloom filter of the inner table — if the key definitely does not exist, skip the disk read.\n- **Distributed caches** (Redis, Cassandra): check whether a key possibly exists before a cache miss round-trip.\n- **Malware / phishing detection**: browsers check URLs against a Bloom filter of known-bad URLs stored locally — no false negatives means no phishing URL is ever missed."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"false positive scenario\"]\n  A --> X[\"insert 'cat': bits 2,5,9\"]\n  X --> Y[\"insert 'fish': bits 1,5,7\"]\n  Y --> Z[\"query 'xyz': h1=2, h2=5, h3=7\"]\n  Z --> R[\"bits 2,5,7 all set → false positive\"]",
+      "caption": "After inserting 'cat' (bits 2,5,9) and 'fish' (bits 1,5,7), querying 'xyz' checks bits 2,5,7 — all are 1 due to collisions from prior insertions. False positive."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Bloom Filter — O(k) insert and query, O(m) space\nclass BloomFilter {\n  #bits;  // Uint8Array — 1 byte per slot, but treated as bit array\n  #m;     // number of bits\n  #k;     // number of hash functions\n\n  constructor(m = 1024, k = 7) {\n    this.#m    = m;\n    this.#k    = k;\n    this.#bits = new Uint8Array(Math.ceil(m / 8));\n  }\n\n  // Simple double-hashing to generate k independent positions\n  // In production use MurmurHash3 or FNV variants\n  #positions(item) {\n    const s   = String(item);\n    let   h1  = 0, h2 = 0;\n    for (let i = 0; i < s.length; i++) {\n      const c = s.charCodeAt(i);\n      h1 = Math.imul(31, h1) + c | 0;\n      h2 = Math.imul(37, h2) + c | 0;\n    }\n    const positions = [];\n    for (let i = 0; i < this.#k; i++) {\n      // Double hashing: gi(x) = (h1 + i*h2) mod m\n      const pos = ((h1 + i * h2) % this.#m + this.#m) % this.#m;\n      positions.push(pos);\n    }\n    return positions;\n  }\n\n  #setBit(pos)    { this.#bits[pos >> 3] |=  (1 << (pos & 7)); }\n  #testBit(pos)   { return !!(this.#bits[pos >> 3] & (1 << (pos & 7))); }\n\n  // O(k)\n  add(item) {\n    for (const pos of this.#positions(item)) this.#setBit(pos);\n  }\n\n  // O(k) — returns false: definitely not present; true: probably present\n  mightContain(item) {\n    return this.#positions(item).every(pos => this.#testBit(pos));\n  }\n\n  get fillRatio() {\n    let set = 0;\n    for (const byte of this.#bits) {\n      let b = byte;\n      while (b) { set += b & 1; b >>= 1; }\n    }\n    return set / this.#m;\n  }\n}\n\nconst bf = new BloomFilter(2048, 7);\n['apple','banana','cherry','date','elderberry'].forEach(w => bf.add(w));\n\nconsole.log(bf.mightContain('apple'));     // true  (definitely)\nconsole.log(bf.mightContain('cherry'));    // true  (definitely)\nconsole.log(bf.mightContain('mango'));     // false (definitely not)\nconsole.log(bf.mightContain('grape'));     // false (probably not)\nconsole.log('fill ratio:', bf.fillRatio.toFixed(4)); // low fill = low FPR",
+      "explanation": "Double hashing `h1 + i×h2` generates k pseudo-independent positions from two base hashes — avoids the cost of k independent hash functions. Bits are packed 8 per byte using bitwise operations. `fillRatio` shows how many bits are set — a high fill ratio (> 0.5) means increasing false-positive risk and suggests the filter is undersized."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Bloom filter sizing formulas\n// Given: n (expected insertions), p (target false-positive rate)\n// Optimal m (bits): m = -n * ln(p) / (ln(2))^2\n// Optimal k (hashes): k = (m/n) * ln(2)\n\nfunction bloomFilterSize(n, targetFPR) {\n  const ln2 = Math.LN2;\n  const m   = Math.ceil(-n * Math.log(targetFPR) / (ln2 * ln2));\n  const k   = Math.round((m / n) * ln2);\n  return { bits: m, hashes: k, bytes: Math.ceil(m / 8) };\n}\n\n// Examples:\nconsole.log(bloomFilterSize(1_000_000, 0.01));  // 1% FPR\n// { bits: 9585059, hashes: 7, bytes: 1198133 } ≈ 1.1 MB for 1M items\n\nconsole.log(bloomFilterSize(1_000_000, 0.001)); // 0.1% FPR\n// { bits: 14377589, hashes: 10, bytes: 1797199 } ≈ 1.7 MB for 1M items\n\n// Comparison: plain hash set for 1M items, avg 64-byte strings = 64 MB\n// Bloom filter at 1% FPR = 1.1 MB — ~58× smaller, but probabilistic\n\n// Bloom filter vs alternatives:\n//\n// Hash set:       O(1) exact,     O(n) space,  supports delete\n// Bloom filter:   O(k) probabilistic, O(m) bits, NO delete (standard)\n// Counting BF:    O(k) probabilistic, O(4m) bits, supports delete\n// Cuckoo filter:  O(1) probabilistic, O(m) bits, supports delete\n\n// Key property: NO FALSE NEGATIVES\n// If mightContain() returns false → element is 100% not in the set\n// If mightContain() returns true  → element is PROBABLY in the set",
+      "explanation": "The sizing formulas let you calculate exactly how large to make a Bloom filter before deployment. 1% FPR costs 9.6 bits per element with 7 hash functions — a fixed, predictable cost regardless of element size. A hash set's cost scales with element size (strings, URLs can be 50–200 bytes each)."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**The defining property of a Bloom filter is: false negatives are impossible.** If `mightContain()` returns `false`, you have a mathematical guarantee the element was never inserted. This asymmetry is what makes Bloom filters safe for cache guards: you might do an unnecessary cache miss (false positive) but you will never skip a valid cached item (false negative would be a bug). When an interviewer asks about Bloom filters, immediately state both properties — no false negatives, possible false positives — and the typical use case: 'fast first-pass filter before an expensive exact lookup'."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "A Bloom filter uses a bit array of m bits and k hash functions; insert sets k bits, query checks k bits — both O(k) operations with O(m) space.",
+        "False negatives are impossible: a 'not present' answer is always correct. False positives are possible: a 'present' answer means 'probably present'.",
+        "False-positive rate depends on m (bits), n (insertions), and k (hashes): FPR ≈ (1 - e^(-kn/m))^k. More bits and optimal k minimise FPR.",
+        "Standard Bloom filters do not support deletion — clearing a bit could break other elements. Counting Bloom filters and Cuckoo filters add deletion support.",
+        "Applications: URL deduplication in web crawlers, database join optimisation, distributed cache guards, browser malware detection, and username-availability checks."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does a Bloom filter guarantee about 'not present' answers?",
+      "type": "mcq",
+      "options": [
+        "They may be wrong — false negatives are possible",
+        "They are always correct — if mightContain returns false the element was definitely never inserted",
+        "They are correct 99% of the time depending on the hash functions",
+        "They are only correct when the filter is less than 50% full"
+      ],
+      "correct": 1,
+      "explanation": "If any of the k bits is 0, the element was definitely not inserted — because insertion always sets all k bits. A 'not present' result is always correct: zero false negatives. Only 'present' answers can be wrong (false positives)."
+    },
+    {
+      "id": "q2",
+      "question": "What causes a false positive in a Bloom filter?",
+      "type": "mcq",
+      "options": [
+        "A hash function collision that maps two different inputs to the same output",
+        "All k bit positions of a queried element happen to be set by combinations of prior insertions",
+        "The bit array becomes full and cannot store new information",
+        "Two elements share the same first hash function output"
+      ],
+      "correct": 1,
+      "explanation": "A false positive occurs when all k bit positions for a new element are already 1 — not because that element was inserted, but because those positions were set by different previously inserted elements. No single element needs to share all k positions; the overlap can come from multiple distinct insertions."
+    },
+    {
+      "id": "q3",
+      "question": "Why can standard Bloom filters not support deletion?",
+      "type": "mcq",
+      "options": [
+        "Deletion is slower than O(k) due to bit propagation",
+        "Clearing the k bits for one element might clear bits that are also set by other elements, causing false negatives",
+        "The hash functions are not reversible, so the bits cannot be located",
+        "Bloom filters do not store elements, so deletion has no effect"
+      ],
+      "correct": 1,
+      "explanation": "Multiple elements can share individual bit positions. Clearing element A's bits might clear a bit that element B also set. Future queries for B would then return false — a false negative — violating the core guarantee. Counting Bloom filters solve this by using counters instead of bits."
+    },
+    {
+      "id": "q4",
+      "question": "What is the effect of increasing the number of bits m (while keeping n and k fixed) on false-positive rate?",
+      "type": "mcq",
+      "options": [
+        "FPR increases — more bits means more collisions",
+        "FPR stays the same — only k affects FPR",
+        "FPR decreases — bits are less densely set, reducing accidental matches",
+        "FPR becomes 0 — no false positives with enough bits"
+      ],
+      "correct": 2,
+      "explanation": "More bits means the n×k set operations are spread over a larger array, so individual bits are less likely to be set. The fill ratio (fraction of set bits) drops, and the probability that all k positions for a new element are accidentally set decreases."
+    },
+    {
+      "id": "q5",
+      "question": "For n=1 000 000 elements and a target 1% false-positive rate, approximately how many bits per element does an optimally sized Bloom filter need?",
+      "type": "mcq",
+      "options": ["1 bit per element", "4 bits per element", "9.6 bits per element", "64 bits per element"],
+      "correct": 2,
+      "explanation": "The formula m/n = -log₂(p)/ln(2) gives m/n = log₂(100)/ln(2) ≈ 6.64/0.693 ≈ 9.58 bits per element for 1% FPR. A hash set storing 50-byte average-length keys uses 400 bits per element — about 40× more space."
+    },
+    {
+      "id": "q6",
+      "question": "Which use case is a Bloom filter UNSUITABLE for?",
+      "type": "mcq",
+      "options": [
+        "Checking whether a URL has been crawled before in a web crawler",
+        "Filtering database lookups to avoid disk reads for definitely-absent keys",
+        "Storing the exact set of all registered usernames for authentication",
+        "Detecting known malicious URLs in a browser extension"
+      ],
+      "correct": 2,
+      "explanation": "Authentication cannot tolerate false positives — if a Bloom filter incorrectly says a username exists, a new user is wrongly rejected. Authentication requires exact membership (use a hash set or database). Bloom filters are only appropriate when false positives are a minor inconvenience, not a correctness bug."
+    },
+    {
+      "id": "q7",
+      "question": "What is double hashing in the context of Bloom filters?",
+      "type": "mcq",
+      "options": [
+        "Hashing each element twice through the same hash function",
+        "Using two base hash functions h1 and h2 to derive k positions via g_i(x) = h1(x) + i*h2(x) mod m",
+        "Storing each element in two separate bit arrays for redundancy",
+        "Applying SHA-256 twice to increase collision resistance"
+      ],
+      "correct": 1,
+      "explanation": "Double hashing generates k pseudo-independent bit positions from just two hash function evaluations: g_i(x) = (h1(x) + i × h2(x)) mod m for i = 0, 1, ..., k-1. This is far cheaper than computing k truly independent hash functions and has been proven to maintain near-optimal Bloom filter properties."
+    },
+    {
+      "id": "q8",
+      "question": "A Bloom filter is 80% full (80% of bits are set to 1). What is the consequence?",
+      "type": "mcq",
+      "options": [
+        "New insertions will fail because there is no more space",
+        "False-positive rate rises sharply — most queries for unseen elements will accidentally find all k bits set",
+        "The filter automatically resizes to accommodate more elements",
+        "False-negative rate increases proportionally"
+      ],
+      "correct": 1,
+      "explanation": "FPR ≈ (fill_ratio)^k. At 80% fill with k=7 hashes: (0.8)^7 ≈ 0.21 — a 21% false-positive rate, far above the intended design. Bloom filters should be sized so fill ratio stays below ~50% under expected load."
+    },
+    {
+      "id": "q9",
+      "question": "How do Cuckoo filters improve on standard Bloom filters?",
+      "type": "mcq",
+      "options": [
+        "They use fewer hash functions, reducing computational cost",
+        "They support deletion and achieve similar or better space efficiency",
+        "They eliminate false positives entirely",
+        "They store actual elements alongside the bit array"
+      ],
+      "correct": 1,
+      "explanation": "Cuckoo filters store small fingerprints of elements in a cuckoo hash table. This allows deletion (remove the fingerprint) with comparable or better space efficiency than Bloom filters at low FPR. Standard Bloom filters cannot delete; counting Bloom filters can but use 3–4× more space."
+    },
+    {
+      "id": "q10",
+      "question": "Chrome's Safe Browsing feature stores a Bloom filter of known malicious URLs locally. Why is this an appropriate use of a Bloom filter?",
+      "type": "mcq",
+      "options": [
+        "Exact matches are required — no false positives are acceptable in security",
+        "The filter must be queried on every network request — O(k) speed is critical and false positives only cause an extra server round-trip",
+        "Bloom filters allow the browser to store URLs and their page content",
+        "Bloom filters can be updated without re-downloading the filter"
+      ],
+      "correct": 1,
+      "explanation": "Chrome checks every URL against a local Bloom filter before making a network request to Google's servers. False positives (innocent URLs mistakenly flagged) only cause a single extra server round-trip to confirm. False negatives (real malicious URL not caught) are prevented by the no-false-negative guarantee. This makes Bloom filters perfect: fast local check, no missed threats."
+    }
+  ]
+}

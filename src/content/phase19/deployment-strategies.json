@@ -1,0 +1,195 @@
+{
+  "id": "phase19_deployment-strategies",
+  "title": "Deployment Strategies",
+  "phase": 19,
+  "week": 58,
+  "icon": "gear",
+  "tagline": "Blue-green, canary, rolling, and feature flags — how to ship new versions with zero downtime and controlled risk.",
+  "readTime": "~14 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Deploying software to production is inherently risky: bugs slip through, performance degrades under real load, and requirements change. **Deployment strategies** are patterns that control *how* a new version replaces the old one, trading off speed, cost, complexity, and blast radius. A naive strategy — stop the old version, start the new one — causes downtime and gives you no escape hatch if something goes wrong.\n\nModern strategies eliminate downtime and reduce risk by gradually shifting traffic, maintaining parallel environments, or hiding new features behind toggles until you are confident. The right strategy depends on your team's risk tolerance, infrastructure budget, and how quickly you can detect problems."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"New version\\nready to deploy\"]\n    A --> B{\"Strategy?\"}\n    B -- \"Blue-Green\" --> C[\"Spin up identical\\nenvironment\"]\n    B -- \"Canary\" --> D[\"Route 5% traffic\\nto new version\"]\n    B -- \"Rolling\" --> E[\"Replace instances\\none at a time\"]\n    C --> F[\"Instant cutover\\nor rollback\"]\n    D --> G[\"Gradually increase\\nif metrics healthy\"]\n    E --> H[\"Old and new run\\nside by side briefly\"]",
+      "caption": "Three primary deployment strategies — each balances rollback speed, cost, and traffic control differently."
+    },
+    {
+      "type": "analogy",
+      "title": "Switching Lanes on a Motorway",
+      "content": "**Blue-green** is like building a brand new parallel road next to the existing motorway. Traffic keeps flowing on the old road while the new one is constructed and inspected. When ready, you flip all traffic to the new road in one instant — and if something is wrong, you flip it straight back. Fast rollback, but you pay for two roads simultaneously.\n\n**Canary deployment** is like opening one experimental lane on the motorway and letting a small percentage of drivers use it. You watch how those drivers fare — if accidents spike, you close the lane immediately and lose nothing. If they sail through, you gradually open more lanes until all traffic is on the new path.\n\n**Rolling deployment** is like resurfacing a motorway one section at a time, with live traffic on adjacent sections. Drivers experience the new surface progressively with no full closure, but for a brief window old and new surfaces coexist. **Feature flags** are the toll-gate switches: a driver might be *on the new road* but the new lane is gated — only drivers with a special token can access it, regardless of which road they are on."
+    },
+    {
+      "type": "explanation",
+      "content": "**Blue-Green Deployment** maintains two identical production environments, 'Blue' (current) and 'Green' (new). The new version is deployed to the idle environment, smoke-tested in isolation, then traffic is cut over at the load balancer in seconds. Rollback is equally instant: flip traffic back to Blue. The main cost is running two full environments continuously — acceptable for stateless services, expensive for large databases.\n\n**Canary Deployment** routes a small percentage of real production traffic (e.g. 5%) to the new version while the remaining 95% continues on the old version. You monitor error rates, latency, and business metrics for the canary cohort. If all is healthy, you increase the percentage in increments (5% → 25% → 100%). If metrics degrade, route all traffic back to the old version. The term comes from the canary-in-a-coal-mine practice — a small group absorbs risk first.\n\n**Rolling Deployment** replaces instances of the old version one (or a few) at a time with the new version. At any given moment, both versions serve traffic. It is the default strategy in Kubernetes: the old pod is removed only after the new pod passes its readiness probe. Rolling deployments are resource-efficient but slow to roll back — you have to roll out a fix version.\n\n**Feature Flags** (also called feature toggles) decouple deployment from release. Code for a new feature is shipped to production in the 'off' state behind a conditional check. The feature is enabled for specific users, percentages, or environments via a config service. This allows dark launches (deploy without exposing), A/B testing, and instant kill-switch rollback by flipping a flag rather than redeploying.\n\n**Rollback** is not a strategy itself but a capability every strategy must support. The fastest rollback is a load-balancer switch (blue-green), followed by incrementally decreasing canary percentage, then re-deploying a previous image tag in rolling."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant LB as \"Load Balancer\"\n    participant Blue as \"Blue (v1)\"\n    participant Green as \"Green (v2)\"\n    LB->>Blue: \"100% traffic\"\n    Note over Green: \"Deploy v2, run smoke tests\"\n    LB->>Green: \"Switch: 100% traffic to v2\"\n    Note over Blue: \"v1 kept warm for rollback\"\n    LB->>Blue: \"Rollback if metrics degrade\"",
+      "caption": "Blue-green cutover: traffic switches atomically at the load balancer; the old environment stays warm as an instant rollback target."
+    },
+    {
+      "type": "code_example",
+      "language": "yaml",
+      "label": "Runtime",
+      "code": "# ── Kubernetes Rolling Update (default strategy) ────────────────\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api-service\nspec:\n  replicas: 6\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 2        # Allow 2 extra pods during rollout\n      maxUnavailable: 0  # Never remove old pod until new pod is Ready\n  selector:\n    matchLabels:\n      app: api-service\n  template:\n    metadata:\n      labels:\n        app: api-service\n    spec:\n      containers:\n        - name: api\n          image: ghcr.io/myorg/api-service:2.4.1\n          readinessProbe:\n            httpGet:\n              path: /health\n              port: 3000\n            initialDelaySeconds: 5\n            periodSeconds: 5\n\n---\n# ── Canary via Kubernetes: separate Deployment with lower replicas\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api-service-canary\nspec:\n  replicas: 1            # 1 of 7 total pods = ~14% canary traffic\n  selector:\n    matchLabels:\n      app: api-service   # Same label — same Service routes to both!\n  template:\n    metadata:\n      labels:\n        app: api-service\n    spec:\n      containers:\n        - name: api\n          image: ghcr.io/myorg/api-service:2.5.0-beta\n\n---\n# ── Feature flag pattern (Node.js pseudocode) ────────────────────\n# if (featureFlags.isEnabled('new-checkout-flow', user.id)) {\n#   return newCheckoutController.handle(req);\n# }\n# return legacyCheckoutController.handle(req);",
+      "explanation": "The rolling deployment sets `maxUnavailable: 0` — Kubernetes only terminates an old pod once the new pod passes its `readinessProbe`. The canary deployment shares the same Service selector label as the stable deployment, so the single canary pod naturally receives a fraction of traffic proportional to its replica count. The feature flag snippet shows the simplest pattern: a conditional branch keyed on a user ID or percentage, checked at runtime against a flag service."
+    },
+    {
+      "type": "code_concept",
+      "language": "bash",
+      "label": "Concept",
+      "code": "# ── Rollback commands by strategy ───────────────────────────────\n\n# Rolling rollback in Kubernetes — undo last deployment:\nkubectl rollout undo deployment/api-service\n# or roll back to a specific revision:\nkubectl rollout undo deployment/api-service --to-revision=3\n\n# Blue-green rollback — flip load balancer target group back to Blue:\naws elbv2 modify-listener \\\n  --listener-arn arn:aws:elasticloadbalancing:...:listener/... \\\n  --default-actions Type=forward,TargetGroupArn=<BLUE_TARGET_GROUP_ARN>\n\n# Canary rollback — scale canary to 0 replicas instantly:\nkubectl scale deployment api-service-canary --replicas=0\n\n# Feature flag rollback — no redeploy needed, just toggle:\n# curl -X PATCH https://flags.internal/new-checkout-flow \\\n#   -d '{\"enabled\": false}'\n\n# ── Decision matrix ──────────────────────────────────────────────\n# Strategy     | Rollback speed | Cost        | Complexity\n# -------------|----------------|-------------|------------\n# Blue-Green   | Instant        | 2x infra    | Medium\n# Canary       | Fast (scale 0) | +5% infra   | High\n# Rolling      | Slow (re-roll) | 1x infra    | Low\n# Feature Flag | Instant        | No infra    | Dev overhead\n\necho \"Best practice: use rolling for most services,\"\necho \"blue-green for stateless critical paths,\"\necho \"feature flags for risky user-facing changes.\""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Pair every deployment strategy with automated health checks.** A canary that nobody is watching is just a slow bad deploy. Instrument your canary with automatic traffic shifting: if the error rate exceeds a threshold within 10 minutes, route 100% back to the stable version automatically. Tools like Argo Rollouts and Flagger can do this for Kubernetes. For feature flags, always build in an explicit kill-switch and review flag hygiene regularly — stale flags left permanently 'on' become dead code."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Blue-green deployment** maintains two identical environments and switches traffic at the load balancer — instant rollback, but doubles infrastructure cost.",
+        "**Canary deployment** routes a small percentage of traffic to the new version, monitors metrics, and gradually increases the percentage — limits blast radius at the cost of added complexity.",
+        "**Rolling deployment** replaces instances one at a time; it is resource-efficient and the Kubernetes default, but rollback requires re-deploying an older image.",
+        "**Feature flags** decouple code deployment from feature release — ship code 'off', enable per user or percentage, and kill-switch instantly without redeployment.",
+        "Every strategy requires **automated health checks** (error rate, latency) to detect problems quickly; a deployment strategy without monitoring is incomplete."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "In a blue-green deployment, how is rollback achieved?",
+      "type": "mcq",
+      "options": [
+        "Re-deploy the previous Docker image to the green environment.",
+        "Flip the load balancer back to the blue environment, which has been kept running.",
+        "Use `kubectl rollout undo` to revert the deployment manifest.",
+        "Delete the green environment and rebuild blue from source."
+      ],
+      "correct": 1,
+      "explanation": "Blue-green keeps the old (blue) environment warm and idle. Rollback is just pointing the load balancer back to blue — it takes seconds and requires no redeployment or rebuild."
+    },
+    {
+      "id": "q2",
+      "question": "A canary deployment sends 5% of traffic to v2. After 15 minutes, error rates on v2 are 3× higher than v1. What should happen?",
+      "type": "mcq",
+      "options": [
+        "Increase canary to 25% to gather more data before deciding.",
+        "Route 100% of traffic back to v1 immediately and investigate v2.",
+        "Deploy a hotfix to v2 while keeping canary at 5%.",
+        "Wait 24 hours for the error rate to stabilise."
+      ],
+      "correct": 1,
+      "explanation": "A 3× error rate spike is a clear signal of regression. The correct response is to abort the canary immediately — route all traffic to v1 — to stop user impact. Investigate the root cause before retrying the rollout."
+    },
+    {
+      "id": "q3",
+      "question": "What does `maxUnavailable: 0` mean in a Kubernetes rolling update strategy?",
+      "type": "mcq",
+      "options": [
+        "Zero pods will be available during the rollout — all traffic is paused.",
+        "No old pods are removed until a new pod has passed its readiness probe, ensuring capacity is never reduced below the desired replica count.",
+        "The rollout cannot proceed if any node in the cluster is unavailable.",
+        "All pods must be updated simultaneously in one batch."
+      ],
+      "correct": 1,
+      "explanation": "`maxUnavailable: 0` ensures zero downtime: Kubernetes first starts a new pod, waits for it to become Ready, then terminates one old pod. Capacity never drops below the configured replica count during rollout."
+    },
+    {
+      "id": "q4",
+      "question": "What is the primary advantage of feature flags over canary deployments for managing risky features?",
+      "type": "mcq",
+      "options": [
+        "Feature flags require no code changes to enable a new feature.",
+        "Feature flags provide instant rollback without any redeployment — just toggle a config value.",
+        "Feature flags automatically load-balance traffic between old and new code.",
+        "Feature flags work only in production environments."
+      ],
+      "correct": 1,
+      "explanation": "With feature flags the code is already in production — rollback means flipping a flag value in a config service, which takes effect in milliseconds. Canary rollback requires scaling down pods or adjusting load balancer weights, which is slower and involves infrastructure changes."
+    },
+    {
+      "id": "q5",
+      "question": "Why is a rolling deployment's rollback slower than a blue-green rollback?",
+      "type": "mcq",
+      "options": [
+        "Rolling rollback requires downloading a new Docker image from scratch.",
+        "Rolling rollback must deploy a previous version image across all instances sequentially, not switch a single load balancer rule.",
+        "Rolling rollback is not supported in Kubernetes without third-party tools.",
+        "Rolling rollback requires a full cluster restart."
+      ],
+      "correct": 1,
+      "explanation": "In a rolling deployment there is no warm standby. To roll back you must run `kubectl rollout undo`, which triggers another rolling update deploying the previous image. This takes time proportional to the number of replicas and pod startup time."
+    },
+    {
+      "id": "q6",
+      "question": "Two Kubernetes Deployments share the same Service `selector: app: api-service` — one has 6 replicas (v1), one has 1 replica (v2). Approximately what percentage of traffic goes to v2?",
+      "type": "mcq",
+      "options": [
+        "50% — the Service splits evenly between deployments.",
+        "About 14% — 1 of 7 total pods matching the selector.",
+        "100% — the latest Deployment always takes all traffic.",
+        "0% — Services cannot route to multiple Deployments."
+      ],
+      "correct": 1,
+      "explanation": "A Kubernetes Service load-balances across all pods that match its selector, regardless of which Deployment owns them. With 6 v1 pods and 1 v2 pod, 1/7 ≈ 14% of requests reach v2 — a simple canary split."
+    },
+    {
+      "id": "q7",
+      "question": "What is a 'dark launch' in the context of feature flags?",
+      "type": "mcq",
+      "options": [
+        "Deploying code to production at midnight to minimise traffic impact.",
+        "Deploying new code to production with the feature flag disabled, so no users see it, allowing infrastructure validation before release.",
+        "Running production code without any monitoring to avoid alert noise.",
+        "Hiding a feature from paying users and showing it only to free-tier users."
+      ],
+      "correct": 1,
+      "explanation": "A dark launch deploys the code to production but keeps the flag off. Engineers can then manually enable it for themselves or internal users to verify the infrastructure path, without any user exposure. It separates the 'deploy' event from the 'release' event."
+    },
+    {
+      "id": "q8",
+      "question": "Which deployment strategy has the highest infrastructure cost?",
+      "type": "mcq",
+      "options": [
+        "Rolling deployment",
+        "Feature flags",
+        "Canary deployment",
+        "Blue-green deployment"
+      ],
+      "correct": 3,
+      "explanation": "Blue-green requires running two complete, identical production environments simultaneously. The cost is roughly 2× normal infrastructure spend. Rolling deployments add only a small surge (maxSurge pods), canary adds a tiny fraction, and feature flags add zero infrastructure overhead."
+    },
+    {
+      "id": "q9",
+      "question": "A team ships a new feature flag but never removes it after the feature is 100% rolled out. What is the main risk?",
+      "type": "mcq",
+      "options": [
+        "The flag service will run out of storage for flag values.",
+        "Stale flags accumulate as dead code, increasing cognitive overhead and the risk of unintended interactions with future flags.",
+        "Users will see the feature disabled if they clear their browser cache.",
+        "The CI pipeline will fail because flag configurations are not version-controlled."
+      ],
+      "correct": 1,
+      "explanation": "Stale feature flags are tech debt. They add conditional branches that no one remembers the purpose of, increase cognitive load for new developers, and can interact unexpectedly with new flags. Flags should be cleaned up promptly after a full rollout."
+    },
+    {
+      "id": "q10",
+      "question": "For a stateless microservice with 20 replicas where zero downtime is the top priority and infrastructure budget is secondary, which strategy is most appropriate?",
+      "type": "mcq",
+      "options": [
+        "Rolling update with maxUnavailable: 5",
+        "Blue-green deployment",
+        "Manual deployment during off-peak hours",
+        "Feature flags only"
+      ],
+      "correct": 1,
+      "explanation": "Blue-green gives instant, atomic traffic switching with instant rollback. For a stateless service (no sticky sessions or persistent connections to manage), the traffic cutover is seamless. The 2× cost is acceptable given the stated priority of zero downtime. Rolling with maxUnavailable > 0 risks brief capacity reduction."
+    }
+  ]
+}

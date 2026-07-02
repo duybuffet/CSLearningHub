@@ -1,0 +1,198 @@
+{
+  "id": "phase8_system-design-case-studies",
+  "title": "System Design Case Studies",
+  "phase": 8,
+  "week": 31,
+  "icon": "architecture",
+  "tagline": "URL shortener, news feed, chat app — walk through requirements, estimation, and component design for three real interview classics.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "System design interviews test whether you can reason about scale before writing code. The canonical questions — URL shortener, news feed, real-time chat — are not trick questions. They are vehicles for demonstrating that you understand **requirements clarification**, **capacity estimation**, **database choice**, **caching**, and **trade-offs**.\n\nEvery system design answer follows the same structure: clarify requirements → estimate scale → choose data stores → design APIs → draw the component diagram → discuss bottlenecks and trade-offs. This topic walks through three classics end-to-end so the pattern becomes instinctive."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Client[\"Browser / Mobile\"]\n  Client -->|\"POST /shorten\"| GW[\"API Gateway\"]\n  GW --> WS[\"Web Server\"]\n  WS --> Cache[\"Redis Cache\\n(short→long mapping)\"]\n  WS --> DB[\"PostgreSQL\\n(url_mappings table)\"]\n  WS --> ID[\"ID Generator\\n(Base62 encoder)\"]\n  Client -->|\"GET /{code}\"| CDN[\"CDN / Edge\"]\n  CDN --> WS",
+      "caption": "URL Shortener: writes go through the web server to Postgres; reads are served from Redis cache or CDN edge — the redirect path must be fast and requires no auth."
+    },
+    {
+      "type": "analogy",
+      "title": "Library Card Catalog",
+      "content": "A URL shortener is a **card catalog**: the short code is the call number, the destination URL is the shelf location. The catalog is write-once, read-many. You stamp a new card when a librarian adds a book (**write path**). Anyone can look up any call number at the front desk (**read path**). Most readers never create links — they only follow them, so the read path must be extremely fast. A good librarian keeps frequently requested call numbers on an index card at the desk (**cache**) so they do not have to walk to the stacks every time."
+    },
+    {
+      "type": "explanation",
+      "content": "**Case Study 1 — URL Shortener (bit.ly)**\n\n*Requirements:* Given a long URL, return a unique short code. Given a short code, redirect to the original URL. Codes expire optionally. Analytics (click count) are a stretch goal.\n\n*Estimation:* 100M new URLs/day = 1,157 writes/sec. Reads are 100× writes = 115,700/sec. Storage: average URL 200 bytes × 100M × 365 days = ~7 TB/year. Read-heavy — cache aggressively.\n\n*Key design:* Generate a 6-character Base62 code (62^6 = 56 billion unique codes). Options: hash the URL + truncate (collision risk), or use a distributed ID generator (Snowflake) + Base62 encode. Store `{code, long_url, created_at, expires_at, user_id}` in Postgres. Cache hot codes in Redis with TTL matching expiry. Serve redirects from CDN edge when possible — a `301` redirect is cacheable by the browser, a `302` is not (use `302` if you need click analytics).\n\n---\n\n**Case Study 2 — News Feed (Twitter / Instagram)**\n\n*Requirements:* A user sees posts from people they follow, in reverse-chronological or ranked order. Users can post. Celebrities may have millions of followers.\n\n*Estimation:* 500M DAU, 5M posts/day = 58 writes/sec. Each user views feed 10×/day = 5B feed reads/day = 57,870 reads/sec. Read/write ratio ~1000:1. Feed reads dominate.\n\n*Key design:* **Fan-out on write (push)**: when a user posts, immediately write their post ID into every follower's feed list in Redis (`ZADD feed:{userId} timestamp postId`). Reading the feed is a fast Redis ZRANGE — no joins. Works well when follower counts are low. Problem: a celebrity with 10M followers triggers 10M Redis writes per post — **write amplification**. Solution: **hybrid fan-out** — push to normal users' feeds; pull from celebrities at read time and merge. Store posts in a `posts` table (Cassandra or Postgres + read replicas). Cache post content by post ID.\n\n---\n\n**Case Study 3 — Real-time Chat (WhatsApp / Slack)**\n\n*Requirements:* 1-to-1 and group messaging. Messages delivered in order. Online presence. Message history. Push notifications for offline users.\n\n*Estimation:* 50M DAU, 40 messages/user/day = 2B messages/day = 23,148 msg/sec. Store messages forever for history. Write-heavy per conversation; read is recent history only.\n\n*Key design:* Each client holds a **WebSocket** connection to a Chat Server for real-time bidirectional messaging. A **Connection Manager** (Redis) maps `userId → serverId` so Server A knows to forward a message for user B to Server B via a **message relay** (Kafka or Redis pub/sub). Messages are persisted to Cassandra (optimized for append and time-range scans) with a partition key of `conversation_id` and sort key of `message_timestamp`. For offline users, a **Push Notification Service** (APNs / FCM) delivers the message when the WebSocket is unavailable. A **Presence Service** tracks online/offline status with a heartbeat TTL in Redis."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  UserA[\"User A (online)\"]\n  UserB[\"User B (online)\"]\n  UserC[\"User C (offline)\"]\n  UserA -->|\"WebSocket msg\"| CS1[\"Chat Server 1\"]\n  CS1 --> CM[\"Connection Manager\\n(Redis: userId→serverId)\"]\n  CM --> CS2[\"Chat Server 2\"]\n  CS2 -->|\"WebSocket push\"| UserB\n  CS1 --> MQ[\"Message Queue\\n(Kafka)\"]\n  MQ --> DB[\"Cassandra\\n(messages table)\"]\n  MQ --> PS[\"Push Notif Service\"]\n  PS -->|\"APNs/FCM\"| UserC",
+      "caption": "Chat architecture: the Connection Manager routes messages between chat servers. Kafka persists messages asynchronously and fans out to the push notification path for offline users."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// URL Shortener — core encode/decode logic\nconst BASE62 = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';\n\nfunction encodeBase62(num) {\n  if (num === 0) return BASE62[0];\n  let result = '';\n  while (num > 0) {\n    result = BASE62[num % 62] + result;\n    num = Math.floor(num / 62);\n  }\n  return result.padStart(6, BASE62[0]); // always 6 chars\n}\n\nfunction decodeBase62(str) {\n  return str.split('').reduce((acc, ch) => acc * 62 + BASE62.indexOf(ch), 0);\n}\n\n// Shorten: assign a unique auto-increment ID → encode\nasync function shortenUrl(longUrl, db, cache) {\n  const existing = await db.query(\n    'SELECT code FROM url_mappings WHERE long_url = $1 LIMIT 1', [longUrl]\n  );\n  if (existing.rows[0]) return existing.rows[0].code; // deduplicate\n\n  const { rows } = await db.query(\n    'INSERT INTO url_mappings (long_url) VALUES ($1) RETURNING id', [longUrl]\n  );\n  const code = encodeBase62(rows[0].id);\n  await db.query('UPDATE url_mappings SET code = $1 WHERE id = $2', [code, rows[0].id]);\n  await cache.set(code, longUrl, { EX: 86400 }); // warm the cache\n  return code;\n}\n\n// Redirect: cache-first lookup\nasync function resolveCode(code, db, cache) {\n  const cached = await cache.get(code);\n  if (cached) return cached; // ~1ms Redis hit\n\n  const { rows } = await db.query(\n    'SELECT long_url, expires_at FROM url_mappings WHERE code = $1', [code]\n  );\n  if (!rows[0]) return null;\n  if (rows[0].expires_at && rows[0].expires_at < new Date()) return null; // expired\n\n  await cache.set(code, rows[0].long_url, { EX: 3600 }); // backfill cache\n  return rows[0].long_url;\n}",
+      "explanation": "Base62 encoding turns a numeric auto-increment ID into a 6-character code with 56 billion possible values. The read path checks Redis first — a cache hit costs ~1ms and no DB query. The DB is a single source of truth for durability. Deduplication prevents two inserts for the same long URL from generating two codes."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// News Feed — fan-out on write (push model)\n// Called when any user publishes a post\nasync function fanOutPost(authorId, postId, redis, db) {\n  // Get all follower IDs (paginated for large accounts)\n  const { rows } = await db.query(\n    'SELECT follower_id FROM follows WHERE followee_id = $1', [authorId]\n  );\n\n  const timestamp = Date.now();\n  const pipeline = redis.pipeline();\n\n  for (const { follower_id } of rows) {\n    // ZADD feed:{userId} score member — sorted set by timestamp\n    pipeline.zadd(`feed:${follower_id}`, timestamp, postId);\n    // Trim feed to last 1000 posts to bound memory\n    pipeline.zremrangebyrank(`feed:${follower_id}`, 0, -1001);\n  }\n  await pipeline.exec();\n}\n\n// Read feed: O(log N) Redis ZRANGE — no DB query needed\nasync function getFeed(userId, page, limit, redis) {\n  const start = page * limit;\n  const postIds = await redis.zrevrange(`feed:${userId}`, start, start + limit - 1);\n  // Hydrate post content from post cache or DB\n  return hydratePosts(postIds);\n}\n// Celebrity accounts (> 1M followers) skip fan-out and are merged at read time"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "In a system design interview, state your assumptions out loud before estimating. 'I am assuming 100M DAU, 10 reads per user per day, average payload 1KB — does that sound right?' Interviewers reward structured thinking more than the exact numbers. The estimation phase also reveals the bottleneck: if reads dominate 1000:1, your design must optimize reads. If writes dominate, focus on write throughput and durability."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Always clarify requirements first**: functional (what it does) and non-functional (scale, latency, consistency) before drawing any diagram.",
+        "**Estimation reveals the bottleneck**: calculate read/write QPS and storage; a 1000:1 read/write ratio means cache aggressively and scale read replicas.",
+        "**URL shortener**: Base62-encode an auto-increment ID for collision-free codes; serve redirects from Redis/CDN; use `302` if click analytics are required.",
+        "**News feed**: fan-out on write (push model) for low-follower users; hybrid pull for celebrities to avoid write amplification — Redis sorted sets power the feed list.",
+        "**Chat**: WebSockets for real-time delivery, a Connection Manager to route across servers, Cassandra for append-heavy message storage, and push notifications for offline users."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "A URL shortener uses a 302 redirect instead of 301 for shortened links. What is the main reason?",
+      "type": "mcq",
+      "options": [
+        "302 is faster because it skips DNS lookup",
+        "301 is cached by browsers permanently, preventing click analytics from being recorded on subsequent visits",
+        "302 supports HTTPS while 301 does not",
+        "301 requires a Content-Type header that URL shorteners cannot set"
+      ],
+      "correct": 1,
+      "explanation": "A 301 (Moved Permanently) is cached by browsers — subsequent clicks go directly to the destination without hitting the shortener's servers, so click counts are not recorded. A 302 (Found / Temporary) is not cached, so every click passes through the shortener and can be counted."
+    },
+    {
+      "id": "q2",
+      "question": "Why does Base62 encoding use an auto-increment database ID rather than hashing the long URL?",
+      "type": "mcq",
+      "options": [
+        "Hashing is too slow for production use",
+        "Auto-increment IDs guarantee uniqueness; URL hashes can collide requiring retry logic",
+        "Base62 only works with numeric inputs",
+        "Hashing produces codes that are too long for a short URL"
+      ],
+      "correct": 1,
+      "explanation": "Hashing a URL and truncating to 6 characters has a non-trivial collision probability as the URL count grows. Auto-increment IDs from the database are guaranteed unique by the DB sequence, eliminating collision handling entirely. The ID is then encoded to Base62 to produce a short alphanumeric string."
+    },
+    {
+      "id": "q3",
+      "question": "In the news feed fan-out model, what is 'write amplification' and when does it become a problem?",
+      "type": "mcq",
+      "options": [
+        "Writing the same post to multiple databases for redundancy",
+        "A single post write triggering millions of feed-list writes — one per follower — for celebrity accounts",
+        "Each post being compressed and then decompressed on read",
+        "Write amplification occurs when the feed sorted set exceeds 1000 entries"
+      ],
+      "correct": 1,
+      "explanation": "Fan-out on write copies a post ID into every follower's feed list. For a normal user with 500 followers this is fine. For a celebrity with 10M followers, one post causes 10M Redis writes — a massive burst that can overwhelm the cache tier. The solution is hybrid fan-out: push for regular users, pull-and-merge at read time for celebrities."
+    },
+    {
+      "id": "q4",
+      "question": "Why is Cassandra often chosen for storing chat messages instead of PostgreSQL?",
+      "type": "mcq",
+      "options": [
+        "Cassandra supports joins, making conversation queries faster",
+        "Cassandra is optimized for high-volume sequential writes and time-range scans by partition key, matching the append-only message pattern",
+        "Cassandra automatically encrypts messages end-to-end",
+        "PostgreSQL cannot store more than 1 billion rows"
+      ],
+      "correct": 1,
+      "explanation": "Chat messages are append-only and queried by conversation ID in time order — an ideal fit for Cassandra's partition key (conversation_id) and clustering key (timestamp). Cassandra handles millions of writes per second with linear horizontal scalability, which PostgreSQL struggles to match at chat scale."
+    },
+    {
+      "id": "q5",
+      "question": "In the chat system, what is the role of the Connection Manager?",
+      "type": "mcq",
+      "options": [
+        "It manages database connection pools for the chat servers",
+        "It stores a mapping of userId to serverId so messages can be routed to the correct chat server holding a user's WebSocket",
+        "It authenticates users before they can open a WebSocket connection",
+        "It limits the number of concurrent WebSocket connections per user"
+      ],
+      "correct": 1,
+      "explanation": "With many chat servers, server A does not know which server holds user B's WebSocket. The Connection Manager (typically a Redis hash) stores userId → serverId. Server A looks up user B's server, then forwards the message to server B over an internal relay (e.g. Redis pub/sub or Kafka)."
+    },
+    {
+      "id": "q6",
+      "question": "In a system design interview, why should you clarify requirements before drawing any diagrams?",
+      "type": "mcq",
+      "options": [
+        "Interviewers penalize candidates who draw diagrams without permission",
+        "Requirements determine scale, consistency needs, and latency targets — wrong assumptions produce a design that solves the wrong problem",
+        "You need the requirements document to calculate Base62 encoding length",
+        "Clarifying requirements demonstrates that you can read product specifications"
+      ],
+      "correct": 1,
+      "explanation": "A URL shortener that needs analytics requires different design decisions than one that does not. A feed that needs strict chronological order differs from one with ML ranking. Clarifying scope, scale (DAU, QPS), consistency model, and SLAs before designing prevents solving the wrong problem."
+    },
+    {
+      "id": "q7",
+      "question": "For a news feed, Redis sorted sets (ZADD/ZREVRANGE) are used instead of a SQL query because:",
+      "type": "mcq",
+      "options": [
+        "SQL databases cannot store post IDs",
+        "Pre-computed feed lists in Redis serve in O(log N) with no joins, while a SQL fan-in query at read time would require scanning all followed users' posts",
+        "Redis sorted sets automatically deduplicate posts from the same author",
+        "SQL GROUP BY cannot sort by timestamp"
+      ],
+      "correct": 1,
+      "explanation": "A SQL read-time fan-in query ('give me posts from all 500 users I follow, sorted by time') scans many rows and joins under load. A pre-computed sorted set in Redis stores only the post IDs in time order; reading the feed is a single O(log N) range query with no joins, making it orders of magnitude faster."
+    },
+    {
+      "id": "q8",
+      "question": "A URL shortener serving 100M redirects per day should cache redirects in Redis. Which eviction policy is most appropriate?",
+      "type": "mcq",
+      "options": [
+        "allkeys-random — evict any key at random to free space",
+        "volatile-ttl — evict keys with the shortest remaining TTL first",
+        "allkeys-lru — evict the least recently used key, keeping hot codes in cache",
+        "noeviction — never evict; add more memory instead"
+      ],
+      "correct": 2,
+      "explanation": "URL redirects follow a power-law distribution — a small fraction of short codes receive the vast majority of clicks (viral links). LRU eviction naturally keeps these hot codes in cache by discarding the codes that have not been accessed recently, maximizing the cache hit rate."
+    },
+    {
+      "id": "q9",
+      "question": "Why does a chat system need push notifications (APNs / FCM) in addition to WebSockets?",
+      "type": "mcq",
+      "options": [
+        "WebSockets do not support group messages",
+        "WebSocket connections close when a mobile app is backgrounded or the device is locked, so offline delivery requires a separate push channel",
+        "APNs and FCM encrypt messages more strongly than WebSockets",
+        "Push notifications are faster than WebSockets for short messages"
+      ],
+      "correct": 1,
+      "explanation": "Mobile operating systems aggressively kill background WebSocket connections to save battery. When the app is not in the foreground, the chat server cannot deliver via WebSocket. APNs (iOS) and FCM (Android) are OS-level push channels that deliver a notification payload even when the app is not running."
+    },
+    {
+      "id": "q10",
+      "question": "During capacity estimation for a chat app, you calculate 23,000 messages/sec. This number most directly informs which design decision?",
+      "type": "mcq",
+      "options": [
+        "The length of the short code for message IDs",
+        "The number of WebSocket servers needed and the write throughput required from the message store",
+        "Whether to use REST or GraphQL for the chat API",
+        "The CDN cache TTL for message attachments"
+      ],
+      "correct": 1,
+      "explanation": "23,000 messages/sec drives two key decisions: (1) how many WebSocket servers are needed to handle concurrent connections (each server can hold ~50k-100k connections), and (2) what write throughput the message database must sustain — validating that Cassandra (optimized for high write throughput) is the right choice over a single SQL instance."
+    }
+  ]
+}

@@ -1,0 +1,199 @@
+{
+  "id": "phase17_websockets-and-sse",
+  "title": "WebSockets & Server-Sent Events",
+  "phase": 17,
+  "week": 52,
+  "icon": "network",
+  "tagline": "Full-duplex real-time with WebSockets, one-way server push with SSE, and how they compare to polling and long-polling — choosing the right transport for your use case.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "HTTP is fundamentally a request-response protocol — the client always initiates. Yet many applications need the **server to push data proactively**: live dashboards, chat messages, notifications, collaborative editing, market prices. Three approaches bridge this gap:\n\n- **Polling**: client asks repeatedly on a timer\n- **Long-Polling**: client waits; server holds the connection open until data arrives\n- **Server-Sent Events (SSE)**: server streams data over a persistent HTTP connection (server → client only)\n- **WebSockets**: bidirectional, full-duplex persistent connection\n\nChoosing the wrong transport wastes resources and complicates your architecture. SSE is often simpler and sufficient; WebSockets are necessary when the client needs to send high-frequency data too."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    Note over C,S: WebSocket Handshake\n    C->>S: GET /chat HTTP/1.1\n    C->>S: Upgrade: websocket\n    C->>S: Connection: Upgrade\n    C->>S: Sec-WebSocket-Key: dGhlIHNhbXBsZQ==\n    S->>C: 101 Switching Protocols\n    S->>C: Upgrade: websocket\n    S->>C: Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\n    Note over C,S: Connection upgraded — full-duplex frames\n    C->>S: Frame: {\"type\":\"message\",\"text\":\"Hello\"}\n    S->>C: Frame: {\"type\":\"message\",\"text\":\"World\"}\n    S->>C: Frame: {\"type\":\"ping\"}",
+      "caption": "WebSocket handshake upgrades an HTTP/1.1 connection to a persistent full-duplex channel. After 101, both sides send framed messages at any time."
+    },
+    {
+      "type": "analogy",
+      "title": "Transport Patterns as Delivery Services",
+      "content": "Imagine you are waiting for a package:\n\n- **Polling** is calling the delivery company every 5 minutes to ask 'Has my package arrived?' — mostly wasted calls, high overhead.\n- **Long-Polling** is calling and saying 'I'll stay on hold until you have news' — better, but you still have to call back after each update, and the phone line is occupied.\n- **Server-Sent Events** is signing up for text updates: the delivery company proactively texts you when the status changes. You cannot text them back (one-way), but it's simple and efficient for notifications.\n- **WebSockets** is a walkie-talkie — both sides can speak and listen simultaneously. Perfect for a two-way conversation (chat), but setting up a walkie-talkie is more complex than receiving texts.\n\nChoose based on communication pattern: notifications and feeds → SSE. Interactive real-time → WebSockets."
+    },
+    {
+      "type": "explanation",
+      "content": "**Polling**: The client sends a request every N seconds regardless of whether new data exists. Simple to implement. Cons: high latency (up to N seconds), wastes bandwidth/server resources when there is nothing new. Use only for very slow-changing data or legacy compatibility.\n\n**Long-Polling**: The client sends a request; the server holds it open until data is available (or a timeout occurs), then responds. The client immediately sends another request. Lower latency than polling, but complex server-side (holding connections) and has per-message HTTP overhead. Effectively superseded by SSE and WebSockets.\n\n**Server-Sent Events (SSE)**: The client opens a persistent HTTP connection using `EventSource`. The server sends data as a stream of `data: ...\\n\\n` chunks. The browser's `EventSource` API handles reconnection automatically with `Last-Event-ID`. SSE works over standard HTTP/1.1 and HTTP/2. Cons: server → client only; some firewalls and proxies buffer SSE streams.\n\n**WebSockets**: The client sends an HTTP `Upgrade: websocket` request. After the `101 Switching Protocols` handshake, the TCP connection is reused for framed messages. Both client and server can send messages at any time — true full-duplex. The `Sec-WebSocket-Key`/`Sec-WebSocket-Accept` handshake prevents accidental or malicious WebSocket requests from cached proxies. WebSockets do not use HTTP after the handshake — headers, cookies, and CORS rules do not apply to WebSocket frames (only to the initial handshake). Authentication must be handled in the handshake or first message.\n\n**When to use each**:\n- **SSE**: notifications, live feeds, progress bars, one-way streams (server → client). Simpler, works over HTTP/2 multiplexed.\n- **WebSocket**: chat, multiplayer games, collaborative editing, financial trading, anything requiring low-latency bidirectional communication.\n- **Polling**: webhook delivery status checks, simple refresh use cases, situations where the server cannot maintain open connections."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Need real-time data?\"] --> B{\"Client also sends frequent data?\"}\n    B -->|\"Yes\"| C[\"WebSocket\"]\n    B -->|\"No — server push only\"| D{\"Need auto-reconnect and HTTP/2 support?\"}\n    D -->|\"Yes\"| E[\"Server-Sent Events (SSE)\"]\n    D -->|\"No or legacy\"| F{\"How frequent?\"}\n    F -->|\"High frequency\"| G[\"Long-Polling\"]\n    F -->|\"Low frequency\"| H[\"Polling\"]",
+      "caption": "Decision tree for choosing a real-time transport. SSE covers most server-push use cases; WebSockets when clients also need to send frequently."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── WebSocket client with reconnection logic ──────────────────\nfunction createReconnectingWebSocket(url, handlers) {\n  let ws = null;\n  let reconnectDelay = 1000;\n  const MAX_DELAY = 30000;\n\n  function connect() {\n    ws = new WebSocket(url);\n\n    ws.addEventListener('open', () => {\n      reconnectDelay = 1000; // reset on success\n      handlers.onOpen?.();\n    });\n\n    ws.addEventListener('message', ({ data }) => {\n      try {\n        handlers.onMessage?.(JSON.parse(data));\n      } catch {\n        handlers.onMessage?.(data); // handle non-JSON messages\n      }\n    });\n\n    ws.addEventListener('close', ({ code, reason, wasClean }) => {\n      handlers.onClose?.({ code, reason, wasClean });\n      if (!wasClean && code !== 1000) {\n        // Exponential backoff reconnect\n        setTimeout(() => {\n          reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY);\n          connect();\n        }, reconnectDelay);\n      }\n    });\n\n    ws.addEventListener('error', (err) => {\n      handlers.onError?.(err);\n    });\n  }\n\n  connect();\n\n  return {\n    send(data) {\n      if (ws?.readyState === WebSocket.OPEN) {\n        ws.send(typeof data === 'string' ? data : JSON.stringify(data));\n      } else {\n        console.warn('WebSocket not open, message dropped');\n      }\n    },\n    close() { ws?.close(1000, 'Client closed'); },\n  };\n}\n\n// ── Server-Sent Events client ─────────────────────────────────\nfunction createSSEConnection(url, handlers) {\n  // EventSource handles reconnection and Last-Event-ID automatically\n  const es = new EventSource(url, { withCredentials: true });\n\n  es.addEventListener('message', ({ data, lastEventId }) => {\n    handlers.onMessage?.(JSON.parse(data), lastEventId);\n  });\n\n  // Custom named events\n  es.addEventListener('notification', ({ data }) => {\n    handlers.onNotification?.(JSON.parse(data));\n  });\n\n  es.addEventListener('error', () => {\n    if (es.readyState === EventSource.CLOSED) {\n      handlers.onClose?.();\n    }\n    // EventSource.CONNECTING means auto-reconnecting\n  });\n\n  return { close: () => es.close() };\n}\n\n// ── Polling with exponential backoff ─────────────────────────\nasync function poll(fetchFn, onData, { interval = 5000 } = {}) {\n  let active = true;\n  async function tick() {\n    if (!active) return;\n    try {\n      const data = await fetchFn();\n      onData(data);\n    } catch (err) {\n      console.warn('Poll failed:', err);\n    }\n    if (active) setTimeout(tick, interval);\n  }\n  tick();\n  return { stop: () => { active = false; } };\n}\n\nconsole.log('WebSocket and SSE examples loaded');\n",
+      "explanation": "Exponential backoff reconnection is essential for WebSocket clients — without it, a server restart causes all clients to hammer the server simultaneously ('thundering herd'). `EventSource` handles reconnection automatically using the `Last-Event-ID` header, re-sending the last received event ID so the server can resume the stream from where the client left off."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── WebSocket readyState values ───────────────────────────────\nconst WS_STATES = {\n  0: 'CONNECTING — handshake in progress',\n  1: 'OPEN       — connected, can send/receive',\n  2: 'CLOSING    — close handshake in progress',\n  3: 'CLOSED     — connection terminated',\n};\n// Always check ws.readyState === WebSocket.OPEN before calling ws.send()\n\n// ── WebSocket close codes ─────────────────────────────────────\nconst WS_CLOSE_CODES = {\n  1000: 'Normal closure',\n  1001: 'Going away (page navigating)',\n  1002: 'Protocol error',\n  1003: 'Unsupported data type',\n  1006: 'Abnormal closure (no close frame — network error)',\n  1007: 'Invalid data (e.g. non-UTF8 in text frame)',\n  1008: 'Policy violation',\n  1009: 'Message too large',\n  1011: 'Server internal error',\n  4000: 'App-defined codes start at 4000',\n};\n// Code 1006 means no close frame was received — reconnect needed\n\n// ── SSE wire format (server response) ────────────────────────\n// Content-Type: text/event-stream\n// Cache-Control: no-cache\n// Connection: keep-alive\n//\n// data: {\"price\": 42.5}\\n\n// \\n\n// id: 100\\n\n// event: notification\\n\n// data: {\"message\": \"Order shipped\"}\\n\n// \\n\n// : this is a comment (heartbeat)\\n\n// \\n\n// retry: 3000\\n   ← tells browser to reconnect after 3s\n\n// ── Transport comparison ──────────────────────────────────────\nconst TRANSPORTS = {\n  Polling:     { latency: 'High (N seconds)', overhead: 'High', direction: 'C→S→C', complexity: 'Low' },\n  LongPoll:    { latency: 'Medium',           overhead: 'Medium', direction: 'C→S→C', complexity: 'Medium' },\n  SSE:         { latency: 'Low',              overhead: 'Low',    direction: 'S→C only', complexity: 'Low' },\n  WebSocket:   { latency: 'Very Low',         overhead: 'Very Low', direction: 'Both',  complexity: 'Medium' },\n};\n",
+      "explanation": "WebSocket close code 1006 is particularly important — it indicates an abnormal closure (no close frame received), usually a network error. Always implement reconnection logic for this code. SSE's text/event-stream format is newline-delimited and human-readable. The `id:` field enables the browser's automatic `Last-Event-ID` tracking for reconnection."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Prefer SSE over WebSockets for most notification/feed use cases**. SSE works over standard HTTP (including HTTP/2 multiplexing), automatically reconnects with `Last-Event-ID`, works through most firewalls and proxies, and is supported by all modern browsers. Only upgrade to WebSockets when you genuinely need bidirectional communication. A common architecture: use SSE for server → client updates (order status, notifications, live prices) and regular POST requests for client → server actions — simpler than WebSockets and just as effective."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Polling** is simple but wasteful. **Long-polling** reduces latency but adds server complexity. **SSE** and **WebSockets** maintain persistent connections for low-latency push.",
+        "**WebSocket** handshake begins as HTTP (`Upgrade: websocket`) and gets promoted to a full-duplex binary framing protocol after `101 Switching Protocols`. After handshake, it is no longer HTTP.",
+        "**SSE** (`EventSource`) is server → client only, works over standard HTTP/1.1 and HTTP/2, auto-reconnects with `Last-Event-ID`, and is simpler to implement and proxy-friendly.",
+        "**Exponential backoff** reconnection is mandatory for WebSocket clients — without it, a server restart causes all clients to reconnect simultaneously, potentially crashing the server.",
+        "**Choose SSE** for notifications, live feeds, and progress updates. **Choose WebSockets** for chat, collaborative editing, gaming, or any bidirectional low-latency communication."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What HTTP status code does the server return to complete a WebSocket upgrade?",
+      "type": "mcq",
+      "options": [
+        "200 OK",
+        "204 No Content",
+        "101 Switching Protocols",
+        "301 Moved Permanently"
+      ],
+      "correct": 2,
+      "explanation": "101 Switching Protocols is the server's response to a successful WebSocket upgrade request. After this response, the TCP connection is reused for WebSocket framing — it is no longer HTTP. The server must also return the Upgrade: websocket and Connection: Upgrade headers, plus the Sec-WebSocket-Accept hash."
+    },
+    {
+      "id": "q2",
+      "question": "What is the main limitation of Server-Sent Events (SSE)?",
+      "type": "mcq",
+      "options": [
+        "SSE requires HTTP/2 and does not work over HTTP/1.1",
+        "SSE is unidirectional — only server to client",
+        "SSE does not support reconnection after connection loss",
+        "SSE cannot send JSON data"
+      ],
+      "correct": 1,
+      "explanation": "SSE is server-to-client only. The client cannot send data through the SSE connection. For client-to-server communication, you use regular HTTP requests (POST, etc.) alongside the SSE connection. SSE works over HTTP/1.1 and HTTP/2, and the EventSource API handles automatic reconnection."
+    },
+    {
+      "id": "q3",
+      "question": "WebSocket close code `1006` indicates:",
+      "type": "mcq",
+      "options": [
+        "Normal, clean closure by the client",
+        "Server closed the connection due to internal error",
+        "Abnormal closure — no WebSocket close frame received (typically a network error)",
+        "The message size exceeded the server limit"
+      ],
+      "correct": 2,
+      "explanation": "Code 1006 is set by the browser itself (not negotiated) when the TCP connection closes without a WebSocket close frame. This typically means a network dropout or server crash. Always implement reconnection logic for code 1006. Code 1000 is normal closure; 1011 is server error."
+    },
+    {
+      "id": "q4",
+      "question": "Which feature of `EventSource` enables resuming an SSE stream after reconnection?",
+      "type": "mcq",
+      "options": [
+        "The retry: field in the SSE response",
+        "The Last-Event-ID header sent automatically by the browser",
+        "A session cookie set during the initial SSE request",
+        "The reconnecting state machine built into EventSource"
+      ],
+      "correct": 1,
+      "explanation": "When the EventSource reconnects, the browser automatically includes Last-Event-ID in the request header, set to the id: field of the last received SSE event. The server uses this to resume sending from that point, preventing missed events. The server sets event IDs using `id: <value>\\n` in the stream."
+    },
+    {
+      "id": "q5",
+      "question": "Why should WebSocket reconnection use exponential backoff?",
+      "type": "mcq",
+      "options": [
+        "WebSocket connections degrade in quality over time requiring gradual reconnection",
+        "To prevent all clients reconnecting simultaneously after a server restart, causing a 'thundering herd'",
+        "To comply with WebSocket protocol specification requirements",
+        "To give the server time to clear old sessions"
+      ],
+      "correct": 1,
+      "explanation": "Without backoff, all disconnected clients reconnect immediately and simultaneously after a server restart, potentially overwhelming it. Exponential backoff spreads reconnections over time. Starting at 1s and doubling up to 30s is common. Adding random jitter further prevents synchronized reconnection spikes."
+    },
+    {
+      "id": "q6",
+      "question": "What is the primary advantage of WebSockets over long-polling?",
+      "type": "mcq",
+      "options": [
+        "WebSockets work without a server",
+        "WebSockets have much lower per-message overhead (no HTTP headers per message) and true full-duplex communication",
+        "WebSockets are supported by older browsers that do not support long-polling",
+        "WebSockets automatically handle authentication"
+      ],
+      "correct": 1,
+      "explanation": "Long-polling has full HTTP overhead (headers, new TCP connections) for every message. WebSocket frames have 2-14 bytes of overhead compared to hundreds of bytes for HTTP headers. WebSockets also enable the server to push without waiting for a client request, and both sides can send simultaneously (full-duplex)."
+    },
+    {
+      "id": "q7",
+      "question": "What `Content-Type` header must an SSE endpoint return?",
+      "type": "mcq",
+      "options": [
+        "application/json",
+        "application/octet-stream",
+        "text/event-stream",
+        "multipart/form-data"
+      ],
+      "correct": 2,
+      "explanation": "SSE endpoints must use Content-Type: text/event-stream. The browser's EventSource API only processes responses with this content type. The response should also include Cache-Control: no-cache to prevent caching of the stream, and Connection: keep-alive for HTTP/1.1."
+    },
+    {
+      "id": "q8",
+      "question": "Before calling `ws.send()`, you should check `ws.readyState === WebSocket.OPEN` because:",
+      "type": "mcq",
+      "options": [
+        "send() is asynchronous and may be called before the connection opens",
+        "Calling send() when not OPEN throws an InvalidStateError or silently drops the message",
+        "The OPEN state optimizes the internal send buffer",
+        "WebSocket requires a handshake acknowledgment before each message"
+      ],
+      "correct": 1,
+      "explanation": "WebSocket.send() throws an InvalidStateError if called when readyState is CONNECTING (0) or CLOSING/CLOSED (2/3). Checking for OPEN (1) prevents errors. During reconnection windows, messages can be silently lost without this check, so you may also want to queue messages and flush them on open."
+    },
+    {
+      "id": "q9",
+      "question": "For a live notification system where the server pushes order status updates to users, which transport is most appropriate?",
+      "type": "mcq",
+      "options": [
+        "WebSockets — because real-time requires WebSockets",
+        "Polling every second — for simplicity",
+        "Server-Sent Events — one-way push is sufficient, simpler than WebSockets",
+        "Long-polling — better latency than SSE"
+      ],
+      "correct": 2,
+      "explanation": "For server-push notifications where the client does not need to send data through the same connection, SSE is the right choice. It is simpler than WebSockets, works over HTTP/2 (multiplexed with other requests), auto-reconnects, and is easier to load-balance. Use WebSockets only when bidirectional real-time communication is required."
+    },
+    {
+      "id": "q10",
+      "question": "After a WebSocket handshake completes, which HTTP features still apply to WebSocket frames?",
+      "type": "mcq",
+      "options": [
+        "All HTTP features including headers, CORS, and cookies on each message",
+        "Only CORS headers — cookies are not sent after handshake",
+        "None — WebSocket is no longer HTTP; authentication must be handled in the handshake or first message",
+        "Cookies and cache headers, but not CORS"
+      ],
+      "correct": 2,
+      "explanation": "Once the WebSocket handshake is complete and the connection is upgraded, it is no longer HTTP. WebSocket frames do not carry HTTP headers — CORS, cookies, and cache headers only apply to the initial HTTP handshake request. Authentication tokens are typically passed in the WebSocket URL (query param) during handshake, or sent as the first message after connection."
+    }
+  ]
+}

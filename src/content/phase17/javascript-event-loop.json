@@ -1,0 +1,199 @@
+{
+  "id": "phase17_javascript-event-loop",
+  "title": "JavaScript Event Loop",
+  "phase": 17,
+  "week": 52,
+  "icon": "network",
+  "tagline": "Call stack, task queue, microtasks, async/await, and how the browser fits rendering frames between tasks — the model that makes JavaScript single-threaded yet non-blocking.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "JavaScript is **single-threaded** — only one piece of code runs at a time. Yet web apps handle user clicks, fetch data, run timers, and update the UI seemingly in parallel. The **event loop** is the mechanism that makes this possible: it continuously checks a set of queues for work and runs tasks one at a time on the main thread.\n\nMastering the event loop explains why `setTimeout(fn, 0)` doesn't always run immediately, why `Promise.then` callbacks run before the next `setTimeout`, why long-running code freezes the UI, and how `async/await` fits into the picture. This knowledge is essential for writing performant, predictable JavaScript."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant CS as Call Stack\n    participant MQ as Microtask Queue\n    participant TQ as Task Queue\n    participant R as Renderer\n    Note over CS: Task begins (e.g. click handler)\n    CS->>CS: Execute synchronous code\n    CS->>MQ: Promise.resolve() queued\n    CS->>CS: Stack empty\n    CS->>MQ: Drain ALL microtasks\n    MQ->>CS: Run microtask 1\n    MQ->>CS: Run microtask 2\n    Note over MQ: Microtask queue empty\n    R->>R: Render frame (if needed)\n    TQ->>CS: Next task (setTimeout cb)\n    CS->>CS: Execute task\n    Note over CS,TQ: Loop repeats",
+      "caption": "The event loop order: run one task → drain ALL microtasks → render frame (maybe) → next task. Microtasks always run before the next task or render."
+    },
+    {
+      "type": "analogy",
+      "title": "The Event Loop as a Restaurant Kitchen",
+      "content": "Imagine the JavaScript engine as a single chef (main thread) working in a kitchen:\n\n- The **call stack** is the chef's current work surface — the active recipe being cooked right now.\n- The **task queue** (macrotask queue) is the incoming order queue — each new order is one task (a user click, a timer firing, a network response arriving).\n- The **microtask queue** is a sticky-note pad the chef keeps on the counter — urgent notes written during cooking that must be handled *before* looking at the order queue again.\n- **Rendering** is like plating and serving food — it happens between orders, not mid-recipe.\n\nThe chef's rule: finish the current recipe completely, then handle ALL sticky notes (microtasks), then plate the dish (render), then look at the order queue for the next customer. A chef who starts a 2-hour recipe (long synchronous task) cannot serve any other customers until it's done — this is why blocking the main thread freezes the UI."
+    },
+    {
+      "type": "explanation",
+      "content": "**Call Stack**: JavaScript execution is stack-based. When a function is called, a stack frame is pushed; when it returns, the frame is popped. If the call stack is non-empty, the event loop will not process any queued tasks. Infinite recursion causes a 'Maximum call stack size exceeded' error.\n\n**Task Queue (Macrotask Queue)**: Holds callbacks from `setTimeout`, `setInterval`, I/O events (click, fetch response), `MessageChannel`, and `setImmediate` (Node.js). The event loop processes **one task per iteration**. After each task, it checks the microtask queue before picking the next task.\n\n**Microtask Queue**: Holds callbacks from `Promise.then/catch/finally`, `queueMicrotask()`, `MutationObserver`, and `async/await` continuations. **All microtasks are drained before the next task or render frame begins.** This means Promise chains can starve the event loop if they keep adding more microtasks (infinite Promise chain = no rendering).\n\n**Rendering**: The browser's rendering engine gets a chance to paint between task boundaries — not in the middle of a task. `requestAnimationFrame` callbacks run just before rendering, making them ideal for animation code that reads layout and writes styles in sync with the frame rate.\n\n**async/await**: `await` suspends the current async function and returns control to the event loop. The continuation (code after `await`) is scheduled as a microtask when the awaited Promise resolves. `await` does not block the thread — it yields it.\n\n**Web Workers**: For truly CPU-intensive work, use Web Workers to run code on a separate thread. Workers communicate with the main thread via `postMessage` (which schedules a task). Workers cannot access the DOM."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant Main as Main Thread\n    participant W as Web Worker\n    participant DOM as DOM API\n    Main->>W: postMessage(largeDataset)\n    Note over Main: Continues processing\n    W->>W: Heavy computation (off main thread)\n    W->>Main: postMessage(result)\n    Main->>DOM: Update UI with result\n    Note over Main,W: DOM access only on main thread",
+      "caption": "Web Workers run on a separate thread and communicate via postMessage. The main thread remains responsive during heavy computation."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── Event loop ordering quiz ──────────────────────────────────\nconsole.log('1 - synchronous');\n\nsetTimeout(() => console.log('2 - setTimeout (task)'), 0);\n\nPromise.resolve()\n  .then(() => console.log('3 - Promise.then (microtask)'))\n  .then(() => console.log('4 - chained .then (microtask)'));\n\nqueueMicrotask(() => console.log('5 - queueMicrotask'));\n\nconsole.log('6 - synchronous');\n\n// Output order: 1, 6, 3, 5, 4, 2\n// Explanation:\n//  1, 6  → synchronous code runs first (call stack)\n//  3, 5, 4 → microtasks drained (Promise.then, queueMicrotask)\n//  2   → setTimeout callback (next task queue item)\n\n// ── async/await desugared to understand timing ────────────────\nasync function fetchUser(id) {\n  // await yields control; continuation is a microtask\n  const res = await fetch(`/api/users/${id}`);\n  const data = await res.json();\n  return data; // resolved value of the returned Promise\n}\n\n// Equivalent using raw Promises:\nfunction fetchUserRaw(id) {\n  return fetch(`/api/users/${id}`)\n    .then(res => res.json());\n}\n\n// ── Avoiding main thread blocking with chunking ───────────────\nasync function processLargeArray(items) {\n  const CHUNK_SIZE = 100;\n  const results = [];\n\n  for (let i = 0; i < items.length; i += CHUNK_SIZE) {\n    const chunk = items.slice(i, i + CHUNK_SIZE);\n\n    // Process chunk synchronously\n    for (const item of chunk) {\n      results.push(item * 2); // example work\n    }\n\n    // Yield to event loop: allow rendering + other tasks\n    await new Promise(resolve => setTimeout(resolve, 0));\n  }\n\n  return results;\n}\n\n// ── requestAnimationFrame: sync with render frames ────────────\nlet animating = false;\nlet offset = 0;\n\nfunction startAnimation(el) {\n  animating = true;\n  function frame() {\n    if (!animating) return;\n    offset += 2;\n    el.style.transform = `translateX(${offset}px)`;\n    requestAnimationFrame(frame); // schedule next frame\n  }\n  requestAnimationFrame(frame);\n}\n\nconsole.log('Event loop examples loaded — check console output order above');\n",
+      "explanation": "The output order (1, 6, 3, 5, 4, 2) demonstrates the event loop: synchronous code runs first, then ALL microtasks (Promises and queueMicrotask), then tasks from the task queue (setTimeout). Chunking with `await new Promise(r => setTimeout(r, 0))` yields to the event loop between chunks, keeping the page responsive during heavy computation."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── Queue priority summary ────────────────────────────────────\n//\n// Priority (highest to lowest):\n//  1. Call Stack       — currently executing code\n//  2. Microtask Queue  — Promise.then, queueMicrotask, MutationObserver\n//                        ALL drained before next task\n//  3. Animation Frame  — requestAnimationFrame callbacks (before render)\n//  4. Render           — layout, paint, composite (browser internal)\n//  5. Task Queue       — setTimeout, setInterval, I/O events, click handlers\n//                        ONE task per loop iteration\n\n// ── Sources of tasks vs microtasks ───────────────────────────\nconst TASKS = [\n  'setTimeout(fn, ms)',\n  'setInterval(fn, ms)',\n  'I/O events (click, keydown, fetch response)',\n  'MessageChannel.postMessage()',\n  'setImmediate() — Node.js only',\n];\n\nconst MICROTASKS = [\n  'Promise.then() / .catch() / .finally()',\n  'queueMicrotask(fn)',\n  'MutationObserver callback',\n  'await (continuation of async function)',\n];\n\n// ── Common event loop traps ───────────────────────────────────\n\n// TRAP 1: setTimeout(fn, 0) does NOT mean immediate\n// It means \"put fn in the task queue after at least 0ms\"\n// Microtasks from the current task run first\n\n// TRAP 2: Infinite microtask loop blocks rendering\nasync function infiniteLoop() {\n  while (true) {\n    await Promise.resolve(); // keeps adding microtasks, never renders!\n  }\n}\n// Use setTimeout to give the renderer a chance\n\n// TRAP 3: Blocking the main thread\n// This freezes the UI for 5 seconds:\nfunction blockingWork() {\n  const end = Date.now() + 5000;\n  while (Date.now() < end) { /* busy wait */ }\n}\n// Solution: Web Worker or chunked async processing\n\n// TRAP 4: Unhandled Promise rejections\nPromise.reject(new Error('oops'));\n// Always attach .catch() or use try/catch in async functions\n// window.addEventListener('unhandledrejection', e => ...);\n",
+      "explanation": "Microtasks run before any task (and before rendering), which means a chain of Promise.then calls or an async loop that awaits resolved Promises can starve the rendering engine. If you need to process large amounts of data, break it into chunks separated by setTimeout(resolve, 0) or scheduler.postTask() (Chrome) to yield between chunks."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Debugging async execution order**: In Chrome DevTools, the Async checkbox in the Call Stack panel shows the full async call chain across microtask and task boundaries — invaluable for understanding where a Promise rejection originated. For performance issues, the Performance panel's Main thread track shows tasks, microtask checkpoints, and rendering frames on a timeline. Any task bar taller than 16ms (the 60fps budget) is a potential jank source and should be investigated."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**JavaScript is single-threaded** but non-blocking: the event loop processes one task at a time, but async APIs (fetch, setTimeout) schedule callbacks in queues rather than blocking the thread.",
+        "**Microtasks** (Promise.then, queueMicrotask) are drained completely after each task and before any rendering. They have higher priority than setTimeout callbacks.",
+        "**`async/await`** is syntactic sugar over Promises: `await` suspends the async function and schedules the continuation as a microtask when the Promise resolves — it does NOT block the thread.",
+        "**Long synchronous tasks** block the main thread and freeze rendering. Break heavy work into chunks with `await new Promise(r => setTimeout(r, 0))` between chunks, or offload to a **Web Worker**.",
+        "**`requestAnimationFrame`** schedules a callback to run just before the browser's next render frame — the correct place for animation code to read layout and apply visual changes in sync with 60fps."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Given: `setTimeout(() => console.log('A'), 0); Promise.resolve().then(() => console.log('B')); console.log('C');` — what is the output order?",
+      "type": "mcq",
+      "options": [
+        "C, A, B",
+        "C, B, A",
+        "A, B, C",
+        "B, C, A"
+      ],
+      "correct": 1,
+      "explanation": "Synchronous code runs first (C), then microtasks are drained (B from Promise.then), then the next task runs (A from setTimeout). Microtasks always run before the next task queue item, even if the setTimeout delay is 0."
+    },
+    {
+      "id": "q2",
+      "question": "What happens when you `await` a resolved Promise inside an async function?",
+      "type": "mcq",
+      "options": [
+        "The function blocks the main thread until the Promise resolves",
+        "The function suspends and the continuation is scheduled as a microtask",
+        "The function suspends and the continuation is scheduled as a setTimeout task",
+        "JavaScript switches to a separate thread for the await expression"
+      ],
+      "correct": 1,
+      "explanation": "await suspends the current async function and returns control to the event loop. The continuation (code after await) is scheduled as a microtask when the awaited Promise resolves. The main thread is free to do other work while awaiting. This is why await is non-blocking."
+    },
+    {
+      "id": "q3",
+      "question": "Why can an infinite `while(true) { await Promise.resolve(); }` loop starve the renderer?",
+      "type": "mcq",
+      "options": [
+        "It causes a stack overflow that crashes the renderer",
+        "Microtasks are drained completely before rendering; an infinite microtask chain prevents rendering from ever running",
+        "Promise.resolve() is synchronous and blocks the thread",
+        "The loop consumes too much memory, causing the renderer to be garbage collected"
+      ],
+      "correct": 1,
+      "explanation": "After each task, the browser drains ALL microtasks before rendering. Each `await Promise.resolve()` schedules another microtask continuation. If this loop runs forever, the microtask queue never empties, and the renderer never gets to run. Use setTimeout between iterations to yield to the task queue and allow rendering."
+    },
+    {
+      "id": "q4",
+      "question": "Which API is most appropriate for CPU-intensive computation that should not block the UI?",
+      "type": "mcq",
+      "options": [
+        "setInterval with a very short delay",
+        "requestAnimationFrame",
+        "Web Workers",
+        "queueMicrotask"
+      ],
+      "correct": 2,
+      "explanation": "Web Workers run on a separate OS thread, allowing CPU-intensive computation without blocking the main thread or the UI. setInterval still runs on the main thread. requestAnimationFrame is for animation synchronized to render frames. queueMicrotask adds to the microtask queue — still on the main thread."
+    },
+    {
+      "id": "q5",
+      "question": "What is the correct use case for `requestAnimationFrame`?",
+      "type": "mcq",
+      "options": [
+        "Debouncing user input events",
+        "Delaying code by exactly one second",
+        "Running animation code in sync with the browser's 60fps render loop",
+        "Scheduling microtasks for Promise chains"
+      ],
+      "correct": 2,
+      "explanation": "requestAnimationFrame schedules a callback to run just before the browser paints the next frame. This synchronizes animation code with the display refresh rate (typically 60fps = 16ms per frame), preventing wasted computation on frames that will be overwritten, and ensuring visual updates are always in sync with rendering."
+    },
+    {
+      "id": "q6",
+      "question": "Which of the following is a MICROTASK source?",
+      "type": "mcq",
+      "options": [
+        "setTimeout(fn, 0)",
+        "element.addEventListener('click', fn)",
+        "Promise.then(fn)",
+        "setInterval(fn, 100)"
+      ],
+      "correct": 2,
+      "explanation": "Promise.then() (and .catch(), .finally()), queueMicrotask(), MutationObserver callbacks, and async/await continuations are microtask sources. setTimeout, setInterval, I/O event handlers, and click listeners all schedule tasks in the macrotask queue."
+    },
+    {
+      "id": "q7",
+      "question": "How can you process a large array in JavaScript without freezing the UI?",
+      "type": "mcq",
+      "options": [
+        "Use synchronous for loop — browsers optimize large loops automatically",
+        "Chunk the array and yield between chunks using await new Promise(r => setTimeout(r, 0))",
+        "Use Promise.all to process all items simultaneously",
+        "Increase the setTimeout delay to 1000ms between batches"
+      ],
+      "correct": 1,
+      "explanation": "Yielding via `await new Promise(r => setTimeout(r, 0))` between chunks gives the event loop a chance to process rendering and user events. Promise.all still runs callbacks as microtasks on the main thread. A pure synchronous loop blocks the thread entirely until completion."
+    },
+    {
+      "id": "q8",
+      "question": "What does the event loop do after the call stack empties?",
+      "type": "mcq",
+      "options": [
+        "Immediately picks the next task from the task queue",
+        "Renders the current frame, then picks the next task",
+        "Drains all microtasks, then potentially renders, then picks the next task",
+        "Pauses until the next user interaction"
+      ],
+      "correct": 2,
+      "explanation": "After the call stack empties: (1) drain ALL microtasks, (2) give the renderer a chance to paint if a frame is due, (3) pick the next task from the task queue. Microtasks always run before rendering. Rendering doesn't happen after every task — only when the browser decides a new frame is needed (typically every 16ms)."
+    },
+    {
+      "id": "q9",
+      "question": "How do Web Workers communicate with the main thread?",
+      "type": "mcq",
+      "options": [
+        "Via shared memory through direct object references",
+        "Via postMessage(), which schedules a task in the receiver's task queue",
+        "Via async/await across thread boundaries",
+        "Via global variables accessible to both threads"
+      ],
+      "correct": 1,
+      "explanation": "Workers and the main thread communicate via postMessage(). The message is received as a 'message' event task in the receiving thread's task queue. By default, data is copied via the Structured Clone Algorithm (not shared by reference). SharedArrayBuffer with Atomics can be used for true shared memory, but requires additional security headers."
+    },
+    {
+      "id": "q10",
+      "question": "Why does `setTimeout(fn, 0)` not guarantee `fn` runs in 0 milliseconds?",
+      "type": "mcq",
+      "options": [
+        "Browsers enforce a minimum delay of 4ms for nested setTimeouts",
+        "The callback is put in the task queue; it runs only after the current task and all microtasks complete, which may take longer than 0ms",
+        "JavaScript timers are imprecise due to CPU scheduling",
+        "Both A and B"
+      ],
+      "correct": 3,
+      "explanation": "Both are correct: (A) Browsers enforce a minimum 4ms clamping for nested setTimeouts (per HTML spec). (B) Even if the timer fires immediately, the callback must wait in the task queue until the current task and ALL microtasks complete. A heavy main thread task can delay setTimeout callbacks by many milliseconds."
+    }
+  ]
+}

@@ -1,0 +1,196 @@
+{
+  "id": "phase5_concurrency-deadlocks",
+  "title": "Concurrency & Deadlocks",
+  "phase": 5,
+  "week": 18,
+  "icon": "os",
+  "tagline": "Shared state, race conditions, and why threads freeze",
+  "readTime": "14 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "When two or more threads access shared data without coordination, you get **race conditions** — bugs that appear randomly and are notoriously hard to reproduce. The solution is **synchronization**: forcing threads to take turns accessing critical sections using primitives like mutexes and semaphores.\n\nBut synchronization introduces its own danger: **deadlock**. When Thread A holds Lock 1 and waits for Lock 2, while Thread B holds Lock 2 and waits for Lock 1, both threads freeze forever. Understanding the four conditions that cause deadlock — and the strategies to prevent them — is essential for writing correct concurrent software."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  T1[\"Thread 1\"] -- holds --> L1[\"Lock A\"]\n  T1 -- waits for --> L2[\"Lock B\"]\n  T2[\"Thread 2\"] -- holds --> L2\n  T2 -- waits for --> L1\n  L1 -- blocked --> T2\n  L2 -- blocked --> T1",
+      "caption": "Classic deadlock: Thread 1 holds Lock A and waits for Lock B; Thread 2 holds Lock B and waits for Lock A — neither can proceed."
+    },
+    {
+      "type": "analogy",
+      "title": "Single-Lane Bridge Analogy",
+      "content": "Picture a single-lane bridge with one car from each direction entering simultaneously. **Car A** (Thread 1) is on the bridge and won't reverse until Car B moves. **Car B** (Thread 2) is on the bridge and won't reverse until Car A moves. Both are stuck — a deadlock.\n\nThe bridge is a **critical section** — a resource only one car (thread) should use at a time. A **mutex** is the traffic light that ensures only one car enters at once. A **semaphore** is a counter that allows up to N cars simultaneously (like a multi-lane car park with N spaces). Without these controls, two cars enter at the same time and collide — that's a **race condition**."
+    },
+    {
+      "type": "explanation",
+      "title": "Race Conditions, Mutexes, and Semaphores",
+      "content": "A **race condition** occurs when program output depends on the relative timing of thread execution. The classic example: two threads each read a counter (value = 5), both increment locally, and both write back 6 — but the correct answer is 7. The **read-modify-write** sequence is not atomic.\n\nA **mutex** (mutual exclusion lock) is a binary flag: one thread acquires it, does its work in the **critical section**, then releases it. Any other thread trying to acquire the mutex blocks until it's free. Mutexes enforce that at most one thread executes the critical section at a time. A **semaphore** generalizes this to N: initialized to N, it allows N threads in simultaneously; each `wait()` decrements the count, and each `signal()` increments it. A binary semaphore (N=1) is functionally similar to a mutex.\n\n**Deadlock** requires all four **Coffman conditions** to hold simultaneously: (1) **Mutual Exclusion** — a resource can only be held by one thread; (2) **Hold and Wait** — a thread holds resources while waiting for more; (3) **No Preemption** — resources can't be forcibly taken away; (4) **Circular Wait** — a cycle exists in the resource-wait graph. Break *any one* condition and deadlock cannot occur."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  ME[\"1. Mutual Exclusion\\nResource held exclusively\"] --> DL[\"DEADLOCK\"]\n  HW[\"2. Hold and Wait\\nThread holds + requests more\"] --> DL\n  NP[\"3. No Preemption\\nResources not forcibly taken\"] --> DL\n  CW[\"4. Circular Wait\\nCycle in wait-for graph\"] --> DL\n  DL --> P1[\"Prevention: Lock Ordering\"]\n  DL --> P2[\"Prevention: Timeout + Retry\"]\n  DL --> P3[\"Detection: Wait-for Graph\"]\n  DL --> P4[\"Avoidance: Banker's Algorithm\"]",
+      "caption": "All four Coffman conditions must hold for deadlock. Breaking any one prevents it; detection and avoidance are alternative strategies."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// Race condition: two async operations on shared state\nlet balance = 1000;\n\nasync function withdraw(amount, label) {\n  // Simulate a read-then-write that takes time (like a DB round-trip)\n  const current = balance;                     // READ\n  await new Promise(r => setTimeout(r, 10));   // simulate latency\n  balance = current - amount;                  // WRITE (stale 'current'!)\n  console.log(`${label}: withdrew ${amount}, new balance: ${balance}`);\n}\n\n// UNSAFE: both reads happen before either write\nPromise.all([\n  withdraw(200, 'Alice'),\n  withdraw(300, 'Bob')\n]).then(() => {\n  console.log('Final balance:', balance);\n  // Expected: 500  |  Actual: 700 or 800 — race condition!\n});\n\n// FIX: serialize with a simple async mutex\nfunction createMutex() {\n  let queue = Promise.resolve();\n  return function withLock(fn) {\n    queue = queue.then(fn);  // chain: next fn only runs after previous resolves\n    return queue;\n  };\n}\n\nconst lock = createMutex();\nbalance = 1000;\n\nlock(() => withdraw(200, 'Alice (safe)'));\nlock(() => withdraw(300, 'Bob (safe)'));\n// Now operations are serialized — correct final balance: 500",
+      "explanation": "The first `Promise.all` demonstrates a classic async race: both functions read `balance = 1000` before either writes, so one withdrawal is lost. The mutex chains promises sequentially — each withdrawal waits for the previous to finish before reading `balance`, eliminating the race."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// Deadlock prevention strategy 1: consistent lock ordering\n// WRONG — can deadlock if threadA acquires lockA first and threadB acquires lockB first\nfunction transferWrong(from, to, amount) {\n  from.lock();  // Thread A: acquires 'from'\n  to.lock();    // Thread A: waits for 'to'  (Thread B may hold it)\n  // ...transfer...\n  to.unlock();\n  from.unlock();\n}\n\n// RIGHT — always acquire locks in a globally consistent order (by account ID)\nfunction transferSafe(accountA, accountB, amount) {\n  const [first, second] = accountA.id < accountB.id\n    ? [accountA, accountB]\n    : [accountB, accountA];\n  first.lock();\n  second.lock();\n  // ...transfer...\n  second.unlock();\n  first.unlock();\n  // Eliminates circular wait (Coffman condition 4)\n}\n\n// Deadlock prevention strategy 2: lock with timeout\nasync function tryTransfer(from, to, amount, timeoutMs = 500) {\n  const acquired = await from.tryLock(timeoutMs);\n  if (!acquired) throw new Error('Lock timeout — retry later');\n  try {\n    await to.lock();\n    // ...transfer...\n  } finally {\n    from.unlock();\n  }\n  // Breaks 'no preemption' by abandoning if lock not acquired in time\n}"
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Golden rule for deadlock prevention:** always acquire multiple locks in the same globally agreed order (e.g., by resource ID ascending). This eliminates **circular wait** — the most practical Coffman condition to break. In databases, this is exactly why ORM transactions sort row locks by primary key."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "A **race condition** occurs when two threads read-modify-write shared state without synchronization, producing non-deterministic results.",
+        "A **mutex** enforces exclusive access to a critical section; a **semaphore** is a generalized counter allowing up to N concurrent accesses.",
+        "**Deadlock** requires all four Coffman conditions simultaneously: Mutual Exclusion, Hold and Wait, No Preemption, and Circular Wait.",
+        "The simplest prevention is **lock ordering** — always acquiring locks in a consistent global order eliminates circular wait.",
+        "Alternative strategies include **timeout-and-retry** (breaks No Preemption), **deadlock detection** via wait-for graphs, and **avoidance** algorithms like the Banker's Algorithm."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What is a race condition?",
+      "type": "mcq",
+      "options": [
+        "When two processes compete for CPU time fairly",
+        "When program output depends on the non-deterministic timing of concurrent thread execution",
+        "When a thread runs faster than its time slice allows",
+        "When the OS schedules high-priority threads before low-priority ones"
+      ],
+      "correct": 1,
+      "explanation": "A race condition occurs when the correctness of a program depends on the relative execution order of concurrent threads — and that order is not guaranteed. The classic symptom is intermittent, hard-to-reproduce bugs."
+    },
+    {
+      "id": "q2",
+      "question": "A mutex is best described as:",
+      "type": "mcq",
+      "options": [
+        "A counter that allows up to N threads into a section simultaneously",
+        "A binary lock ensuring at most one thread is in the critical section at a time",
+        "A hardware instruction that makes a single operation atomic",
+        "A scheduling algorithm that prevents starvation"
+      ],
+      "correct": 1,
+      "explanation": "A mutex (mutual exclusion lock) is a binary synchronization primitive: one thread acquires it, performs its critical section, then releases it. All other threads attempting to acquire it block until it is free."
+    },
+    {
+      "id": "q3",
+      "question": "How does a semaphore differ from a mutex?",
+      "type": "mcq",
+      "options": [
+        "A semaphore is faster but less safe",
+        "A semaphore allows a configurable number (N) of threads to proceed concurrently; a mutex allows exactly one",
+        "A semaphore is only used for inter-process communication; a mutex is only for threads",
+        "They are identical — semaphore is just an older name for mutex"
+      ],
+      "correct": 1,
+      "explanation": "A semaphore maintains an integer count. `wait()` decrements it (blocks if 0); `signal()` increments it. Setting N=1 makes it behave like a mutex. N>1 allows N concurrent accesses — useful for resource pools like database connections."
+    },
+    {
+      "id": "q4",
+      "question": "Which of the four Coffman conditions must be true for deadlock to occur?",
+      "type": "mcq",
+      "options": [
+        "At least one must hold",
+        "Any two must hold simultaneously",
+        "All four must hold simultaneously",
+        "Mutual Exclusion alone is sufficient"
+      ],
+      "correct": 2,
+      "explanation": "Deadlock requires all four Coffman conditions simultaneously: Mutual Exclusion, Hold and Wait, No Preemption, and Circular Wait. Breaking even one condition prevents deadlock."
+    },
+    {
+      "id": "q5",
+      "question": "Thread A holds Lock 1 and waits for Lock 2. Thread B holds Lock 2 and waits for Lock 1. Which Coffman condition does this scenario illustrate?",
+      "type": "mcq",
+      "options": [
+        "No Preemption",
+        "Hold and Wait",
+        "Mutual Exclusion",
+        "Circular Wait"
+      ],
+      "correct": 3,
+      "explanation": "Circular Wait is the condition where a cycle exists in the resource-wait graph: A→B→A. This is the most direct descriptor of the classic two-thread deadlock scenario."
+    },
+    {
+      "id": "q6",
+      "question": "What is the most practical technique to prevent deadlock when multiple locks are needed?",
+      "type": "mcq",
+      "options": [
+        "Release all locks before requesting new ones",
+        "Acquire all locks in a consistent, globally agreed-upon order",
+        "Use only a single global lock for all resources",
+        "Allow the OS to preempt locks after 1 second"
+      ],
+      "correct": 1,
+      "explanation": "Lock ordering eliminates Circular Wait: if every thread acquires locks in the same order (e.g., by ID), a cycle in the wait-for graph cannot form. This is practical, has zero runtime overhead, and is widely used in real systems."
+    },
+    {
+      "id": "q7",
+      "question": "In the async race condition example, why does balance end up wrong without a mutex?",
+      "type": "mcq",
+      "options": [
+        "JavaScript arithmetic is non-deterministic",
+        "Both withdrawals read the balance before either writes it back, so one update is lost",
+        "Promises always execute in a random order",
+        "The `await` keyword introduces a compiler bug"
+      ],
+      "correct": 1,
+      "explanation": "Both functions read `balance = 1000` before the `await`. After the delay, both write back a value derived from the original 1000, so the second write overwrites the first — one withdrawal is silently lost."
+    },
+    {
+      "id": "q8",
+      "question": "The Banker's Algorithm is an example of which deadlock strategy?",
+      "type": "mcq",
+      "options": [
+        "Deadlock detection",
+        "Deadlock prevention",
+        "Deadlock avoidance",
+        "Deadlock recovery"
+      ],
+      "correct": 2,
+      "explanation": "The Banker's Algorithm is a deadlock *avoidance* strategy: before granting a resource request, it simulates whether granting would leave the system in a 'safe state' (all threads can eventually finish). If not, the request is deferred."
+    },
+    {
+      "id": "q9",
+      "question": "A 'critical section' is best defined as:",
+      "type": "mcq",
+      "options": [
+        "Any code that runs on the main thread",
+        "A code region that accesses shared mutable state and must not be executed by more than one thread at a time",
+        "The first function called when a thread starts",
+        "A section of code that is performance-critical and must be optimized"
+      ],
+      "correct": 1,
+      "explanation": "A critical section is any code segment that reads or writes shared mutable state. It must be protected — only one thread should execute it at a time — to avoid race conditions."
+    },
+    {
+      "id": "q10",
+      "question": "Which deadlock strategy does 'lock with timeout and retry' implement?",
+      "type": "mcq",
+      "options": [
+        "Circular Wait elimination",
+        "No Preemption violation — releasing a held lock when the timeout expires",
+        "Mutual Exclusion elimination",
+        "Hold and Wait elimination"
+      ],
+      "correct": 1,
+      "explanation": "Timeout-and-retry breaks the 'No Preemption' Coffman condition: if a thread cannot acquire a lock within the timeout, it releases its currently held locks and retries later. This allows the other thread to proceed, resolving the potential deadlock."
+    }
+  ]
+}

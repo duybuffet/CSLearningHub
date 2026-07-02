@@ -1,0 +1,199 @@
+{
+  "id": "phase20_ml-systems-in-production",
+  "title": "ML Systems in Production",
+  "phase": 20,
+  "week": 60,
+  "icon": "pattern",
+  "tagline": "Getting a model to 95% accuracy is 10% of the work — keeping it reliable in production is the other 90%.",
+  "readTime": "~16 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Building a working ML model in a notebook is one thing. Deploying it reliably to serve millions of requests, monitoring its performance over time, retraining it as the world changes, and auditing it for fairness — that is **ML in production**.\n\nThe discipline that addresses this is **MLOps** (Machine Learning Operations), analogous to DevOps but with the added complexity that ML systems degrade silently: a model can return confidently wrong predictions for weeks before anyone notices. Key concerns are the **data pipeline** (reliable feature computation), **training infrastructure** (reproducible experiments), **serving** (low-latency prediction APIs), **feature stores** (consistent features between training and serving), **model drift** (detecting when the real world diverges from training data), and **evaluation** (measuring what actually matters)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Raw Data Sources\"] --> B[\"Data Pipeline\"]\n    B --> C[\"Feature Store\"]\n    C --> D[\"Training\"]\n    D --> E[\"Model Registry\"]\n    E --> F[\"Serving / Inference API\"]\n    F --> G[\"Predictions\"]\n    G --> H[\"Monitoring\"]\n    H --> I{\"Drift Detected?\"}    \n    I -->|\"Yes\"| D\n    I -->|\"No\"| G",
+      "caption": "End-to-end ML system: data flows through pipelines into a feature store, feeds training, the model is registered and served, and monitoring triggers retraining when drift is detected."
+    },
+    {
+      "type": "analogy",
+      "title": "A Weather Forecast Station",
+      "content": "A weather station does more than compute today's forecast. It must **ingest sensor data** continuously (data pipeline), store historical readings consistently (feature store), retrain its forecast model as climate patterns shift (retraining on drift), and alert operators when sensor readings become implausible — frozen at yesterday's value (monitoring). The forecast model is only one component in a much larger system.\n\nML production systems have the same structure. The model is the 'forecast' — valuable only if the data feeding it is fresh and clean, the infrastructure serving it is reliable, and someone is watching for the moment sensor data (real-world distribution) diverges from what the model was trained on. A beautiful model degraded by stale features or undetected drift is worse than useless — it is confidently wrong."
+    },
+    {
+      "type": "explanation",
+      "content": "**Data pipeline** is the foundation. Raw data from databases, logs, and external APIs must be cleaned, validated, and transformed into features. Pipelines are usually orchestrated with tools like Apache Airflow, Prefect, or dbt. Key concerns: late-arriving data, schema changes, null handling, and data quality checks that fail loudly rather than silently.\n\n**Feature store** solves the training-serving skew problem. If you compute feature X one way during training and a slightly different way during serving, the model receives inputs it was never trained on — a subtle but catastrophic inconsistency. A feature store (e.g., Feast, Tecton, Vertex AI Feature Store) provides a single source of truth: the same feature computation logic runs for both training (historical batch) and serving (real-time). It also enables feature reuse across multiple models.\n\n**Model registry** is version control for trained models. After each training run, the model artifact (weights, hyperparameters, training metrics, data version) is registered with a unique version ID. Deployment pulls from the registry, enabling reproducibility, rollback, and audit trails. Tools: MLflow, Weights & Biases, SageMaker Model Registry.\n\n**Serving** is the inference API layer. A model server (TorchServe, TensorFlow Serving, Triton, vLLM for LLMs) loads model weights and exposes a REST/gRPC endpoint. Performance requirements vary: fraud detection needs sub-10ms p99 latency; batch recommendation can tolerate minutes. Serving concerns include batching, hardware (GPU vs CPU), autoscaling, and A/B testing infrastructure.\n\n**Model drift** is the degradation of model performance over time as the real world diverges from the training data. Two types:\n- **Data drift** (covariate shift): the distribution of input features changes. Users' behaviour shifts, sensor calibration drifts, a new product category appears.\n- **Concept drift**: the relationship between features and labels changes. A fraud pattern the model learned becomes obsolete as fraudsters adapt.\n\nDetecting drift requires monitoring input feature distributions (KL divergence, Population Stability Index), output prediction distributions, and — where ground truth labels are available — actual model accuracy over time.\n\n**Evaluation** in production goes beyond offline accuracy. Key metrics:\n- **Business metrics** (revenue, user engagement) — the ultimate measure.\n- **Online A/B test metrics** — compare new model to champion on live traffic.\n- **Slice-based metrics** — performance by subgroup (age, geography) to catch fairness issues.\n- **Calibration** — predicted probabilities should match empirical frequencies.\n- **Latency SLAs** — p50, p95, p99 inference latency thresholds."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"Training Features\"] --> B[\"Feature Store\"]\n    C[\"Serving Request\"] --> B\n    B --> D[\"Same Computation Logic\"]\n    D --> E[\"Model Input\"]\n    E --> F[\"Training: fit model\"]\n    E --> G[\"Serving: predict\"]",
+      "caption": "Feature store eliminates training-serving skew: the same feature computation logic runs for both training (batch, historical) and serving (real-time), guaranteeing model inputs are consistent."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── ML pipeline components in code ─────────────────────────────\n\n// 1. Data validation — fail loudly on bad data\nfunction validateFeatures(record) {\n  const errors = [];\n  if (typeof record.age !== 'number' || record.age < 0 || record.age > 150) {\n    errors.push(`Invalid age: ${record.age}`);\n  }\n  if (typeof record.purchaseAmount !== 'number' || record.purchaseAmount < 0) {\n    errors.push(`Invalid purchaseAmount: ${record.purchaseAmount}`);\n  }\n  if (!['web', 'mobile', 'api'].includes(record.channel)) {\n    errors.push(`Unknown channel: ${record.channel}`);\n  }\n  if (errors.length > 0) throw new Error(`Feature validation failed: ${errors.join('; ')}`);\n  return true;\n}\n\n// 2. Feature computation — same logic for train and serve\nfunction computeFeatures(rawRecord) {\n  return {\n    ageNormalised:     (rawRecord.age - 30) / 20,   // z-score approx\n    logAmount:         Math.log1p(rawRecord.purchaseAmount),\n    isWebChannel:      rawRecord.channel === 'web' ? 1 : 0,\n    isMobileChannel:   rawRecord.channel === 'mobile' ? 1 : 0,\n    hourOfDay:         new Date(rawRecord.timestamp).getHours()\n  };\n}\n\n// 3. Model registry simulation (in production: MLflow, W&B, SageMaker)\nconst modelRegistry = new Map();\n\nfunction registerModel(name, version, metrics, artifact) {\n  const key = `${name}:${version}`;\n  modelRegistry.set(key, {\n    name, version, metrics, artifact,\n    registeredAt: new Date().toISOString()\n  });\n  console.log(`Registered model ${key} — accuracy: ${metrics.accuracy}`);\n  return key;\n}\n\nfunction getLatestModel(name) {\n  const versions = [...modelRegistry.entries()]\n    .filter(([k]) => k.startsWith(name))\n    .sort(([,a], [,b]) => b.registeredAt.localeCompare(a.registeredAt));\n  return versions[0]?.[1] ?? null;\n}\n\n// 4. Drift detection — Population Stability Index (PSI)\n// PSI < 0.1: no drift. 0.1-0.25: moderate. > 0.25: significant drift.\nfunction computePSI(expected, actual, bins = 10) {\n  // Quantise both distributions into bins\n  const allValues = [...expected, ...actual].sort((a, b) => a - b);\n  const min = allValues[0], max = allValues[allValues.length - 1];\n  const binWidth = (max - min) / bins;\n\n  function toBinCounts(arr) {\n    const counts = new Array(bins).fill(0);\n    for (const v of arr) {\n      const idx = Math.min(Math.floor((v - min) / binWidth), bins - 1);\n      counts[idx]++;\n    }\n    return counts.map(c => Math.max(c / arr.length, 1e-9)); // proportions, avoid 0\n  }\n\n  const expProp = toBinCounts(expected);\n  const actProp = toBinCounts(actual);\n\n  const psi = expProp.reduce((sum, e, i) => {\n    const a = actProp[i];\n    return sum + (a - e) * Math.log(a / e);\n  }, 0);\n\n  return psi;\n}\n\n// Demo\nconst record = { age: 35, purchaseAmount: 149.99, channel: 'web', timestamp: Date.now() };\nvalidateFeatures(record);\nconst features = computeFeatures(record);\nconsole.log('Computed features:', features);\n\nregisterModel('fraud-detector', 'v1.2', { accuracy: 0.94, auc: 0.97 }, { path: '/models/fraud/v1.2' });\nregisterModel('fraud-detector', 'v1.3', { accuracy: 0.95, auc: 0.98 }, { path: '/models/fraud/v1.3' });\nconsole.log('Latest model:', getLatestModel('fraud-detector').version); // v1.3\n\n// Drift: compare training distribution vs recent serving distribution\nconst trainingAges = Array.from({length: 100}, () => 25 + Math.random() * 20); // 25-45\nconst servingAges  = Array.from({length: 100}, () => 40 + Math.random() * 25); // 40-65 (shifted)\nconst psi = computePSI(trainingAges, servingAges);\nconsole.log(`PSI for age feature: ${psi.toFixed(3)} — ${psi > 0.25 ? 'DRIFT DETECTED' : psi > 0.1 ? 'moderate shift' : 'stable'}`);\n// PSI will likely be > 0.25 — drift detected, trigger retraining",
+      "explanation": "Feature validation rejects malformed records before they contaminate predictions or training. Feature computation is extracted into a pure function — identical logic for training batch jobs and real-time serving, preventing skew. The registry records model versions with metrics, enabling rollback. The PSI drift detector compares binned feature distributions: a PSI above 0.25 on the age feature (training: 25-45, serving: 40-65) triggers a retraining alert."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── MLOps vocabulary ────────────────────────────────────────────\n//\n// DATA PIPELINE\n//   Orchestrated ETL from raw sources → clean features.\n//   Tools: Apache Airflow, Prefect, dbt, Spark.\n//   Key: idempotent, monitored, fails loudly on data quality issues.\n//\n// FEATURE STORE\n//   Single source of truth for feature computation.\n//   Training path (batch): historical feature values for labelled examples.\n//   Serving path (online): real-time feature lookup for live predictions.\n//   Eliminates training-serving skew.\n//   Tools: Feast, Tecton, Vertex AI Feature Store, Databricks Feature Store.\n//\n// MODEL REGISTRY\n//   Version-controlled storage of model artifacts + metadata.\n//   Enables reproducibility, A/B testing, rollback.\n//   Tools: MLflow, Weights & Biases, SageMaker Model Registry.\n//\n// SERVING\n//   Model-as-a-service for real-time or batch inference.\n//   Concerns: latency SLA, throughput, autoscaling, batching, hardware.\n//   Tools: TorchServe, Triton, TF Serving, vLLM (for LLMs).\n//\n// MODEL DRIFT\n//   Data drift:    input feature distribution changes.\n//   Concept drift: feature → label relationship changes.\n//   Detection:     PSI, KL divergence, output distribution monitoring,\n//                  accuracy on labelled holdout windows.\n//\n// EVALUATION\n//   Offline metrics: accuracy, AUC, RMSE (benchmark datasets).\n//   Online A/B test: compare new model to champion on live traffic.\n//   Slice analysis: performance by subgroup (age, region, device type).\n//   Calibration:    predicted probabilities match empirical frequencies.\n//\n// SHADOW MODE\n//   New model runs in parallel but predictions are NOT served to users.\n//   Output is logged and compared to champion model offline.\n//   Safe way to validate a new model before traffic cutover.\n//\n// CANARY DEPLOYMENT\n//   Route a small % (1-5%) of traffic to new model.\n//   Monitor metrics; roll back instantly if degradation detected.\n//   Gradually increase traffic as confidence grows.",
+      "explanation": ""
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Monitor your features, not just your model.** The most common cause of silent production degradation is not a model bug — it is upstream data quality issues: a column going null, a value encoding changing, or a data source going stale. Set up **feature distribution monitoring** (mean, stddev, null rate, PSI vs training baseline) on every feature your model ingests. Alert before the model's accuracy degrades — by the time accuracy drops, you have already served bad predictions to real users for hours or days."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**MLOps** treats ML systems as software systems: versioned, monitored, deployed via CI/CD, and subject to production SLAs. A model without MLOps infrastructure will silently degrade.",
+        "**Feature stores** eliminate training-serving skew by providing the same feature computation logic for both training (batch historical) and serving (real-time online) paths.",
+        "**Model drift** — data drift (input distribution shifts) or concept drift (feature-label relationship changes) — causes silent accuracy degradation. Monitor feature distributions (PSI, KL divergence) proactively.",
+        "**Model registries** version model artifacts, metrics, and training metadata, enabling reproducibility, A/B testing, and safe rollbacks when a new model underperforms.",
+        "**Safe deployment patterns**: shadow mode (run parallel, log but do not serve), canary (small traffic slice to new model), and gradual rollout reduce the blast radius of a bad model deployment."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What problem does a feature store solve?",
+      "type": "mcq",
+      "options": [
+        "It stores trained model weights so they do not need to be recomputed",
+        "It eliminates training-serving skew by ensuring the same feature computation logic is used for both training and serving",
+        "It provides a database for storing raw unprocessed training data",
+        "It caches model predictions to reduce inference latency"
+      ],
+      "correct": 1,
+      "explanation": "Training-serving skew occurs when features are computed differently at training time versus serving time, causing the model to receive inputs unlike those it was trained on. A feature store provides a single implementation of each feature's computation logic, run in batch mode for training and in real-time for serving."
+    },
+    {
+      "id": "q2",
+      "question": "What is 'concept drift' in ML production?",
+      "type": "mcq",
+      "options": [
+        "The model's code drifting out of sync with the feature store schema",
+        "The input feature distribution changing over time",
+        "The relationship between input features and the target label changing over time",
+        "Model weights gradually changing during inference"
+      ],
+      "correct": 2,
+      "explanation": "Concept drift means the statistical relationship between features and labels has changed — the pattern the model learned is no longer valid. For example, a spam filter trained on 2022 spam patterns may fail when spammers adapt their tactics. Data drift (covariate shift) is different: just the feature distribution changes, but the feature-label relationship stays the same."
+    },
+    {
+      "id": "q3",
+      "question": "What is the purpose of a model registry?",
+      "type": "mcq",
+      "options": [
+        "To store user prediction requests for auditing",
+        "To version and store trained model artifacts along with metadata, enabling reproducibility and rollback",
+        "To register new features before they are added to the feature store",
+        "To manage API keys for model serving endpoints"
+      ],
+      "correct": 1,
+      "explanation": "A model registry stores versioned model artifacts (weights, configs) along with training metadata (dataset version, hyperparameters, evaluation metrics). This enables reproducing any past model, comparing versions, deploying a specific version, and rolling back to a previous champion if a new model underperforms."
+    },
+    {
+      "id": "q4",
+      "question": "In shadow mode deployment, how are new model predictions handled?",
+      "type": "mcq",
+      "options": [
+        "They are served to 1% of users to test real-world impact",
+        "They are computed and logged but not served to users, allowing safe offline comparison to the champion model",
+        "They replace the champion model immediately for internal users only",
+        "They are stored in a queue and served only during off-peak hours"
+      ],
+      "correct": 1,
+      "explanation": "Shadow mode runs the new model in parallel with the champion model. Actual user-facing predictions still come from the champion. The new model's outputs are logged and compared offline. This is the safest validation method — no user-facing risk — before committing to a traffic cutover."
+    },
+    {
+      "id": "q5",
+      "question": "What does the Population Stability Index (PSI) measure?",
+      "type": "mcq",
+      "options": [
+        "The percentage of users whose predictions have changed",
+        "The statistical distance between a feature's training distribution and its current serving distribution",
+        "The fraction of model parameters that have changed since the last training run",
+        "The ratio of positive to negative labels in the training dataset"
+      ],
+      "correct": 1,
+      "explanation": "PSI quantifies how much a feature's distribution has shifted between training (expected) and production (actual). PSI < 0.1 indicates no meaningful shift; 0.1-0.25 is moderate and worth investigating; > 0.25 signals significant drift requiring retraining or feature investigation."
+    },
+    {
+      "id": "q6",
+      "question": "Why is monitoring feature distributions important, even when model accuracy is not yet degraded?",
+      "type": "mcq",
+      "options": [
+        "Feature monitoring is a regulatory compliance requirement",
+        "Accuracy metrics are lagging indicators — feature drift precedes accuracy degradation, so catching it early prevents serving bad predictions",
+        "Feature monitoring prevents the model from overfitting during serving",
+        "Feature distributions determine compute costs and must be tracked for billing"
+      ],
+      "correct": 1,
+      "explanation": "By the time accuracy visibly drops, you have already served incorrect predictions for potentially hours or days. Feature distribution shifts are leading indicators — they tell you something has changed upstream before the downstream impact on accuracy. Early alerts allow investigation and correction before users are harmed."
+    },
+    {
+      "id": "q7",
+      "question": "What is canary deployment in the context of ML model releases?",
+      "type": "mcq",
+      "options": [
+        "Running a model only during business hours to reduce compute costs",
+        "Deploying the new model to a small percentage of traffic while monitoring metrics, then gradually increasing",
+        "Testing the model only on synthetic data before production release",
+        "Reverting to the previous model version after a fixed time period"
+      ],
+      "correct": 1,
+      "explanation": "Canary deployment routes a small fraction of live traffic (e.g., 1-5%) to the new model. Key production metrics (latency, error rate, business KPIs) are monitored. If they remain acceptable, traffic is gradually shifted to 100%. If issues arise, rollback is instant — only a tiny user fraction was affected."
+    },
+    {
+      "id": "q8",
+      "question": "What is 'slice-based evaluation' in ML model assessment?",
+      "type": "mcq",
+      "options": [
+        "Evaluating the model on a random 10% slice of the test set for speed",
+        "Evaluating model performance separately across subgroups to detect fairness issues or weak spots",
+        "Training the model on slices of time to test temporal generalisation",
+        "Splitting the model weights into slices for distributed evaluation"
+      ],
+      "correct": 1,
+      "explanation": "Aggregate accuracy can hide poor performance on important subgroups. A loan approval model might achieve 90% accuracy overall but 70% on a specific demographic — a serious fairness issue. Slice-based evaluation computes metrics (accuracy, AUC, RMSE) for each subgroup (age range, geography, device type) to detect these discrepancies."
+    },
+    {
+      "id": "q9",
+      "question": "Which tool is commonly used to orchestrate ML data pipelines?",
+      "type": "mcq",
+      "options": [
+        "Kubernetes",
+        "Apache Airflow or Prefect",
+        "Nginx",
+        "Redis"
+      ],
+      "correct": 1,
+      "explanation": "Apache Airflow and Prefect are workflow orchestration tools that schedule and monitor DAG-based pipelines. In ML systems they orchestrate data ingestion, feature computation, model training, and evaluation jobs — ensuring tasks run in dependency order, failures are retried and alerted, and pipeline history is tracked."
+    },
+    {
+      "id": "q10",
+      "question": "A model achieving 95% accuracy in offline evaluation performs poorly in production. What is the most likely cause?",
+      "type": "mcq",
+      "options": [
+        "The model has too many parameters and is too slow to serve",
+        "Training-serving skew, data drift, or label leakage in the offline dataset that does not exist in production",
+        "The test set was too large, causing memory issues",
+        "Production hardware is less powerful than the training cluster"
+      ],
+      "correct": 1,
+      "explanation": "The gap between offline and online performance is usually caused by: (1) training-serving skew — features computed differently at training vs serving time; (2) data drift — production data distribution differs from training; (3) label leakage — features in the offline evaluation inadvertently contain future information not available in real time. These are the canonical causes of the 'offline-online gap'."
+    }
+  ]
+}
