@@ -5,57 +5,111 @@
   "week": 44,
   "icon": "network",
   "tagline": "Data structures that merge automatically and conflict-free — how CRDTs enable collaborative editing, distributed counters, and always-available systems.",
-  "readTime": "~13 min",
+  "readTime": "~20 min",
   "sections": [
     {
       "type": "intro",
-      "content": "**Conflict-free Replicated Data Types (CRDTs)** are data structures designed so that concurrent updates can always be merged automatically — with no conflicts and no coordination required. Where vector clocks detect conflicts and ask the application to resolve them, CRDTs are designed so that conflict resolution is built into the data structure itself: any two replicas that have seen the same set of updates (in any order) will converge to identical state.\n\nCRDTs make **strong eventual consistency** achievable: if two replicas receive the same updates (in any order), they reach the same state. No consensus, no leader, no round-trips. This enables collaborative text editors (Google Docs uses CRDT-like structures), distributed counters (Redis, Riak), and shopping carts that work offline and sync later."
+      "content": "Imagine two engineers editing the same document simultaneously — one in New York, one in Tokyo. Both are offline on a plane. When their laptops reconnect, the system must somehow merge their changes automatically, without asking either person to manually resolve a conflict. This is not science fiction; Google Docs, Notion, Figma, and dozens of other collaborative tools do exactly this millions of times per day. The secret ingredient is often a **Conflict-free Replicated Data Type**, or **CRDT**.\n\nA CRDT is a data structure specifically designed so that concurrent updates from multiple replicas can always be merged automatically and deterministically — producing identical results regardless of the order in which updates are received. There are no conflicts, no leader required, no consensus round, no human involved. The merge logic is baked into the data structure itself, as a mathematical guarantee rather than a best-effort heuristic.\n\nCRDTs deliver a property called **strong eventual consistency**: any two replicas that have processed the same set of updates (in any order, across any number of intermediate syncs) will hold identical state. This is strictly stronger than basic eventual consistency, which merely promises that replicas *will* converge *eventually* without specifying what value they converge to. CRDTs tell you exactly what the converged value will be — before the merge even happens.\n\nUnderstanding CRDTs requires weaving together three threads: the mathematics of semilattices, the engineering reality of distributed systems, and the practical trade-offs that determine when CRDTs are the right tool. This chapter covers all three. By the end, you will understand why G-Counters converge, how OR-Sets handle the tricky remove-then-readd case, why LWW registers can silently lose data, and where you will encounter CRDTs in production systems you already use."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  Client1[\"User A (+3)\"] --> R1[\"Replica 1\\ncount=3\"]\n  Client2[\"User B (+2)\"] --> R2[\"Replica 2\\ncount=2\"]\n  R1 -->|\"sync\"| R2\n  R2 -->|\"sync\"| R1\n  R1 --> M1[\"Merged: count=5\"]\n  R2 --> M2[\"Merged: count=5\"]\n  M1 -.-> Same[\"Both converge to 5\"]",
-      "caption": "G-Counter CRDT: each replica independently increments its own slot. Merging takes the max per-slot and sums all slots. Regardless of sync order, both replicas converge to 5."
+      "mermaid": "flowchart TD\n  subgraph Problem[\"The Problem: Concurrent Updates\"]\n    UA[\"User A: +3 likes\"]\n    UB[\"User B: +2 likes\"]\n  end\n  UA --> R1[\"Replica 1\\ncount=3\"]\n  UB --> R2[\"Replica 2\\ncount=2\"]\n  R1 -->|\"sync state\"| Merge[\"CRDT Merge\\nmax per slot\"]\n  R2 -->|\"sync state\"| Merge\n  Merge --> C1[\"Replica 1: 5\"]\n  Merge --> C2[\"Replica 2: 5\"]",
+      "caption": "Two replicas independently accept writes, then sync. The CRDT merge function guarantees both arrive at the same result — 5 — regardless of sync order or network delays."
     },
     {
       "type": "analogy",
-      "title": "The Collaborative Whiteboard",
-      "content": "Imagine two designers, Alice and Bob, working offline on whiteboards. Alice adds a green sticky note. Bob adds a blue sticky note. When they sync their boards, there is no conflict — both sticky notes go on the merged board. But what if they both moved the same sticky note to different positions? With a naive merge, you'd have a conflict. A **CRDT** redesigns the sticky note so that 'move' is defined as 'add a new position and tombstone the old one' — the merge always takes the latest position by timestamp or unique ID, guaranteeing both boards end up identical. The data structure encodes the merge semantics, so humans never need to manually resolve conflicts."
+      "title": "The Collaborative Whiteboard with Sticky Notes",
+      "content": "Picture two product designers, Alice and Bob, working offline at a design sprint. Each has a physical whiteboard. Alice adds a green sticky note labelled 'Login screen'. Bob adds a blue sticky note labelled 'Dashboard'. When they compare boards later, there is no conflict — both sticky notes go on the merged board. Union of disjoint additions is always safe.\n\nNow imagine a harder case: both Alice and Bob move the same sticky note — the one labelled 'Signup' — to different quadrants of their boards. With a naive merge, you have a genuine conflict: two different positions, one must win. A traditional system would prompt a human to choose. A **CRDT** re-designs the very concept of 'move': instead of mutating the position in place, every 'move' is recorded as 'remove old position tag, add new position tag with a fresh unique ID'. The merge algorithm then takes the union of all position tags minus the removed ones. The sticky note ends up at the position with the surviving tag — deterministic, automatic, no human prompt.\n\nThe insight is that the data structure encodes not just the current value but also the history of operations in a form that makes merge trivial. You give up some simplicity in the data model to gain automatic conflict resolution forever."
     },
     {
       "type": "explanation",
-      "content": "CRDTs come in two families:\n\n**State-based CRDTs (CvRDTs)**: replicas periodically exchange their full state. A merge function combines two states into a new state. The merge must be commutative (A merge B = B merge A), associative ((A merge B) merge C = A merge (B merge C)), and idempotent (A merge A = A). These three properties guarantee that any order and any number of merges produce the same result.\n\n**Operation-based CRDTs (CmRDTs)**: replicas broadcast operations (not full state). Operations must be commutative — applying them in any order produces the same state. Requires reliable causal delivery (operations are delivered after their causal predecessors), which typically needs a delivery layer. More bandwidth-efficient than state-based for large structures.\n\n**G-Counter (Grow-only Counter)**: each node has its own slot in a vector. Increment only updates the local slot. The merge takes the component-wise maximum. The total value is the sum of all slots. Two concurrent increments on different replicas merge correctly — increment(3) + increment(2) always gives 5, regardless of order.\n\n**PN-Counter (Positive-Negative Counter)**: combines two G-Counters — one for increments (P) and one for decrements (N). Value = sum(P) - sum(N). Enables both increments and decrements while remaining conflict-free.\n\n**G-Set (Grow-only Set)**: items can only be added, never removed. Merge is set union. Trivially conflict-free — adding the same element twice or adding in different orders always results in the same set.\n\n**2P-Set (Two-Phase Set)**: adds a tombstone set for removals. An element is in the set if it is in the add-set but not the tombstone-set. Once removed (tombstoned), an element can never be re-added. Merge: union of both add-sets and both tombstone-sets.\n\n**OR-Set (Observed-Remove Set)**: solves 2P-Set's re-add limitation. Each addition of an element gets a unique tag (UUID). Removal tombstones specific tags, not the element itself. Re-adding an element generates a new tag that is not tombstoned — so the element is back. Merge: union of all tags, minus tombstoned tags. Used in Riak's set datatype.\n\n**LWW-Register (Last-Write-Wins Register)**: associates a timestamp with each value. Merge takes the value with the highest timestamp. Simple but prone to data loss if concurrent writes are common and time resolution is coarse — two writes with identical timestamps lose one arbitrarily. Cassandra uses LWW by default for conflict resolution."
+      "title": "The Mathematical Foundation: Join-Semilattices",
+      "content": "CRDTs are not engineering folklore — they rest on a clean algebraic structure called a **join-semilattice**. A join-semilattice is a set `S` equipped with a binary operation `⊔` (called 'join' or 'merge') that satisfies three laws:\n\n1. **Commutativity**: `A ⊔ B = B ⊔ A` — the order of merging two replicas does not matter.\n2. **Associativity**: `(A ⊔ B) ⊔ C = A ⊔ (B ⊔ C)` — the grouping of merges does not matter.\n3. **Idempotency**: `A ⊔ A = A` — merging a replica with itself (or re-receiving the same state) is safe.\n\nThese three properties together mean: no matter how many times, in what order, or via what intermediate replicas you exchange state, the final merged state is the same. Commutativity handles network reordering. Associativity handles partial merges. Idempotency handles duplicate delivery (at-least-once networks).\n\nThe join-semilattice also implies a **partial order** on states: `A ≤ B` if `A ⊔ B = B` (B already 'contains' everything in A). Updates always move a replica's state *upward* in this order — the state space has a single direction of travel. This monotonic growth is what makes convergence a mathematical certainty rather than a hope.\n\nFor state-based CRDTs (which exchange full state snapshots), any merge function satisfying these three laws is sufficient. The function can be as simple as set union or as complex as a tree merge — what matters is that the algebra holds."
     },
     {
       "type": "diagram",
-      "mermaid": "stateDiagram-v2\n  [*] --> Active\n  Active --> Tombstoned: remove(element)\n  Tombstoned --> Active: re-add with new tag\n  Active --> Active: add same element new tag\n  Tombstoned --> Tombstoned: merge tombstone sets",
-      "caption": "OR-Set state transitions: elements can be re-added after removal because each add creates a unique tag. Removal tombstones the specific tag, not the element identity."
+      "mermaid": "flowchart LR\n  A[\"State: empty set\"] -->|\"add apple\"| B[\"State: apple\"]\n  B -->|\"add banana\"| C[\"State: apple, banana\"]\n  A -->|\"add cherry\"| D[\"State: cherry\"]\n  C -->|\"merge\"| E[\"Merged: apple, banana, cherry\"]\n  D -->|\"merge\"| E",
+      "caption": "A G-Set (grow-only set) forms a join-semilattice where merge = set union. States move only upward — you can add but never remove. Both paths through the diagram reach the same merged state."
+    },
+    {
+      "type": "explanation",
+      "title": "Two Families: State-Based vs Operation-Based CRDTs",
+      "content": "CRDTs come in two fundamentally different implementation families, each with its own trade-offs.\n\n**State-based CRDTs (CvRDTs — Convergent Replicated Data Types)** work by periodically sending the full current state of a replica to other replicas. The receiving replica applies the merge function to combine the incoming state with its own. Because the merge is commutative, associative, and idempotent, it does not matter if the same state is received multiple times, or if states arrive out of order. The downside is bandwidth: if your state is a large map with thousands of entries, you broadcast the entire thing on every sync.\n\n**Operation-based CRDTs (CmRDTs — Commutative Replicated Data Types)** work differently: instead of broadcasting state, they broadcast the individual *operations* that mutate state (e.g., 'increment by 1', 'add element X with tag T'). Each operation is applied directly to every replica. This is far more bandwidth-efficient for large state, since you only send deltas. However, it requires the delivery layer to guarantee **causal delivery**: if operation B causally depends on operation A (B was generated after the replica that generated B had seen A), then all replicas must apply A before B. Without causal delivery, some operation-based CRDTs break. Implementing causal delivery typically requires vector clocks or a messaging middleware that tracks causal ordering.\n\nThere is a theoretical equivalence: any state-based CRDT can be converted to an operation-based one and vice versa. In practice, most production systems use state-based CRDTs for simplicity, or **delta-state CRDTs** — a hybrid that sends only the *portion* of state that has changed since the last sync, giving bandwidth efficiency without requiring causal delivery."
+    },
+    {
+      "type": "explanation",
+      "title": "The CRDT Catalog: G-Counter and PN-Counter",
+      "content": "The simplest CRDT is the **G-Counter** (Grow-only Counter). Each node in the cluster has its own slot in a vector. A node can only increment its own slot — never another node's. The current counter value is the sum of all slots. The merge function takes the component-wise maximum of two vectors.\n\nWhy does this work? Suppose Node A has `{A:3, B:0}` and Node B has `{A:1, B:4}`. Node A's slot is 3 (it did 3 increments); Node B's slot is 4. After merge: `{A:max(3,1), B:max(0,4)} = {A:3, B:4}`. Total = 7. Now if Node A had already received an update from Node B that brought its view to `{A:3, B:4}`, and then receives the same state again — `max(4,4) = 4`, no change. Idempotent. If Node B merges first with A and then with C, and then A merges with B — same final result. Commutative and associative.\n\nThe restriction that each node only increments its own slot is what makes the max-merge correct. If Node A could increment Node B's slot, a merge could see the same logical increment reflected in both nodes' copies of that slot and double-count it.\n\nThe **PN-Counter** (Positive-Negative Counter) extends G-Counter to support decrements by maintaining two G-Counters: one for increments (P) and one for decrements (N). The logical value is `sum(P) - sum(N)`. Each node increments its own P slot and its own N slot independently. Merge is component-wise max on both vectors. This enables decrement without ever breaking the monotonic growth property of either underlying G-Counter. Useful for follower counts, inventory levels, or any metric that can go up or down."
+    },
+    {
+      "type": "explanation",
+      "title": "The CRDT Catalog: Sets and the OR-Set Problem",
+      "content": "Sets are trickier than counters because remove operations create the potential for conflict.\n\nThe **G-Set** (Grow-only Set) is trivial: items can only be added, and merge is set union. Because union is commutative, associative, and idempotent, G-Set is a valid CRDT. The limitation is obvious — you can never remove an element.\n\nThe **2P-Set** (Two-Phase Set) adds a tombstone set. An element is logically present if it is in the add-set but not in the tombstone set. To remove an element, you add it to the tombstones. Merge is union of both add-sets and union of both tombstone sets. This works, but it has a painful limitation: once tombstoned, an element can never be re-added, because the tombstone persists forever. Adding it back to the add-set does not help — the tombstone always wins.\n\nThe **OR-Set** (Observed-Remove Set) solves this elegantly. Each *addition* of an element is tagged with a globally unique identifier (a UUID or vector-clock timestamp). The element is logically present if at least one of its tags is not tombstoned. To remove an element, you tombstone all of the element's *current* tags — the ones you have observed. If another replica then re-adds the element, it creates a brand new tag (not in anyone's tombstone set), so the element is live again. Merge is: union of all (element, tag) pairs, union of all tombstones, membership = exists at least one live tag.\n\nThe concurrent add/remove case is also handled correctly: if Replica A adds 'apple' with tag T1, and Replica B concurrently removes 'apple' (tombstoning T1) and Replica A simultaneously adds 'apple' again (tag T2), after merging: T1 is tombstoned (Replica B removed it), T2 is live (Replica A added it). Result: apple is present. This matches the semantics 'add wins over concurrent remove', which is the right default for shopping carts and collaborative editors.\n\nThe **LWW-Register** (Last-Write-Wins Register) is a scalar value paired with a timestamp. Merge keeps the value with the higher timestamp. It is simple but dangerous: clock skew between nodes can cause a genuinely newer write with a lower timestamp to be silently discarded. Cassandra uses LWW as its default conflict resolution strategy, which is fast and simple but requires awareness of this data-loss risk.\n\nThe **MV-Register** (Multi-Value Register) takes the opposite philosophy: instead of picking a winner, it keeps *all* values that are concurrently written (values that are incomparable in the causal order). Applications then see multiple versions and can merge them at the application layer. Amazon's original Dynamo paper described this approach — the shopping cart returned a list of versions that the client reconciled. More correct than LWW, but shifts complexity to the application."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n  [*] --> AddSet\n  AddSet --> Tombstoned: remove\n  Tombstoned --> AddSet: re-add with new tag\n  AddSet --> AddSet: add same element new tag",
+      "caption": "OR-Set state machine per element: removal tombstones the specific tag, not the element identity. Re-adding creates a fresh tag that starts life outside the tombstone set — the element is live again."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// G-Counter CRDT — grow-only distributed counter\nclass GCounter {\n  constructor(nodeId) {\n    this.nodeId = nodeId;\n    this.slots = { [nodeId]: 0 };\n  }\n\n  increment(amount = 1) {\n    this.slots[this.nodeId] = (this.slots[this.nodeId] || 0) + amount;\n  }\n\n  value() {\n    return Object.values(this.slots).reduce((sum, v) => sum + v, 0);\n  }\n\n  // Merge: component-wise maximum\n  merge(otherSlots) {\n    for (const [node, count] of Object.entries(otherSlots)) {\n      this.slots[node] = Math.max(this.slots[node] || 0, count);\n    }\n  }\n}\n\n// OR-Set CRDT — add/remove set with conflict-free re-add\nconst { randomUUID } = require('crypto');\n\nclass ORSet {\n  constructor() {\n    this.entries = new Map(); // element -> Set of tags\n    this.tombstones = new Set(); // removed tags\n  }\n\n  add(element) {\n    const tag = randomUUID();\n    if (!this.entries.has(element)) this.entries.set(element, new Set());\n    this.entries.get(element).add(tag);\n    return tag; // broadcast (element, tag) to peers\n  }\n\n  remove(element) {\n    const tags = this.entries.get(element) || new Set();\n    tags.forEach(tag => this.tombstones.add(tag)); // tombstone all current tags\n    // Future adds create new tags not in tombstones\n  }\n\n  has(element) {\n    const tags = this.entries.get(element) || new Set();\n    return [...tags].some(tag => !this.tombstones.has(tag));\n  }\n\n  // Merge two OR-Sets: union entries, union tombstones\n  merge(other) {\n    for (const [element, tags] of other.entries) {\n      if (!this.entries.has(element)) this.entries.set(element, new Set());\n      tags.forEach(tag => this.entries.get(element).add(tag));\n    }\n    other.tombstones.forEach(tag => this.tombstones.add(tag));\n  }\n}\n\n// Demo: concurrent add/remove, then merge\nconst replicaA = new ORSet();\nconst replicaB = new ORSet();\n\nconst tag1 = replicaA.add('apple'); // A adds apple\nreplicaB.merge({ entries: new Map([['apple', new Set([tag1])]]), tombstones: new Set() });\nreplicaB.remove('apple');           // B concurrently removes apple\nreplicaA.add('apple');              // A re-adds apple (new tag)\n\n// After merging: apple exists (new tag survives tombstone)\nconsole.log(replicaA.has('apple')); // true\nconsole.log(replicaB.has('apple')); // false (hasn't merged A's re-add yet)",
-      "explanation": "G-Counter shows the core CRDT property: merge is max per slot, making it commutative, associative, and idempotent. The OR-Set shows how unique tags enable conflict-free re-addition — removing 'apple' tombstones tag1, but a subsequent add creates tag2, which is not tombstoned. After merging, apple is present."
+      "label": "Example",
+      "code": "// ── G-Counter: grow-only distributed counter ──────────────────\nclass GCounter {\n  constructor(nodeId) {\n    this.nodeId = nodeId;\n    this.slots = { [nodeId]: 0 };\n  }\n\n  increment(amount = 1) {\n    this.slots[this.nodeId] = (this.slots[this.nodeId] || 0) + amount;\n  }\n\n  value() {\n    return Object.values(this.slots).reduce((sum, v) => sum + v, 0);\n  }\n\n  // State-based merge: component-wise maximum\n  // Commutative, associative, idempotent — guarantees convergence\n  merge(otherSlots) {\n    for (const [node, count] of Object.entries(otherSlots)) {\n      this.slots[node] = Math.max(this.slots[node] || 0, count);\n    }\n  }\n}\n\n// Demonstrate convergence regardless of sync order\nconst nodeA = new GCounter('A');\nconst nodeB = new GCounter('B');\n\nnodeA.increment(3); // A does 3 increments\nnodeB.increment(2); // B does 2 increments\n\n// Scenario 1: A syncs to B first, then B syncs back\nnodeB.merge(nodeA.slots);  // B merges A's state\nnodeA.merge(nodeB.slots);  // A merges B's state (which already has A's)\nconsole.log('A value:', nodeA.value()); // 5\nconsole.log('B value:', nodeB.value()); // 5\n\n// Scenario 2: Idempotency — merging same state twice is safe\nnodeA.merge(nodeB.slots);\nconsole.log('A after double merge:', nodeA.value()); // still 5\n\n// ── PN-Counter: supports both increment and decrement ─────────\nclass PNCounter {\n  constructor(nodeId) {\n    this.nodeId = nodeId;\n    this.P = new GCounter(nodeId); // increments\n    this.N = new GCounter(nodeId); // decrements\n  }\n\n  increment(amount = 1) { this.P.increment(amount); }\n  decrement(amount = 1) { this.N.increment(amount); }\n  value() { return this.P.value() - this.N.value(); }\n\n  merge(other) {\n    this.P.merge(other.P.slots);\n    this.N.merge(other.N.slots);\n  }\n}\n\nconst inv1 = new PNCounter('node1');\nconst inv2 = new PNCounter('node2');\n\ninv1.increment(10); // add 10 units to inventory\ninv2.decrement(3);  // sell 3 units concurrently\n\ninv1.merge(inv2);   // sync\ninv2.merge(inv1);   // sync\n\nconsole.log('Inventory:', inv1.value()); // 7 — correct regardless of order",
+      "explanation": "The G-Counter's correctness rests entirely on each node owning one slot. `merge` is `Math.max` per slot — never decreasing, always safe to apply twice. The PN-Counter composes two G-Counters. Notice that neither counter ever needs to coordinate before accepting a write — that is the whole point. Each node accepts writes independently and convergence is guaranteed by the merge math."
     },
     {
-      "type": "code_concept",
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  subgraph NodeA[\"Node A\"]\n    A1[\"P: A=10, B=0\"]\n    A2[\"N: A=0, B=3\"]\n  end\n  subgraph NodeB[\"Node B\"]\n    B1[\"P: A=0, B=0\"]\n    B2[\"N: A=0, B=3\"]\n  end\n  NodeA -->|\"merge\"| Merged[\"Merged\\nP: A=10, B=0\\nN: A=0, B=3\\nValue = 10 - 3 = 7\"]",
+      "caption": "PN-Counter merge: component-wise max on both P and N vectors. Node A's increment and Node B's decrement are independent — no coordination needed, value converges to 7."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// CRDT catalog and properties\n\n// G-Counter: increment-only counter\n//   Merge: component-wise max, value = sum(slots)\n//   Use: view counts, download counters, rate limiting\n\n// PN-Counter: increment and decrement counter\n//   Structure: G-Counter(P) - G-Counter(N)\n//   Use: inventory counts, follower counts\n\n// G-Set: add-only set\n//   Merge: set union — trivially commutative\n//   Use: event logs, append-only collections\n\n// 2P-Set: add + permanent remove\n//   Merge: union(add-sets), union(tombstone-sets)\n//   Limitation: removed elements cannot be re-added\n//   Use: whitelist/blacklist that never reinstates removed items\n\n// OR-Set: add + removable-and-re-addable set\n//   Tags per element; tombstone specific tags\n//   Merge: union tags, union tombstones\n//   Use: shopping cart, collaborative document elements, Riak set type\n\n// LWW-Register: last-write-wins scalar value\n//   Merge: keep value with highest timestamp\n//   Use: user profile fields, configuration values\n//   Risk: clock skew can cause newer writes to be discarded\n\n// MV-Register (Multi-Value Register): keep all concurrent values\n//   Merge: union all undominated values (like Git merge conflicts)\n//   Use: when application must see and resolve concurrent values\n\n// KEY PROPERTY for state-based CRDTs:\n//   merge must be: commutative + associative + idempotent\n//   This forms a 'join-semilattice' — merge always moves state 'upward'"
+      "label": "Example",
+      "code": "// ── OR-Set: add/remove set with conflict-free re-addition ─────\nconst { randomUUID } = require('crypto');\n\nclass ORSet {\n  constructor() {\n    // element -> Set of live tags\n    this.entries = new Map();\n    // Set of tombstoned tags\n    this.tombstones = new Set();\n  }\n\n  add(element) {\n    const tag = randomUUID(); // globally unique — never collides\n    if (!this.entries.has(element)) this.entries.set(element, new Set());\n    this.entries.get(element).add(tag);\n    return tag; // in op-based variant, broadcast (ADD, element, tag)\n  }\n\n  remove(element) {\n    // Tombstone ALL current tags for this element\n    // Future adds will have new tags — they survive\n    const tags = this.entries.get(element);\n    if (tags) tags.forEach(tag => this.tombstones.add(tag));\n  }\n\n  has(element) {\n    const tags = this.entries.get(element);\n    if (!tags) return false;\n    // Element is live if at least one tag is not tombstoned\n    return [...tags].some(tag => !this.tombstones.has(tag));\n  }\n\n  // State-based merge: union entries, union tombstones\n  merge(other) {\n    for (const [element, tags] of other.entries) {\n      if (!this.entries.has(element)) this.entries.set(element, new Set());\n      const myTags = this.entries.get(element);\n      tags.forEach(tag => myTags.add(tag));\n    }\n    other.tombstones.forEach(tag => this.tombstones.add(tag));\n  }\n}\n\n// Concurrent add-remove scenario\nconst replicaA = new ORSet();\nconst replicaB = new ORSet();\n\n// Both replicas start with apple (tag1 seen by both)\nconst tag1 = replicaA.add('apple');\n// Propagate initial add to B\nreplicaB.merge(replicaA);\n\n// Now concurrent: B removes apple, A re-adds apple — both offline\nreplicaB.remove('apple');       // tombstones tag1\nconst tag2 = replicaA.add('apple'); // adds tag2 (new UUID)\n\n// After reconnect — both sync\nreplicaA.merge(replicaB);\nreplicaB.merge(replicaA);\n\n// Result: apple has tag1 (tombstoned) and tag2 (live)\nconsole.log('A has apple?', replicaA.has('apple')); // true — tag2 survives\nconsole.log('B has apple?', replicaB.has('apple')); // true — same after merge",
+      "explanation": "The OR-Set's key insight is that 'remove' is really 'tombstone the specific version I have observed'. A re-add creates a new version (tag2) that no tombstone touches. After merging, both replicas agree: apple is present because tag2 is live. This is exactly how Riak's set datatype and Automerge handle concurrent add/remove in collaborative applications."
+    },
+    {
+      "type": "explanation",
+      "title": "CRDTs in Collaborative Text Editing",
+      "content": "Text editing is one of the most demanding applications of CRDTs because the positions of characters in a document shift as text is inserted and deleted. A naive approach — storing character positions as integers — fails immediately: if Alice inserts a character at position 5 and Bob inserts a character at position 5 simultaneously, their position numbers collide in a non-mergeable way.\n\n**Sequence CRDTs** solve this by assigning each character a globally unique, immutable identifier that encodes causal position rather than physical index. Two dominant approaches exist in production:\n\n**LOGOOT and LSEQ** represent the document as a sequence of (position, character) pairs, where positions are drawn from a dense ordered identifier space. Each identifier is chosen to be between its left and right neighbors, never changing as insertions happen elsewhere. Merge is simply sorting all known (position, character) pairs by their identifiers.\n\n**RGA (Replicated Growable Array)**, used by Automerge and ShareDB, assigns each character a unique timestamp vector. The document is a linked list of characters. Concurrent insertions at the same position are ordered by comparing timestamps. Deletions are tombstones (the character slot persists but is flagged invisible). The Yjs library uses a variant called YATA (Yet Another Transformation Approach) that achieves O(n) complexity for common editing patterns.\n\nThese sequence CRDTs are what power real-time collaborative editing in Notion, Figma, and Linear. They handle the full editing lifecycle — including multi-cursor, selection ranges, and undo/redo — while guaranteeing that all clients converge to identical document state without a central coordination server."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant A as Alice\n  participant S as CRDT Store\n  participant B as Bob\n  A->>S: insert(char='H', id=A1, after=null)\n  B->>S: insert(char='W', id=B1, after=null)\n  S->>A: merge B1\n  S->>B: merge A1\n  Note over A,B: Both see H,W or W,H ordered by id\n  A->>S: insert(char='i', id=A2, after=A1)\n  B->>S: insert(char='o', id=B2, after=B1)\n  S->>A: merge B2\n  S->>B: merge A2",
+      "caption": "Sequence CRDT: each character has a unique immutable ID. Concurrent inserts at the same position are deterministically ordered by comparing IDs — no conflict, no coordinator."
+    },
+    {
+      "type": "explanation",
+      "title": "Production CRDTs: Where You Meet Them in the Wild",
+      "content": "CRDTs are not just academic curiosities — they appear in production systems used at massive scale.\n\n**Riak** (by Basho) was the first mainstream database to expose first-class CRDT types: counters (PN-Counter), sets (OR-Set), maps (a composable structure where map values are themselves CRDTs), flags (enable/disable), and registers (LWW-Register). Riak's philosophy is 'always available, eventually consistent' — even during network partitions, writes are accepted, and CRDT semantics handle convergence.\n\n**Redis** includes probabilistic CRDTs: **HyperLogLog** is a space-efficient probabilistic counter for estimating cardinality (how many unique visitors). While not a strict CRDT, its merge function (union of registers) satisfies the convergence properties. Redis's CRDT module enables active-active geo-replication where multiple primary nodes accept writes globally.\n\n**Automerge** and **Yjs** are JavaScript/Rust CRDT libraries used directly in applications. Yjs powers collaborative features in Jupyter notebooks, Monaco editor (used by VS Code on the web), and Atlassian products. Automerge is used in local-first applications following the architecture described in the Ink & Switch research group's 'local-first software' paper.\n\n**Phoenix LiveView** and **ElectricSQL** use CRDT-like structures for offline-first SQLite replication, enabling mobile apps to work without connectivity and sync when back online.\n\n**Amazon's Dynamo** (the internal system, not DynamoDB) used vector clocks and multi-value registers — the shopping cart paper from SOSP 2007 is the canonical description of this approach, and is required reading for distributed systems engineers."
+    },
+    {
+      "type": "explanation",
+      "title": "The Real Costs and Limitations of CRDTs",
+      "content": "CRDTs are not a free lunch. Understanding their costs is as important as understanding their benefits.\n\n**Storage overhead**: OR-Sets accumulate tombstones indefinitely. Every element ever removed leaves a permanent tombstone entry. Without periodic compaction (which requires coordination — a form of distributed garbage collection), OR-Set storage grows monotonically. Most CRDT libraries implement tombstone GC, but it introduces the very coordination CRDTs normally avoid.\n\n**State size for sync**: A naive G-Counter with N nodes sends an N-entry vector on every sync. With 10,000 nodes, that is 10,000 entries per message. **Delta-state CRDTs** address this by sending only the 'delta' — the portion of state added since the last acknowledged sync. This requires tracking per-peer acknowledged state, adding implementation complexity.\n\n**Causality tracking**: Operation-based CRDTs require causal delivery. Implementing causal delivery at scale requires vector clocks or epoch-based solutions, each with their own overhead. Systems that use CRDTs in production (like Riak) invest significant engineering in the delivery layer.\n\n**Semantic limitations**: CRDTs work beautifully for counters, sets, and registers. They do not gracefully handle relational constraints ('at most one record with this email'), global invariants ('total inventory never goes negative'), or complex transactions ('transfer $100 from A to B atomically'). These operations inherently require coordination. Using CRDTs for them results in violated invariants that must be repaired after the fact — which may be fine for some applications (accepting a duplicate order is recoverable) but catastrophic for others (double-spending money).\n\n**Mental model mismatch**: Developers trained on relational databases expect strong consistency. Code that 'reads what you just wrote' is the default mental model. With CRDTs, your write may not be visible on the next read from a different replica. Testing CRDT-based systems requires intentionally simulating network partitions and verifying convergence — more complex than unit-testing a single-node database."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context:** The mathematical foundations of CRDTs were formalised by Marc Shapiro, Nuno Preguiça, Carlos Baquero, and Marek Zawirski in a 2011 INRIA technical report and Lecture Notes in Computer Science paper. The term 'CRDT' was coined in that paper. However, the underlying ideas appeared earlier: the Bayou system at Xerox PARC (1995) used operation-based reconciliation, and Amazon's Dynamo (2007) popularised eventual consistency with vector-clock conflict detection. Automerge was released in 2017; Yjs followed and became the most widely-deployed collaborative editing CRDT library."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**CRDTs are not free.** State-based CRDTs send their full state on every sync — a G-Counter with 1000 nodes sends a 1000-entry vector. OR-Sets accumulate tombstones indefinitely until compaction. Operation-based CRDTs require causal delivery guarantees, adding network complexity. Use CRDTs for the specific data structures they model well (counters, sets, registers) rather than as a general conflict resolution strategy — they shine in offline-first mobile apps, collaborative editing, and systems where coordination latency is prohibitive."
+      "content": "**Interview and exam traps:** The distinction between eventual consistency and *strong* eventual consistency is frequently tested. Eventual consistency says replicas *will* agree; strong eventual consistency (from CRDTs) says replicas that have seen the same updates *are already* in the same state — no waiting required. A second common trap: confusing the three CRDT laws. Commutativity handles *order*; associativity handles *grouping*; idempotency handles *duplicates*. Each addresses a different failure mode in real networks. Finally, many candidates can name G-Counter but cannot explain *why* the max-merge is correct — because each node increments only its own slot, so the max across replicas is also the correct value for that node's contribution."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**CRDTs** are data structures with merge functions that are commutative, associative, and idempotent — guaranteeing that any order of merges produces the same result (**strong eventual consistency**).",
-        "**G-Counter** (grow-only) uses per-node slots with max-merge; **PN-Counter** adds a decrements G-Counter. Both converge without coordination.",
-        "**OR-Set** uses unique tags per add and tombstones per remove, enabling conflict-free re-addition — the core mechanism in Riak's set and collaborative editing systems.",
-        "**State-based CRDTs** exchange full state; **operation-based CRDTs** broadcast operations — both achieve convergence, with different bandwidth and delivery requirements.",
-        "CRDTs are used in production by Redis (HyperLogLog, streams), Riak (set, register, counter types), collaborative editors (Automerge, Yjs), and distributed shopping carts."
+        "**CRDTs** are data structures with merge functions that are **commutative, associative, and idempotent** — forming a join-semilattice that guarantees **strong eventual consistency**: any two replicas with the same updates are identical, regardless of delivery order.",
+        "**State-based CRDTs** send full state snapshots; **operation-based CRDTs** broadcast operations requiring causal delivery. **Delta-state CRDTs** are a practical hybrid sending only changed state fragments.",
+        "**G-Counter** uses per-node slots with max-merge (value = sum of slots). **PN-Counter** combines two G-Counters for increment and decrement. Both accept writes without any coordination between nodes.",
+        "**OR-Set** assigns a unique tag to each add operation. Removal tombstones specific observed tags, not the element identity — enabling conflict-free re-addition after removal, used in Riak's set type and collaborative editors.",
+        "**LWW-Register** is simple but risky: clock skew between nodes can cause a genuinely newer write to be silently discarded because its timestamp is lower. Always consider this trade-off when choosing LWW.",
+        "Production deployments include **Riak** (first-class CRDT types), **Redis** (HyperLogLog, geo-replication), **Automerge** and **Yjs** (collaborative editing in Notion, Figma, VS Code web), and **Amazon Dynamo** (multi-value registers for shopping carts).",
+        "CRDTs have real costs: **tombstone accumulation**, **state size proportional to node count**, **semantic limitations on global invariants**, and a **mental model mismatch** with developers trained on strongly consistent systems. Use them for the specific patterns they solve well — counters, sets, and collaborative sequences — not as a general conflict-resolution panacea."
       ]
     }
   ],
@@ -75,124 +129,124 @@
         "Linearizable, serializable, and atomic"
       ],
       "correct": 1,
-      "explanation": "A CRDT merge must be: commutative (A merge B = B merge A, so order doesn't matter), associative ((A merge B) merge C = A merge (B merge C), so grouping doesn't matter), and idempotent (A merge A = A, so duplicate merges are safe). Together these form a join-semilattice, guaranteeing convergence."
+      "explanation": "A CRDT merge must be commutative (A ⊔ B = B ⊔ A, so delivery order does not matter), associative ((A ⊔ B) ⊔ C = A ⊔ (B ⊔ C), so grouping does not matter), and idempotent (A ⊔ A = A, so duplicate delivery is safe). Together these three properties form a join-semilattice, mathematically guaranteeing convergence without any coordination."
     },
     {
       "id": "q2",
       "question": "A G-Counter on Node A has slots {A:3, B:0} and Node B has slots {A:1, B:4}. After merging, what is the total counter value?",
       "type": "mcq",
       "options": [
-        "5 (A:1+B:4)",
-        "7 (A:3+B:4, taking max per slot)",
-        "8 (A:3+B:0 + A:1+B:4)",
-        "4 (max of total values)"
+        "5 — sum of A's total (3) and B's total (4)",
+        "7 — component-wise max gives {A:3, B:4}, sum is 7",
+        "8 — sum of all individual slot values across both replicas",
+        "4 — maximum of the two replica totals"
       ],
       "correct": 1,
-      "explanation": "G-Counter merge takes component-wise maximum: merged slots = {A:max(3,1), B:max(0,4)} = {A:3, B:4}. Total value = sum of all slots = 3 + 4 = 7. Node A's slot dominates for A; Node B's slot dominates for B."
+      "explanation": "G-Counter merge takes component-wise maximum: {A:max(3,1), B:max(0,4)} = {A:3, B:4}. The total value is the sum of all slots = 3 + 4 = 7. Node A contributed 3 increments (its slot), Node B contributed 4 (its slot). Max-merge selects each node's own authoritative slot value."
     },
     {
       "id": "q3",
-      "question": "Why does the OR-Set (Observed-Remove Set) use unique tags per add instead of just tracking element membership?",
+      "question": "Why does the OR-Set use a unique tag per add rather than simply tracking element membership?",
       "type": "mcq",
       "options": [
-        "Tags allow elements to be stored in sorted order",
-        "Tags enable elements to be re-added after removal — removal tombstones specific tags, not the element identity",
-        "Tags are needed for distributed authentication of write operations",
-        "Tags reduce storage overhead compared to storing element values directly"
+        "Tags allow the set to be stored in sorted order for faster lookup",
+        "Tags enable elements to be re-added after removal — removing tombstones specific tags, not the element identity itself",
+        "Tags are required for cryptographic authentication of write operations across replicas",
+        "Tags reduce storage overhead compared to storing full element values directly"
       ],
       "correct": 1,
-      "explanation": "In a 2P-Set, removing an element tombstones the element itself — it can never be re-added. OR-Set's tags let you remove specific 'versions' of an element. Re-adding creates a new tag not in the tombstone set, so the element is live again. This handles the common case: item removed from cart, then re-added."
+      "explanation": "In a 2P-Set, removing an element tombstones the element identity permanently — it can never come back. OR-Set tombstones the specific tag (UUID) from one particular add operation. A subsequent re-add generates a fresh tag with no tombstone, so the element is live again. This handles the shopping-cart case: item removed from cart, then re-added — a distinct add that should win."
     },
     {
       "id": "q4",
-      "question": "Which CRDT type is most appropriate for tracking a distributed like count that can only increase?",
+      "question": "What is 'strong eventual consistency' as provided by CRDTs, and how does it differ from plain eventual consistency?",
       "type": "mcq",
       "options": [
-        "OR-Set",
-        "LWW-Register",
-        "G-Counter",
-        "2P-Set"
+        "Strong eventual consistency means all replicas agree within a bounded time window of 1 second",
+        "Strong eventual consistency guarantees that any two replicas which have processed the same set of updates are already in identical state — no waiting required",
+        "Strong eventual consistency means writes are acknowledged by a quorum before being applied",
+        "Strong eventual consistency means reads always return the most recently written value across all replicas"
       ],
-      "correct": 2,
-      "explanation": "G-Counter (Grow-only Counter) is designed exactly for monotonically increasing counters. Each node increments its own slot; merging takes the component-wise max. It is commutative, associative, and idempotent — perfect for distributed like/view counts."
+      "correct": 1,
+      "explanation": "Plain eventual consistency promises replicas *will* agree someday, but says nothing about what value they converge to or when. Strong eventual consistency (the property CRDTs provide) is stronger: if replica X and replica Y have both processed the same set of updates (in any order), they are already in identical state right now. The CRDT merge math guarantees this, not eventual delivery."
     },
     {
       "id": "q5",
-      "question": "What is the key risk of LWW-Register (Last-Write-Wins) for conflict resolution?",
+      "question": "What is the key risk of using an LWW-Register (Last-Write-Wins) for conflict resolution?",
       "type": "mcq",
       "options": [
-        "LWW requires a consensus round for every write",
-        "Clock skew can cause a newer write to have a lower timestamp, silently discarding it",
-        "LWW only works for numeric values, not strings or objects",
+        "LWW requires a consensus round for every write, adding significant latency",
+        "Clock skew between nodes can cause a genuinely newer write to have a lower timestamp, making it silently discarded",
+        "LWW only supports numeric values, not strings or complex objects",
         "LWW stores all concurrent values permanently, causing unbounded storage growth"
       ],
       "correct": 1,
-      "explanation": "LWW keeps the value with the highest timestamp. If two nodes have clock skew and node B's clock is behind, a write from node B at real-time T+1 may have a lower timestamp than node A's write at real-time T. Node A's older write wins — silent data loss. LWW is simple but requires tight clock synchronization."
+      "explanation": "LWW keeps the value with the highest timestamp. If Node B's clock is 200ms behind Node A's, a write on Node B at real-time T+100ms may carry a lower timestamp than Node A's write at real-time T. Node A's older write wins — Node B's newer write is silently discarded. LWW is simple but requires tight clock synchronization (e.g., NTP + bounded skew) to avoid data loss."
     },
     {
       "id": "q6",
-      "question": "What is 'strong eventual consistency' as provided by CRDTs?",
+      "question": "Operation-based CRDTs (CmRDTs) require what specific property from the delivery layer that state-based CRDTs do not?",
       "type": "mcq",
       "options": [
-        "All replicas immediately agree on every write within 1 second",
-        "If two replicas have received the same set of updates (in any order), they are guaranteed to be in the same state",
-        "Writes require quorum acknowledgment before being applied",
-        "Reads always return the most recently written value across all replicas"
+        "Exactly-once delivery to prevent any operation from being applied more than once",
+        "Causal delivery — each operation is delivered only after all operations that causally preceded it",
+        "Synchronous delivery — all replicas receive operations at exactly the same real-world time",
+        "Total-order delivery — all replicas receive all operations in the same sequence"
       ],
       "correct": 1,
-      "explanation": "Strong eventual consistency = eventual consistency + convergence guarantee. CRDTs guarantee that any two replicas that have processed the same set of operations will have identical state, regardless of the order they processed those operations. No coordination needed — the data structure guarantees it."
+      "explanation": "Operation-based CRDTs broadcast individual operations rather than full state. Operations must be commutative, but for commutativity to be sufficient, operations must arrive only after their causal predecessors. Without causal delivery, a dependent operation could arrive before the operation it depends on, breaking correctness. State-based CRDTs avoid this by sending full state snapshots, which are inherently self-contained."
     },
     {
       "id": "q7",
-      "question": "Operation-based CRDTs (CmRDTs) require what property from the delivery layer?",
+      "question": "A G-Counter uses component-wise maximum as its merge function. Why is it correct for each node to increment only its own slot?",
       "type": "mcq",
       "options": [
-        "Exactly-once delivery to prevent duplicate operations",
-        "Causal delivery — operations are delivered after all operations that causally precede them",
-        "Synchronous delivery — all replicas receive operations in real time",
-        "Ordered delivery — operations are delivered in the same order on all replicas"
+        "It prevents more than one node from writing at the same time, avoiding race conditions",
+        "Each node's slot is the authoritative count of that node's increments, so max-merge correctly selects each node's own contribution without double-counting",
+        "It reduces network traffic by limiting which slots need to be transmitted during sync",
+        "It ensures that the counter value can never exceed the number of nodes in the cluster"
       ],
       "correct": 1,
-      "explanation": "Operation-based CRDTs broadcast operations rather than state. Operations must be commutative. To ensure correctness, the delivery layer must guarantee causal delivery: if operation A causally precedes B, all replicas see A before B. Without this, an operation might be applied before its causal predecessor, breaking correctness."
+      "explanation": "If Node A could increment Node B's slot, then when A and B both hold a copy of slot B and both increment it independently, max-merge would collapse their independent increments into one — losing a count. By restricting each node to its own slot, max-merge always selects the correct authoritative value for each node's contributions, and sum of all slots gives the true total."
     },
     {
       "id": "q8",
-      "question": "The 2P-Set's limitation compared to OR-Set is:",
+      "question": "Which of the following is a real limitation of OR-Sets that must be managed in production systems?",
       "type": "mcq",
       "options": [
-        "2P-Set cannot represent more than two elements",
-        "Once an element is removed from a 2P-Set, it can never be added back",
-        "2P-Set requires a leader for merging",
-        "2P-Set merge is not commutative"
+        "OR-Sets cannot represent more than 65,536 unique elements due to tag encoding limits",
+        "Tombstones accumulate indefinitely unless explicit distributed garbage collection is performed",
+        "OR-Set merge is not commutative when tombstone sets on two replicas have different sizes",
+        "OR-Sets require a central coordinator to generate globally unique tags for each add operation"
       ],
       "correct": 1,
-      "explanation": "A 2P-Set uses a tombstone set — once an element is tombstoned (removed), it stays tombstoned forever, even if re-added to the add-set. The membership rule (element in add-set AND NOT in tombstone-set) means re-additions after removal are impossible. OR-Set solves this with per-add unique tags."
+      "explanation": "Every remove operation in an OR-Set adds one or more entries to the tombstone set, and that set only ever grows. Without periodic garbage collection (which requires knowing that all replicas have seen the tombstoned tags — a form of coordination), OR-Sets leak storage indefinitely. Production CRDT libraries like Yjs and Automerge implement tombstone GC epochs to bound this growth."
     },
     {
       "id": "q9",
-      "question": "Which real-world systems use CRDT data structures in production?",
+      "question": "Which real-world systems use CRDT data structures in production at scale?",
       "type": "mcq",
       "options": [
-        "MySQL and PostgreSQL for replica conflict resolution",
-        "Riak (set/counter types), Redis (HyperLogLog), and collaborative editors (Automerge, Yjs)",
-        "Apache Kafka for message ordering guarantees",
-        "Nginx and HAProxy for load balancing state"
+        "MySQL InnoDB and PostgreSQL logical replication for multi-primary conflict resolution",
+        "Riak (set/counter/map types), Redis (HyperLogLog, geo-replication), and collaborative editors like Automerge and Yjs",
+        "Apache Kafka for guaranteed message ordering across consumer groups",
+        "Nginx and HAProxy for session affinity and load balancing state"
       ],
       "correct": 1,
-      "explanation": "Riak exposes CRDT-based set, map, and counter types. Redis HyperLogLog is a probabilistic CRDT for cardinality estimation. Automerge and Yjs are JavaScript CRDT libraries used in collaborative editing (Notion, Linear, and others use CRDT concepts for real-time collaboration)."
+      "explanation": "Riak exposes first-class CRDT types (counter, set, map, flag, register). Redis HyperLogLog is a probabilistic CRDT for cardinality estimation, and Redis's enterprise CRDT module enables active-active geo-replication. Automerge and Yjs are JavaScript CRDT libraries powering collaborative editing in Notion, Figma, VS Code web, and Jupyter notebooks."
     },
     {
       "id": "q10",
       "question": "A PN-Counter is needed instead of a G-Counter when:",
       "type": "mcq",
       "options": [
-        "The counter needs to track events across more than one node",
-        "The counter must support both increments and decrements",
-        "The counter value must be visible to external clients",
-        "The counter must be consistent across data centers"
+        "The counter must be visible to external clients via a REST API",
+        "The counter must support both increments and decrements, such as tracking current inventory or follower count",
+        "The counter needs to track events across more than two nodes simultaneously",
+        "The counter must be consistent across multiple geographic data centers"
       ],
       "correct": 1,
-      "explanation": "G-Counters only support increments — the value can only grow. A PN-Counter combines two G-Counters: one for increments (P) and one for decrements (N). The value is sum(P) - sum(N). This enables distributed decrement operations that converge correctly, useful for inventory counts and follower counts."
+      "explanation": "A G-Counter is grow-only — its value can only increase. A PN-Counter maintains two G-Counters: one for increments (P) and one for decrements (N). The logical value is sum(P) - sum(N). This enables distributed decrement operations that converge correctly without any coordination, making it suitable for inventory levels, like/unlike counts, and follower/following counts."
     }
   ]
 }

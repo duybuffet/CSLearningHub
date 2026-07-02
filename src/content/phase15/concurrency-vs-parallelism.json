@@ -5,58 +5,111 @@
   "week": 47,
   "icon": "os",
   "tagline": "Dealing with many things vs doing many things at once",
-  "readTime": "13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "**Concurrency** and **parallelism** are among the most misunderstood terms in computing. Rob Pike, co-creator of Go, put it clearly: *concurrency is about dealing with lots of things at once; parallelism is about doing lots of things at once*. The distinction matters enormously when designing systems — getting it wrong leads to either deadlocks, wasted cores, or bottlenecks that no amount of hardware can fix.\n\nA single-core CPU can be highly concurrent (rapidly switching between tasks) yet never parallel. A poorly designed multi-core program can be parallel yet not concurrent — running multiple copies of a sequential program. The real art is knowing which property you need and designing your system to exploit it."
+      "content": "**Concurrency** and **parallelism** are two of the most frequently confused terms in all of computer science — and the confusion is not merely academic. Designing a system with the wrong mental model leads to deadlocks that halt production, wasted cores that never fully load, async code that secretly executes serially, or thread pools so over-provisioned that context-switch overhead destroys the very throughput gain you were chasing.\n\nRob Pike, co-creator of Go and one of Unix's intellectual descendants, crystallised the distinction in a 2012 talk: *'Concurrency is about dealing with lots of things at once. Parallelism is about doing lots of things at once.'* Read that twice. Concurrency is a **structural** property of your program — a way of decomposing work so that multiple tasks can make progress. Parallelism is an **execution** property — tasks literally running at the same physical instant on separate compute units.\n\nA single-core CPU running an event loop is concurrent but not parallel: only one instruction executes per clock cycle, yet the program juggles hundreds of in-flight HTTP connections by interleaving them. Conversely, a naive multi-threaded program that launches one thread per core to do identical sequential work can be parallel but poorly concurrent — it never actually coordinates or composes independent logical tasks. The art of systems programming is knowing which property you need, which mechanisms provide it, and at what cost.\n\nIn this chapter we will build that understanding from first principles: the hardware model of CPUs and cores, the OS scheduler's role, the key concurrency primitives (threads, event loops, coroutines, actors), Amdahl's and Gustafson's laws that govern the hard ceilings of parallelism, the workload taxonomy that tells you which tool to reach for, and the synchronisation hazards that make concurrent code notoriously difficult to reason about."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  A[\"Task Execution Strategy\"] --> B[\"Concurrent\"]\n  A --> C[\"Parallel\"]\n  B --> D[\"Single Core\\nTime-sliced\"]\n  B --> E[\"Multi Core\\nInterleaved\"]\n  C --> F[\"Multi Core\\nSimultaneous\"]\n  D --> G[\"Event Loop / Coroutines\"]\n  E --> H[\"OS Thread Scheduling\"]\n  F --> I[\"Worker Threads / Processes\"]",
-      "caption": "Concurrency is a program design property; parallelism is a runtime execution property. Both can coexist."
+      "mermaid": "flowchart TD\n  A[\"Task Execution Strategy\"] --> B[\"Concurrent Design\"]\n  A --> C[\"Parallel Execution\"]\n  B --> D[\"Single Core\\nTime-sliced scheduling\"]\n  B --> E[\"Multi-Core\\nInterleaved tasks\"]\n  C --> F[\"Multi-Core\\nSimultaneous compute\"]\n  D --> G[\"Event Loop / Coroutines\"]\n  E --> H[\"OS Thread Scheduling\"]\n  F --> I[\"Worker Threads / Processes\"]\n  G --> J[\"Node.js, Python asyncio\"]\n  I --> K[\"CPU-bound parallelism\"]",
+      "caption": "Concurrency is a program design property; parallelism is a runtime execution property. Both can — and often should — coexist in a well-designed system."
     },
     {
       "type": "analogy",
-      "title": "The Coffee Shop Analogy",
-      "content": "Imagine a **barista** (single CPU core) serving a queue of customers. While the espresso machine runs for Customer A (I/O wait), the barista takes Customer B's order — this is **concurrency**. One person, multiple tasks in progress, interleaved intelligently.\n\nNow imagine **two baristas** each simultaneously pulling a shot for a different customer. Both shots extract at the same instant on two machines — this is **parallelism**. Two workers, two tasks, genuinely simultaneous.\n\nA coffee shop with two baristas who also interleave tasks is *both* concurrent and parallel — the goal most modern systems aim for. Amdahl's Law, however, warns us: if 20% of the workflow *must* be sequential (e.g., the single cash register), adding a hundred baristas can only ever deliver a 5× speedup, not 100×."
+      "title": "The Coffee Shop: One Barista, Two Baristas, and the Cash Register Problem",
+      "content": "Picture a busy coffee shop at 8 AM. Imagine a **single barista** (one CPU core) facing a queue of ten customers. She does not serve Customer A from start to finish and then move to Customer B. Instead, while the espresso machine pulls a 25-second shot for Customer A (an I/O wait — the machine does the work, not her), she takes Customer B's order, calls out Customer C's name, and swipes Customer D's card. Multiple tasks are all *in progress* simultaneously, interleaved intelligently around wait periods. This is **concurrency** — one worker, many tasks in flight, making progress by exploiting idle time.\n\nNow imagine the shop hires a **second barista**. At 8:05 both baristas simultaneously pull a shot, steam milk, and prepare a drink for different customers at the same instant. Two workers, two tasks, genuinely simultaneous physical work. This is **parallelism** — true simultaneous execution.\n\nA coffee shop with two baristas who *also* interleave tasks intelligently is both concurrent and parallel — exactly the design goal of a multi-core async server.\n\nBut here is the hard part: the shop has **one cash register**. Every order, regardless of how many baristas are making drinks in parallel, must eventually be processed through that single register. If ringing up an order takes 10 seconds and it cannot be parallelised, then no matter how many baristas you hire, the maximum throughput is 6 customers per minute — the register is the bottleneck. This is **Amdahl's Law** made tangible: the sequential fraction of any workflow places a hard ceiling on achievable speedup."
     },
     {
       "type": "explanation",
-      "title": "Amdahl's Law and the Limits of Parallelism",
-      "content": "**Amdahl's Law** quantifies the theoretical maximum speedup achievable by parallelizing a program. If a fraction `p` of work is parallelizable and `(1-p)` must remain sequential, adding `N` cores gives:\n\n`Speedup = 1 / ((1 - p) + p/N)`\n\nAs N → ∞, speedup approaches `1 / (1 - p)`. If only 5% of your program is sequential, the theoretical ceiling is 20×, no matter how many cores you add. This is why profiling for the sequential bottleneck is the *first* step in any parallelization effort.\n\n**Gustafson's Law** offers an optimistic counterpoint: as problem size grows, the parallelizable fraction typically increases. Large scientific simulations, rendering farms, and ML training jobs benefit enormously from scale because their sequential setup cost stays constant while their parallel workload grows.\n\nIn practice, deciding between **concurrency** and **parallelism** comes down to the workload type:\n- **I/O-bound** tasks (network calls, file reads) benefit from concurrency — while one task waits, another runs. A single thread with async I/O can handle thousands of connections.\n- **CPU-bound** tasks (compression, cryptography, video encoding) require parallelism — multiple cores crunching data simultaneously. More threads than cores cause context-switch overhead with diminishing returns."
+      "title": "The Hardware Reality: CPUs, Cores, and Threads",
+      "content": "To understand concurrency and parallelism precisely, you need a clear picture of the hardware. A modern CPU chip contains multiple independent **cores** — each core is a complete processing unit capable of fetching, decoding, and executing instructions. A quad-core CPU can genuinely execute four instruction streams simultaneously; sixteen cores can execute sixteen streams.\n\nBut the story does not end there. Intel's **Hyper-Threading** (and AMD's equivalent SMT — Simultaneous Multi-Threading) gives each physical core two **hardware threads**, also called logical processors. Each hardware thread maintains its own register file and program counter, so the OS sees twice as many logical CPUs. When one hardware thread stalls waiting for a cache miss, the core's execution units switch to the other hardware thread immediately — a micro-level concurrency mechanism baked into silicon.\n\nThe **OS scheduler** sits above this hardware and manages **software threads** (also called kernel threads or OS threads). A software thread is a schedulable unit of execution: the OS assigns it to a hardware thread for a time quantum (typically 1–10 ms), then preempts it and runs another. This preemptive time-slicing is how a dual-core laptop with 200 running processes feels responsive — the OS rotates through them fast enough that each appears to make continuous progress.\n\n**Context switching** is the cost of this illusion. Switching from thread A to thread B requires saving A's full register state (hundreds of registers on a modern x86-64 CPU), loading B's state, potentially flushing the TLB (Translation Lookaside Buffer) if they belong to different processes, and warming up the CPU pipeline again. A context switch costs roughly 1–10 microseconds. For I/O-bound work where threads spend most time sleeping, this is negligible. For CPU-bound work where every microsecond of compute matters, switching 1000 threads on 4 cores means thousands of unnecessary switches per second — pure overhead.\n\nThis is why the **number of threads for CPU-bound work should equal the number of physical cores**, not the number of tasks. More threads than cores means the OS must context-switch them onto the same core, adding overhead without adding compute capacity."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  WL[\"Workload\"] --> IO[\"I/O-Bound\"]\n  WL --> CPU[\"CPU-Bound\"]\n  IO --> C1[\"Use Concurrency\"]\n  IO --> C2[\"Async / Event Loop\"]\n  CPU --> P1[\"Use Parallelism\"]\n  CPU --> P2[\"Worker Threads / Processes\"]\n  C1 --> R1[\"High throughput\\nlow memory\"]\n  P1 --> R2[\"Max throughput\\ncores × speedup\"]",
-      "caption": "Match the concurrency model to the workload: async event loops for I/O, parallel workers for CPU."
+      "mermaid": "flowchart LR\n  A[\"CPU Chip\"] --> B[\"Core 0\"]\n  A --> C[\"Core 1\"]\n  B --> D[\"HW Thread 0\"]\n  B --> E[\"HW Thread 1\"]\n  C --> F[\"HW Thread 2\"]\n  C --> G[\"HW Thread 3\"]\n  D --> H[\"OS Thread Pool\"]\n  E --> H\n  F --> H\n  G --> H\n  H --> I[\"User Tasks\"]",
+      "caption": "Physical cores contain hardware threads (SMT/Hyper-Threading). The OS scheduler maps many software threads onto the available hardware threads via time-slicing."
+    },
+    {
+      "type": "explanation",
+      "title": "Concurrency Mechanisms: Threads, Event Loops, Coroutines, and Actors",
+      "content": "There is no single 'concurrency primitive' — different languages and runtimes offer different abstractions, each with trade-offs in complexity, overhead, and composability.\n\n**OS Threads** are the most direct abstraction: one thread per independent task, each with its own stack (typically 1–8 MB). The OS preemptively schedules them. Threads are powerful but expensive to create (microseconds) and memory-hungry at scale. A server spawning one thread per HTTP connection collapses under 10,000 simultaneous connections because 10,000 × 4 MB stacks = 40 GB of RAM just for stacks.\n\n**Event loops** (pioneered by libevent, popularised by Node.js) solve the C10K problem with a radically different model: one OS thread runs a tight loop, calling `epoll`/`kqueue` (OS I/O multiplexing syscalls) to ask 'which of my thousands of file descriptors is ready?', then dispatching callbacks for each ready descriptor. The event loop never blocks — instead of *waiting* for I/O, it *registers interest* and returns control immediately. The OS notifies it when data arrives. This allows a single thread to manage tens of thousands of simultaneous connections with a tiny memory footprint. The trade-off: any callback that does CPU-intensive work blocks the entire loop for its duration, starving all other connections.\n\n**Coroutines / async-await** give event loops a readable face. Instead of nested callback pyramids, you write code that *looks* sequential but is actually cooperative: every `await` is a suspension point where the coroutine yields control back to the event loop, allowing other coroutines to run. The runtime maintains a list of suspended coroutines and resumes them when their awaited I/O completes. Python's `asyncio`, Rust's `tokio`, and JavaScript's native Promises all implement this model. Unlike OS threads, coroutines have tiny stacks (a few KB) and switching between them is pure user-space — no kernel involvement, no context-switch overhead.\n\n**The Actor model** (Erlang, Elixir, Akka) takes a different approach: actors are lightweight processes (like coroutines, not OS processes) that share no memory and communicate only by passing immutable messages. Because there is no shared state, there are no locks and no data races. An Erlang VM can run millions of actors on a handful of OS threads, with the scheduler preemptively switching actors. This model trades the expressiveness of shared memory for the safety of isolation.\n\n**Green threads** (Go's goroutines, Java's virtual threads in JDK 21) split the difference: they look and behave like OS threads — blocking I/O is fine, you can write sequential code — but they are managed by the language runtime, not the OS. The runtime multiplexes thousands of goroutines onto a pool of OS threads (the `GOMAXPROCS` setting in Go), transparently suspending a goroutine when it blocks on I/O and resuming it when the I/O completes. This gives you the programming model of threads with the scalability of event loops."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Concurrency Mechanism\"] --> B[\"OS Threads\"]\n  A --> C[\"Event Loop\"]\n  A --> D[\"Coroutines / async-await\"]\n  A --> E[\"Green Threads\"]\n  A --> F[\"Actor Model\"]\n  B --> B1[\"Heavy: 1-8MB stack\\nPreemptive, kernel-managed\"]\n  C --> C1[\"Single thread\\nCallback-based I/O\"]\n  D --> D1[\"Cooperative yield\\nAsync/await syntax\"]\n  E --> E1[\"Goroutines, VirtualThreads\\nRuntime-managed\"]\n  F --> F1[\"No shared state\\nMessage passing only\"]",
+      "caption": "Five concurrency models, each optimising for different trade-offs between programmability, scalability, and safety."
+    },
+    {
+      "type": "explanation",
+      "title": "Amdahl's Law: The Hard Ceiling on Parallelism",
+      "content": "**Amdahl's Law** is the most important quantitative tool in parallel computing. It answers the question: if I add N cores to my program, what is the maximum speedup I can achieve?\n\nIf a fraction `p` of the total work is parallelisable (i.e., can be split across cores), and the remaining fraction `(1 - p)` must execute serially, then with `N` cores the theoretical speedup is:\n\n`Speedup(N) = 1 / ((1 - p) + p / N)`\n\nAs N approaches infinity, speedup approaches `1 / (1 - p)`. The sequential fraction is the permanent bottleneck — it dominates as you throw more hardware at the problem.\n\nLet us build intuition with concrete numbers. Suppose 90% of your program is parallelisable (`p = 0.9`) and 10% is sequential (`1 - p = 0.1`):\n- 2 cores: `1 / (0.1 + 0.9/2) = 1 / 0.55 ≈ 1.82×`\n- 4 cores: `1 / (0.1 + 0.9/4) = 1 / 0.325 ≈ 3.08×`\n- 10 cores: `1 / (0.1 + 0.09) = 1 / 0.19 ≈ 5.26×`\n- ∞ cores: `1 / 0.1 = 10×` — the hard ceiling\n\nThat means even with an infinite number of cores, a program with 10% sequential work can never run more than 10× faster than on one core. This is why **profiling for sequential bottlenecks** is the mandatory first step of any parallelisation effort.\n\nThe practical implications are stark:\n- If your sequential fraction is 1%, you can achieve near-100× speedup — great for embarrassingly parallel work like rendering image frames.\n- If your sequential fraction is 25%, the ceiling is 4× — adding 256 cores gets you from 3.8× to 4×, an almost imperceptible improvement.\n- Database query planning, lock acquisition, log writing, and leader election are all serial bottlenecks hiding in distributed systems.\n\n**Gustafson's Law** offers a more optimistic perspective. Amdahl assumed a fixed problem size — you are parallelising the same amount of work. Gustafson observed that in practice, as compute capacity grows, engineers tend to *scale the problem* rather than keep it fixed. A CGI studio with 100× more cores does not render the same frames faster; it renders frames with 100× more detail in the same time. When the problem grows with the hardware, the parallelisable fraction increases while the serial setup cost stays constant — and near-linear scaling becomes achievable for appropriately structured work."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\nconst os = require('os');\n\n// Demonstrates: I/O-bound favors concurrency, CPU-bound favors parallelism\n\nif (isMainThread) {\n  const CORES = os.cpus().length;\n  console.log(`Available cores: ${CORES}`);\n\n  // --- I/O-BOUND: concurrency with async (single thread handles many) ---\n  async function simulateIO(id) {\n    // In a real app: await fetch(...) or fs.promises.readFile(...)\n    await new Promise(r => setTimeout(r, 50)); // simulate network latency\n    return `IO task ${id} done`;\n  }\n\n  async function runIOBound() {\n    const start = Date.now();\n    // 10 tasks, ~50ms each, run concurrently — total ≈ 50ms, not 500ms\n    const results = await Promise.all(\n      Array.from({ length: 10 }, (_, i) => simulateIO(i))\n    );\n    console.log(`I/O-bound: ${results.length} tasks in ${Date.now() - start}ms`);\n  }\n\n  // --- CPU-BOUND: parallelism with workers (N cores × throughput) ---\n  function runCPUBound() {\n    const start = Date.now();\n    const promises = Array.from({ length: CORES }, (_, i) =>\n      new Promise((resolve, reject) => {\n        const w = new Worker(__filename, { workerData: { chunk: i, total: CORES } });\n        w.on('message', resolve);\n        w.on('error', reject);\n      })\n    );\n    Promise.all(promises).then(results => {\n      console.log(`CPU-bound: ${results.length} workers in ${Date.now() - start}ms`);\n    });\n  }\n\n  runIOBound().then(runCPUBound);\n} else {\n  // Worker: CPU-intensive work (sum large range)\n  const { chunk, total } = workerData;\n  const size = 2e7;\n  const start = Math.floor((size / total) * chunk);\n  const end = Math.floor((size / total) * (chunk + 1));\n  let sum = 0;\n  for (let i = start; i < end; i++) sum += i;\n  parentPort.postMessage({ chunk, sum });\n}",
-      "explanation": "Two patterns side-by-side: `Promise.all` achieves concurrency for I/O-bound tasks on one thread — 10 tasks finish in ~50ms instead of 500ms. `worker_threads` achieves parallelism for CPU-bound work — one worker per core, genuinely simultaneous. Mixing both gives you a system that is concurrent *and* parallel."
+      "label": "Example",
+      "code": "// Amdahl's Law and Gustafson's Law modelled in JavaScript\n\n// --- Amdahl's Law ---\n// parallelFraction: 0.0 to 1.0 (the portion that can run in parallel)\nfunction amdahlSpeedup(parallelFraction, numCores) {\n  const sequential = 1 - parallelFraction;\n  return 1 / (sequential + parallelFraction / numCores);\n}\n\nconst p = 0.9; // 90% parallelisable, 10% must be serial\nconsole.log('=== Amdahl (fixed p=0.9) ===');\nfor (const n of [1, 2, 4, 8, 16, 32, 64, 1e9]) {\n  const label = n >= 1e9 ? '∞' : String(n).padStart(2);\n  console.log(`Cores: ${label}  Speedup: ${amdahlSpeedup(p, n).toFixed(2)}x`);\n}\n// Cores:  1  Speedup: 1.00x\n// Cores:  2  Speedup: 1.82x\n// Cores:  4  Speedup: 3.08x\n// Cores:  8  Speedup: 4.71x\n// Cores: 16  Speedup: 6.40x\n// Cores: 64  Speedup: 8.77x\n// Cores:  ∞  Speedup: 10.00x  ← hard ceiling at 1/(1-0.9)\n\n// --- Gustafson's Law ---\n// As problem size scales with cores, the parallelisable fraction grows\n// scaledSpeedup ≈ N - serialFraction * (N - 1)\nfunction gustafsonsSpeedup(serialFraction, numCores) {\n  return numCores - serialFraction * (numCores - 1);\n}\n\nconst s = 0.1; // 10% serial (same as above)\nconsole.log('\\n=== Gustafson (scaled workload, s=0.1) ===');\nfor (const n of [1, 2, 4, 8, 16, 32, 64]) {\n  console.log(`Cores: ${String(n).padStart(2)}  Speedup: ${gustafsonsSpeedup(s, n).toFixed(2)}x`);\n}\n// Cores:  1  Speedup: 1.00x\n// Cores:  2  Speedup: 1.90x\n// Cores:  4  Speedup: 3.70x\n// Cores:  8  Speedup: 7.30x\n// Cores: 64  Speedup: 57.30x  ← near-linear scaling with scaled workload",
+      "explanation": "Amdahl's Law caps speedup at `1/(1-p)` for a fixed problem — the sequential tail dominates. Gustafson's Law shows that when you scale the problem with the hardware (the real-world case for simulations, ML training, rendering), near-linear speedup is achievable. The key difference: Amdahl asks 'how fast can I do the same job?'; Gustafson asks 'how much more can I do in the same time?'"
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "I/O-Bound vs CPU-Bound: The Workload Taxonomy",
+      "content": "Every performance problem begins with correctly classifying the workload, because the optimal concurrency strategy is completely different for the two major categories.\n\n**I/O-bound workloads** spend most of their time waiting for external resources: network responses, disk reads, database queries, or user input. The CPU is idle most of the time — a thread waiting for a database query to return is doing nothing. Adding more CPU cores to an I/O-bound program is nearly useless. The bottleneck is latency and bandwidth, not compute. The correct tool is **concurrency**: allow other tasks to run while this one waits. A Node.js server handling 10,000 HTTP connections does so efficiently on a single thread because all 10,000 connections spend most of their time waiting — the event loop can service all of them during their idle periods.\n\nCommon I/O-bound examples: web servers, API gateways, chat applications, database clients, file synchronisation tools, and any service that proxies requests to downstream services.\n\n**CPU-bound workloads** spend most of their time performing computation: cryptographic hashing, video transcoding, image processing, numerical simulation, machine learning inference, data compression. The CPU is saturated — there is no idle time to exploit. Concurrency alone cannot help: even if you interleave 100 tasks on one core, you still only have one core's worth of compute. The correct tool is **parallelism**: distribute the computation across multiple cores. A video encoder processes multiple frames simultaneously on multiple cores, achieving throughput proportional to core count.\n\nCommon CPU-bound examples: video/audio encoding, ray tracing and 3D rendering, scientific simulation (weather, physics, genomics), cryptographic mining, machine learning training, image thumbnail generation at scale.\n\n**Mixed workloads** — the most common case in real systems — have both I/O and CPU components. A web application might receive a request (I/O), decode a JWT and validate a schema (CPU, tiny), query a database (I/O, dominant), format a JSON response (CPU, tiny). The dominant cost is I/O, so concurrency is the primary tool, supplemented by a small thread pool for the CPU spikes.\n\nA critical sub-case: **memory-bound workloads**. Some computations are neither I/O-bound in the network sense nor CPU-bound in the instruction-throughput sense, but are limited by memory bandwidth — how fast data can be moved between RAM and CPU caches. Matrix multiplication with huge matrices, certain graph algorithms, and many ML operations hit this limit. Adding cores does not help if all cores are stalled waiting on the memory bus. Techniques like cache blocking, NUMA-aware allocation, and SIMD vectorisation address this."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  WL[\"Workload\"] --> IO[\"I/O-Bound\\n(waiting on network/disk)\"]\n  WL --> CPU[\"CPU-Bound\\n(continuous computation)\"]\n  WL --> MEM[\"Memory-Bound\\n(cache/RAM bandwidth)\"]\n  IO --> C1[\"Use Concurrency\"]\n  IO --> C2[\"Async / Event Loop / Coroutines\"]\n  CPU --> P1[\"Use Parallelism\"]\n  CPU --> P2[\"Worker Threads / Processes\"]\n  MEM --> M1[\"Cache-aware algorithms\"]\n  MEM --> M2[\"SIMD / NUMA optimisation\"]\n  C2 --> R1[\"High throughput\\nLow memory\"]\n  P2 --> R2[\"Cores × speedup\"]\n  M2 --> R3[\"Memory bandwidth\\nfull utilisation\"]",
+      "caption": "Classify the workload first, then choose the tool. Using parallelism for I/O-bound work wastes resources; using only concurrency for CPU-bound work leaves cores idle."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Amdahl's Law modeled in JS\nfunction amdahlSpeedup(parallelFraction, numCores) {\n  // parallelFraction: 0.0 to 1.0 (portion that can be parallelized)\n  const sequential = 1 - parallelFraction;\n  return 1 / (sequential + parallelFraction / numCores);\n}\n\n// Example: 80% of work is parallelizable\nconst p = 0.8;\nfor (const cores of [1, 2, 4, 8, 16, 32, 64, Infinity]) {\n  const s = amdahlSpeedup(p, cores);\n  console.log(`Cores: ${cores === Infinity ? '∞' : cores.toString().padStart(2)}, Speedup: ${s.toFixed(2)}x`);\n}\n// Cores:  1, Speedup: 1.00x\n// Cores:  2, Speedup: 1.67x\n// Cores:  8, Speedup: 3.08x\n// Cores: 64, Speedup: 4.71x\n// Cores:  ∞, Speedup: 5.00x  ← hard ceiling at 1/(1-0.8)"
+      "label": "Example",
+      "code": "// Side-by-side: concurrency for I/O-bound vs parallelism for CPU-bound\nconst { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\nconst os = require('os');\n\nif (isMainThread) {\n  const CORES = os.cpus().length;\n  console.log(`System cores: ${CORES}`);\n\n  // ── I/O-BOUND: concurrency with async (one thread, many in-flight tasks) ──\n  async function simulateNetworkRequest(id) {\n    // In production: await fetch(url) or db.query(sql)\n    await new Promise(resolve => setTimeout(resolve, 100)); // 100ms latency\n    return `Request ${id} completed`;\n  }\n\n  async function runIOBound() {\n    const start = Date.now();\n    // Fire 20 requests concurrently — all 20 are in-flight simultaneously\n    // Total time ≈ 100ms (not 20 × 100ms = 2000ms)\n    const results = await Promise.all(\n      Array.from({ length: 20 }, (_, i) => simulateNetworkRequest(i))\n    );\n    console.log(`I/O-bound: ${results.length} requests in ${Date.now() - start}ms`);\n    // → ~100ms regardless of request count (up to the event loop limit)\n  }\n\n  // ── CPU-BOUND: parallelism with workers (one worker per core) ──\n  function runCPUBound() {\n    const start = Date.now();\n    // Spin up CORES workers — each runs on its own OS thread\n    const promises = Array.from({ length: CORES }, (_, i) =>\n      new Promise((resolve, reject) => {\n        const worker = new Worker(__filename, {\n          workerData: { chunk: i, totalChunks: CORES }\n        });\n        worker.on('message', resolve);\n        worker.on('error', reject);\n      })\n    );\n    Promise.all(promises).then(results => {\n      const total = results.reduce((s, r) => s + r.partialSum, 0);\n      console.log(`CPU-bound: sum=${total} in ${Date.now() - start}ms using ${CORES} workers`);\n    });\n  }\n\n  runIOBound().then(runCPUBound);\n\n} else {\n  // Worker thread: performs CPU-intensive summation on its assigned slice\n  const { chunk, totalChunks } = workerData;\n  const N = 50_000_000; // 50 million iterations split across workers\n  const start = Math.floor((N / totalChunks) * chunk);\n  const end   = Math.floor((N / totalChunks) * (chunk + 1));\n  let partialSum = 0;\n  for (let i = start; i < end; i++) partialSum += i;\n  parentPort.postMessage({ chunk, partialSum });\n}",
+      "explanation": "`Promise.all` achieves concurrency: 20 simulated requests all start immediately and resolve concurrently on a single thread in ~100ms instead of 2000ms. `worker_threads` achieves parallelism: each worker runs in its own OS thread with its own V8 isolate, genuinely computing in parallel. Notice workers are spawned equal to `CORES` — more workers than cores would cause context-switch overhead without additional compute."
+    },
+    {
+      "type": "explanation",
+      "title": "Shared State and Synchronisation: Where Concurrency Gets Dangerous",
+      "content": "The fundamental hazard of concurrent programming is **shared mutable state**: when two or more threads can read and write the same memory location simultaneously, the results become unpredictable. This is the root cause of **race conditions**, **data races**, and the notorious difficulty of debugging concurrent code.\n\nConsider a simple bank transfer: Thread A reads account balance (£100), Thread B reads account balance (£100), Thread A writes balance − £30 = £70, Thread B writes balance − £40 = £60. The final balance is £60, but it should be £30. Both threads read a stale value and overwrote each other's write — £40 was double-spent from £100.\n\n**Mutual exclusion (mutex)** is the classic solution: a lock that ensures only one thread can execute a critical section at a time. Thread B must wait until Thread A has released the lock before it can read the balance. Mutexes are correct but come with costs: **contention** (threads queuing at the lock), **priority inversion** (a low-priority thread holds a lock a high-priority thread needs), and **deadlock** (Thread A holds Lock 1 and waits for Lock 2 while Thread B holds Lock 2 and waits for Lock 1 — both wait forever).\n\n**Deadlock** requires four conditions to occur simultaneously (Coffman conditions): mutual exclusion, hold-and-wait, no preemption, and circular wait. Eliminating any one condition prevents deadlock — the most common practical technique is a **consistent lock ordering**: always acquire locks in the same global order, which breaks the circular-wait condition.\n\n**Atomic operations** offer an alternative for simple cases. A compare-and-swap (CAS) instruction atomically reads a value, compares it to an expected value, and writes a new value — all in one indivisible CPU instruction. This is the foundation of **lock-free data structures** (lock-free queues, lock-free hash maps), which avoid mutexes entirely by retrying whenever a concurrent modification is detected. Lock-free structures are harder to implement correctly but can dramatically reduce contention under high parallelism.\n\n**Immutability** is the most powerful technique: if data never changes after creation, no synchronisation is needed. Functional languages (Haskell, Clojure), the Actor model (Erlang), and Rust's ownership system push programmers toward immutability by design. JavaScript's `Object.freeze`, Go's convention of sending values over channels rather than sharing pointers, and Java's `record` types all encourage this direction.\n\n**Software Transactional Memory (STM)**, used in Haskell's `STM` monad and Clojure's `ref`, takes a database-style approach: bundle multiple memory reads and writes into a transaction. If another thread modified any of the values during the transaction, roll back and retry. STM composes — you can combine two separately-correct transactions into a larger correct transaction — which is notoriously difficult with locks."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant T1 as \"Thread A\"\n  participant M as \"Shared Balance\"\n  participant T2 as \"Thread B\"\n  T1->>M: read balance (100)\n  T2->>M: read balance (100)\n  T1->>M: write 100-30=70\n  T2->>M: write 100-40=60\n  Note over M: Final: 60 (should be 30!)\n  Note over T1,T2: Race condition — 40 lost",
+      "caption": "A classic race condition: two threads read a stale value and overwrite each other. Mutual exclusion (mutex/lock) around the read-modify-write sequence fixes this."
+    },
+    {
+      "type": "explanation",
+      "title": "The Event Loop in Depth: How Node.js Handles Concurrency",
+      "content": "Node.js is the canonical example of a **single-threaded concurrent** runtime, and understanding its event loop precisely dissolves many common misconceptions.\n\nNode's event loop is built on **libuv**, a cross-platform async I/O library. When you call `fs.readFile()` or `fetch()`, Node does not block the thread waiting for data. Instead, it registers the operation with the OS I/O multiplexer (`epoll` on Linux, `kqueue` on macOS, `IOCP` on Windows) and immediately returns. The OS kernel performs the I/O in the background. When data is ready, the OS places the file descriptor in the 'ready' set, libuv picks it up on the next event loop tick, and the associated callback is placed on the **callback queue**.\n\nThe event loop runs through phases on every tick:\n1. **timers** — execute `setTimeout` and `setInterval` callbacks whose delay has elapsed\n2. **pending callbacks** — I/O callbacks deferred to next iteration\n3. **idle, prepare** — internal libuv use\n4. **poll** — retrieve new I/O events; block here if queue is empty and timers are not yet due\n5. **check** — `setImmediate` callbacks\n6. **close callbacks** — `socket.on('close', ...)` etc.\n\n`Promise` microtasks and `queueMicrotask` callbacks are processed **after each phase**, before moving to the next phase — they have higher priority than regular callbacks.\n\nThe critical implication: **any synchronous JavaScript code that takes a long time blocks the entire event loop**. If you have a callback that runs a CPU-intensive loop for 500ms, every other connection waiting in the queue is stalled for 500ms. This is why CPU-bound work in Node.js must be offloaded to `worker_threads` — they run in separate OS threads with their own V8 isolates and their own event loops, communicating with the main thread via `postMessage`.\n\nThis architecture allows Node.js to handle tens of thousands of simultaneous HTTP connections on a single thread — each connection spends most of its time waiting for database responses, and the event loop handles all of them concurrently during that waiting period. Netflix, LinkedIn, and PayPal famously adopted Node.js for API gateways precisely because this I/O-concurrent model dramatically reduced server counts compared to the traditional one-thread-per-connection model."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Misconceptions and Edge Cases",
+      "content": "**'Async/await makes code parallel.'** This is perhaps the most common confusion. In a single-threaded runtime like Node.js, `await` does not create a new thread. It suspends the current coroutine and yields to the event loop, which can run other coroutines. The code after `await` runs on the same thread when the awaited operation completes. `await fetch(url)` is concurrent (other code runs while the network I/O is in flight), but it is decidedly not parallel — no extra CPU cores are used.\n\n**'More threads always means faster.'** As established: for CPU-bound work, creating more threads than cores adds context-switch overhead. For I/O-bound work in languages with a GIL (Python's Global Interpreter Lock), multiple threads literally cannot execute Python bytecode simultaneously — the GIL ensures only one thread runs the interpreter at a time. Python threads provide concurrency (the GIL is released during I/O) but not parallelism for Python code. To achieve true CPU parallelism in Python, you must use `multiprocessing`, which spawns separate processes each with their own interpreter and GIL.\n\n**'The GIL makes Python threads useless.'** Not quite — Python threads are useful for I/O-bound concurrency. While one thread waits on a network socket (GIL released by the C extension), another thread executes Python code. Web frameworks like Django and Flask scale well with multiple threads for I/O-heavy workloads.\n\n**'Concurrency bugs are deterministic.'** Race conditions are notoriously non-deterministic. A race may occur one in ten thousand runs, never reproduce in a debugger (because the debugger changes timing), and appear exclusively under production load. This is what makes concurrent bugs so costly — they are hard to reproduce, hard to test for, and hard to diagnose. **Thread sanitisers** (Go's `-race` flag, Clang's ThreadSanitizer) dynamically instrument your binary to detect races at runtime — run these in your CI/CD pipeline.\n\n**'Parallelism always improves throughput.'** Amdahl's Law says otherwise. But even beyond the sequential fraction, parallelism introduces overheads not captured by Amdahl's simple model: work distribution time, result merging time, inter-core cache coherence traffic (cores must synchronise their L1/L2 cache views of shared memory via the MESI protocol), and NUMA effects when threads on different CPU sockets access each other's memory. Real measured speedup is almost always lower than the Amdahl prediction."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context:** The distinction between concurrency and parallelism sharpened during the multicore era (mid-2000s) when single-core clock speeds plateaued due to power and heat limits. Intel's first dual-core consumer CPU shipped in 2005. Before that, 'going faster' meant waiting for the next processor generation. After 2005, it meant learning to write concurrent and parallel code — a skill the industry was largely unprepared for. Erlang (1986) and Haskell's STM (2004) had pioneered safe concurrency models, but they entered mainstream consciousness only when the multicore wall made parallel programming a survival skill rather than a research curiosity. Go's goroutines (2009) and Rust's ownership model (2015) were direct responses to this shift."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Practical heuristic:** Before reaching for parallel threads, first *maximize concurrency* in your sequential code — async I/O, batching, pipelining. These have zero synchronization overhead. Only parallelize CPU-bound bottlenecks you've confirmed with a profiler. Parallelism adds coordination cost (locks, channels, merging) that can erase the gain if the workload is too small."
+      "content": "**Interview and architecture insights:**\n- When asked 'how would you scale this service?', always classify the workload first: I/O-bound → async/event loop; CPU-bound → worker pool sized to core count.\n- Amdahl's Law is a standard interview topic. Know the formula `1 / ((1-p) + p/N)` and be able to compute the ceiling for p=0.9 (10×) and p=0.95 (20×) by hand.\n- 'Concurrency is not parallelism' (Rob Pike) is a phrase interviewers love — be ready to explain it with a concrete example.\n- The number one concurrency bug in coding interviews: forgetting that `i++` in C/Java/JS is not atomic — it is a read-modify-write sequence that requires synchronisation under concurrent access.\n- For Node.js roles: be clear that `async/await` is cooperative concurrency on one thread, `worker_threads` is parallelism on multiple threads.\n- Race conditions are notoriously hard to reproduce; mention ThreadSanitizer, Go's `-race` flag, and Rust's type system as tools that catch them at development time."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Concurrency** is a program design property — multiple tasks can make progress; **parallelism** is a runtime property — tasks actually execute simultaneously on multiple cores.",
-        "**I/O-bound** tasks benefit from concurrency (async/event loop); **CPU-bound** tasks require parallelism (multiple threads/processes).",
-        "**Amdahl's Law** caps the speedup from parallelism at `1 / (1 - p)` where `p` is the parallelizable fraction — the sequential bottleneck always wins.",
-        "A single-core system can be concurrent (via time-slicing) but never truly parallel; a poorly coordinated multi-core system can be parallel but fail at concurrency.",
-        "Profile first: measure where time is actually spent before adding parallelism — coordination overhead frequently erases the theoretical gain on small workloads."
+        "**Concurrency** is a structural property of your program — tasks are decomposed so they can *make progress* by interleaving, even on a single core. **Parallelism** is an execution property — tasks genuinely run simultaneously on multiple cores at the same instant.",
+        "**I/O-bound** workloads benefit from concurrency (async event loops, coroutines): one thread can manage thousands of in-flight network requests by interleaving during their wait periods. **CPU-bound** workloads require parallelism (worker threads/processes): additional cores provide additional compute capacity.",
+        "**Amdahl's Law** caps parallelism speedup at `1 / (1 - p)` where `p` is the parallelisable fraction — a 10% sequential bottleneck limits you to 10× speedup regardless of core count. Profile for the sequential bottleneck before adding cores.",
+        "**Concurrency mechanisms** span a spectrum from heavyweight OS threads (1–8 MB stack, kernel-scheduled) to lightweight goroutines and coroutines (KB-sized, user-space scheduled) to the Actor model (no shared state, message passing only) — each trades memory, programmability, and safety differently.",
+        "**Shared mutable state** is the root cause of race conditions, deadlocks, and priority inversion. The safest defences are immutability (no shared mutable state), the Actor model (isolated state, message passing), or Rust's ownership system (compile-time exclusivity guarantees).",
+        "**Python's GIL** means OS threads cannot execute Python bytecode in parallel — use `multiprocessing` for CPU-bound parallelism and `asyncio`/threads for I/O-bound concurrency. **Node.js** is single-threaded concurrent by default; offload CPU-heavy work to `worker_threads`.",
+        "**Gustafson's Law** complements Amdahl's: when problem size scales with hardware (the common case for scientific computing and ML training), near-linear speedup is achievable because the sequential fraction stays constant while the parallelisable work grows."
       ]
     }
   ],
@@ -64,133 +117,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "Which statement best describes the difference between concurrency and parallelism?",
+      "question": "Which statement most precisely captures the difference between concurrency and parallelism?",
       "type": "mcq",
       "options": [
-        "Concurrency requires multiple CPU cores; parallelism only needs one",
-        "Concurrency means tasks make progress by interleaving; parallelism means tasks run at the same instant on multiple cores",
+        "Concurrency requires multiple CPU cores; parallelism can run on one core",
+        "Concurrency is a structural design property allowing tasks to make progress by interleaving; parallelism is a runtime execution property where tasks run simultaneously on multiple cores",
         "Parallelism is a design property; concurrency is a hardware property",
-        "They are synonyms used interchangeably in modern systems"
+        "They are synonyms — modern usage treats them as interchangeable"
       ],
       "correct": 1,
-      "explanation": "Concurrency is about structure — multiple tasks can progress, possibly interleaved on one core. Parallelism is about simultaneous execution on multiple cores. A program can have either, both, or neither."
+      "explanation": "Concurrency is about how a program is structured (can multiple tasks make progress?). Parallelism is about how it executes (are multiple tasks running at the exact same instant?). A single-core event loop is concurrent but not parallel; a poorly structured multi-core program may be parallel but lack meaningful concurrency."
     },
     {
       "id": "q2",
-      "question": "Amdahl's Law states that if 10% of a program is sequential, the maximum speedup with unlimited cores is:",
-      "type": "mcq",
-      "options": [
-        "10×",
-        "Unlimited — more cores always help",
-        "90×",
-        "Approximately 10× (1 / 0.1)"
-      ],
-      "correct": 3,
-      "explanation": "With p = 0.9 parallelizable, the ceiling is 1 / (1 - 0.9) = 1 / 0.1 = 10×. The 10% sequential portion becomes the permanent bottleneck regardless of core count."
-    },
-    {
-      "id": "q3",
-      "question": "A web server handles 1000 simultaneous HTTP connections on a single OS thread using async I/O. This is an example of:",
-      "type": "mcq",
-      "options": [
-        "Parallelism",
-        "Concurrency",
-        "Both parallelism and concurrency",
-        "Neither — one thread cannot handle multiple connections"
-      ],
-      "correct": 1,
-      "explanation": "Handling many connections on one thread by interleaving while waiting on I/O is the definition of concurrency. No parallel execution occurs — the single thread switches between in-flight requests as I/O completes."
-    },
-    {
-      "id": "q4",
-      "question": "Which workload type benefits MOST from adding more CPU cores?",
-      "type": "mcq",
-      "options": [
-        "A web server waiting on database queries",
-        "A chat application handling WebSocket connections",
-        "A video encoder compressing 4K footage",
-        "A file watcher monitoring directory changes"
-      ],
-      "correct": 2,
-      "explanation": "Video encoding is CPU-bound: it performs intensive computation continuously. Adding cores lets multiple frames compress simultaneously. The other examples are I/O-bound and gain little from additional cores."
-    },
-    {
-      "id": "q5",
-      "question": "Rob Pike's formulation 'concurrency is about dealing with many things at once' emphasizes that concurrency is primarily:",
-      "type": "mcq",
-      "options": [
-        "A hardware feature",
-        "A program structure / design property",
-        "A synonym for threading",
-        "Only possible with OS-level support"
-      ],
-      "correct": 1,
-      "explanation": "Pike's point is that concurrency is a way of *designing* a program to handle multiple tasks — it says nothing about whether they run simultaneously. A well-structured concurrent program can run on one core."
-    },
-    {
-      "id": "q6",
-      "question": "What does Gustafson's Law suggest about large-scale parallel workloads?",
-      "type": "mcq",
-      "options": [
-        "The sequential fraction grows as problem size increases",
-        "Parallelism cannot improve performance beyond Amdahl's limit",
-        "As problem size grows, the parallelizable fraction increases, allowing near-linear scaling",
-        "More cores always reduce performance due to coordination overhead"
-      ],
-      "correct": 2,
-      "explanation": "Gustafson's Law observes that larger problems have a higher fraction of parallelizable work while sequential setup cost stays constant. This allows scaling much closer to N× on N cores than Amdahl's Law implies."
-    },
-    {
-      "id": "q7",
-      "question": "Using `Promise.all` in Node.js to fetch data from 5 APIs simultaneously is:",
-      "type": "mcq",
-      "options": [
-        "Parallel execution using 5 threads",
-        "Concurrent execution on a single thread",
-        "Sequential execution one after another",
-        "Multi-process execution"
-      ],
-      "correct": 1,
-      "explanation": "`Promise.all` fires all 5 requests concurrently — they're all 'in flight' at once — but Node.js handles them on a single event loop thread. The OS network stack handles actual I/O asynchronously in the background."
-    },
-    {
-      "id": "q8",
-      "question": "Why does adding more threads than available CPU cores hurt CPU-bound performance?",
-      "type": "mcq",
-      "options": [
-        "Extra threads consume too much RAM",
-        "The OS cannot schedule more than one thread per process",
-        "Context-switch overhead increases without additional compute capacity",
-        "CPU-bound tasks cannot use threads at all"
-      ],
-      "correct": 2,
-      "explanation": "With more threads than cores, the OS must time-slice threads on the same core. Each context switch saves/restores register state with no new computation happening. For CPU-bound work this is pure overhead."
-    },
-    {
-      "id": "q9",
-      "question": "A program has 95% parallelizable work. According to Amdahl's Law, the maximum speedup with 20 cores is closest to:",
+      "question": "According to Amdahl's Law, if 20% of a program must remain sequential, the maximum speedup achievable with unlimited cores is:",
       "type": "mcq",
       "options": [
         "20×",
-        "10.3×",
         "5×",
-        "19×"
+        "80×",
+        "Unlimited — more cores always improve throughput"
       ],
       "correct": 1,
-      "explanation": "Speedup = 1 / (0.05 + 0.95/20) = 1 / (0.05 + 0.0475) = 1 / 0.0975 ≈ 10.3×. The 5% sequential portion limits us well below the core count."
+      "explanation": "With p = 0.8 parallelisable and (1-p) = 0.2 sequential, the limit as N→∞ is 1 / 0.2 = 5×. The 20% sequential fraction is the permanent bottleneck that no amount of hardware can overcome."
+    },
+    {
+      "id": "q3",
+      "question": "A Node.js server handles 5,000 simultaneous HTTP connections on a single OS thread. This is an example of:",
+      "type": "mcq",
+      "options": [
+        "Parallelism — the OS executes multiple threads simultaneously",
+        "Concurrency — one thread interleaves tasks during their I/O wait periods",
+        "Both parallelism and concurrency equally",
+        "Neither — one thread cannot logically handle multiple connections"
+      ],
+      "correct": 1,
+      "explanation": "Node.js uses an event loop on a single thread. Each connection spends most of its time waiting for I/O (database queries, network). The event loop interleaves these waiting connections — serving others while one waits — which is exactly concurrency. No parallel execution on multiple cores is involved."
+    },
+    {
+      "id": "q4",
+      "question": "Why does creating more OS threads than available CPU cores hurt performance for CPU-bound workloads?",
+      "type": "mcq",
+      "options": [
+        "The OS cannot schedule more than one thread per process",
+        "Extra threads consume too much heap memory",
+        "Context-switch overhead increases without any additional compute capacity being added",
+        "CPU-bound tasks are incompatible with multi-threading by definition"
+      ],
+      "correct": 2,
+      "explanation": "With more threads than cores, the OS must time-slice multiple threads on the same core. Each context switch saves and restores register state with no useful computation happening. For CPU-bound work where every microsecond of compute matters, this is pure waste. The ideal thread count for CPU-bound work equals the physical core count."
+    },
+    {
+      "id": "q5",
+      "question": "Python's Global Interpreter Lock (GIL) means that in CPython:",
+      "type": "mcq",
+      "options": [
+        "Python programs cannot use threads at all",
+        "Multiple OS threads cannot execute Python bytecode simultaneously, but the GIL is released during I/O operations",
+        "Python threads achieve full parallelism for CPU-bound work just like C threads",
+        "Only one process can run at a time on a Python-installed system"
+      ],
+      "correct": 1,
+      "explanation": "The GIL ensures only one thread runs the Python interpreter at a time, preventing true CPU parallelism for Python bytecode. However, the GIL is released when a thread is blocked on I/O (network, file reads), so threads still provide I/O-bound concurrency. For CPU-bound parallelism, use `multiprocessing` to spawn separate interpreter processes, each with their own GIL."
+    },
+    {
+      "id": "q6",
+      "question": "What does Gustafson's Law suggest that Amdahl's Law underestimates?",
+      "type": "mcq",
+      "options": [
+        "The cost of context switching in parallel systems",
+        "Near-linear scaling potential when problem size grows proportionally with the number of cores",
+        "The sequential fraction grows as hardware scales up",
+        "More cores always reduce performance due to synchronisation overhead"
+      ],
+      "correct": 1,
+      "explanation": "Amdahl's Law fixes the problem size — it asks 'how fast can I do the same job with N cores?' Gustafson observed that practitioners tend to scale the problem with the hardware. When the workload grows proportionally with cores, the sequential setup cost stays constant while parallelisable work grows, enabling near-linear scaling that Amdahl's model would dismiss."
+    },
+    {
+      "id": "q7",
+      "question": "The four Coffman conditions for deadlock are: mutual exclusion, hold-and-wait, no preemption, and circular wait. The most common practical technique to prevent deadlock in real systems is:",
+      "type": "mcq",
+      "options": [
+        "Using only one mutex per program",
+        "Enforcing a consistent global lock acquisition order to break the circular-wait condition",
+        "Releasing all locks before acquiring new ones",
+        "Using atomic operations instead of mutexes for every shared variable"
+      ],
+      "correct": 1,
+      "explanation": "Consistent lock ordering breaks the circular-wait condition — if Thread A always acquires Lock 1 before Lock 2, and Thread B does the same, they can never form a cycle. This is the most widely applied deadlock prevention technique in real codebases (e.g., Linux kernel's lock hierarchy documentation)."
+    },
+    {
+      "id": "q8",
+      "question": "In Node.js, calling `await Promise.all([fetch(urlA), fetch(urlB), fetch(urlC)])` fires all three requests:",
+      "type": "mcq",
+      "options": [
+        "Sequentially — each fetch waits for the previous to complete before starting",
+        "In parallel across three separate OS threads, one per fetch",
+        "Concurrently on the single event-loop thread — all three are in-flight simultaneously",
+        "Only if the server supports HTTP/2 multiplexing"
+      ],
+      "correct": 2,
+      "explanation": "`Promise.all` fires all three fetch calls immediately — they are all registered with the OS network stack and are in-flight simultaneously. The event loop handles callbacks as each response arrives. This is concurrency (one thread, multiple in-progress tasks), not parallelism (multiple threads). No additional OS threads are created."
+    },
+    {
+      "id": "q9",
+      "question": "A program has 95% parallelisable work. Using Amdahl's Law, what is the speedup with exactly 20 cores?",
+      "type": "mcq",
+      "options": [
+        "20×",
+        "Approximately 10.3×",
+        "19×",
+        "Approximately 5×"
+      ],
+      "correct": 1,
+      "explanation": "Speedup = 1 / ((1 - 0.95) + 0.95/20) = 1 / (0.05 + 0.0475) = 1 / 0.0975 ≈ 10.26×. The 5% sequential tail limits the 20-core machine to roughly half the core count in effective speedup."
     },
     {
       "id": "q10",
-      "question": "Which approach should you take FIRST when trying to speed up a slow program?",
+      "question": "You are designing a backend service that proxies requests to three downstream microservices and aggregates their responses. Each downstream call takes ~200ms. The correct design to minimise latency is:",
       "type": "mcq",
       "options": [
-        "Add worker threads immediately",
-        "Switch from a single process to multiple processes",
-        "Profile the program to identify the actual bottleneck",
-        "Rewrite in a lower-level language"
+        "Call each downstream service sequentially to avoid race conditions (~600ms total)",
+        "Spawn a new OS thread per downstream call (~200ms total but heavyweight)",
+        "Issue all three calls concurrently with Promise.all or equivalent (~200ms total, lightweight)",
+        "Cache the responses in Redis to avoid making the calls at all"
       ],
       "correct": 2,
-      "explanation": "Profiling first reveals whether the bottleneck is sequential logic, I/O, or CPU work. Adding parallelism to the wrong part of the code wastes engineering effort and may not improve performance at all."
+      "explanation": "This is a textbook I/O-bound fan-out pattern. Calling services concurrently (Promise.all, asyncio.gather, Go goroutines) means all three 200ms waits happen simultaneously, so total latency is ~200ms instead of ~600ms. A thread-per-call approach also works but is heavyweight. Caching may help overall but does not solve the latency problem for cache misses."
     }
   ]
 }

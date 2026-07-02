@@ -5,62 +5,118 @@
   "week": 26,
   "icon": "database",
   "tagline": "Why there is no perfect distributed database — and how to pick the right store for your workload.",
-  "readTime": "~13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Relational databases have dominated storage for 50 years, yet today's applications routinely reach for document stores, key-value caches, graph databases, and time-series engines. The reason is not that SQL is broken — it is that different data shapes and access patterns call for different storage models.\n\nDistributed databases face a fundamental trade-off proved by Eric Brewer in 2000: the **CAP theorem**. A system under a network partition must choose between staying **consistent** (every read sees the latest write) or staying **available** (every request gets a response). Understanding this triangle is the single most important mental model for evaluating any distributed data store."
+      "content": "Every application you build rests on a storage layer, and the choice of that layer shapes almost every architectural decision that follows. For the first half-century of commercial computing, that choice was simple: you used a relational database, you learned SQL, and you trusted your data to tables and foreign keys. The relational model, invented by Edgar Codd at IBM in 1970, was so expressive and so rigorously grounded in mathematics that it dominated essentially everything.\n\nThen came the internet at scale. Companies like Google, Amazon, and Facebook discovered that the guarantees relational databases provide — strict schemas, multi-table joins, serializable transactions — come at a cost: **they are hard to distribute**. Partitioning a relational database across many machines while preserving all its correctness guarantees requires extraordinary coordination. At the scale of billions of users and petabytes of data, that coordination cost becomes prohibitive.\n\nOut of this pressure emerged an entire ecosystem of alternative data stores, loosely grouped under the label **NoSQL** (which originally stood for 'Non SQL' and was later re-interpreted as 'Not Only SQL'). These systems traded away some of SQL's guarantees in exchange for horizontal scalability, flexible schemas, and access patterns tuned to specific workloads. Document stores, key-value caches, wide-column engines, graph databases — each family makes a different set of trade-offs.\n\nIn 2000, Eric Brewer proposed the **CAP theorem** as a formal framework for understanding what distributed databases can and cannot promise. Proved rigorously by Gilbert and Lynch in 2002, it states that during a network partition — when nodes in a cluster cannot communicate — a distributed system must choose between two properties: **Consistency** (every read reflects the latest write) or **Availability** (every request receives a response, even if the data may be stale). This is not an engineering failure; it is a mathematical impossibility to have both simultaneously.\n\nIn this chapter we will build a complete mental model: what SQL gives you and why, what the NoSQL families are and when each shines, how the CAP theorem works mechanically, how sharding and replication scale data horizontally, and how to make the right choice for a given workload. These are some of the most common senior engineering interview topics, and mastering them is a prerequisite for any serious system design conversation."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  CAP[\"CAP Triangle\"] --> C[\"Consistency\\nAll nodes see\\nsame data\"]\n  CAP --> A[\"Availability\\nEvery request\\ngets a response\"]\n  CAP --> P[\"Partition Tolerance\\nSurvives network split\"]\n  C --- CA[\"CA systems\\nPostgreSQL single-node\"]\n  C --- CP[\"CP systems\\nMongoDB, HBase, Zookeeper\"]\n  A --- AP[\"AP systems\\nCassandra, DynamoDB, CouchDB\"]",
-      "caption": "CAP theorem: during a network partition you can guarantee Consistency OR Availability, never both. Partition tolerance is non-negotiable in real distributed systems."
+      "mermaid": "flowchart TD\n  Q[\"What is your workload?\"] --> A[\"Relational?\\nACID required?\"]\n  Q --> B[\"Flexible schema?\\nDocument-shaped?\"]\n  Q --> C[\"Key lookups?\\nCaching/Sessions?\"]\n  Q --> D[\"Massive write scale?\\nTime-series?\"] \n  Q --> E[\"Relationship traversal?\\nGraph queries?\"]\n  A --> SQL[\"SQL\\nPostgreSQL / MySQL\"]\n  B --> DOC[\"Document\\nMongoDB / Firestore\"]\n  C --> KV[\"Key-Value\\nRedis / DynamoDB\"]\n  D --> WC[\"Wide-Column\\nCassandra / HBase\"]\n  E --> GR[\"Graph\\nNeo4j / Neptune\"]",
+      "caption": "Start with the access pattern, not the hype. Each database family optimises for a different query shape."
     },
     {
       "type": "analogy",
-      "title": "The Split-Brain Office",
-      "content": "Imagine two offices sharing a spreadsheet. If the network cable between them is cut (a partition), they face a choice: stop accepting edits until the cable is fixed (Consistency, sacrifice Availability), or keep accepting edits in both offices and reconcile later when the cable is restored (Availability, sacrifice Consistency). A single office with no network to worry about can offer both — that's why single-node Postgres is often called 'CA', even though P is technically moot without distribution."
+      "title": "The Split-Brain Filing Room",
+      "content": "Imagine a large company with two filing rooms on opposite sides of a building, both maintaining identical copies of the employee records. A courier runs between them all day to keep the copies in sync. Now imagine the courier's hallway is blocked — a network partition.\n\nThe filing-room managers now face a choice. They can **stop accepting updates** until the hallway reopens (that is Consistency: readers are guaranteed to see the latest data, but no writes can proceed). Or they can **keep accepting updates independently**, knowing the copies will drift apart and will need to be reconciled later when the hallway reopens (that is Availability: the service stays up, but readers might see stale records).\n\nA single filing room with no courier to worry about can offer both guarantees simultaneously — that is why a standalone PostgreSQL instance is sometimes described as 'CA', even though partition tolerance is moot when there is nothing to partition. In a real distributed system, the hallway is the network, and it will be blocked eventually. The partition is not hypothetical — it is a certainty at scale. The question is only what you sacrifice when it happens."
     },
     {
       "type": "explanation",
-      "content": "**SQL databases** use a fixed schema, enforce relationships via foreign keys, and query with the expressive JOIN syntax. They excel at complex reporting, financial data, and any domain where correctness constraints (foreign keys, unique indexes, check constraints) are business requirements. PostgreSQL, MySQL, and SQLite are the dominant open-source choices.\n\n**NoSQL** is an umbrella for four major families. **Document stores** (MongoDB, Firestore) store JSON-like documents — great for hierarchical, schema-flexible data like user profiles or CMS content. **Key-value stores** (Redis, DynamoDB) offer O(1) lookups by key — perfect for sessions, caches, and feature flags. **Wide-column stores** (Cassandra, HBase) organize data by row key and column families optimized for time-series and write-heavy workloads at massive scale. **Graph databases** (Neo4j) store nodes and edges natively — ideal for social networks and recommendation engines where relationship traversal is the primary operation.\n\n**Sharding** horizontally partitions a dataset across multiple database nodes — each shard holds a range or hash bucket of rows. It scales writes beyond what one machine can handle, but cross-shard JOINs become expensive or impossible. **Replication** copies data to multiple replicas; reads scale linearly, but writes must be coordinated. Most large-scale systems combine both: data is sharded for write capacity and each shard is replicated for read throughput and fault tolerance."
+      "title": "Relational Databases: The SQL Fortress",
+      "content": "A **relational database** organises data into **tables** (also called relations in the mathematical sense). Each table has a fixed **schema** — a list of named, typed columns. Rows are individual records. Relationships between entities are expressed via **foreign keys**: a column in one table holding the primary key value of a row in another table.\n\nSQL (Structured Query Language) is the interface. It is **declarative**: you describe *what* you want, not *how* to retrieve it. The database's query optimizer — a sophisticated piece of software — reads your SQL, consults statistics about table sizes and index coverage, and generates an efficient **execution plan**. This separation of intent from execution is enormously powerful. A query that takes ten lines of SQL might be rewritten by the optimizer into a plan that uses a hash join plus a bitmap index scan, executing in milliseconds against a table with a hundred million rows.\n\nThe correctness guarantees SQL databases offer are called **ACID**:\n- **Atomicity**: a transaction either commits entirely or rolls back entirely — no partial writes.\n- **Consistency**: every transaction brings the database from one valid state to another — constraints (foreign keys, CHECK clauses, UNIQUE indexes) are always enforced.\n- **Isolation**: concurrent transactions do not see each other's intermediate states — the database appears to execute them serially.\n- **Durability**: once committed, a transaction survives crashes — the write-ahead log (WAL) ensures recovery.\n\nThese four properties are what make relational databases the default choice for financial systems, ERP/CRM, healthcare records, and any domain where incorrect data has legal, safety, or monetary consequences. When the correctness contract must be ironclad, SQL is the answer.\n\nThe trade-off is **scaling writes**. SQL's ACID guarantees require coordination: locks, two-phase commit for distributed transactions, WAL flushing to disk. On a single powerful server this coordination is cheap. Spread it across dozens of nodes and the coordination overhead dominates. This is why SQL databases historically scaled **vertically** (bigger machines) while NoSQL systems are designed to scale **horizontally** (more machines).\n\nPostgreSQL, MySQL/MariaDB, and SQLite are the dominant open-source relational databases. In the cloud, Amazon Aurora, Google Cloud Spanner, and Azure SQL Database add distribution on top of the SQL model — though always at the cost of some guarantee weakening or latency increase."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  Client[\"Client\"] --> PNode[\"Primary\\nShard 0\"]\n  Client --> PNode2[\"Primary\\nShard 1\"]\n  PNode --> R1[\"Replica A\"]\n  PNode --> R2[\"Replica B\"]\n  PNode2 --> R3[\"Replica C\"]\n  PNode2 --> R4[\"Replica D\"]",
-      "caption": "Sharding splits data across primaries for write scale; replication copies each shard for read scale and fault tolerance."
+      "mermaid": "flowchart LR\n  TX[\"BEGIN TRANSACTION\"] --> W1[\"Write users row\"]\n  W1 --> W2[\"Write orders row\"]\n  W2 --> CK[\"CHECK constraints\\nForeign keys\"]\n  CK --> OK{\"All pass?\"}\n  OK -->|\"Yes\"| CM[\"COMMIT\\nWAL flush\"]\n  OK -->|\"No\"| RB[\"ROLLBACK\\nNo partial write\"]",
+      "caption": "ACID atomicity: every statement in a transaction succeeds together or fails together. The WAL (Write-Ahead Log) ensures durability — even a crash after COMMIT cannot lose the data."
+    },
+    {
+      "type": "explanation",
+      "title": "The Four NoSQL Families — and When to Reach for Each",
+      "content": "**NoSQL** is not a single technology but an umbrella for several distinct storage paradigms, each optimised for a different shape of data and access pattern. Confusing them is the most common mistake engineers make when evaluating databases.\n\n**Document stores** (MongoDB, Firestore, CouchDB) store semi-structured, JSON-like documents. Each document is a self-contained blob of nested fields and arrays — there is no join required to load a complete entity because all its attributes live in one place. This is called **denormalisation by default**. Document stores excel when the shape of data varies between records (user profiles with different optional fields), when you often load an entire entity at once, and when your team iterates rapidly on the schema. The downside: querying across multiple document collections is expensive (`$lookup` in MongoDB is far slower than a SQL join) and you must manage data consistency manually — if a user's email appears in multiple documents, you must update them all.\n\n**Key-value stores** (Redis, DynamoDB, Memcached) are the simplest possible abstraction: a giant hash map. Given a key, retrieve the value — always O(1), always lightning fast. Redis keeps everything in memory with optional persistence to disk; lookups are measured in microseconds. Key-value stores are the natural fit for sessions, caches, feature flags, rate-limiting counters, and leaderboards. Their limitation is the absence of structure: you cannot query by anything other than the key, and complex relationships are invisible to the database.\n\n**Wide-column stores** (Apache Cassandra, HBase, ScyllaDB) are more nuanced. Despite their name they are closer to a distributed sorted map than to a traditional column store. Data is organised by a **partition key** (which shard holds this row), a **clustering key** (the sort order within a partition), and an arbitrary set of columns that can vary per row. Cassandra is engineered for **write-heavy, append-intensive** workloads: time-series data, IoT sensor readings, event logs, and analytics at scale. It achieves extraordinary write throughput by writing to an in-memory structure first (the memtable), flushing to disk sequentially (SSTables), and never performing in-place updates — instead, newer writes simply shadow older ones. The trade-off is that the data model must be designed **query-first**: you define your tables around the queries you will run, not around the relationships between entities.\n\n**Graph databases** (Neo4j, Amazon Neptune, ArangoDB) represent data as **nodes** and **edges** — vertices and relationships in graph theory terms. Both nodes and edges can carry properties. The key advantage is **native relationship traversal**: finding 'all friends of friends within 3 hops who live in Berlin' is an O(edges traversed) operation in a graph database versus an O(table-size) multi-join in SQL. Social networks, recommendation engines, fraud detection (spotting suspicious transaction chains), and knowledge graphs are the canonical use cases. Graph databases shine when relationships are the query, not the afterthought."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  SQL[\"SQL\\n(PostgreSQL)\"] -->|\"Strong ACID\"| FS[\"Financial\\nSystems\"]\n  SQL -->|\"Complex JOINs\"| ERP[\"ERP / CRM\"]\n  KV[\"Key-Value\\n(Redis)\"] -->|\"O(1) lookup\"| Cache[\"Sessions\\nCaching\"]\n  Doc[\"Document\\n(MongoDB)\"] -->|\"Flexible schema\"| CMS[\"CMS\\nUser Profiles\"]\n  WC[\"Wide-Column\\n(Cassandra)\"] -->|\"Append-heavy\"| TS[\"Time-Series\\nIoT\"]\n  Graph[\"Graph\\n(Neo4j)\"] -->|\"Traversal\"| Social[\"Social\\nRecommendations\"]",
-      "caption": "Matching database type to access pattern: the first question is always 'what does the query look like?'"
+      "mermaid": "flowchart LR\n  SQL[\"SQL\\nPostgreSQL\"] -->|\"ACID\\nComplex JOINs\"| FIN[\"Finance / ERP\"]\n  DOC[\"Document\\nMongoDB\"] -->|\"Flexible schema\\nNested docs\"| CMS[\"CMS / Profiles\"]\n  KV[\"Key-Value\\nRedis\"] -->|\"O1 lookup\\nIn-memory\"| CACHE[\"Cache / Sessions\"]\n  WC[\"Wide-Column\\nCassandra\"] -->|\"Append-heavy\\nQuery-first\"| TS[\"IoT / Time-series\"]\n  GR[\"Graph\\nNeo4j\"] -->|\"Edge traversal\\nRelationships\"| SOC[\"Social / Fraud\"]",
+      "caption": "Each NoSQL family optimises for a fundamentally different access pattern. Choosing by workload shape, not by popularity, is the key discipline."
     },
     {
       "type": "code_example",
       "language": "sql",
-      "label": "Runtime",
-      "code": "-- SQL: relational join across normalized tables\nSELECT u.name, COUNT(o.id) AS order_count\nFROM users u\nJOIN orders o ON o.user_id = u.id\nWHERE o.created_at >= NOW() - INTERVAL '30 days'\nGROUP BY u.id, u.name\nHAVING COUNT(o.id) > 5\nORDER BY order_count DESC\nLIMIT 10;\n\n-- Equivalent NoSQL approach in MongoDB aggregation pipeline\n-- db.orders.aggregate([\n--   { $match: { created_at: { $gte: thirtyDaysAgo } } },\n--   { $group: { _id: '$user_id', count: { $sum: 1 } } },\n--   { $match: { count: { $gt: 5 } } },\n--   { $sort: { count: -1 } },\n--   { $limit: 10 }\n--   // NOTE: no JOIN — must $lookup or denormalize\n-- ])",
-      "explanation": "The SQL version expresses the intent declaratively; the database's optimizer chooses the execution plan. MongoDB requires an aggregation pipeline and a $lookup stage (expensive cross-collection join) or pre-joining data at write time. This is the core SQL vs NoSQL trade-off: SQL wins on ad-hoc querying; NoSQL wins on write throughput and schema flexibility."
+      "label": "Example",
+      "code": "-- ── SQL: expressive declarative query with JOINs ──────────────\n-- 'Top 10 customers by order count in the last 30 days'\nSELECT\n  u.id,\n  u.name,\n  u.email,\n  COUNT(o.id)          AS order_count,\n  SUM(o.total_amount)  AS total_spent\nFROM users u\nJOIN orders o ON o.user_id = u.id\nWHERE o.created_at >= NOW() - INTERVAL '30 days'\n  AND o.status = 'completed'\nGROUP BY u.id, u.name, u.email\nHAVING COUNT(o.id) > 5\nORDER BY order_count DESC\nLIMIT 10;\n\n-- The optimizer may choose:\n--   1. Index scan on orders.created_at\n--   2. Hash join with users on user_id\n--   3. Hash aggregate for GROUP BY\n-- You describe WHAT; the optimizer decides HOW.\n\n-- ── MongoDB equivalent (aggregation pipeline) ─────────────────\n-- db.orders.aggregate([\n--   { $match: { created_at: { $gte: thirtyDaysAgo },\n--               status: 'completed' } },\n--   { $group: { _id: '$user_id',\n--               order_count: { $sum: 1 },\n--               total_spent: { $sum: '$total_amount' } } },\n--   { $match: { order_count: { $gt: 5 } } },\n--   // $lookup = cross-collection join (expensive, sequential)\n--   { $lookup: { from: 'users', localField: '_id',\n--                foreignField: '_id', as: 'user' } },\n--   { $unwind: '$user' },\n--   { $sort: { order_count: -1 } },\n--   { $limit: 10 }\n-- ])",
+      "explanation": "The SQL version is 14 lines and lets the optimizer pick the best execution plan. The MongoDB version is longer, requires a $lookup (which performs a sequential collection scan per matched group by default unless carefully indexed), and has far fewer optimizer options. For ad-hoc analytical queries across multiple entities, SQL is almost always the right choice. MongoDB wins when you load whole documents by _id without joins."
     },
     {
-      "type": "code_concept",
-      "language": "sql",
-      "label": "Concept",
-      "code": "-- CAP decision guide (comments only)\n\n-- CP choice: HBase, Zookeeper, MongoDB (w/ majority write concern)\n--   Use when: banking ledgers, inventory counts, user auth tokens\n--   Behavior: returns error during partition instead of stale data\n\n-- AP choice: Cassandra, DynamoDB, CouchDB\n--   Use when: shopping carts, social feeds, analytics counters\n--   Behavior: returns possibly-stale data; reconciles after partition heals\n--   Trade-off: 'eventual consistency' — reads may lag behind writes\n\n-- Sharding key selection matters:\n--   Good key: high cardinality, evenly distributed (e.g. user_id hash)\n--   Bad key: low cardinality or monotonic (e.g. timestamp) → hot shard"
+      "type": "explanation",
+      "title": "The CAP Theorem — What It Actually Says",
+      "content": "The **CAP theorem** states that a distributed data store can guarantee at most two of the following three properties simultaneously:\n\n- **Consistency (C)**: Every read receives the most recent write or an error. All nodes see the same data at the same time. This is **linearizability** in formal terms — every operation appears to happen instantaneously at some point between its start and end.\n- **Availability (A)**: Every request receives a response — success or failure — without guarantee that it contains the most recent data. The system never returns an error because it cannot reach the latest state.\n- **Partition Tolerance (P)**: The system continues to operate even when an arbitrary number of messages between nodes are dropped or delayed — a network partition.\n\nHere is the critical nuance that most explanations miss: **in any real distributed system, partition tolerance is non-negotiable**. Network partitions happen. Cables are cut, switches fail, cloud availability zones lose connectivity. A system that abandons partition tolerance when a partition occurs is simply offline — which violates availability anyway. So the real choice is not 'pick two of three'; it is:\n\n> **When a partition happens, do you prioritise Consistency (return an error rather than stale data) or Availability (return possibly-stale data rather than an error)?**\n\nThis is the **CP vs AP** choice. 'CA' systems are really just single-node systems where partitions are not relevant.\n\n**CP systems** (Consistency + Partition Tolerance): HBase, Zookeeper, etcd, MongoDB with majority write concern. During a partition, a CP system refuses to serve requests that cannot be guaranteed to reflect the latest state. You might get an error: 'Cannot reach quorum'. Banks, inventory systems, and leader-election services want CP — it is worse to show a customer a balance that is $1000 too high than to show them a temporary error.\n\n**AP systems** (Availability + Partition Tolerance): Cassandra, DynamoDB, CouchDB, Riak. During a partition, AP systems continue to serve requests from whichever nodes are reachable, potentially returning stale data. When the partition heals, the system reconciles diverged writes — **eventual consistency**. Social feeds, shopping carts, DNS, and analytics counters accept eventual consistency — showing a user a post that is two seconds old is not a business problem."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  CAP[\"CAP Triangle\"] --> C[\"Consistency\\nAll reads see\\nlatest write\"]\n  CAP --> A[\"Availability\\nEvery request\\ngets a response\"]\n  CAP --> P[\"Partition Tolerance\\nSurvives network split\"]\n  C --> CP[\"CP Systems\\nZookeeper, HBase\\nMongoDB majority\"]\n  A --> AP[\"AP Systems\\nCassandra, DynamoDB\\nCouchDB\"]\n  P --> CP\n  P --> AP",
+      "caption": "CAP in practice: P is mandatory in distributed systems. The real decision is CP (error on partition, never stale) vs AP (respond with possibly-stale data, reconcile later)."
+    },
+    {
+      "type": "explanation",
+      "title": "Eventual Consistency — Mechanics and Consequences",
+      "content": "**Eventual consistency** is the consistency model adopted by AP systems. It is a weaker guarantee than linearizability: if no new writes are made to a key, eventually all replicas will converge to the same value. During the period before convergence, different clients reading from different replicas may see different values for the same key.\n\nIn Cassandra, writes use a concept called **quorum**. If you have a replication factor of 3 (each row is stored on three nodes) and you configure writes to succeed when 2 out of 3 nodes acknowledge (`QUORUM`), and reads to also require acknowledgment from 2 out of 3 nodes, then `R + W > N` (2 + 2 > 3) — you are guaranteed to always read at least one node that has the latest write. This is called a **quorum read/write** and provides strong consistency despite an AP foundation. Lowering to `ONE` (only one node must acknowledge) maximises throughput and availability but allows reads of stale data.\n\nThis tunability is a key insight: most modern distributed databases do not sit strictly at one point on the CAP spectrum — they let operators **tune the trade-off per operation**.\n\n**Conflict resolution** becomes necessary when diverged writes must be merged. Common strategies:\n- **Last-Write-Wins (LWW)**: the write with the highest timestamp wins. Simple but loses data in concurrent scenarios.\n- **Version vectors / vector clocks**: each replica maintains a vector of write counts per node. Causally related updates can be ordered; concurrent updates are flagged for application-level resolution.\n- **CRDTs (Conflict-free Replicated Data Types)**: data structures designed so that any merge of concurrent updates is commutative, associative, and idempotent — counters, sets, and registers can be made CRDT-safe.\n\nRiak and some Redis Cluster configurations use CRDTs. DynamoDB lets application code define reconciliation logic. Cassandra defaults to LWW."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C1 as \"Client 1\"\n  participant N1 as \"Node A\"\n  participant N2 as \"Node B\"\n  participant C2 as \"Client 2\"\n  C1->>N1: \"Write x=5\"\n  Note over N1,N2: \"Network partition\"\n  C2->>N2: \"Write x=7\"\n  Note over N1,N2: \"Partition heals — conflict!\"\n  N1->>N2: \"Sync: x=5 (ts=100)\"\n  N2->>N1: \"Sync: x=7 (ts=101)\"\n  Note over N1,N2: \"LWW: x=7 wins (higher ts)\"",
+      "caption": "During a partition, two nodes accept concurrent writes. When the partition heals, Last-Write-Wins (LWW) picks the higher timestamp, silently discarding Client 1's write. This data loss is the price of availability."
+    },
+    {
+      "type": "explanation",
+      "title": "Sharding: Scaling Writes Horizontally",
+      "content": "**Sharding** (also called horizontal partitioning) is the technique of splitting a dataset across multiple database nodes, each responsible for a disjoint subset of the data. Each node — called a **shard** — is a fully independent database server. No single machine holds all the data.\n\nSharding solves the write bottleneck: instead of one node absorbing all writes, each shard absorbs writes for its partition only. With 10 shards of equal size, write throughput scales roughly linearly (minus coordination overhead).\n\n**How data is routed to a shard** is determined by the **shard key** and the **partitioning strategy**:\n\n- **Hash partitioning**: compute `hash(shard_key) mod N` where N is the number of shards. Data is evenly distributed and lookups are O(1). The downside: range queries require hitting every shard (a scatter-gather fan-out). This is how Cassandra and Redis Cluster work by default.\n- **Range partitioning**: assign ranges of the shard key to specific shards (e.g., users A–M on shard 1, N–Z on shard 2). Range queries are efficient — only the relevant shards are queried. The risk is **hot spots**: if the range partition is on a monotonically increasing value (like a timestamp or auto-increment ID), all new writes always land on the last shard.\n- **Directory-based partitioning**: a lookup table maps each key to its shard. Maximum flexibility; the risk is that the lookup table becomes a single point of failure and a bottleneck.\n\n**Choosing the shard key** is one of the most consequential decisions in database design. A good shard key has:\n1. **High cardinality**: enough distinct values to spread data evenly across shards.\n2. **Uniform distribution**: not skewed so that 80% of writes go to one value.\n3. **Query alignment**: the most common queries filter by the shard key — otherwise every query fans out to all shards.\n4. **Immutability**: if the shard key value changes, the row must be moved to a different shard — an expensive operation.\n\n**Cross-shard operations** are the main cost of sharding. A query that joins data from multiple shards must be routed to each relevant shard, the results collected (**scatter**) and merged at a coordinator node (**gather**). Distributed transactions across shards require two-phase commit (2PC) — expensive and error-prone. Most sharded systems avoid cross-shard joins by denormalising data so that everything needed for a query lives on the same shard."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  CL[\"Client\"] --> RT[\"Router / Coordinator\"]\n  RT -->|\"hash(user_id) mod 3 = 0\"| S0[\"Shard 0\\nusers 0..33%\"]\n  RT -->|\"hash(user_id) mod 3 = 1\"| S1[\"Shard 1\\nusers 33..66%\"]\n  RT -->|\"hash(user_id) mod 3 = 2\"| S2[\"Shard 2\\nusers 66..100%\"]\n  S0 --> R0A[\"Replica 0A\"]\n  S0 --> R0B[\"Replica 0B\"]\n  S1 --> R1A[\"Replica 1A\"]\n  S2 --> R2A[\"Replica 2A\"]",
+      "caption": "Sharding distributes writes across three shards via hash partitioning. Each shard is replicated for read scale and fault tolerance. The router holds the mapping logic."
+    },
+    {
+      "type": "explanation",
+      "title": "Replication: Scaling Reads and Surviving Failures",
+      "content": "**Replication** is the practice of maintaining multiple identical (or near-identical) copies of the same data on different nodes. Unlike sharding — which splits the data — replication duplicates it. The two techniques compose: most large-scale systems shard for write capacity and replicate each shard for read capacity and fault tolerance.\n\n**Primary-replica replication** (also called master-slave) is the classic model. One node — the **primary** — accepts all writes. It records each write to a replication log (the WAL in PostgreSQL, the binlog in MySQL). Replica nodes tail this log and apply the same writes in order, staying in sync with the primary. Reads can be served from any replica, multiplying read throughput by the number of replicas. If the primary fails, a replica is promoted — a process called **failover**.\n\nThe danger in primary-replica replication is **replication lag**: replicas apply writes asynchronously, so for a brief window after a write, reading from a replica may return stale data. This is the classic 'read-your-own-writes' consistency problem: a user writes a post and immediately reads their feed — if the read hits a replica that has not caught up, the post appears to be missing.\n\nMitigation strategies:\n- **Read-your-own-writes**: route reads for a user to the primary for a short window after that user's write.\n- **Monotonic reads**: ensure a user always reads from the same replica during a session — preventing them from seeing data going 'backwards'.\n- **Synchronous replication**: the primary waits for at least one replica to confirm the write before returning success. Eliminates lag but adds write latency.\n\n**Multi-primary replication** (active-active) allows writes on multiple nodes simultaneously. Conflict resolution (as discussed under eventual consistency) becomes necessary. This is how CouchDB and some DynamoDB Global Tables configurations work.\n\n**Leaderless replication** (used by Cassandra and Riak) has no designated primary. Any node can accept a write. The client writes to N nodes using quorum rules to determine success. This eliminates the single-write-path bottleneck and the failover delay, at the cost of requiring quorum-based conflict resolution."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// ── Simulating shard routing and quorum logic ─────────────────\n\n// Simple hash-based shard router (pure JS, no external deps)\nfunction hashCode(str) {\n  let hash = 0;\n  for (const ch of str) {\n    hash = (Math.imul(31, hash) + ch.charCodeAt(0)) | 0;\n  }\n  return Math.abs(hash);\n}\n\nfunction getShardIndex(key, numShards) {\n  return hashCode(key) % numShards;\n}\n\nconst NUM_SHARDS = 4;\nconst users = ['alice', 'bob', 'carol', 'dave', 'eve', 'frank'];\nconsole.log('Shard routing:');\nfor (const user of users) {\n  console.log(`  ${user} → shard ${getShardIndex(user, NUM_SHARDS)}`);\n}\n// Output example (hash-dependent):\n//   alice  → shard 1\n//   bob    → shard 0\n//   carol  → shard 3\n//   dave   → shard 2\n//   eve    → shard 3\n//   frank  → shard 1\n\n// ── Quorum logic (R + W > N = strong consistency) ─────────────\nconst N = 3;   // replication factor\nconst W = 2;   // write quorum — how many nodes must ack write\nconst R = 2;   // read quorum  — how many nodes must respond\n\nconsole.log(`\\nQuorum check: R(${R}) + W(${W}) > N(${N})? ${R + W > N}`);\n// true → strong consistency: at least one node in the read set\n//        is guaranteed to have the latest write.\n\n// With W=1, R=1 (ONE consistency level in Cassandra):\nconst W1 = 1, R1 = 1;\nconsole.log(`Weak quorum: R(${R1}) + W(${W1}) > N(${N})? ${R1 + W1 > N}`);\n// false → eventual consistency: reads may return stale data",
+      "explanation": "Hash-based shard routing distributes keys deterministically — given the same key and shard count, you always get the same shard. The quorum formula R + W > N is the mathematical guarantee of strong consistency in a leaderless replication system: because the read set and write set must overlap, at least one node in any read quorum holds the latest write."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// ── Database selection decision tree ─────────────────────────\n\nfunction recommendDatabase(requirements) {\n  const {\n    needsACID,          // boolean: strict transactions required?\n    schemaFlexible,     // boolean: schema varies per record?\n    primaryAccessPattern, // 'point' | 'range' | 'graph' | 'timeseries'\n    writeScale,         // 'low' | 'medium' | 'high'\n    consistencyNeeded,  // 'strong' | 'eventual'\n  } = requirements;\n\n  // Financial / ERP: ACID is non-negotiable\n  if (needsACID) {\n    return { db: 'PostgreSQL / MySQL', cap: 'CP (single node = CA)', notes:\n      'ACID transactions, complex JOINs, strong consistency' };\n  }\n\n  // Relationship-heavy traversal\n  if (primaryAccessPattern === 'graph') {\n    return { db: 'Neo4j / Amazon Neptune', cap: 'typically CA', notes:\n      'Native edge traversal, O(relationship) multi-hop queries' };\n  }\n\n  // Massive append-heavy time-series\n  if (primaryAccessPattern === 'timeseries' && writeScale === 'high') {\n    return { db: 'Cassandra / InfluxDB', cap: 'AP', notes:\n      'Partition by time bucket, LSM-tree writes, eventual consistency' };\n  }\n\n  // Cache / session / feature flags\n  if (primaryAccessPattern === 'point' && writeScale === 'low') {\n    return { db: 'Redis', cap: 'CP (single) / AP (cluster)', notes:\n      'In-memory O(1), TTL support, pub/sub' };\n  }\n\n  // Flexible schema, document-shaped entities\n  if (schemaFlexible) {\n    return { db: 'MongoDB / Firestore', cap: 'CP (majority concern)', notes:\n      'Document model, flexible schema, horizontal sharding' };\n  }\n\n  return { db: 'PostgreSQL', cap: 'CP', notes: 'Default to relational' };\n}\n\nconsole.log(recommendDatabase({\n  needsACID: false, schemaFlexible: false,\n  primaryAccessPattern: 'timeseries', writeScale: 'high',\n  consistencyNeeded: 'eventual'\n}));\n// { db: 'Cassandra / InfluxDB', cap: 'AP', notes: '...' }",
+      "explanation": "This decision tree encodes the core logic of database selection: ACID first, then access pattern, then write scale. In real system design interviews, walking through this tree systematically demonstrates architectural maturity. The key insight is that the access pattern drives the schema design, not the other way around."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**PACELC — the extension to CAP**: In 2012, Daniel Abadi proposed PACELC to address a gap in CAP: even when there is *no* partition, distributed systems face a trade-off between **Latency** and **Consistency**. A fully synchronous replication scheme gives strong consistency but adds write latency (must wait for remote acknowledgment). PACELC says: when Partitioned, choose between A and C; Else (when running normally), choose between L and C. Cassandra is PA/EL (prefers availability during partition, prefers low latency otherwise). PostgreSQL (single-node) is PC/EC. This is a more complete model for evaluating real systems."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "CAP is often misread as 'pick two of three'. In practice, partition tolerance is mandatory for any distributed system — network splits happen. The real choice is **CP vs AP**: sacrifice availability or consistency when a partition occurs. Most systems are tunable (e.g., Cassandra's quorum settings) rather than strictly one or the other."
+      "content": "**Common interview traps and misconceptions to master:**\n\n'Pick two of three in CAP' is misleading — P is mandatory. The real choice is CP vs AP during a partition.\n\nMongoDB is not automatically AP — with majority write and read concern it behaves as CP. Weaker settings push it toward AP. Always clarify the concern level.\n\nA **hot shard** is the most common scaling failure in sharded systems. If you choose a monotonically increasing shard key (auto-increment ID, timestamp), 100% of new writes go to one shard. Always hash or composite-key to spread load.\n\n'Eventual consistency' does not mean 'frequently inconsistent'. Under low load with fast networks, replicas may be within milliseconds of each other. Eventual consistency is only observable under concurrent conflicting writes — which may be rare for your workload.\n\nSQL and NoSQL are not mutually exclusive. Most production architectures use both: PostgreSQL for transactional data, Redis for caching, and Cassandra or DynamoDB for high-volume event streams. Polyglot persistence is the norm at scale."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**SQL** enforces schema and relationships via constraints and JOIN — the right choice for ACID-critical, relational workloads like finance and ERP.",
-        "**NoSQL families** (document, key-value, wide-column, graph) each optimize for a specific access pattern; choose by query shape, not by hype.",
-        "**CAP theorem** — under a network partition, a distributed system must choose Consistency (CP) or Availability (AP); partition tolerance is non-negotiable.",
-        "**Sharding** scales writes by partitioning data across nodes; choose a high-cardinality, evenly distributed shard key to avoid hot spots.",
-        "**Replication** scales reads and improves fault tolerance; combined with sharding it underpins the architecture of every large-scale database system."
+        "**SQL databases** offer ACID transactions, expressive JOINs, and a query optimizer — the right default for financial, ERP, and relational workloads where correctness is non-negotiable.",
+        "**NoSQL families each optimise for a specific access pattern**: document stores for flexible hierarchical data, key-value for O(1) point lookups, wide-column for append-heavy time-series at scale, graph for multi-hop relationship traversal.",
+        "**CAP theorem**: during a network partition, a distributed system must choose Consistency (return error, never stale) or Availability (respond, possibly stale). Partition tolerance is mandatory in any real distributed system — 'CA' only applies to single-node systems.",
+        "**Eventual consistency** means replicas converge after a partition heals. Quorum rules (R + W > N) let operators tune where on the CP/AP spectrum a system sits on a per-operation basis.",
+        "**Sharding** partitions data across nodes for write scale. The shard key must have high cardinality, uniform distribution, and align with the most common query patterns. Avoid monotonically-increasing shard keys to prevent hot shards.",
+        "**Replication** duplicates data across nodes for read scale and fault tolerance. Primary-replica replication introduces replication lag — the read-your-own-writes problem must be addressed in application design.",
+        "**Polyglot persistence** is the norm at scale: use PostgreSQL for transactions, Redis for caching, Cassandra for event streams, and Neo4j for graph queries — picking each tool for the access pattern it was designed for."
       ]
     }
   ],
@@ -71,133 +127,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "According to the CAP theorem, during a network partition a distributed system must sacrifice which guarantee?",
+      "question": "According to the CAP theorem, why is 'Partition Tolerance' non-negotiable in any real distributed system?",
       "type": "mcq",
       "options": [
-        "Either Consistency or Availability — the system cannot guarantee both",
-        "Partition Tolerance — the system can choose to ignore the split",
-        "Durability — data may be lost during the partition",
-        "Atomicity — transactions roll back automatically"
+        "Network partitions are mathematically impossible to prevent, so any system that abandons P is simply unavailable when splits occur",
+        "Partition tolerance is optional — small clusters can be configured to avoid it",
+        "Abandoning partition tolerance improves both consistency and availability simultaneously",
+        "Partition tolerance only applies to systems with more than 100 nodes"
       ],
       "correct": 0,
-      "explanation": "CAP states that during a partition, a system must choose between Consistency (refusing stale reads) and Availability (returning possibly-stale data). Partition tolerance itself is required for any distributed system."
+      "explanation": "Network partitions — nodes losing the ability to communicate — happen in all real distributed systems due to hardware failures, software bugs, and network outages. A system that abandons P when a partition happens is simply down. So the real choice during a partition is Consistency vs Availability, not which two of three properties to pick."
     },
     {
       "id": "q2",
-      "question": "A social feed that must always return results — even if slightly stale — during a network outage should use which CAP profile?",
+      "question": "A banking system must never show an incorrect account balance. It should return an error rather than stale data during a network partition. Which CAP profile should it adopt?",
       "type": "mcq",
       "options": [
-        "CP — prioritize consistency over availability",
-        "CA — no partition tolerance needed",
-        "AP — prioritize availability, accept eventual consistency",
-        "ACID — use a relational database"
+        "AP — prioritise availability so customers can always check balances",
+        "CP — prioritise consistency, returning an error during a partition rather than stale data",
+        "CA — use a system with no partition tolerance",
+        "ACID — relational databases are immune to CAP"
       ],
-      "correct": 2,
-      "explanation": "Social feeds tolerate eventual consistency — showing a post a few seconds late is acceptable. AP systems like Cassandra or DynamoDB stay available during partitions and reconcile afterward."
+      "correct": 1,
+      "explanation": "A CP system refuses requests that cannot be guaranteed to reflect the latest state during a partition. For a bank, showing an incorrect balance (stale data) could allow overdrafts or double-spends — an error message is safer. HBase and Zookeeper are CP; so is MongoDB with majority write concern."
     },
     {
       "id": "q3",
-      "question": "Which NoSQL family is best suited for storing JSON user profiles with variable fields?",
+      "question": "In Cassandra with replication factor N=3, what is the minimum combined read quorum (R) and write quorum (W) that guarantees strong consistency?",
       "type": "mcq",
       "options": [
-        "Key-value store (Redis)",
-        "Document store (MongoDB)",
-        "Wide-column store (Cassandra)",
-        "Graph database (Neo4j)"
+        "R=1, W=1 (total 2) — fast and consistent",
+        "R=2, W=2 (total 4) — because R + W > N ensures overlap",
+        "R=3, W=3 (total 6) — all replicas must agree",
+        "R=1, W=3 (total 4) — writing to all ensures reads are always fresh"
       ],
       "correct": 1,
-      "explanation": "Document stores store schema-flexible JSON-like documents natively. Each document can have different fields — perfect for user profiles where attributes vary per record."
+      "explanation": "The quorum condition for strong consistency is R + W > N. With N=3, R=2 and W=2 gives 4 > 3, which guarantees the read set and write set overlap by at least one node — that node holds the latest write. R=1,W=1 gives 2 which is not greater than 3, allowing stale reads."
     },
     {
       "id": "q4",
-      "question": "What is the primary problem with a monotonically-increasing column (e.g., a timestamp) as a sharding key?",
+      "question": "A team chooses a timestamp column as the shard key for a high-traffic event table. What failure mode will they experience?",
       "type": "mcq",
       "options": [
-        "It causes hash collisions across shards",
-        "All new writes land on the same shard, creating a hot spot",
-        "Timestamp columns cannot be indexed in distributed databases",
-        "Range queries become impossible across shard boundaries"
+        "Hash collisions will corrupt data across shards",
+        "Range queries will become impossible because timestamps are too granular",
+        "All new writes will land on the latest-timestamp shard, creating a hot spot while other shards sit idle",
+        "Replication lag will increase because timestamps change frequently"
       ],
-      "correct": 1,
-      "explanation": "A timestamp shard key means the current shard always receives all new inserts. This creates a 'hot shard' that overwhelms one node while others are idle — defeating the purpose of horizontal scaling."
+      "correct": 2,
+      "explanation": "A monotonically increasing shard key (timestamp, auto-increment ID) means the 'current' shard always receives 100% of new writes. This defeats horizontal scaling — one shard is overwhelmed while others are underutilised. The fix is to hash the key or use a composite key that distributes writes evenly."
     },
     {
       "id": "q5",
-      "question": "You need to query 'friends of friends who live in Berlin' efficiently. Which database type is the best fit?",
+      "question": "Which NoSQL family is architecturally best suited for the query 'find all accounts that transacted with account X within two degrees of separation'?",
       "type": "mcq",
       "options": [
-        "Wide-column store — optimized for time-series lookups",
-        "Key-value store — fastest point lookups",
-        "Graph database — native edge traversal",
-        "Document store — flexible nested JSON"
+        "Wide-column store — optimised for time-ordered lookups",
+        "Document store — nested documents can hold transaction lists",
+        "Key-value store — O(1) lookups for each account ID",
+        "Graph database — native multi-hop edge traversal is O(edges), not O(table size)"
       ],
-      "correct": 2,
-      "explanation": "Graph databases store relationships as first-class citizens (edges). Multi-hop traversals like 'friends of friends' are O(relationship count) rather than O(table size) joins in SQL."
+      "correct": 3,
+      "explanation": "Graph databases store relationships as first-class citizens (edges with properties). A two-hop traversal ('accounts that transacted with accounts that transacted with X') is O(edges followed), which is far more efficient than performing multiple expensive SQL JOINs. This is exactly the fraud detection use case that drives graph database adoption in financial services."
     },
     {
       "id": "q6",
-      "question": "Replication primarily helps with:",
+      "question": "What is the primary advantage of the SQL query optimizer over MongoDB's aggregation pipeline for ad-hoc analytical queries?",
       "type": "mcq",
       "options": [
-        "Scaling write throughput by distributing inserts",
-        "Scaling read throughput and improving fault tolerance",
-        "Reducing storage cost by compressing duplicate data",
-        "Enforcing foreign-key constraints across distributed nodes"
+        "SQL always runs faster because it is compiled to native code",
+        "The SQL optimizer can choose among multiple join algorithms (hash join, merge join, index nested-loop) based on statistics; the aggregation pipeline is a fixed procedural sequence",
+        "SQL queries can be cached by the browser; MongoDB queries cannot",
+        "SQL supports more data types than MongoDB's BSON format"
       ],
       "correct": 1,
-      "explanation": "Replication copies data to multiple replicas; reads can be served from any replica, scaling read throughput. If one node fails, others take over, improving fault tolerance."
+      "explanation": "SQL is declarative — you describe what to retrieve and the optimizer generates a plan. It can choose hash joins, merge joins, or nested-loop joins based on table cardinality and index coverage. MongoDB's aggregation pipeline is procedural: stages execute in the order written, with far fewer optimizer choices. For complex multi-collection queries, SQL's optimizer advantage is decisive."
     },
     {
       "id": "q7",
-      "question": "Which statement about MongoDB's CAP profile is most accurate?",
+      "question": "A social media application must always return a user's feed, even if slightly stale, to maximise uptime during network issues. Which database and consistency model fits best?",
       "type": "mcq",
       "options": [
-        "MongoDB is always AP — it returns stale data during partitions",
-        "MongoDB is CA — it doesn't support partitioning",
-        "MongoDB defaults to CP — with majority write concern it refuses stale reads during partitions",
-        "MongoDB ignores the CAP theorem entirely"
+        "PostgreSQL with serializable isolation — ACID guarantees freshness",
+        "HBase with strong consistency — CP systems are reliable",
+        "Cassandra with ONE consistency level — AP, eventual consistency, always available",
+        "Redis in standalone mode — fastest in-memory reads"
       ],
       "correct": 2,
-      "explanation": "With majority write concern and majority read concern, MongoDB behaves as a CP system — it will return an error rather than stale data during a partition. Weaker settings push it toward AP."
+      "explanation": "Social feeds tolerate stale data — showing a post two seconds late is not a business problem. Cassandra with consistency level ONE (write/read acknowledged by a single node) maximises availability at the cost of possible staleness. This is the archetypal AP use case. HBase/CP would error during a partition, hurting availability — the wrong trade-off for a social feed."
     },
     {
       "id": "q8",
-      "question": "What does 'eventual consistency' mean in an AP database?",
+      "question": "What does 'replication lag' mean in a primary-replica setup, and which application pattern does it most directly break?",
       "type": "mcq",
       "options": [
-        "Data is consistent immediately after every write",
-        "All replicas will converge to the same value once the partition heals and writes stop",
-        "The database eventually migrates to a SQL schema",
-        "Transactions are retried until they succeed"
+        "The delay in applying schema migrations across all replicas — breaks deployment automation",
+        "The window during which a replica has not yet applied the primary's latest writes — breaks read-your-own-writes consistency",
+        "The time difference between UTC and local time in replica timestamps — breaks date-range queries",
+        "Network latency when routing cross-shard queries — breaks distributed JOINs"
       ],
       "correct": 1,
-      "explanation": "Eventual consistency means replicas may temporarily diverge during a partition, but once the network is restored and conflicting writes are reconciled, all nodes will converge to the same state."
+      "explanation": "Replication lag is the asynchronous delay between a write landing on the primary and that write being replicated to and applied by replicas. If a user writes data and immediately reads from a replica that has not caught up, they see their own write missing — the read-your-own-writes consistency violation. Mitigations include routing reads to the primary briefly after a user's write, or using synchronous replication."
     },
     {
       "id": "q9",
-      "question": "A startup stores user sessions and caches computed results. Which database is most appropriate?",
+      "question": "Which of the following is the best shard key for a global user table with 500 million users, where the most common query is 'look up a user by ID'?",
       "type": "mcq",
       "options": [
-        "PostgreSQL — strong ACID for session integrity",
-        "Neo4j — graph traversal for session relationships",
-        "Redis — in-memory key-value store with TTL support",
-        "Cassandra — wide-column for high write throughput"
+        "created_at timestamp — enables chronological range queries",
+        "country_code — groups users by geography for locality",
+        "hash(user_id) — high cardinality, even distribution, aligns with point-lookup query pattern",
+        "last_login_at — distributes active users evenly across shards"
       ],
       "correct": 2,
-      "explanation": "Redis excels at session storage and caching: O(1) key lookups, built-in TTL (time-to-live) expiry, and in-memory speed make it the standard choice for ephemeral data."
+      "explanation": "hash(user_id) satisfies all good shard key criteria: high cardinality (500M distinct values), even distribution (a good hash function is uniform), and alignment with the primary access pattern (look up by user_id). Timestamp keys cause hot shards. Country codes have low cardinality — a shard for 'US' would hold 30%+ of all users. last_login_at changes frequently, making the key effectively mutable."
     },
     {
       "id": "q10",
-      "question": "The key advantage of SQL JOIN over MongoDB's $lookup is:",
+      "question": "What does the PACELC model add to CAP that CAP does not address?",
       "type": "mcq",
       "options": [
-        "SQL JOIN is always faster than $lookup",
-        "SQL JOIN can be written in fewer lines of code",
-        "The SQL optimizer can choose the best execution plan (hash join, index nested loop) based on statistics",
-        "SQL JOIN works across different databases on different servers"
+        "It adds a fourth property — Elasticity — measuring how quickly a system scales under load",
+        "It recognises that even without a partition, systems must trade off between Latency and Consistency in normal operation",
+        "It replaces Partition Tolerance with a probabilistic metric for network reliability",
+        "It extends CAP to cover storage durability and replication factor decisions"
       ],
-      "correct": 2,
-      "explanation": "SQL's declarative model lets the query optimizer pick the join algorithm (nested loop, hash join, merge join) based on table statistics and indexes. MongoDB's $lookup is a procedural pipeline step with far fewer optimizer choices."
+      "correct": 1,
+      "explanation": "CAP only describes behaviour during a partition. PACELC (proposed by Abadi, 2012) adds the Else clause: when the system is running normally (no partition), it still must choose between lower Latency (respond before all replicas confirm) and stronger Consistency (wait for quorum before responding). Cassandra is PA/EL (availability during partition, low latency otherwise); a synchronous single-node PostgreSQL is effectively PC/EC."
     }
   ]
 }

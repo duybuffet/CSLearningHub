@@ -5,58 +5,123 @@
   "week": 10,
   "icon": "stack",
   "tagline": "Range queries and point updates in O(log n) — the workhorses of competitive programming and time-series analytics.",
-  "readTime": "~13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Two classic operations on arrays are expensive with naive approaches: **range queries** (\"what is the sum/min/max of elements from index l to r?\") and **point updates** (\"change the value at index i\"). A brute-force range sum costs O(n); a prefix-sum array answers range sums in O(1) but cannot handle updates (rebuilding the prefix sum after each update costs O(n)).\n\n**Segment trees** and **Fenwick trees** (also called Binary Indexed Trees or BITs) both achieve O(log n) for both queries and updates — a dramatic improvement over the brute-force O(n). The trade-off is O(n) space and O(n) build time. Segment trees are more general — they support range minimum, maximum, GCD, and lazy-propagation range updates — while Fenwick trees are simpler to code and faster in practice for prefix-sum problems. Both are foundational in competitive programming, real-time analytics, and computational geometry."
+      "content": "Suppose you are building a real-time analytics dashboard that must answer thousands of queries per second of the form: \"What is the total revenue between timestamps l and r?\" A naive scan across the array costs O(n) per query — unacceptable when n is millions of records and latency must be milliseconds. A prefix-sum array answers range sums in O(1), but the moment a single value changes — say, a refund is processed — you must rebuild the entire prefix-sum array at O(n) cost. For a dataset that mutates constantly, this is equally unacceptable.\n\nThis tension — fast queries *or* fast updates, but not both — is one of the most common bottlenecks in systems that mix reads and writes on ordered data. **Segment trees** and **Fenwick trees** (also called Binary Indexed Trees, or BITs) are the classical solution: they achieve **O(log n) for both queries and updates simultaneously**, with O(n) space and O(n) build time. They do this by precomputing partial answers in a carefully organised hierarchy, so that any range query decomposes into at most O(log n) precomputed pieces.\n\nSegment trees are the more powerful of the two. They support arbitrary associative aggregations — sum, minimum, maximum, GCD, XOR, product — and can be extended with **lazy propagation** to handle range updates (\"add 5 to every element between index 3 and 7\") in O(log n). Fenwick trees are narrower in scope but beautifully concise: the entire data structure fits in roughly ten lines of code, runs 2–4x faster in practice for prefix-sum problems due to cache-friendliness, and is sufficient for a large class of competitive programming problems. Understanding both, knowing when to reach for each, and being able to implement either from memory are hallmarks of a strong algorithms engineer.\n\nThis chapter covers: the problem that motivates both structures, the segment tree from the ground up (build, query, update, lazy propagation), the Fenwick tree and its elegant bit trick, a worked complexity comparison, common variants and extensions, real-world usage, and the subtle edge cases that trip up even experienced practitioners."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  R[\"sum[0..7]=36\"]\n  R --> L[\"sum[0..3]=10\"]\n  R --> RR[\"sum[4..7]=26\"]\n  L --> LL[\"sum[0..1]=3\"]\n  L --> LR[\"sum[2..3]=7\"]\n  RR --> RL[\"sum[4..5]=9\"]\n  RR --> RRR[\"sum[6..7]=17\"]\n  LL --> A[\"1\"]\n  LL --> B[\"2\"]\n  LR --> C[\"3\"]\n  LR --> D[\"4\"]\n  RL --> E[\"4\"]\n  RL --> F[\"5\"]\n  RRR --> G[\"7\"]\n  RRR --> H[\"10\"]",
-      "caption": "Segment tree for array [1,2,3,4,4,5,7,10]. Each internal node stores the sum of its range. Query sum(2,5) combines at most O(log n) nodes."
+      "mermaid": "flowchart TD\n  A[\"Array of n elements\"] --> B[\"Need range queries AND updates?\"]\n  B --> C[\"Updates rare or none?\"]\n  B --> D[\"Only prefix sums?\"]\n  B --> E[\"General aggregation?\"]\n  C --> F[\"Prefix-sum array\\nO(1) query, O(n) update\"]\n  D --> G[\"Fenwick Tree\\nO(log n) both\"]\n  E --> H[\"Segment Tree\\nO(log n) both\"]\n  H --> I[\"Need range updates too?\\nAdd lazy propagation\"]",
+      "caption": "Decision tree for choosing a range-query data structure. Fenwick trees are simpler and faster for prefix sums; segment trees handle arbitrary aggregation and range updates."
     },
     {
       "type": "analogy",
-      "title": "A Company Org Chart with Pre-computed Totals",
-      "content": "Imagine a company org chart where every manager knows the **total sales for their entire team**, not just their direct reports. The CEO knows the company total; each VP knows their division total; each director knows their department total — down to individual salespeople at the leaves.\n\nWhen you want **total sales for the engineering division** you ask the VP of Engineering: one query, instant answer. When a salesperson's number changes, only their manager, their manager's manager, and so on up to the CEO need to update their totals — O(log n) updates. This is exactly how a segment tree works: internal nodes cache aggregated values over their subtree's range, so any range query decomposes into at most O(log n) pre-computed cache reads, and any single update propagates up O(log n) ancestors."
+      "title": "A Company Org Chart with Pre-computed Division Totals",
+      "content": "Imagine a large corporation where every manager maintains a running total of **sales for their entire team** — not just their direct reports, but every person beneath them in the hierarchy. The CEO knows the company-wide total; each VP knows their division total; each director knows their department total; individual salespeople at the leaves track only their own numbers.\n\nWhen you want the **total sales for the engineering division**, you simply ask the VP of Engineering — one call, instant answer, no need to contact every individual contributor. That is a range query: the range is \"everyone in engineering\", and the answer is precomputed.\n\nWhen a salesperson closes a deal and their personal number changes, only their direct manager, their manager's manager, and so on up to the CEO need to update their running totals. That chain has length equal to the depth of the tree — **O(log n)** updates for a balanced hierarchy. No peer on the same level, no distant branch, need to be touched.\n\nThis is precisely how a segment tree works. Array elements are the leaf salespeople. Internal nodes are managers caching the aggregate of their subtree's range. Queries navigate down (or across) the hierarchy to collect exactly the nodes whose ranges tile the query interval. Updates propagate upward along a single root-to-leaf path. The tree's logarithmic height is the source of log n efficiency for both operations."
     },
     {
       "type": "explanation",
-      "content": "**Segment Tree** is a complete binary tree where each leaf stores one array element and each internal node stores an aggregate (sum, min, max, etc.) over its range. For an array of n elements the tree has at most 4n nodes and is stored in an array using 1-indexed arithmetic (left child = 2i, right child = 2i+1).\n\n**Build** fills the tree bottom-up in O(n). **Query(l, r)** recursively splits the query range: if the current node's range falls entirely inside [l, r], return its cached value; if entirely outside, return an identity (0 for sum, ∞ for min); otherwise recurse on both children and combine. At most 4 log n nodes are visited — O(log n) time. **Update(i, val)** walks from the root to leaf i, updates the leaf, and fixes all ancestors on the way back — O(log n).\n\n**Lazy propagation** extends the segment tree to support **range updates** (\"add 5 to every element between index 3 and 7\"): a lazy tag at each node defers the actual update until the node is needed, keeping range-update time at O(log n) rather than O(n).\n\n**Fenwick Tree (Binary Indexed Tree)** exploits a bit trick: the number of elements each `bit[i]` is responsible for equals the value of the lowest set bit of i. `update(i, delta)` adds delta and then propagates up by repeatedly adding the lowest set bit: `i += i & (-i)`. `query(i)` sums prefix [1..i] by repeatedly subtracting the lowest set bit: `i -= i & (-i)`. Range sum [l, r] = `query(r) - query(l-1)`. Both operations are O(log n) with extremely small constants — Fenwick trees are often 3–4× faster in practice than segment trees for pure prefix-sum problems."
+      "title": "The Segment Tree: Structure and Indexing",
+      "content": "A **segment tree** is a complete binary tree built over an array of n elements. Each node is responsible for a contiguous **subrange** [start, end] of the array:\n\n- **Leaf nodes** hold individual array elements: node responsible for [i, i] stores `arr[i]`.\n- **Internal nodes** store an aggregate (sum, min, max, etc.) over their entire range, computed by combining their two children.\n- The root covers the full array [0, n-1].\n\nThe tree is stored in a flat array using **1-based indexing** with the convention: if a node has index `v`, its left child is at `2v` and its right child at `2v+1`. The root sits at index 1. This mapping means the tree needs no pointers — it is a simple integer array of size **4n** (the factor 4 safely handles cases where n is not a power of 2 and the tree is not perfectly balanced).\n\nThe **midpoint splitting rule** determines the structure: for a node covering [start, end], the midpoint is `mid = (start + end) >> 1`, the left child covers [start, mid], and the right child covers [mid+1, end]. This recursion terminates at leaves where start equals end.\n\nAn important observation: the height of the tree is `⌈log₂ n⌉`. For n=8 elements the tree has height 3 (8 leaves, 4 nodes at level 2, 2 at level 1, 1 root). For n=10⁶ elements the height is only 20. This is the source of the log n bounds on every operation."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  Q[\"query(l=2, r=5)\"]\n  Q --> C1[\"node covers 0..7\\n(partial: recurse both)\"]\n  C1 --> C2[\"node covers 0..3\\n(partial: recurse both)\"]\n  C1 --> C3[\"node covers 4..7\\n(partial: recurse left)\"]\n  C2 --> C4[\"node covers 0..1\\n(outside: return 0)\"]\n  C2 --> C5[\"node covers 2..3\\n(inside: return 7)\"]\n  C3 --> C6[\"node covers 4..5\\n(inside: return 9)\"]\n  C3 --> C7[\"node covers 6..7\\n(outside: return 0)\"]",
-      "caption": "Segment tree query(2,5): nodes fully inside the range return their cached value; nodes outside return 0. Only O(log n) nodes are visited."
+      "mermaid": "flowchart TD\n  R[\"v=1: sum[0..7]=36\"]\n  R --> L[\"v=2: sum[0..3]=10\"]\n  R --> RR[\"v=3: sum[4..7]=26\"]\n  L --> LL[\"v=4: sum[0..1]=3\"]\n  L --> LR[\"v=5: sum[2..3]=7\"]\n  RR --> RL[\"v=6: sum[4..5]=9\"]\n  RR --> RRR[\"v=7: sum[6..7]=17\"]\n  LL --> A[\"v=8: arr[0]=1\"]\n  LL --> B[\"v=9: arr[1]=2\"]\n  LR --> C[\"v=10: arr[2]=3\"]\n  LR --> D[\"v=11: arr[3]=4\"]",
+      "caption": "Segment tree for array [1,2,3,4,4,5,7,10] (first 4 elements shown). Node index v uses 1-based indexing: left child = 2v, right child = 2v+1. Each internal node caches the sum of its subtree's range."
+    },
+    {
+      "type": "explanation",
+      "title": "Build, Query, and Update: The Three Core Operations",
+      "content": "**Build — O(n)**\n\nBuilding fills the tree bottom-up. Start from the leaves and work upward: each leaf is set to the corresponding array element, and each internal node is set to the combination of its two children. The recursion visits every node exactly once, doing O(1) work per node, for a total of O(n) time. Even though the array has 4n slots, the work is proportional to n.\n\n**Query(l, r) — O(log n)**\n\nA range query is answered by a recursive descent that classifies each visited node into one of three cases:\n\n1. **Fully outside**: The node's range has no overlap with [l, r]. Return the identity element (0 for sum, +∞ for minimum, −∞ for maximum).\n2. **Fully inside**: The node's entire range [start, end] lies within [l, r]. Return the node's cached value — no need to recurse further.\n3. **Partially overlapping**: Recurse into both children and combine their results.\n\nThe critical insight is that at each level of the tree, at most **2 nodes** are partially overlapping (the leftmost and rightmost boundary nodes of the query range). All other nodes at that level are either fully inside or fully outside. Across all log n levels, at most 4 log n nodes are visited — so the query runs in O(log n) time with a small constant.\n\n**Update(i, val) — O(log n)**\n\nTo update the element at index i, navigate from the root to the leaf at position i, updating each node's cached aggregate on the way back up. At each level the recursion goes left or right based on whether i falls in [start, mid] or [mid+1, end]. The path from root to leaf has length O(log n), and each node along the path does O(1) work (recomputing from its two children). Total: O(log n).\n\nThe elegance of this design is that the tree never becomes stale: every update immediately corrects all ancestors of the changed leaf, so subsequent queries always see consistent data."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Q[\"query(l=2, r=5)\"]\n  Q --> C1[\"v=1: covers 0..7\\npartial - recurse both\"]\n  C1 --> C2[\"v=2: covers 0..3\\npartial - recurse both\"]\n  C1 --> C3[\"v=3: covers 4..7\\npartial - recurse left only\"]\n  C2 --> C4[\"v=4: covers 0..1\\nFULLY OUTSIDE - return 0\"]\n  C2 --> C5[\"v=5: covers 2..3\\nFULLY INSIDE - return 7\"]\n  C3 --> C6[\"v=6: covers 4..5\\nFULLY INSIDE - return 9\"]\n  C3 --> C7[\"v=7: covers 6..7\\nFULLY OUTSIDE - return 0\"]",
+      "caption": "query(2, 5) visits only 5 nodes to get 0+7+9+0=16. At each level, at most 2 boundary nodes recurse further. All others return cached values or identity immediately."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Segment Tree — O(n) build, O(log n) query and update\nclass SegmentTree {\n  #n;\n  #tree;\n\n  constructor(arr) {\n    this.#n    = arr.length;\n    this.#tree = new Array(4 * this.#n).fill(0);\n    this.#build(arr, 1, 0, this.#n - 1);\n  }\n\n  #build(arr, node, start, end) {\n    if (start === end) {\n      this.#tree[node] = arr[start];\n    } else {\n      const mid = (start + end) >> 1;\n      this.#build(arr, 2*node,   start, mid);\n      this.#build(arr, 2*node+1, mid+1, end);\n      this.#tree[node] = this.#tree[2*node] + this.#tree[2*node+1];\n    }\n  }\n\n  // O(log n) — point update: set index i to val\n  update(i, val, node=1, start=0, end=this.#n-1) {\n    if (start === end) {\n      this.#tree[node] = val;\n    } else {\n      const mid = (start + end) >> 1;\n      if (i <= mid) this.update(i, val, 2*node,   start, mid);\n      else          this.update(i, val, 2*node+1, mid+1, end);\n      this.#tree[node] = this.#tree[2*node] + this.#tree[2*node+1];\n    }\n  }\n\n  // O(log n) — range sum query [l..r]\n  query(l, r, node=1, start=0, end=this.#n-1) {\n    if (r < start || end < l) return 0;             // outside range\n    if (l <= start && end <= r) return this.#tree[node]; // inside range\n    const mid = (start + end) >> 1;\n    return this.query(l, r, 2*node,   start, mid)\n         + this.query(l, r, 2*node+1, mid+1, end);\n  }\n}\n\n// Fenwick Tree (BIT) — O(n) build, O(log n) prefix sum and update\nclass FenwickTree {\n  #bit;\n  constructor(n) { this.#bit = new Array(n + 1).fill(0); }\n\n  // O(log n) — add delta to index i (1-indexed)\n  update(i, delta) {\n    for (; i < this.#bit.length; i += i & (-i))\n      this.#bit[i] += delta;\n  }\n\n  // O(log n) — prefix sum [1..i]\n  query(i) {\n    let sum = 0;\n    for (; i > 0; i -= i & (-i)) sum += this.#bit[i];\n    return sum;\n  }\n\n  // O(log n) — range sum [l..r] (1-indexed)\n  rangeQuery(l, r) { return this.query(r) - this.query(l - 1); }\n}\n\nconst arr = [1, 2, 3, 4, 4, 5, 7, 10];\nconst seg = new SegmentTree(arr);\nconsole.log(seg.query(2, 5));  // 3+4+4+5 = 16\nseg.update(3, 10);             // change index 3 from 4 to 10\nconsole.log(seg.query(2, 5));  // 3+10+4+5 = 22\n\nconst bit = new FenwickTree(8);\narr.forEach((v, i) => bit.update(i + 1, v)); // 1-indexed\nconsole.log(bit.rangeQuery(3, 6));             // 3+4+4+5 = 16\nbit.update(4, 6);                              // add 6 to index 4 (now 10)\nconsole.log(bit.rangeQuery(3, 6));             // 3+10+4+5 = 22",
-      "explanation": "The segment tree stores 4n nodes (worst-case allocation). Queries return 0 for ranges fully outside — the identity for sum. The Fenwick tree's `i & (-i)` isolates the lowest set bit: for i=6 (binary 110), `6 & -6 = 2`, so bit[6] covers indices 5–6. The trick is elegant but requires 1-indexed arrays."
+      "label": "Example",
+      "code": "// ── Segment Tree: build O(n), query O(log n), update O(log n) ──\nclass SegmentTree {\n  #n;\n  #tree;\n\n  constructor(arr) {\n    this.#n    = arr.length;\n    this.#tree = new Array(4 * this.#n).fill(0);\n    this.#build(arr, 1, 0, this.#n - 1);\n  }\n\n  // Bottom-up build: leaves get arr values, internals combine children\n  #build(arr, v, start, end) {\n    if (start === end) {\n      this.#tree[v] = arr[start];\n      return;\n    }\n    const mid = (start + end) >> 1;\n    this.#build(arr, 2*v,   start, mid);\n    this.#build(arr, 2*v+1, mid+1, end);\n    this.#tree[v] = this.#tree[2*v] + this.#tree[2*v+1]; // combine step\n  }\n\n  // Point update: set arr[i] = val, fix all O(log n) ancestors\n  update(i, val, v=1, start=0, end=this.#n-1) {\n    if (start === end) {\n      this.#tree[v] = val;\n      return;\n    }\n    const mid = (start + end) >> 1;\n    if (i <= mid) this.update(i, val, 2*v,   start, mid);\n    else          this.update(i, val, 2*v+1, mid+1, end);\n    this.#tree[v] = this.#tree[2*v] + this.#tree[2*v+1]; // recompute on the way up\n  }\n\n  // Range sum query [l..r]: three-case recursion\n  query(l, r, v=1, start=0, end=this.#n-1) {\n    if (r < start || end < l) return 0;                  // fully outside\n    if (l <= start && end <= r) return this.#tree[v];    // fully inside\n    const mid = (start + end) >> 1;\n    return this.query(l, r, 2*v,   start, mid)\n         + this.query(l, r, 2*v+1, mid+1, end);          // partial: recurse both\n  }\n}\n\nconst arr = [1, 2, 3, 4, 4, 5, 7, 10];\nconst seg = new SegmentTree(arr);\n\nconsole.log(seg.query(2, 5));  // arr[2]+arr[3]+arr[4]+arr[5] = 3+4+4+5 = 16\nseg.update(3, 10);             // change arr[3] from 4 to 10\nconsole.log(seg.query(2, 5));  // 3+10+4+5 = 22\nconsole.log(seg.query(0, 7));  // total sum: 1+2+3+10+4+5+7+10 = 42",
+      "explanation": "The `#tree` array uses 1-based node indexing: node v has children 2v and 2v+1. The combine step (`tree[v] = tree[2v] + tree[2v+1]`) is where you swap in `Math.min`, `Math.max`, or any associative function to change what the tree aggregates. After `update(3, 10)`, the path from root to leaf 3 is corrected in place — all ancestors recompute from their (now updated) children."
+    },
+    {
+      "type": "explanation",
+      "title": "Lazy Propagation: Efficient Range Updates",
+      "content": "The segment tree as described supports only **point updates** (change one element). Many real problems also need **range updates**: \"add 5 to every element in [l, r]\", \"set every element in [l, r] to 0\". Without lazy propagation, a range update would touch all O(n) leaves in the worst case — defeating the purpose of the tree.\n\n**Lazy propagation** solves this by maintaining an auxiliary `lazy[]` array alongside `tree[]`. A lazy tag at node v means: \"this node's cached value has been updated, but the update has not yet been pushed to the children.\" The key insight is that we only need to push a tag to children when we actually need to descend into them — which only happens during future queries or updates that partially overlap this node's range.\n\nThe protocol has two parts:\n\n1. **`pushDown(v)`**: Before recursing into children of node v, if v has a pending lazy tag, apply it to both children (update their `tree` values and set their own lazy tags), then clear v's tag. After pushDown, children are consistent and v's tag is cleared.\n\n2. **Range update `rangeUpdate(l, r, delta)`**: Like a query, but instead of reading a value, it applies delta to all fully-covered nodes immediately and sets their lazy tags. Partially covered nodes first call pushDown, then recurse, then recompute from children.\n\nWith lazy propagation:\n- **Range update** runs in O(log n) — at most 4 log n nodes are visited, same as a query.\n- **Range query** also remains O(log n) — the pushDown at each partially overlapping node is O(1).\n\nLazy propagation is one of the most important segment tree extensions. It appears in problems involving bulk assignments, range increments, and \"paint a range\" operations. The mental model is: defer work until it is actually needed, and keep track of what was deferred with a tag."
+    },
+    {
+      "type": "explanation",
+      "title": "The Fenwick Tree: A Completely Different Approach",
+      "content": "The Fenwick tree (Binary Indexed Tree, BIT), introduced by Peter Fenwick in 1994, answers the same prefix-sum / point-update problem as the segment tree but through a completely different mechanism — one that exploits the binary representation of array indices directly.\n\nThe key idea is that every positive integer i can be decomposed into powers of 2. The Fenwick tree stores, at position i, the sum of a specific contiguous subrange ending at i. The length of that subrange is determined by the **lowest set bit** of i:\n\n- `bit[6]` (binary 110, lowest set bit = 2) stores the sum of 2 elements: arr[5] + arr[6] (1-indexed).\n- `bit[4]` (binary 100, lowest set bit = 4) stores the sum of 4 elements: arr[1] + arr[2] + arr[3] + arr[4].\n- `bit[5]` (binary 101, lowest set bit = 1) stores exactly 1 element: arr[5].\n- `bit[8]` (binary 1000, lowest set bit = 8) stores the sum of 8 elements: arr[1] through arr[8].\n\nThe **lowest set bit** of i is computed in one instruction using two's-complement arithmetic: `i & (-i)`. In two's complement, `-i` flips all bits and adds 1, which isolates exactly the lowest set bit. For i=6 (110), `-6` is `...11111010` in two's complement, and `6 & -6 = 010 = 2`. This simple bit manipulation is the entire magic of the Fenwick tree.\n\n**`query(i)`** computes the prefix sum of elements 1 through i by traversing a chain of Fenwick tree entries, each time stripping the lowest set bit: `i -= i & (-i)`. This moves from i to its \"parent\" in the Fenwick tree hierarchy, collecting partial sums until i reaches 0.\n\n**`update(i, delta)`** propagates a change at position i upward by repeatedly adding the lowest set bit: `i += i & (-i)`. This moves from i to each Fenwick tree entry that covers position i, updating them all.\n\nBoth operations visit O(log n) positions because each step either strips or adds a bit, and there are at most log n bits in i. The loop terminates in logarithmic time.\n\nCompared to the segment tree, the Fenwick tree is dramatically simpler to implement (10–15 lines of code), uses exactly n+1 memory cells (vs. ~4n for segment tree), and runs significantly faster in practice due to its iterative nature and excellent cache behaviour. Its limitation is that it natively supports only operations with an efficient inverse — addition has subtraction as its inverse, XOR is its own inverse, but minimum has no inverse, so range minimum queries require a segment tree instead."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"bit[8] covers arr[1..8]\"]\n  A --> B[\"bit[4] covers arr[1..4]\"]\n  A --> C[\"bit[6] covers arr[5..6]\"]\n  A --> D[\"bit[7] covers arr[7..7]\"]\n  B --> E[\"bit[2] covers arr[1..2]\"]\n  B --> F[\"bit[3] covers arr[3..3]\"]\n  E --> G[\"bit[1] covers arr[1..1]\"]",
+      "caption": "Fenwick tree responsibility: bit[i] covers a subrange of length equal to the lowest set bit of i. query(6) = bit[6] + bit[4] = (arr[5]+arr[6]) + (arr[1]+arr[2]+arr[3]+arr[4]) = prefix sum [1..6]."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// ── Fenwick Tree (Binary Indexed Tree) — 1-indexed ─────────────\nclass FenwickTree {\n  #bit;\n  #n;\n\n  constructor(n) {\n    this.#n   = n;\n    this.#bit = new Array(n + 1).fill(0); // 1-indexed; bit[0] unused\n  }\n\n  // Build from an existing array in O(n) — each element added individually\n  static fromArray(arr) {\n    const ft = new FenwickTree(arr.length);\n    arr.forEach((val, i) => ft.update(i + 1, val)); // shift to 1-indexed\n    return ft;\n  }\n\n  // O(log n) — add delta to position i (1-indexed)\n  // Walk UP the tree: i += i & (-i) moves to the next responsible ancestor\n  update(i, delta) {\n    for (; i <= this.#n; i += i & (-i))\n      this.#bit[i] += delta;\n  }\n\n  // O(log n) — prefix sum of arr[1..i]\n  // Walk DOWN the tree: i -= i & (-i) strips the lowest set bit\n  query(i) {\n    let sum = 0;\n    for (; i > 0; i -= i & (-i))\n      sum += this.#bit[i];\n    return sum;\n  }\n\n  // O(log n) — range sum of arr[l..r] using prefix sum subtraction\n  rangeQuery(l, r) {\n    return this.query(r) - this.query(l - 1);\n  }\n}\n\n// Worked example: array [1,2,3,4,4,5,7,10] (1-indexed positions 1-8)\nconst ft = FenwickTree.fromArray([1, 2, 3, 4, 4, 5, 7, 10]);\n\nconsole.log(ft.query(3));          // prefix sum [1..3] = 1+2+3 = 6\nconsole.log(ft.rangeQuery(3, 6));  // range sum [3..6] = 3+4+4+5 = 16\n\n// Point update: arr[4] changes from 4 to 10 (delta = +6)\nft.update(4, 6);\nconsole.log(ft.rangeQuery(3, 6));  // 3+10+4+5 = 22\n\n// Trace of query(6):\n// i=6 (110): sum += bit[6]; i = 6 - (6&-6) = 6-2 = 4\n// i=4 (100): sum += bit[4]; i = 4 - (4&-4) = 4-4 = 0  -> stop\n// bit[6] covers arr[5..6]; bit[4] covers arr[1..4] -> total is arr[1..6]\nconsole.log(ft.query(6));  // 1+2+3+10+4+5 = 25",
+      "explanation": "The `i & (-i)` expression is the heart of the Fenwick tree. In `update`, adding it moves to the next ancestor that is responsible for covering position i. In `query`, subtracting it moves to the largest responsible ancestor that starts before i. The two loops together form an elegant inverse pair. Note that `rangeQuery(l, r) = query(r) - query(l-1)` works because prefix sums are additive — this is exactly why Fenwick trees cannot support range minimum (minimum is not invertible the same way)."
+    },
+    {
+      "type": "explanation",
+      "title": "Complexity Comparison and When to Use Each",
+      "content": "The following table summarises the complexity landscape for range-query data structures. Understanding the trade-offs guides which tool to pick for a given problem:\n\n| Structure | Build | Point Update | Range Query | Range Update | Space |\n|---|---|---|---|---|---|\n| Brute-force array | O(1) | O(1) | O(n) | O(n) | O(n) |\n| Prefix-sum array | O(n) | O(n) rebuild | O(1) | O(n) rebuild | O(n) |\n| **Fenwick tree** | O(n) | **O(log n)** | **O(log n)** | — | O(n) |\n| **Segment tree** | O(n) | **O(log n)** | **O(log n)** | — | O(n) |\n| Segment tree + lazy | O(n) | O(log n) | O(log n) | **O(log n)** | O(n) |\n| Sparse table (RMQ) | O(n log n) | — | **O(1)** | — | O(n log n) |\n\nKey decision rules:\n\n- **Fenwick tree**: You need prefix sums (or any aggregation with an invertible operation) with point updates. The code is short, fast, and easy to debug. For competitive programming, reach for this first.\n- **Segment tree (no lazy)**: You need range queries over a non-invertible aggregation (min, max, GCD), or you need to support arbitrary custom combine functions. More flexible than Fenwick, slightly more code.\n- **Segment tree with lazy propagation**: You need *range updates* as well as range queries — e.g., \"add 5 to every element in [l, r]\", \"set all elements in [l, r] to 0\". Lazy is the standard extension.\n- **Sparse table**: The array is **static** (no updates) and you need O(1) range minimum/maximum queries. Sparse tables precompute answers for all power-of-2-length intervals. Because minimum is idempotent (`min(a,a) = a`), overlapping intervals can be combined without double-counting, enabling O(1) queries. The downside is O(n log n) space and O(n log n) build time."
     },
     {
       "type": "code_concept",
       "language": "javascript",
       "label": "Concept",
-      "code": "// Segment tree for RANGE MINIMUM QUERY (RMQ) — O(log n)\nclass RMQTree {\n  #n; #tree;\n  constructor(arr) {\n    this.#n    = arr.length;\n    this.#tree = new Array(4 * this.#n).fill(Infinity);\n    this.#build(arr, 1, 0, this.#n - 1);\n  }\n  #build(arr, node, s, e) {\n    if (s === e) { this.#tree[node] = arr[s]; return; }\n    const m = (s + e) >> 1;\n    this.#build(arr, 2*node,   s, m);\n    this.#build(arr, 2*node+1, m+1, e);\n    this.#tree[node] = Math.min(this.#tree[2*node], this.#tree[2*node+1]);\n  }\n  query(l, r, node=1, s=0, e=this.#n-1) {\n    if (r < s || e < l) return Infinity;\n    if (l <= s && e <= r) return this.#tree[node];\n    const m = (s + e) >> 1;\n    return Math.min(\n      this.query(l, r, 2*node,   s, m),\n      this.query(l, r, 2*node+1, m+1, e)\n    );\n  }\n}\n\n// Complexity comparison for range operations on array of size n\n//\n// Approach          | Build  | Query | Update | Space\n// Brute force       | O(1)   | O(n)  | O(1)   | O(n)\n// Prefix sums       | O(n)   | O(1)  | O(n)   | O(n)   ← no updates\n// Segment tree      | O(n)   | O(logn)| O(logn)| O(n)\n// Fenwick tree      | O(n)   | O(logn)| O(logn)| O(n)   ← prefix only\n// Sparse table      | O(n logn)| O(1) | N/A    | O(n logn) ← static RMQ\n\nconst rmq = new RMQTree([3, 1, 4, 1, 5, 9, 2, 6]);\nconsole.log(rmq.query(1, 5)); // min(1,4,1,5,9) = 1\nconsole.log(rmq.query(4, 7)); // min(5,9,2,6)   = 2",
-      "explanation": "Swapping `+` for `Math.min` converts the sum segment tree into an RMQ tree with no other changes — demonstrating the generality of the segment tree pattern. The identity element changes from 0 (sum) to Infinity (min). Sparse tables achieve O(1) range minimum queries but are read-only (no updates) — use them for static arrays."
+      "code": "// ── Segment Tree for Range Minimum Query (RMQ) ─────────────────\n// Swap + for Math.min, 0 (sum identity) for Infinity (min identity)\nclass RMQTree {\n  #n; #tree;\n  constructor(arr) {\n    this.#n    = arr.length;\n    this.#tree = new Array(4 * this.#n).fill(Infinity);\n    this.#build(arr, 1, 0, this.#n - 1);\n  }\n  #build(arr, v, s, e) {\n    if (s === e) { this.#tree[v] = arr[s]; return; }\n    const m = (s + e) >> 1;\n    this.#build(arr, 2*v,   s, m);\n    this.#build(arr, 2*v+1, m+1, e);\n    this.#tree[v] = Math.min(this.#tree[2*v], this.#tree[2*v+1]); // MIN instead of +\n  }\n  query(l, r, v=1, s=0, e=this.#n-1) {\n    if (r < s || e < l) return Infinity;       // identity for MIN is Infinity\n    if (l <= s && e <= r) return this.#tree[v];\n    const m = (s + e) >> 1;\n    return Math.min(\n      this.query(l, r, 2*v,   s, m),\n      this.query(l, r, 2*v+1, m+1, e)\n    );\n  }\n}\n\n// ── Fenwick Tree for Order Statistics (Count smaller / rank) ───\n// A Fenwick tree indexed by VALUE can count occurrences and answer\n// 'how many elements so far are <= x?' in O(log M) where M is value range.\nclass OrderStatsFenwick {\n  #bit; #M;\n  constructor(maxValue) {\n    this.#M   = maxValue;\n    this.#bit = new Array(maxValue + 1).fill(0);\n  }\n  insert(val) { for (let i=val; i<=this.#M; i+=i&-i) this.#bit[i]++; }\n  countLeq(val) { let c=0; for (let i=val; i>0; i-=i&-i) c+=this.#bit[i]; return c; }\n  // Count inversions in an array in O(n log n):\n  // Process elements right-to-left; for each element x, count elements already\n  // inserted that are LESS than x — those are inversions with x.\n}\n\n// RMQ example\nconst rmq = new RMQTree([3, 1, 4, 1, 5, 9, 2, 6]);\nconsole.log(rmq.query(0, 4));  // min(3,1,4,1,5) = 1\nconsole.log(rmq.query(4, 7));  // min(5,9,2,6)   = 2\nconsole.log(rmq.query(5, 6));  // min(9,2)        = 2\n\n// Order statistics: count inversions using Fenwick tree\n// arr = [3,1,2], inversions = (3,1),(3,2) = 2\nconst ost = new OrderStatsFenwick(10);\nlet inversions = 0;\nconst testArr = [3, 1, 2];\nfor (let i = testArr.length - 1; i >= 0; i--) {\n  inversions += ost.countLeq(testArr[i] - 1); // elements < testArr[i] already seen\n  ost.insert(testArr[i]);\n}\nconsole.log(inversions); // 2",
+      "explanation": "The RMQ tree demonstrates the segment tree's generality: only the combine function and identity element change, everything else is identical. The order-statistics Fenwick tree is a powerful technique: index the BIT by value instead of position, and each `insert` becomes an `update(val, 1)`. Querying `countLeq(x)` gives the count of inserted elements with value at most x. This enables O(n log n) inversion counting, the 'k-th smallest element in a stream' problem, and merge-sort-free computation of order statistics."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Variants and Extensions",
+      "content": "Both structures have well-known extensions that dramatically expand their applicability:\n\n**2D Segment Tree / 2D Fenwick Tree**: Extend to a 2D grid by nesting. A 2D Fenwick tree uses an outer loop over rows (each itself a Fenwick tree over columns). A 2D range sum query runs in O(log² n). This appears in computational geometry for counting points in rectangles.\n\n**Persistent Segment Tree**: Instead of modifying the tree in place, each update creates a new root and only copies the O(log n) nodes along the modified path, leaving the previous version intact. This gives you a full history of the tree — you can query the tree at any past version. It uses O(n log n) total space across all versions. Persistent segment trees solve offline range queries and 'k-th smallest element in a subarray' in O(log n) per query.\n\n**Segment Tree Beats (Ji Driver Segmentation)**: A specialised lazy tag for operations like 'replace all elements greater than x in [l, r] with x' that would normally be hard to handle lazily. These advanced lazy structures are competitive programming tools.\n\n**Coordinate Compression**: When the values are sparse (e.g., elements in the range 10⁹ but only n=10⁵ of them), compress the value space to [1..n] before building a Fenwick or segment tree. This is a standard competitive programming preprocessing step.\n\n**Offline Merge Sort Tree (Fractional Cascading)**: For static arrays, merge-sort tree answers 'how many elements in [l, r] are ≤ x?' in O(log² n) by storing sorted subarrays at each segment tree node. With fractional cascading the bound drops to O(log n).\n\n**Difference Array + Fenwick Tree**: For range-add, point-read problems (the inverse of point-add, range-read), maintain a difference array and use a Fenwick tree on it. A range add [l, r, delta] becomes two point updates on the difference array; a point query becomes a prefix sum. This avoids full lazy propagation for the simpler range-add case."
+    },
+    {
+      "type": "explanation",
+      "title": "Real-World Applications and Historical Context",
+      "content": "Segment trees and Fenwick trees are not purely academic constructs — they appear in production systems and competitive programming alike:\n\n**Time-series databases and analytics**: Systems like InfluxDB, Prometheus, and Apache Druid maintain precomputed aggregates over time windows. The hierarchical nature of a segment tree is directly analogous to how OLAP systems maintain data cubes for fast aggregation across time ranges.\n\n**Computational geometry**: The segment tree was introduced by Jon Bentley and others in the 1970s–1980s as part of work on range searching problems. It underlies interval tree variants used in 2D intersection detection, used in computer graphics (visibility determination) and spatial databases.\n\n**Competitive programming**: Fenwick trees became famous in competitive programming circles after Fenwick's 1994 paper. They appear in virtually every olympiad-level contest problem involving sums with updates. The Fenwick tree's low constant factor — iterative loops rather than recursion, excellent L1 cache behaviour — makes it the default choice when performance matters.\n\n**Order statistics and rank queries**: Fenwick trees indexed by value are used in algorithms that need the count of elements in a range of values — counting inversions in O(n log n), finding the k-th smallest element, and computing the Longest Increasing Subsequence in O(n log n) with patience sorting.\n\n**Game development**: Segment trees with lazy propagation are used in real-time strategy games to handle area-effect spells or buffs applied to ranges of units, where querying total health or attack power of a range of units must be fast.\n\nPeter Fenwick published his BIT in 1994 in the journal *Software: Practice and Experience*, originally applied to arithmetic coding compression. It found its true fame in competitive programming over the following decade as contestants discovered how universally applicable the prefix-sum-with-updates pattern is."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Pitfalls and Edge Cases",
+      "content": "Even experienced programmers make these mistakes with segment and Fenwick trees:\n\n**Off-by-one in Fenwick tree indexing**: Fenwick trees are 1-indexed. If your problem gives a 0-indexed array, shift all indices by +1 when calling `update` and `query`, and shift back for output. Forgetting this causes silent wrong answers, not crashes.\n\n**Wrong `4n` size for segment tree**: If you allocate only `2n` nodes, you will write out of bounds when n is not a power of 2. The safe upper bound is `4n`. Some implementations use the next power of 2 ≥ n and allocate `2 * nextPow2(n)` — fine too, but always verify the allocation.\n\n**Integer overflow in sums**: For sum segment trees over arrays of 32-bit integers, the root can hold a value up to `n * MAX_INT`. Use 64-bit integers (BigInt in JS, `long long` in C++) to avoid overflow when n is large.\n\n**Lazy propagation: forgetting to pushDown before recursing**: The most common lazy propagation bug. Every time you descend into children of a node with a pending lazy tag, you *must* call pushDown first. Forgetting this means children see stale aggregates and queries return wrong values.\n\n**Fenwick tree `update` for point-set vs. point-add**: A standard Fenwick tree supports point *add* (delta semantics). For point *set* (new absolute value), you must compute `delta = newVal - oldVal` and call `update(i, delta)` — or maintain a parallel array of current values to compute the delta.\n\n**Query with l=0 in Fenwick tree**: `query(0)` should return 0 (empty prefix sum). The loop condition `i > 0` handles this correctly — the loop does not execute. But `rangeQuery(1, r)` calls `query(r) - query(0)`, so verify your `query(0) = 0` invariant.\n\n**Segment tree for non-commutative operations**: Most segment tree aggregations (sum, min, XOR) are commutative. But some — like matrix multiplication — are associative but not commutative. In that case the combine step must always do `left_child ∘ right_child` in the correct order (left-to-right), never swapped. This is safe in the standard recursive implementation but easy to break if you try to optimise."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Problem involves ranges?\"] --> B[\"Static array only?\"]  \n  B -->|Yes| C[\"Sparse Table: O(1) RMQ\\nO(n log n) build\"]\n  B -->|No - has updates| D[\"Need range UPDATES too?\"]\n  D -->|No| E[\"Point update + range query\"]\n  D -->|Yes| F[\"Segment Tree + Lazy\\nO(log n) range update\"]\n  E --> G[\"Only prefix sums?\"]\n  G -->|Yes| H[\"Fenwick Tree\\nSimplest and fastest\"]\n  G -->|No - min/max/GCD| I[\"Segment Tree\\nGeneral aggregation\"]",
+      "caption": "Complete decision flowchart. Start with the simplest structure that meets your requirements. Only add lazy propagation when range updates are genuinely needed."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Why O(log n) — a deeper look**: The log n bound comes from the height of a balanced binary tree. When you add one level to the tree, you double the number of leaves you can cover. Conversely, to cover n leaves you need ⌈log₂ n⌉ levels. Any root-to-leaf path — and thus any update — has at most ⌈log₂ n⌉ hops. Any range query can be decomposed into at most 4⌈log₂ n⌉ node visits (a tight bound proven by noting that at each level of the tree, the query range has at most 2 boundary nodes that partially overlap). For n=10⁶, log₂(10⁶) ≈ 20. So even for a million-element array, no operation visits more than ~80 nodes. This is why segment trees can handle thousands of queries per second over large datasets."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Choose a Fenwick tree when you only need prefix sums with point updates — it is half the code and 3× faster than a segment tree.** Choose a segment tree when you need: range minimum/maximum, custom aggregation (GCD, XOR), or range updates via lazy propagation. When the array is static (no updates) and you need O(1) range minimum, use a sparse table instead — it uses O(n log n) space but answers queries with two precomputed lookups."
+      "content": "**Interview and implementation tips:** In technical interviews, the segment tree problem often appears disguised as 'range sum with updates', 'count of elements in a range satisfying a condition', or 'buy/sell stock with multiple transactions'. Recognise these as range-query problems. When coding under time pressure: (1) Implement the Fenwick tree first if the problem is prefix-sum-compatible — it is 10 lines vs. 40. (2) For segment trees, always allocate `4*n` nodes and use 1-based node indexing. (3) Identify the identity element for your aggregation upfront: 0 for sum, +Infinity for min, -Infinity for max, 1 for product, 0 for XOR. (4) Test your query boundary conditions: query(0,0), query(n-1,n-1), and a full query(0,n-1). (5) Never use a segment tree where a Fenwick tree suffices — interviewers notice the over-engineering."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "Segment trees and Fenwick trees both answer range queries and support point updates in O(log n) — far better than the O(n) naive approach or the O(n) rebuild cost of prefix sums.",
-        "A segment tree is a complete binary tree where each node stores an aggregate over its range; build is O(n), query and update are O(log n).",
-        "Lazy propagation extends segment trees to support range updates (e.g. add 5 to all elements in [l, r]) in O(log n) by deferring work until a node is actually queried.",
-        "A Fenwick tree (BIT) uses the lowest-set-bit trick `i & (-i)` to maintain prefix sums; it is simpler, faster, and uses less memory than a segment tree for prefix-sum-only problems.",
-        "Segment trees generalise to any associative operation (sum, min, max, GCD, XOR); Fenwick trees are typically limited to operations with an efficient inverse (sum, XOR)."
+        "Both segment trees and Fenwick trees achieve **O(log n) for range queries and point updates**, solving the fundamental tension between prefix-sum arrays (O(1) query, O(n) update) and brute-force scans (O(n) query, O(1) update).",
+        "A **segment tree** is a complete binary tree where each node caches an aggregate over its subrange. It supports any associative operation (sum, min, max, GCD, XOR) and extends to range updates via **lazy propagation** — deferring work with a tag until a node is actually accessed.",
+        "A **Fenwick tree (BIT)** exploits the binary representation of indices through the `i & (-i)` lowest-set-bit trick. It is half the code, uses less memory, and runs 2–4x faster in practice — but is limited to operations with an efficient inverse (sum, XOR) and cannot directly support range minimum queries.",
+        "**Lazy propagation** is the key extension for range updates: a lazy tag at node v means 'update applied here, not yet pushed to children'. Before recursing into children, always pushDown first — forgetting this is the most common segment tree bug.",
+        "**Choose wisely**: use a Fenwick tree for prefix-sum problems, a plain segment tree for non-invertible aggregations or static range queries needing updates, a segment tree with lazy for range updates, and a sparse table for static arrays needing O(1) range minimum.",
+        "**Common pitfalls**: off-by-one in Fenwick's 1-indexed API, allocating only 2n instead of 4n nodes for segment trees, integer overflow in large sum trees, and forgetting pushDown before recursing in lazy propagation.",
+        "Both structures appear in **production systems**: time-series analytics (hierarchical aggregation windows), computational geometry (interval intersection), order statistics (k-th smallest, inversion counting in O(n log n)), and competitive programming where they are near-universal tools."
       ]
     }
   ],
@@ -67,15 +132,15 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What is the time complexity of a range sum query on a segment tree?",
+      "question": "What is the time complexity of a range sum query on a segment tree of n elements?",
       "type": "mcq",
       "options": ["O(1)", "O(log n)", "O(n)", "O(n log n)"],
       "correct": 1,
-      "explanation": "A segment tree query visits at most 4 log n nodes — at each level of the tree it touches at most 4 nodes (2 at the boundaries of the query range). The dominant term is O(log n)."
+      "explanation": "A segment tree query visits at most 4⌈log₂ n⌉ nodes. At each level of the tree, the query range has at most 2 boundary nodes that partially overlap and recurse; all others are fully inside or outside and return immediately. The dominant term is O(log n)."
     },
     {
       "id": "q2",
-      "question": "Why can a prefix-sum array not efficiently support point updates?",
+      "question": "Why does a prefix-sum array fail to support efficient point updates?",
       "type": "mcq",
       "options": [
         "Prefix sums cannot represent negative numbers",
@@ -84,20 +149,20 @@
         "Prefix sums require O(n log n) space"
       ],
       "correct": 1,
-      "explanation": "A prefix sum array stores `P[i] = arr[0] + arr[1] + ... + arr[i]`. Changing arr[k] invalidates P[k], P[k+1], ..., P[n-1] — all n-k entries must be updated. This makes prefix sums efficient only for static arrays."
+      "explanation": "A prefix-sum array stores P[i] = arr[0]+...+arr[i]. Changing arr[k] invalidates P[k], P[k+1], ..., P[n-1] — all n-k entries must be updated. This makes prefix sums efficient only for static arrays where updates are rare or never happen."
     },
     {
       "id": "q3",
-      "question": "What does `i & (-i)` compute for a Fenwick tree index i?",
+      "question": "What does the expression `i & (-i)` compute for a Fenwick tree index i?",
       "type": "mcq",
       "options": [
-        "The parent of node i",
+        "The parent of node i in the segment tree",
         "The lowest set bit of i — the number of elements bit[i] is responsible for",
         "The total number of elements in the tree",
         "The index of the right sibling of node i"
       ],
       "correct": 1,
-      "explanation": "In two's complement, `-i` flips all bits of i and adds 1, which isolates the lowest set bit. For i=6 (binary 110), `6 & -6 = 2 (010)`, meaning bit[6] covers 2 elements (indices 5–6). This bit trick is the core of all Fenwick tree navigation."
+      "explanation": "In two's complement, -i flips all bits of i and adds 1, which isolates exactly the lowest set bit. For i=6 (binary 110), 6 & -6 = 2 (binary 010), meaning bit[6] is responsible for 2 elements (indices 5–6 in 1-indexed terms). This bit trick is the complete mechanism behind all Fenwick tree navigation."
     },
     {
       "id": "q4",
@@ -105,20 +170,20 @@
       "type": "mcq",
       "options": [
         "O(1) point updates by skipping ancestor updates",
-        "Support for range updates (e.g. add delta to all elements in [l, r]) in O(log n) by deferring updates until a node is queried",
-        "O(1) range queries by caching the last result",
-        "Ability to store two aggregates per node"
+        "Support for range updates in O(log n) by deferring updates with tags until nodes are actually accessed",
+        "O(1) range queries by caching the most recent result",
+        "The ability to store two different aggregate functions simultaneously"
       ],
       "correct": 1,
-      "explanation": "Without lazy propagation, a range update (add delta to every element in [l, r]) would require visiting all O(n) leaves. Lazy tags mark a node as having a pending update that has not yet been pushed to its children. When a node with a lazy tag is queried or updated, the tag is first applied to the children — keeping all operations at O(log n)."
+      "explanation": "Without lazy propagation, a range update (e.g. add delta to every element in [l, r]) would touch all O(n) leaves in the worst case. Lazy tags mark a node as having a pending update that has not yet been pushed to children. The tag is only pushed down when the node is actually descended into during a future query or update — keeping all operations at O(log n)."
     },
     {
       "id": "q5",
-      "question": "A Fenwick tree is built for the array [3, 1, 4, 1, 5]. What is `query(3)` (prefix sum of first 3 elements, 1-indexed)?",
+      "question": "A Fenwick tree is built for the 1-indexed array [3, 1, 4, 1, 5]. What does query(3) return?",
       "type": "mcq",
       "options": ["4", "8", "9", "5"],
       "correct": 1,
-      "explanation": "The first 3 elements (1-indexed) are 3, 1, 4. Their sum is 3+1+4 = 8. The Fenwick query(3) follows: bit[3] covers index 3 only → 4; then 3 - (3 & -3) = 3-1 = 2; bit[2] covers indices 1–2 → 3+1=4; then 2-2=0, stop. 4+4 = 8."
+      "explanation": "query(3) computes the prefix sum of the first 3 elements: 3+1+4 = 8. Trace: i=3 (binary 11), lowest set bit = 1, sum += bit[3] which covers arr[3]=4; i = 3-1 = 2. i=2 (binary 10), lowest set bit = 2, sum += bit[2] which covers arr[1]+arr[2]=3+1=4; i = 2-2 = 0. Stop. Total = 4+4 = 8."
     },
     {
       "id": "q6",
@@ -126,54 +191,59 @@
       "type": "mcq",
       "options": [
         "Prefix sum query in O(log n)",
-        "Point update (add delta to one element) in O(log n)",
-        "Range minimum query (find the minimum in [l, r]) in O(log n)",
-        "Range sum query [l, r] in O(log n)"
+        "Point update in O(log n)",
+        "Range minimum query in O(log n)",
+        "Range sum query using two prefix queries in O(log n)"
       ],
       "correct": 2,
-      "explanation": "Fenwick trees exploit the fact that subtraction is the inverse of addition, enabling prefix-sum decomposition. Minimum has no efficient inverse — you cannot compute min(l, r) from two prefix minimums. For range minimum queries, use a segment tree or sparse table."
+      "explanation": "Fenwick trees work by decomposing prefix sums into hierarchical partial sums, which requires an invertible operation — subtraction is the inverse of addition. Minimum has no efficient inverse: you cannot compute min(l, r) from prefix-minimum values. For range minimum queries, use a segment tree or sparse table instead."
     },
     {
       "id": "q7",
-      "question": "How many nodes does a segment tree array need for an input array of size n?",
+      "question": "How many nodes should a segment tree array be allocated for an input array of n elements?",
       "type": "mcq",
-      "options": ["n", "2n", "4n", "n log n"],
+      "options": ["n nodes", "2n nodes", "4n nodes", "n log n nodes"],
       "correct": 2,
-      "explanation": "A segment tree is a complete binary tree. For n leaves the tree has at most 2n nodes in the perfect case, but since n may not be a power of 2, the standard safe allocation is 4n nodes. The extra nodes are never used but prevent out-of-bounds indexing during build."
+      "explanation": "The safe allocation is 4n nodes. In a perfect binary tree with n=2^k leaves there are 2n-1 nodes, but when n is not a power of 2 the tree is not perfectly balanced and can use more. The factor 4 guarantees safety for all n without needing to compute the next power of 2 first."
     },
     {
       "id": "q8",
-      "question": "For a static array (no updates), which data structure achieves O(1) range minimum queries?",
+      "question": "For a static array (no updates) where you need O(1) range minimum queries, which data structure is best?",
       "type": "mcq",
       "options": [
-        "Segment tree — O(log n) query",
-        "Fenwick tree — O(log n) query",
-        "Sparse table — O(1) query using overlapping precomputed intervals",
-        "Sorted array — O(log n) via binary search"
+        "Segment tree — O(log n) query but supports updates",
+        "Fenwick tree — O(log n) query with minimal code",
+        "Sparse table — O(1) query using overlapping precomputed power-of-2 intervals",
+        "Sorted array with binary search — O(log n) per query"
       ],
       "correct": 2,
-      "explanation": "A sparse table precomputes minimum over every interval of length 2^k in O(n log n) time and O(n log n) space. For any query [l, r], two overlapping precomputed intervals cover it entirely — O(1) query. Because minimum is idempotent (min(a, a) = a), overlapping intervals do not double-count."
+      "explanation": "A sparse table precomputes the minimum over every interval of length 2^k in O(n log n) time and O(n log n) space. Any query [l, r] is answered with two overlapping precomputed intervals in O(1) — valid because minimum is idempotent: min(a, a) = a, so overlap does not corrupt the result. It cannot support updates because precomputed values become stale."
     },
     {
       "id": "q9",
-      "question": "What is the time complexity to build a segment tree from an array of n elements?",
+      "question": "When implementing lazy propagation, what must you do BEFORE recursing into the children of a node that has a pending lazy tag?",
       "type": "mcq",
-      "options": ["O(1)", "O(log n)", "O(n)", "O(n log n)"],
-      "correct": 2,
-      "explanation": "Building fills all ~4n nodes of the tree. Each node is visited exactly once in a bottom-up traversal, performing O(1) work (combining two children). Total work is O(n) — the same as constructing a prefix-sum array."
+      "options": [
+        "Recompute the node's value from the original array",
+        "Push the lazy tag down to both children and clear the tag on the current node",
+        "Mark both children as invalid and rebuild them",
+        "Nothing — the lazy tag is automatically inherited by children during recursion"
+      ],
+      "correct": 1,
+      "explanation": "This is the core protocol of lazy propagation. If you descend into children without first pushing down the pending tag, the children will have stale aggregate values and queries will return incorrect results. pushDown applies the pending update to each child's tree value and lazy tag, then clears the parent's tag. Only after pushDown is it safe to recurse."
     },
     {
       "id": "q10",
-      "question": "In which real-world scenario would you use a segment tree with lazy propagation?",
+      "question": "You need to count the number of inversions in an array of n integers (where an inversion is a pair i<j with arr[i]>arr[j]). Which approach achieves O(n log n)?",
       "type": "mcq",
       "options": [
-        "Building an autocomplete search feature over a dictionary",
-        "A leaderboard where individual scores change and you need the current top player",
-        "A game map where you need to add bonus damage to all enemies in a region, then query total health in another region",
-        "Sorting a list of transactions by timestamp"
+        "Brute-force all pairs — O(n²)",
+        "Sort and scan — O(n log n) but loses position information",
+        "Fenwick tree indexed by value: process elements right-to-left, querying count of elements already inserted that are smaller — O(n log n)",
+        "Segment tree with lazy propagation on the index array — O(n log² n)"
       ],
       "correct": 2,
-      "explanation": "Range updates (add damage to a region) and range queries (total health in a region) are exactly the lazy-propagation use case. Without lazy propagation, a range update would visit every enemy individually — O(n). Lazy propagation defers the update, keeping both operations at O(log n)."
+      "explanation": "Index the Fenwick tree by value (after coordinate compression if needed). Process arr from right to left. For each element x, query the Fenwick tree for countLeq(x-1) — the count of elements already processed (to the right of x) that are smaller than x; each such element forms an inversion with x. Then insert x with update(x, 1). Each of the n elements does one O(log n) query and one O(log n) update, giving O(n log n) total."
     }
   ]
 }

@@ -5,57 +5,116 @@
   "week": 26,
   "icon": "database",
   "tagline": "Redis for sub-millisecond speed, eviction policies for memory control, and inverted indexes for full-text search at scale.",
-  "readTime": "~12 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Not every read needs to hit the database. **Caching** stores frequently-read results in a faster layer — typically RAM — so subsequent requests skip the expensive database query entirely. **Redis** is the dominant in-memory data store: it supports rich data types (strings, hashes, lists, sets, sorted sets), sub-millisecond latency, and built-in expiry (TTL).\n\nFull-text search is a different problem — finding documents that contain a phrase across millions of records. Relational `LIKE '%keyword%'` performs a full scan and can't rank results. **Elasticsearch** (and its open-source fork OpenSearch) uses an **inverted index** to map every token to the list of documents containing it, enabling fast keyword lookup with relevance scoring."
+      "content": "Every production system eventually hits the same wall: the database is fast enough in development, but under real load — thousands of requests per second, data growing into hundreds of gigabytes — the query latency climbs, the CPU saturates, and users start complaining. The root cause is almost always the same: the application is reading the same data repeatedly from a storage layer that was never designed to be hammered that hard.\n\n**Caching** is the practice of storing the results of expensive computations or slow storage lookups in a faster, closer layer so that subsequent requests get the answer without repeating the work. Done well, caching is the single highest-leverage performance improvement available to a backend engineer — it can cut p99 latency from hundreds of milliseconds to under a millisecond and reduce database load by an order of magnitude.\n\n**Redis** (Remote Dictionary Server) is the dominant in-memory data store for caching and much more. Released in 2009 by Salvatore Sanfilippo, it stores data entirely in RAM, making reads and writes absurdly fast — typically under 0.1 milliseconds. But Redis is not a dumb key-value store: it supports rich data types (strings, hashes, lists, sets, sorted sets, streams), built-in expiry (TTL), Lua scripting, pub/sub messaging, and cluster mode for horizontal sharding. Understanding Redis well means understanding which data structure to reach for and which eviction policy to apply when memory is constrained.\n\nFull-text search is a fundamentally different problem. When a user types a search query on an e-commerce site, you are not looking for rows where a single column matches exactly — you want to rank millions of product descriptions by how relevant they are to the query, handle stemming (\"run\" matching \"running\"), and do it in milliseconds. SQL `LIKE '%keyword%'` cannot do this at scale. **Elasticsearch** (and its open-source fork OpenSearch) solves this by prebuilding an **inverted index** — a data structure that maps every token in your corpus to the list of documents containing it, enabling fast lookup with sophisticated relevance scoring via the **BM25** algorithm.\n\nThis chapter covers both worlds in depth: the mechanics and patterns of Redis caching, the eviction strategies that govern memory under pressure, the internals of inverted indexes, and the practical decisions that separate a naive cache from a resilient production system."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  A[\"Client Request\"] --> B{\"Cache hit?\"}\n  B -->|\"Yes\"| C[\"Return from Redis\\n< 1 ms\"]\n  B -->|\"No\"| D[\"Query Database\\n10 - 100 ms\"]\n  D --> E[\"Store in Redis\\nwith TTL\"]\n  E --> F[\"Return to client\"]\n  C --> F",
-      "caption": "Cache-aside pattern: check Redis first, fall back to the database on a miss, and populate the cache for future requests."
+      "mermaid": "flowchart TD\n  A[\"Client Request\"] --> B{\"Cache hit?\"}\n  B -->|\"Yes — < 1 ms\"| C[\"Return from Redis\"]\n  B -->|\"No — cache miss\"| D[\"Query Database\\n10–200 ms\"]\n  D --> E[\"Write result to Redis\\nwith TTL\"]\n  E --> F[\"Return response\"]\n  C --> F\n  G[\"Write request\"] --> H[\"Update Database\"]\n  H --> I[\"Invalidate or update\\nRedis key\"]",
+      "caption": "Cache-aside read pattern (top) and write-invalidation pattern (bottom). The cache sits between the application and the database, absorbing the read majority."
     },
     {
       "type": "analogy",
-      "title": "The Whiteboard Menu and the Recipe Book",
-      "content": "Imagine a busy restaurant. The full recipe book (database) is thorough but slow to look up. The whiteboard by the counter (Redis cache) lists today's specials — pre-made answers to the most common questions. When a customer asks for today's soup, the server reads the whiteboard instantly. If the whiteboard doesn't list it, they check the recipe book and write the answer on the whiteboard for next time. The whiteboard has limited space (memory), so old items are erased (eviction) when new ones arrive."
+      "title": "The Whiteboard Menu, the Recipe Book, and the Library Card Catalog",
+      "content": "Picture a high-volume restaurant. The full recipe book locked in the kitchen (the database) contains every dish ever served — authoritative, comprehensive, but slow to consult. The whiteboard by the counter (Redis) lists tonight's specials in plain sight: pre-computed answers to the most common questions. When a customer asks for today's soup, the server reads the whiteboard in an instant. If the soup isn't listed, the server walks back to the kitchen, looks up the recipe, then writes it on the whiteboard for the next customer. The whiteboard has limited space, so when it fills up, someone erases the items that have been sitting longest without anyone ordering them — that is LRU eviction.\n\nNow imagine you run a library and a patron walks in asking for every book that mentions the phrase 'quantum entanglement'. You cannot open every book and search page by page — that would take hours. Instead, you have a **card catalog** (the inverted index) where, under the entry 'quantum', there is a list of book IDs, and under 'entanglement', another list. You intersect those two lists in seconds and hand the patron exactly the matching titles, ranked by how many times the phrase appears.\n\nRedis is the whiteboard. Elasticsearch is the card catalog. Both serve the same master goal: answering questions faster by preparing the answer before the question is asked."
     },
     {
       "type": "explanation",
-      "content": "**Redis data types** go beyond simple key-value pairs. **Strings** store scalars, counters (`INCR`), or serialized JSON. **Hashes** store field-value pairs (like a row), ideal for session data. **Lists** are ordered sequences supporting push/pop from both ends — useful for queues. **Sets** store unique members with O(1) membership tests and support unions/intersections. **Sorted sets (ZSETs)** assign each member a float score, enabling leaderboards and time-windowed rate limiting. **Streams** (added in Redis 5) are append-only logs for event sourcing.\n\n**Eviction policies** determine which keys Redis removes when `maxmemory` is reached. `noeviction` returns errors when full — use only if you can guarantee the cache never grows past `maxmemory`. `allkeys-lru` evicts the least-recently-used key across all keys — the most common production choice. `volatile-lru` evicts only keys with a TTL set. `allkeys-lfu` evicts the least-frequently-used key, better than LRU for access patterns with hot-cold skew. `volatile-ttl` evicts keys with the shortest remaining TTL first.\n\n**Cache patterns**: **Cache-aside** (lazy loading) — application checks cache, misses go to DB, then populate cache. **Write-through** — writes update the cache and database synchronously, keeping them in sync at the cost of write latency. **Write-behind** (write-back) — writes go to cache first, database is updated asynchronously, improving write latency but risking data loss on cache crash.\n\n**Inverted index** is the core data structure behind full-text search. During indexing, each document is tokenized (split into terms), and each term maps to a **posting list** — the list of document IDs containing it. To search for `\"fast database\"`, the engine looks up both terms' posting lists and intersects them. Elasticsearch extends this with **TF-IDF** or **BM25** scoring to rank results by relevance, analyzers for stemming and stop-word removal, and sharding for horizontal scale."
+      "title": "Redis Data Types: Choosing the Right Tool",
+      "content": "Redis's power comes from its rich collection of built-in data structures. Each has distinct time complexity characteristics and maps to different real-world use cases. Choosing the wrong type is a common source of both bugs and wasted memory.\n\n**Strings** are the most fundamental type. Despite the name, they can hold any binary data up to 512 MB — serialised JSON, compressed blobs, or plain text. The `SET` / `GET` pair is O(1). Strings also support atomic integer operations: `INCR`, `DECR`, `INCRBY`. Because Redis is single-threaded for command execution, `INCR` on a string key is race-condition-free — two concurrent clients cannot interleave their read-modify-write cycles. This makes strings ideal for counters, rate-limit buckets, and session tokens.\n\n**Hashes** store a collection of field-value pairs under a single key — conceptually like a database row or a Python dict. `HSET user:1001 name Alice age 30 role admin` stores three fields atomically. `HGET user:1001 name` retrieves one field in O(1). `HGETALL` returns all fields in O(n) where n is the number of fields. Hashes are more memory-efficient than storing each field as a separate string key when a Redis object has many attributes, because Redis uses a compact `ziplist` encoding internally for small hashes.\n\n**Lists** are doubly linked lists supporting O(1) push and pop from both ends: `LPUSH` / `RPUSH` to push, `LPOP` / `RPOP` to pop. `LRANGE key 0 -1` retrieves all elements in O(n). Lists are natural queues (push to right, pop from left) or stacks (push and pop from the same end). They are also used for activity feeds where you keep the N most recent items using `LTRIM`.\n\n**Sets** store unique, unordered members with O(1) average complexity for add, remove, and membership test. The power of sets lies in set operations: `SUNION`, `SINTER`, `SDIFF` compute unions, intersections, and differences, enabling features like 'users who bought A also bought B' or 'mutual friends'.\n\n**Sorted Sets (ZSETs)** are sets where each member has an associated floating-point **score**. Members are stored in ascending score order. `ZADD leaderboard 4200 user:1001` adds a member with score 4200. `ZREVRANGE leaderboard 0 9 WITHSCORES` retrieves the top 10 in O(log n + k). Sorted sets are the correct data structure for leaderboards, priority queues, time-windowed rate limiting (score = timestamp), and any use case that needs 'give me the k members with the highest/lowest score'.\n\n**Streams** (added in Redis 5.0) are an append-only log with consumer group support — essentially Kafka-lite built into Redis. Each entry has an auto-generated or user-specified ID and arbitrary fields. Streams support `XADD` to append, `XREAD` to read from a position, and consumer groups for distributed processing. They are ideal for event sourcing, real-time analytics, and activity logs where you need replay semantics."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  A[\"Document 1\\nfast database\"] --> B[\"Tokenize\"]\n  C[\"Document 2\\nfast query engine\"] --> B\n  D[\"Document 3\\ndatabase query\"]\n  D --> B\n  B --> E[\"Inverted Index\"]\n  E --> F[\"fast: doc1, doc2\"]\n  E --> G[\"database: doc1, doc3\"]\n  E --> H[\"query: doc2, doc3\"]\n  I[\"Search: fast database\"] --> J[\"Intersect doc1,doc2 AND doc1,doc3\"]\n  J --> K[\"Result: doc1\"]",
-      "caption": "Inverted index: each token maps to a posting list of document IDs. A multi-term search intersects posting lists and ranks by relevance score."
+      "mermaid": "flowchart LR\n  A[\"Redis Data Types\"]\n  A --> B[\"String\\nO(1) GET/SET\\ncounters, tokens\"]\n  A --> C[\"Hash\\nO(1) HGET\\nsessions, profiles\"]\n  A --> D[\"List\\nO(1) push/pop\\nqueues, feeds\"]\n  A --> E[\"Set\\nO(1) member test\\ntags, unique users\"]\n  A --> F[\"Sorted Set\\nO(log n) insert\\nleaderboards, rate limits\"]\n  A --> G[\"Stream\\nappend-only log\\nevent sourcing\"]",
+      "caption": "The six core Redis data types and their primary use cases. Picking the right type is as important as using Redis at all."
+    },
+    {
+      "type": "explanation",
+      "title": "TTL and Cache Expiry: The Art of Staleness",
+      "content": "Every piece of cached data has a freshness window — a period during which it is close enough to the truth to be useful. After that window, it becomes **stale**: it no longer reflects the source of truth and may mislead users or trigger incorrect business logic.\n\nRedis manages freshness through **TTL (Time-To-Live)**: `SET user:1001 '{...}' EX 300` sets the key to expire in 300 seconds. Redis removes expired keys lazily (when they are next accessed) and periodically (a background sweep), so memory is reclaimed without a dedicated garbage collector thread.\n\nSetting the right TTL is a judgment call that balances consistency and performance:\n- **Too short** (e.g., 5 seconds): the cache barely helps — most requests are still cache misses. You get the complexity of caching without the latency benefit.\n- **Too long** (e.g., 24 hours): stale data can cause real problems — a user sees an outdated price, a dashboard shows incorrect metrics, or a permission check reflects a revoked role.\n- A common starting point for user-facing data is **60–300 seconds** for data that changes infrequently, and **5–30 seconds** for data that changes more often but where brief staleness is acceptable.\n\nWhen staleness is not acceptable at all, you need **active invalidation**: the application explicitly deletes the Redis key whenever the underlying data changes. The combination of a modest TTL plus active invalidation (TTL as the safety net, active invalidation as the primary mechanism) is robust and widely used in production.\n\n**Volatile vs. persistent keys**: Redis lets you mix keys with TTLs and keys without TTLs in the same instance. Keys without TTLs are 'persistent' — they survive until explicitly deleted or evicted. This allows you to use a single Redis instance as both a cache (volatile keys) and a durable store (persistent keys), though you need to configure eviction policy carefully when doing so."
+    },
+    {
+      "type": "explanation",
+      "title": "Eviction Policies: What Happens When Redis Runs Out of Memory",
+      "content": "Redis is configured with a `maxmemory` limit. When that limit is reached, Redis must either refuse new writes or remove existing keys to make room. Which keys it removes is controlled by the **eviction policy** (`maxmemory-policy` in `redis.conf`).\n\n**`noeviction`** (the default) returns an `OOM command not allowed` error when memory is full. This is appropriate only when Redis is used as a primary data store where data loss from eviction would be catastrophic — for example, a Celery task queue where losing a task means it never runs. It is almost never the right choice for a cache.\n\n**`allkeys-lru`** evicts the **Least Recently Used** key across all keys, regardless of whether they have a TTL. This is the most common production choice for a pure cache: any key can be evicted, and Redis makes room for new data by removing what has not been used recently. The LRU approximation in Redis is probabilistic — it samples a configurable number of keys (default 5) and evicts the stalest among the sample, which is cheaper than maintaining a strict LRU list.\n\n**`volatile-lru`** applies LRU eviction only to keys that have a TTL set. Keys without a TTL are never evicted. This is useful when Redis holds both cached data (volatile, can be evicted) and critical application data (no TTL, must survive). The risk is that if all volatile keys are also very recently used, this policy degrades to `noeviction`.\n\n**`allkeys-lfu`** evicts the **Least Frequently Used** key. LFU tracks an approximate access count per key (with exponential decay over time). When access patterns have strong hot/cold skew — a small set of 'hot' keys are accessed millions of times while a long tail of 'cold' keys are rarely accessed — LFU keeps the hot keys in memory more reliably than LRU. LFU was added in Redis 4.0.\n\n**`volatile-lfu`** applies LFU logic only to keys with TTLs, analogous to `volatile-lru`.\n\n**`allkeys-random`** evicts a random key. Rarely the best choice, but deterministic in terms of overhead.\n\n**`volatile-ttl`** evicts the key with the shortest remaining TTL — the key that was about to expire anyway. This makes intuitive sense as a 'help the cache clean itself' policy, though in practice `allkeys-lru` is more effective for general caching."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A{\"Memory full?\"}\n  A -->|\"Yes\"| B{\"Policy?\"}\n  B --> C[\"noeviction\\nReturn error\"]\n  B --> D[\"allkeys-lru\\nEvict any LRU key\"]\n  B --> E[\"volatile-lru\\nEvict LRU TTL key\"]\n  B --> F[\"allkeys-lfu\\nEvict any LFU key\"]\n  B --> G[\"volatile-ttl\\nEvict shortest TTL\"]\n  D --> H[\"Space freed\\nWrite succeeds\"]\n  E --> H\n  F --> H\n  G --> H",
+      "caption": "Eviction policy decision tree. For a pure cache, allkeys-lru or allkeys-lfu. For a mixed store+cache, volatile-lru. For critical data that must never be lost, noeviction."
     },
     {
       "type": "code_example",
-      "language": "sql",
-      "label": "Runtime",
-      "code": "-- Redis commands via redis-cli (not SQL, but shown as comments)\n-- STRING: cache a serialized user profile for 300 seconds\n-- SET user:1001 '{\"id\":1001,\"name\":\"Alice\"}' EX 300\n-- GET user:1001\n\n-- HASH: store session data\n-- HSET session:abc123 user_id 1001 role admin expires_at 1720000000\n-- HGETALL session:abc123\n-- HGET session:abc123 role\n\n-- SORTED SET: leaderboard - score is points, member is user id\n-- ZADD leaderboard 4200 \"user:1001\"\n-- ZADD leaderboard 3800 \"user:1002\"\n-- ZREVRANGE leaderboard 0 9 WITHSCORES   -- top 10\n\n-- INCR: atomic counter for rate limiting (no race conditions)\n-- INCR rate:user:1001:2024010112   -- key = user + hour bucket\n-- EXPIRE rate:user:1001:2024010112 3600\n\n-- SET with NX (only if not exists) for distributed lock\n-- SET lock:payment:order_99 process_id NX EX 30\n-- Returns OK if lock acquired, nil if already held",
-      "explanation": "Redis commands are O(1) for GET/SET/HGET and O(log n) for sorted set operations. `EX` sets a TTL in seconds — always set TTLs on cached data to prevent stale data accumulation. `NX` (set-if-not-exists) with `EX` is the foundation of distributed locking (Redlock pattern)."
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Redis commands demonstrated via ioredis (Node.js client)\n// npm install ioredis\n\nimport Redis from 'ioredis';\nconst redis = new Redis({ host: 'localhost', port: 6379 });\n\n// ── String: cache a user profile for 5 minutes ──────────────\nasync function getUserProfile(userId) {\n  const cacheKey = `user:${userId}`;\n\n  // 1. Check cache\n  const cached = await redis.get(cacheKey);\n  if (cached) {\n    return JSON.parse(cached); // cache HIT — ~0.1 ms\n  }\n\n  // 2. Cache miss — query database\n  const user = await db.query('SELECT * FROM users WHERE id = $1', [userId]);\n\n  // 3. Populate cache with 300-second TTL\n  await redis.set(cacheKey, JSON.stringify(user), 'EX', 300);\n  return user;\n}\n\n// ── Hash: store session data ─────────────────────────────────\nasync function createSession(sessionId, userId, role) {\n  await redis.hset(`session:${sessionId}`,\n    'user_id', userId,\n    'role', role,\n    'created_at', Date.now()\n  );\n  await redis.expire(`session:${sessionId}`, 3600); // 1-hour TTL\n}\n\nasync function getSessionRole(sessionId) {\n  return redis.hget(`session:${sessionId}`, 'role');\n}\n\n// ── Sorted Set: leaderboard ───────────────────────────────────\nasync function recordScore(userId, points) {\n  // ZADD is O(log n) — sorted set keeps members ordered by score\n  await redis.zadd('leaderboard:weekly', points, `user:${userId}`);\n}\n\nasync function getTopTen() {\n  // ZREVRANGE returns members highest-score-first\n  return redis.zrevrange('leaderboard:weekly', 0, 9, 'WITHSCORES');\n}\n\n// ── String: rate limiting with atomic INCR ───────────────────\nasync function checkRateLimit(userId, limitPerMinute) {\n  const minute = Math.floor(Date.now() / 60000);\n  const key = `rate:${userId}:${minute}`;\n\n  const count = await redis.incr(key); // atomic — no race condition\n  if (count === 1) {\n    await redis.expire(key, 60); // set TTL on first increment\n  }\n  return count <= limitPerMinute;\n}\n\n// ── String NX: distributed lock ───────────────────────────────\nasync function acquireLock(resource, ttlSeconds) {\n  // SET NX EX is atomic — either you set it or you don't\n  const result = await redis.set(\n    `lock:${resource}`,\n    'acquired',\n    'NX',   // only if Not eXists\n    'EX',   // with expiry\n    ttlSeconds\n  );\n  return result === 'OK'; // OK = lock acquired; null = already held\n}",
+      "explanation": "The cache-aside pattern in `getUserProfile` is the bread-and-butter of Redis usage. Notice `JSON.parse` and `JSON.stringify` — Redis stores strings, so objects must be serialised. The `INCR` in `checkRateLimit` is atomically safe because Redis executes commands single-threadedly. The `SET NX EX` pattern for distributed locks is atomic as a single command, unlike the old two-command `SETNX` + `EXPIRE` which had a race window between the two operations."
     },
     {
-      "type": "code_concept",
-      "language": "sql",
-      "label": "Concept",
-      "code": "-- Redis eviction policy comparison\n-- Policy           | Evicts            | Best for\n-- --------------   | ----------------- | ---------------------------\n-- noeviction       | Nothing (errors)  | Critical data that must not be lost\n-- allkeys-lru      | Least recently used (any key) | General-purpose cache\n-- volatile-lru     | LRU among TTL keys| Mixed cache + durable store\n-- allkeys-lfu      | Least frequently used | Skewed access (hot/cold data)\n-- volatile-ttl     | Shortest TTL first| Explicit expiry management\n\n-- Elasticsearch index mapping (JSON, not SQL)\n-- PUT /products\n-- { \"mappings\": { \"properties\": {\n--     \"name\":        { \"type\": \"text\", \"analyzer\": \"english\" },\n--     \"category\":    { \"type\": \"keyword\" },\n--     \"price\":       { \"type\": \"float\" },\n--     \"description\": { \"type\": \"text\" }\n-- } } }\n--\n-- Search query (BM25 scoring)\n-- POST /products/_search\n-- { \"query\": { \"multi_match\": {\n--     \"query\": \"fast wireless keyboard\",\n--     \"fields\": [\"name^3\", \"description\"]  -- name boosted 3x\n-- } } }\n\n-- Cache invalidation strategies\n-- 1. TTL expiry: simplest, accepts brief staleness\n-- 2. Event-driven: DB write triggers cache DELETE (pub/sub)\n-- 3. Write-through: cache updated in same transaction as DB"
+      "type": "explanation",
+      "title": "Cache Patterns: Cache-Aside, Write-Through, and Write-Behind",
+      "content": "The way an application interacts with the cache on reads and writes defines the **cache pattern**. Each pattern has a different consistency/performance trade-off.\n\n**Cache-Aside (Lazy Loading)** is the most prevalent pattern. The application is the mediator: on a read, it checks the cache first; on a miss, it reads the database and writes the result to the cache. On a write, it updates the database and then either deletes the cache key (invalidation) or updates it directly. The advantages are simplicity and resilience — if Redis goes down, the application still works (just slower). The disadvantage is that the first request after a cache miss (or after startup) is slow, and there is a brief window of stale data between a database write and cache invalidation.\n\n**Write-Through** updates the cache and the database synchronously on every write. The application writes to the cache, and the cache (or a middleware layer) immediately propagates the write to the database before acknowledging success. This keeps the cache perfectly consistent with the database at all times. The cost is increased write latency (you wait for both layers) and wasted cache space for data that is written once but never read.\n\n**Write-Behind (Write-Back)** acknowledges the write after updating the cache only, then asynchronously flushes the change to the database in batches. This is very fast for write-heavy workloads — the database sees fewer, larger writes. The critical risk: if the cache node crashes before the async flush, you lose the uncommitted writes. Write-behind is used in embedded systems, databases (their own internal buffer pools use this pattern), and applications where write throughput is paramount and brief data loss is acceptable.\n\n**Read-Through** is a variant of cache-aside where the cache itself (rather than the application) is responsible for loading data from the database on a miss. The application only ever talks to the cache layer. This simplifies application code but requires a cache that supports a 'loader' function — Redis does not do this natively, but proxy layers like `Twemproxy` or ORM-level caching libraries can.\n\nIn practice, most web applications use **cache-aside for reads** combined with **TTL + active invalidation for writes**: the TTL acts as the safety net (stale data never lives forever), and the invalidation (delete the key on write) provides near-immediate consistency."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant App as Application\n  participant Redis as Redis Cache\n  participant DB as Database\n  App->>Redis: GET user:1001\n  Redis-->>App: (nil) — cache miss\n  App->>DB: SELECT * FROM users WHERE id=1001\n  DB-->>App: {id:1001, name:Alice}\n  App->>Redis: SET user:1001 '{...}' EX 300\n  App->>App: Return data to caller\n  Note over App,Redis: Next request within 300s\n  App->>Redis: GET user:1001\n  Redis-->>App: '{id:1001, name:Alice}' — cache HIT",
+      "caption": "Cache-aside sequence: miss on first request populates the cache; all requests within the TTL window are served from Redis without touching the database."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache Stampede and How to Prevent It",
+      "content": "One of the most dangerous failure modes in caching is the **cache stampede** (also called 'thundering herd'). Here is the scenario: a popular key — say, the homepage product listing for an e-commerce site — expires simultaneously in Redis. In the window between expiry and the first successful repopulation, hundreds or thousands of concurrent requests all find the cache empty and all proceed to query the database at the same time. The database, which was handling maybe 10 queries per second from Redis misses under normal load, suddenly gets slammed with 500 queries in the same second. It can crash or degrade severely, causing a cascading failure.\n\nThe root cause is a **thundering herd**: many actors waking up simultaneously to do the same expensive work. There are several mitigation strategies:\n\n**Mutex locking**: When a request finds the cache empty, it tries to acquire a Redis distributed lock (via `SET NX EX`). Only the request that acquires the lock fetches from the database and repopulates the cache. Other requests either wait briefly and retry (spinning), or return a stale value if one is available. This eliminates parallel database fetches but introduces a brief wait for the non-lock-holders.\n\n**Probabilistic early expiration (PER)**: Instead of a hard expiry boundary, each request that reads a key near its expiry time independently decides — with some probability — to refresh it early. The formula typically involves the remaining TTL and a random draw. As the TTL approaches zero, the probability of early refresh increases. The result is that the cache gets refreshed before it expires, staggered across multiple requests, with no stampede window. This is the approach used internally by Facebook's `memcache` layer.\n\n**Background refresh**: The application serves the stale value immediately and asynchronously triggers a background job to refresh the cache. The user never sees a slow request; they might see data that is slightly old for one request cycle. This works well for data where brief staleness is acceptable (dashboards, analytics).\n\n**Serve stale on miss**: Cache the data indefinitely (no TTL) but store the intended expiry inside the value. When a request reads a key that is past its logical expiry, return the stale value immediately and trigger an async refresh. The first request after expiry is fast (stale data), subsequent requests get fresh data once the background fetch completes."
+    },
+    {
+      "type": "explanation",
+      "title": "Inverted Index: The Engine Behind Full-Text Search",
+      "content": "A relational database is optimised for structured queries — find rows where `price < 100` and `category = 'electronics'`. These are **point or range lookups** on indexed columns, and B+ tree indexes handle them beautifully.\n\nFull-text search is a different problem in kind. When a user searches for 'wireless mechanical keyboard', they want:\n1. Every document that mentions any of those words (or related forms like 'keyboards', 'mechanically')\n2. Documents ranked by **relevance** — how well do they match the query?\n3. Fuzzy tolerance — typos, stemming, synonyms\n4. Results in milliseconds across millions of documents\n\nSQL `LIKE '%wireless%'` fails on all four counts: a leading wildcard disables the B+ tree index and forces a full table scan, there is no relevance ranking, and there is no stemming or fuzzy matching.\n\nThe solution is an **inverted index**. During **indexing**, every document is passed through an **analysis pipeline**:\n1. **Tokenisation**: split text into tokens (words). 'Fast wireless keyboard' → ['Fast', 'wireless', 'keyboard']\n2. **Lowercasing**: normalise case → ['fast', 'wireless', 'keyboard']\n3. **Stemming / lemmatisation**: reduce words to their root form → ['fast', 'wireless', 'keyboard'] (here no change, but 'running' → 'run', 'keyboards' → 'keyboard')\n4. **Stop word removal**: remove common words with low discriminating power → remove 'the', 'is', 'a'\n5. **Synonym expansion** (optional): add related terms\n\nThe result of this pipeline is a list of **terms** (normalised tokens). The inverted index maps each term to a **posting list** — an ordered list of document IDs (and optionally: term positions, term frequency counts) where that term appears.\n\nAt **query time**, the search engine applies the same analysis pipeline to the query string, looks up each resulting term in the inverted index, and combines the posting lists — intersecting for AND queries, unioning for OR — to find matching document IDs. This lookup is an O(1) hash map access to the index plus an O(k) walk of the posting list, where k is the number of matching documents. For a single-term query on a corpus of 100 million documents, this might take a few milliseconds.\n\n**Relevance scoring** is then applied to rank the matching documents. The dominant algorithm is **BM25** (Best Match 25), which extends the earlier TF-IDF formula with saturation and length normalisation:\n- **Term Frequency (TF)**: how often does the query term appear in this document? More occurrences → more relevant, but with diminishing returns (saturation prevents a document from gaming the score by repeating a word 1000 times).\n- **Inverse Document Frequency (IDF)**: how rare is this term across the entire corpus? A term that appears in 90% of documents ('the', 'product') carries little discriminating information; a term that appears in 0.01% of documents is highly distinctive and should be weighted more heavily.\n- **Length normalisation**: shorter documents that mention a term are considered more focused on that term than long documents. A 50-word product description containing 'keyboard' is a better match than a 10,000-word review that also mentions it once."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Document: fast wireless keyboard\\nfor gaming\"] --> B[\"Analysis Pipeline\"]\n  B --> C[\"Tokenise + Lowercase\"]\n  C --> D[\"Stem + Remove stop words\"]\n  D --> E[\"Terms: fast, wireless,\\nkeyboard, gaming\"]\n  E --> F[\"Inverted Index\"]\n  F --> G[\"fast → doc1, doc4, doc7\"]\n  F --> H[\"wireless → doc1, doc3\"]\n  F --> I[\"keyboard → doc1, doc2, doc3\"]\n  J[\"Query: wireless keyboard\"] --> K[\"Analyse query\"]\n  K --> L[\"Intersect: wireless ∩ keyboard\"]\n  L --> M[\"Matches: doc1, doc3\"]\n  M --> N[\"Rank by BM25 score\"]",
+      "caption": "The full indexing and query pipeline. Analysis normalises text; the inverted index enables fast term lookup; posting list intersection finds matches; BM25 ranks them."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Elasticsearch / OpenSearch via @elastic/elasticsearch (Node.js)\n// npm install @elastic/elasticsearch\n\nimport { Client } from '@elastic/elasticsearch';\nconst es = new Client({ node: 'http://localhost:9200' });\n\n// ── 1. Create an index with field mappings ───────────────────\nawait es.indices.create({\n  index: 'products',\n  body: {\n    settings: {\n      analysis: {\n        analyzer: {\n          english_custom: {\n            type: 'custom',\n            tokenizer: 'standard',\n            filter: ['lowercase', 'english_stemmer', 'stop']\n          }\n        },\n        filter: {\n          english_stemmer: { type: 'stemmer', language: 'english' }\n        }\n      }\n    },\n    mappings: {\n      properties: {\n        name:        { type: 'text', analyzer: 'english_custom', boost: 3 },\n        description: { type: 'text', analyzer: 'english_custom' },\n        category:    { type: 'keyword' },  // exact match, not analysed\n        price:       { type: 'float' },\n        in_stock:    { type: 'boolean' }\n      }\n    }\n  }\n});\n\n// ── 2. Index a document ──────────────────────────────────────\nawait es.index({\n  index: 'products',\n  id: 'prod-001',\n  document: {\n    name: 'Wireless Mechanical Keyboard',\n    description: 'Ultra-fast wireless keyboard for gaming and typing',\n    category: 'peripherals',\n    price: 129.99,\n    in_stock: true\n  }\n});\n\n// ── 3. Full-text search with filtering ───────────────────────\nconst result = await es.search({\n  index: 'products',\n  body: {\n    query: {\n      bool: {\n        must: [\n          {\n            multi_match: {\n              query: 'wireless keyboard gaming',\n              fields: ['name^3', 'description'],  // name boosted 3x\n              type: 'best_fields',\n              fuzziness: 'AUTO'  // tolerates 1-2 typos\n            }\n          }\n        ],\n        filter: [\n          { term: { in_stock: true } },\n          { range: { price: { lte: 200 } } }\n        ]\n      }\n    },\n    highlight: {\n      fields: { description: {} }  // return matched snippets\n    },\n    size: 10\n  }\n});\n\nfor (const hit of result.hits.hits) {\n  console.log(`Score: ${hit._score.toFixed(2)} | ${hit._source.name}`);\n}",
+      "explanation": "The `mappings` block defines how each field is analysed. `text` fields are tokenised and stemmed — searching 'keyboards' will match 'keyboard'. `keyword` fields are stored as-is for exact matches (used in filters and aggregations). The `bool` query combines `must` (full-text relevance) with `filter` (hard constraints like `in_stock: true` and `price <= 200`). Filters do not affect the relevance score and are aggressively cached by Elasticsearch. The `^3` boost on the `name` field means a match in the product name counts three times more than a match in the description."
+    },
+    {
+      "type": "explanation",
+      "title": "Elasticsearch Architecture: Shards, Replicas, and the Distributed Index",
+      "content": "A single Elasticsearch **index** is divided into **shards** — each shard is a self-contained Lucene index (Lucene is the Java library that implements the actual inverted index). Sharding enables horizontal scaling: a 10-shard index spreads data and query load across 10 nodes, and searches are executed in parallel across all shards with results merged on the coordinating node.\n\nEach shard can have one or more **replicas** — identical copies on other nodes. Replicas serve two purposes: fault tolerance (if a primary shard's node fails, a replica is promoted) and read scaling (search queries can be routed to replicas, distributing read load).\n\nThe classic indexing recommendation: choose a primary shard count you expect not to need to change (splitting later is expensive — it requires re-indexing), and set `number_of_replicas` to at least 1 in production. A common starting point for a medium-sized index is 3–5 primary shards with 1 replica each.\n\nThe **refresh interval** is critical for performance understanding. By default, Elasticsearch makes new documents searchable every **1 second** (the 'near real-time' guarantee). During the refresh, new documents are flushed from an in-memory buffer to a Lucene segment file. This means there is always up to a 1-second delay between indexing a document and it being searchable — important to account for in real-time use cases. For batch indexing, setting `refresh_interval: -1` during the bulk load and then re-enabling it afterward dramatically improves throughput."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Redis vs. Memcached**: Memcached is Redis's older, simpler predecessor. It supports only string key-value pairs and offers no persistence, pub/sub, scripting, or rich data types. Redis supersedes Memcached for almost all use cases. Memcached can be marginally faster for simple string lookups with multiple threads (Redis is single-threaded for commands), but the operational simplicity of maintaining one caching system and the power of Redis's data types make it the dominant choice. As of Redis 6.0, Redis also supports multi-threaded I/O (not command execution), narrowing the throughput gap.\n\n**Elasticsearch vs. dedicated databases**: Elasticsearch excels at full-text search and log analytics but is not a replacement for a relational database. It does not support ACID transactions, its update model is internally delete-and-reinsert (making partial updates expensive at scale), and it requires substantial operational overhead (JVM tuning, shard management, cluster monitoring). Use Elasticsearch for what it does uniquely well — full-text search and aggregations over large document sets — and keep your source of truth in a relational or document database."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache Invalidation: The Hardest Problem in Caching",
+      "content": "Phil Karlton famously said: 'There are only two hard things in computer science: cache invalidation and naming things.' Cache invalidation is the problem of keeping cached data consistent with the source of truth when the source of truth changes.\n\n**TTL-based invalidation** is the simplest strategy: accept that cached data is stale for up to TTL seconds and set a TTL short enough that the staleness is acceptable. This works well for data that changes infrequently (static content, rarely-updated configuration) or where brief staleness has no business consequence. The risk is always: what if the TTL is too long and a significant data change happens just after the cache is populated?\n\n**Event-driven invalidation** is more precise: whenever a write happens to the database, the application (or a database trigger via CDC — Change Data Capture) publishes an event that deletes or updates the affected cache keys. This can achieve near-immediate consistency. The challenge is ensuring the invalidation event is reliably sent even when the application crashes mid-write. A common pattern: wrap the database write and the Redis `DEL` in a try block; if the `DEL` fails, the TTL serves as the safety net.\n\n**Cache key namespacing** helps manage bulk invalidation. Instead of invalidating individual keys when a user updates their profile, you can version your cache keys: `user:1001:v3` where the version is stored separately. To invalidate all cache entries for a user, you increment their version — all old cache keys become unreachable (they will expire naturally via TTL) and new reads populate keys with the new version suffix.\n\n**The write-then-invalidate order matters**: you should always **write the database first, then invalidate the cache** — never the reverse. If you invalidate the cache first, a concurrent reader might re-populate the cache with old data from the database before your write completes, creating a stale cache entry that outlives your write. Writing to the database first and then deleting the cache key means the worst case is a brief window where the cache holds old data until the delete completes — then subsequent reads get fresh data."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "The two hardest problems in caching are **cache invalidation** (keeping the cache consistent with the source of truth) and **cache stampede** (many requests hitting the DB simultaneously when a popular key expires). Use a short TTL plus write-through invalidation for consistency, and **probabilistic early expiration** or a **mutex lock** (Redis `SET NX`) to prevent stampedes on high-traffic keys."
+      "content": "**Interview and production traps to know cold:**\n\n**Never cache unbounded data**: if a cache key holds a list that could grow to millions of items, you are not caching — you are creating a memory leak. Cache aggregate results (counts, pre-paginated slices) rather than full datasets.\n\n**Avoid 'cache poisoning'**: if a failed database query result (an error or empty result) is cached, all subsequent requests will also get the error until TTL expires. Cache `null` or empty results intentionally with a short TTL to avoid hammering the database on a sustained error condition, but track the distinction between 'this user has no items' (valid, cacheable) and 'the database is down' (error, do not cache).\n\n**Redis is not a lock service**: distributed locks via `SET NX EX` work for simple cases but are not fully safe under network partitions (look up the Redlock controversy). For critical distributed locking, use a dedicated coordination service (etcd, ZooKeeper) or accept that Redlock is 'good enough' for non-critical mutual exclusion.\n\n**Elasticsearch is eventually consistent for indexing**: a document is not searchable the instant you index it — the default 1-second refresh interval means there is a small window where the document exists in the datastore but is not yet in the inverted index. If your application immediately queries Elasticsearch after indexing, you may not see the result. Use `refresh=true` on indexing calls (forces an immediate refresh) only for testing — in production this kills throughput."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Redis** is an in-memory data store supporting strings, hashes, lists, sets, sorted sets, and streams — each with O(1) to O(log n) operations and optional TTL.",
-        "**Eviction policies** (`allkeys-lru`, `volatile-lru`, `allkeys-lfu`) control which keys Redis removes when memory is full; choose based on your access pattern.",
-        "**Cache-aside** (lazy loading) is the most common pattern: check cache, miss goes to DB, result stored with TTL. **Write-through** keeps cache and DB in sync on writes.",
-        "**Inverted index** maps each token to a posting list of document IDs; search engines intersect posting lists and rank results using BM25 scoring.",
-        "**Cache stampede** occurs when a popular key expires and many requests hit the database simultaneously — mitigate with distributed locks or probabilistic early refresh."
+        "**Redis** is an in-memory data store with sub-millisecond latency. Its six core data types — strings, hashes, lists, sets, sorted sets, and streams — each map to specific use cases; choosing the right type is as important as using Redis at all.",
+        "**TTL** is the fundamental mechanism for bounding cache staleness. Set it short enough that stale data does not cause business issues, and combine it with active invalidation (deleting the key on writes) for near-immediate consistency.",
+        "**Eviction policies** govern what Redis removes when `maxmemory` is reached. Use `allkeys-lru` for a pure cache, `volatile-lru` for mixed cache+store, and `allkeys-lfu` when access patterns have strong hot/cold skew.",
+        "**Cache stampede** occurs when a popular key expires and many concurrent requests flood the database simultaneously. Mitigate with distributed mutex locks (`SET NX EX`), probabilistic early expiration, or background refresh patterns.",
+        "**Inverted indexes** map every term in a document corpus to a posting list of document IDs. Full-text search engines look up query terms, intersect posting lists, and rank results using BM25, which balances term frequency, inverse document frequency, and document length normalisation.",
+        "**Cache invalidation order** matters: always write the database first, then delete the cache key. The reverse order creates a race window where stale data can be re-cached after the invalidation but before the database write completes.",
+        "**Elasticsearch** is not a replacement for a relational database — it has no ACID transactions and imposes a ~1-second indexing delay before documents are searchable. Use it specifically for full-text search and analytics aggregations, keeping your source of truth elsewhere."
       ]
     }
   ],
@@ -66,133 +125,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What Redis data type would you use to implement a leaderboard where users are ranked by score?",
+      "question": "Which Redis data type is best suited for implementing a leaderboard where users must be retrieved in descending score order?",
       "type": "mcq",
       "options": [
-        "String",
-        "Hash",
-        "List",
-        "Sorted Set"
+        "List — because it supports ordered push and pop",
+        "Hash — because it stores field-value pairs efficiently",
+        "Set — because it supports union and intersection operations",
+        "Sorted Set — because each member has a score and ZREVRANGE returns members by descending score"
       ],
       "correct": 3,
-      "explanation": "Redis Sorted Sets (ZSETs) assign each member a numeric score. ZREVRANGE retrieves members in descending score order, making them perfect for leaderboards with O(log n) insert and O(log n + k) range queries."
+      "explanation": "Redis Sorted Sets (ZSETs) assign each member a float score and maintain members in sorted order. ZREVRANGE returns members from highest to lowest score in O(log n + k), making them ideal for leaderboards. Lists are ordered by insertion position, not by a numeric score, so they cannot efficiently answer 'give me the top 10 by score'."
     },
     {
       "id": "q2",
-      "question": "Which Redis eviction policy is the best general-purpose choice for a cache where all keys are equally likely to become stale?",
+      "question": "Which Redis eviction policy is most appropriate for a pure cache where any key can safely be removed when memory is full?",
       "type": "mcq",
       "options": [
-        "noeviction",
-        "volatile-ttl",
-        "allkeys-lru",
-        "volatile-lru"
+        "noeviction — it prevents data loss by returning an error",
+        "volatile-lru — it evicts the least recently used key among those with a TTL",
+        "allkeys-lru — it evicts the least recently used key from all keys",
+        "volatile-ttl — it evicts the key with the shortest remaining TTL"
       ],
       "correct": 2,
-      "explanation": "allkeys-lru evicts the least-recently-used key from any key in the database when memory is full. It works well when you want Redis to act purely as a cache and any key can be evicted safely."
+      "explanation": "allkeys-lru evicts the least recently used key across all keys when memory is full, regardless of whether the key has a TTL. This is the standard choice for a pure cache where all data is regenerable. noeviction would cause write failures; volatile-lru only considers keys with TTLs and may refuse to evict if no TTL keys exist; volatile-ttl is a valid alternative but less predictable than LRU."
     },
     {
       "id": "q3",
-      "question": "In the cache-aside pattern, what happens on a cache miss?",
+      "question": "In the cache-aside pattern, what is the correct sequence of steps on a cache miss?",
       "type": "mcq",
       "options": [
-        "The request fails with an error",
-        "The application queries the database and writes the result to the cache",
-        "The cache automatically queries the database",
-        "The request is queued until the cache is refreshed"
+        "Query the database, write the result to the cache with a TTL, return the result",
+        "Write a placeholder to the cache, query the database, update the cache entry",
+        "Return an error to the client and queue the request for background processing",
+        "Delete all related cache keys, query the database, return the result without caching"
       ],
-      "correct": 1,
-      "explanation": "In cache-aside (lazy loading), the application is responsible for reading from the database on a cache miss, then writing the result to the cache with a TTL so future requests hit the cache."
+      "correct": 0,
+      "explanation": "Cache-aside (lazy loading) works like this on a miss: (1) query the database for the authoritative data, (2) write the result to the cache with a TTL so future requests are served from cache, (3) return the result to the caller. Writing a placeholder first would cause race conditions; returning an error is wrong because the database is the fallback; skipping the cache write defeats the purpose of caching."
     },
     {
       "id": "q4",
-      "question": "What is an inverted index?",
+      "question": "What is a cache stampede, and what is its primary cause?",
       "type": "mcq",
       "options": [
-        "An index that stores rows in reverse insertion order",
-        "A mapping from each token to the list of documents containing that token",
-        "A B+ tree index sorted in descending key order",
-        "A hash map of document IDs to their full content"
+        "Redis running out of memory and evicting keys faster than they can be repopulated",
+        "Many concurrent requests hitting the database simultaneously when a popular cached key expires",
+        "A misconfigured TTL causing the cache to serve stale data indefinitely",
+        "Multiple Redis instances returning inconsistent data due to replication lag"
       ],
       "correct": 1,
-      "explanation": "An inverted index maps each unique token (word) to a posting list of document IDs containing it. During search, the engine looks up terms in this index and intersects posting lists to find matching documents."
+      "explanation": "A cache stampede (thundering herd) occurs when a popular key expires in the cache and many concurrent requests, all finding the cache empty at the same time, simultaneously fall through to the database. The database receives a sudden spike in load that can cause degradation or failure. Solutions include distributed locks, probabilistic early expiration, and background refresh."
     },
     {
       "id": "q5",
-      "question": "Why is `LIKE '%keyword%'` a poor substitute for full-text search on a large table?",
+      "question": "What does an inverted index map each token to?",
       "type": "mcq",
       "options": [
-        "LIKE does not support strings longer than 255 characters",
-        "LIKE with a leading wildcard cannot use indexes and requires a full table scan",
-        "LIKE is case-sensitive and misses stemmed variants",
-        "LIKE only works on VARCHAR columns, not TEXT"
+        "The full content of the document containing that token",
+        "The position of the token within a single document",
+        "A posting list of document IDs where that token appears",
+        "The BM25 relevance score for that token across the corpus"
       ],
-      "correct": 1,
-      "explanation": "A leading wildcard (`%keyword`) prevents index usage, forcing a sequential scan of every row. On millions of rows this is extremely slow. Full-text search engines pre-build inverted indexes for fast token lookups."
+      "correct": 2,
+      "explanation": "An inverted index maps each unique token (normalised word) to a posting list — an ordered list of document IDs that contain that token. At query time, the search engine looks up each query term in this index and intersects or unions the posting lists to find matching documents. The inverted index does not store full document content or pre-computed scores — scoring is computed at query time."
     },
     {
       "id": "q6",
-      "question": "What is a cache stampede?",
+      "question": "Why does `LIKE '%keyword%'` with a leading wildcard perform poorly on large tables?",
       "type": "mcq",
       "options": [
-        "A cache that grows beyond its maxmemory limit",
-        "Many concurrent requests hitting the database simultaneously when a popular cached key expires",
-        "A cache that returns stale data after a database update",
-        "Redis restarting and losing all in-memory data"
+        "LIKE does not support case-insensitive matching",
+        "A leading wildcard prevents the database from using a B+ tree index, forcing a full table scan",
+        "LIKE returns results in random order with no relevance ranking",
+        "LIKE is limited to VARCHAR columns and cannot search TEXT fields"
       ],
       "correct": 1,
-      "explanation": "When a popular key expires, many requests find no cache entry at the same time and all proceed to query the database simultaneously, causing a spike in DB load. Solutions include distributed locks or probabilistic early expiration."
+      "explanation": "A B+ tree index stores values in sorted order, so the database can use it to quickly find rows where a column starts with a known prefix. A leading wildcard ('%keyword') means the matching portion can start anywhere in the string — the index cannot narrow the search and must be bypassed. This forces a sequential scan of every row, which is O(n) in table size. Full-text indexes (inverted indexes) are specifically designed to avoid this problem."
     },
     {
       "id": "q7",
-      "question": "Which Redis command atomically increments a counter with no race conditions?",
+      "question": "In BM25 relevance scoring, what does Inverse Document Frequency (IDF) measure?",
       "type": "mcq",
       "options": [
-        "SET key (GET key + 1)",
-        "INCR key",
-        "UPDATE key SET value = value + 1",
-        "APPEND key 1"
+        "How many times a term appears in a specific document",
+        "How short the document is relative to the average document length in the corpus",
+        "How rare a term is across the entire document corpus",
+        "How many shards the search was distributed across"
       ],
-      "correct": 1,
-      "explanation": "INCR is a single atomic Redis command that reads and increments the value. Because Redis is single-threaded for command execution, INCR cannot race with other INCR commands on the same key."
+      "correct": 2,
+      "explanation": "IDF measures how rare or distinctive a term is across the entire corpus. A term that appears in 90% of documents (like 'the' or 'product') has very low IDF and contributes little to ranking. A term that appears in 0.01% of documents is highly distinctive and receives a high IDF weight, boosting documents that contain it. BM25 multiplies TF by IDF to produce a score that balances frequency within a document against rarity across the corpus."
     },
     {
       "id": "q8",
-      "question": "In Elasticsearch, what does BM25 determine?",
+      "question": "What is the correct order of operations when updating cached data to avoid a race condition?",
       "type": "mcq",
       "options": [
-        "The order in which shards are queried",
-        "The relevance score that ranks documents in search results",
-        "The compression algorithm for stored documents",
-        "The maximum number of results returned per query"
+        "Delete the cache key first, then write to the database",
+        "Write to the cache first, then write to the database asynchronously",
+        "Write to the database first, then delete or update the cache key",
+        "Write to both the cache and database simultaneously in a single transaction"
       ],
-      "correct": 1,
-      "explanation": "BM25 (Best Match 25) is a ranking function that scores documents based on term frequency in the document and inverse document frequency across the corpus. Higher scores mean more relevant documents appear first."
+      "correct": 2,
+      "explanation": "You must write to the database first, then invalidate the cache. If you delete the cache key first, a concurrent reader can re-populate the cache with stale data from the database before your write completes — that stale entry will then persist until its TTL expires. Writing to the database first ensures that any concurrent reader who misses the cache after your invalidation will read the new, correct value from the database."
     },
     {
       "id": "q9",
-      "question": "What is the difference between write-through and write-behind caching?",
+      "question": "Which Redis command pattern implements a distributed lock atomically, preventing a race window between checking existence and setting the key?",
       "type": "mcq",
       "options": [
-        "Write-through updates the database first; write-behind updates the cache first",
-        "Write-through updates cache and database synchronously; write-behind updates cache first and database asynchronously",
-        "Write-through is for reads; write-behind is for writes",
-        "Write-through uses Redis; write-behind uses a separate message queue"
+        "SETNX key value followed immediately by EXPIRE key ttl",
+        "GET key; if nil then SET key value EX ttl",
+        "SET key value NX EX ttl",
+        "HSET key lock true then EXPIRE key ttl"
       ],
-      "correct": 1,
-      "explanation": "Write-through keeps cache and DB in sync by writing both on every update (higher write latency but no risk of loss). Write-behind acknowledges the write after updating the cache, then persists to DB asynchronously (lower latency but risk of data loss if the cache crashes before the async write)."
+      "correct": 2,
+      "explanation": "SET key value NX EX ttl is a single atomic command: NX means 'only set if the key does not exist', and EX sets the expiry in seconds. The atomicity is critical — the old two-command pattern (SETNX + EXPIRE) had a race window where the process could crash between the two commands, leaving a lock with no expiry that would never be released. The single SET NX EX command eliminates that window."
     },
     {
       "id": "q10",
-      "question": "What Redis command implements a distributed lock by setting a key only if it does not already exist?",
+      "question": "What does the Elasticsearch `refresh_interval` setting control, and what is its production implication?",
       "type": "mcq",
       "options": [
-        "SET key value XX EX 30",
-        "SETNX key value",
-        "SET key value NX EX 30",
-        "GETSET key value"
+        "How often Elasticsearch syncs data to disk; setting it low risks data loss on crash",
+        "How frequently shard replicas are synchronised; lower values increase replication lag",
+        "The delay between indexing a document and it becoming searchable; default is 1 second",
+        "How often cluster health checks run; setting it high can cause split-brain scenarios"
       ],
       "correct": 2,
-      "explanation": "SET key value NX EX 30 sets the key only if it does not exist (NX = Not eXists) and automatically expires it after 30 seconds (EX). This is the recommended atomic distributed lock pattern, superior to the older SETNX + EXPIRE two-command approach."
+      "explanation": "The refresh_interval controls how often Elasticsearch flushes the in-memory indexing buffer to a Lucene segment, making newly indexed documents searchable. The default is 1 second — meaning there is up to a 1-second window where a document has been indexed but is not yet returnable in search results. This 'near real-time' guarantee is a key operational characteristic of Elasticsearch. Setting refresh_interval to -1 during bulk indexing dramatically improves throughput by deferring this flush, at the cost of documents being unsearchable until a manual refresh."
     }
   ]
 }

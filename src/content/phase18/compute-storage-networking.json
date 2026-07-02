@@ -5,58 +5,116 @@
   "week": 55,
   "icon": "network",
   "tagline": "The three pillars of cloud infrastructure — understanding VMs, storage types, and virtual networks is the vocabulary of every architecture diagram.",
-  "readTime": "~13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Every cloud workload needs three things: something to **run code** (compute), somewhere to **persist data** (storage), and a way to **move data between components** (networking). Getting these right is the difference between a resilient, cost-effective system and one that is slow, expensive, or fragile.\n\nCloud providers expose compute as **virtual machines** and **containers**, storage as **object, block, or file systems**, and networking as **Virtual Private Clouds (VPCs)** with subnets, security groups, and load balancers. Each abstraction has distinct performance characteristics, failure modes, and pricing. Picking the wrong storage type for a workload is a common and costly mistake that shows up months later as a scaling bottleneck or a runaway AWS bill."
+      "content": "Every cloud workload, regardless of size or complexity, ultimately reduces to three concerns: **compute** (something to run your code), **storage** (somewhere to persist your data), and **networking** (a way to move data between components, users, and services). Before cloud computing, each of these required physical hardware that you bought, racked, and maintained yourself. Today, all three are available on-demand as software-defined resources, billed by the hour or even the millisecond. Understanding how they work, why they are designed the way they are, and how to pick the right option for a given workload is the core vocabulary of cloud engineering.\n\nThe three pillars are deeply intertwined. A compute instance cannot function without storage for its operating system. A web application cannot serve users without networking. A distributed database requires all three simultaneously and must carefully coordinate access across them. Getting the combination right is the difference between a resilient, cost-effective architecture and one that is slow, expensive, or fragile — problems that typically only surface months into production when data volumes and traffic spike beyond early estimates.\n\nCloud providers — AWS, Google Cloud, Azure — expose compute primarily as **virtual machines** and **containers**, storage as **object, block, or file systems**, and networking as **Virtual Private Clouds (VPCs)** complete with subnets, routing tables, security groups, NAT gateways, and load balancers. Each abstraction hides enormous engineering complexity behind a clean API. Behind a single `aws ec2 run-instances` call is a hypervisor scheduling CPU time, a distributed storage network backing your root disk, and a software-defined switch enforcing your firewall rules — all invisible to you.\n\nThis chapter builds a deep, working understanding of each pillar: what it is, how the underlying mechanism works, why each design choice was made, when to choose which option, and the most common mistakes engineers make. By the end you will be able to read an AWS architecture diagram and understand not just what each component is named but why it is placed where it is."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  subgraph Compute[\"Compute\"]\n    VM[\"Virtual Machine\\n(EC2 / GCE)\"]\n    CT[\"Container\\n(ECS / GKE)\"]\n  end\n  subgraph Storage[\"Storage\"]\n    OBJ[\"Object Storage\\n(S3 / GCS)\"]\n    BLK[\"Block Storage\\n(EBS / Persistent Disk)\"]\n    FS[\"File Storage\\n(EFS / Filestore)\"]\n  end\n  subgraph Network[\"Networking\"]\n    VPC[\"VPC\"]\n    SG[\"Security Groups\"]\n    LB[\"Load Balancer\"]\n  end\n  VM --> BLK\n  CT --> OBJ\n  LB --> VM\n  LB --> CT\n  VPC --> SG",
-      "caption": "The three pillars: compute options attach to their natural storage types, and all traffic flows through VPC networking with security groups controlling access."
+      "mermaid": "flowchart TD\n  User[\"User / Client\"] --> LB[\"Load Balancer\\n(ALB / NLB)\"]\n  subgraph VPC[\"VPC — Isolated Virtual Network\"]\n    subgraph PubSub[\"Public Subnet\"]\n      LB\n      NAT[\"NAT Gateway\"]\n    end\n    subgraph PrivSub[\"Private Subnet\"]\n      VM1[\"VM / Container 1\"]\n      VM2[\"VM / Container 2\"]\n      DB[\"Managed Database\"]\n    end\n    LB --> VM1\n    LB --> VM2\n    VM1 --> DB\n    VM2 --> DB\n    VM1 --> OBJ[\"Object Storage\\n(S3 / GCS)\"]\n    VM2 --> OBJ\n    VM1 --> BLK[\"Block Volume\\n(EBS)\"] \n    PrivSub --> NAT\n    NAT --> Internet[\"Internet\"]\n  end",
+      "caption": "A canonical three-tier cloud architecture: traffic enters through the load balancer in the public subnet, reaches compute instances in the private subnet, which read/write block and object storage. The NAT gateway lets private instances initiate outbound calls (e.g., package downloads) without exposing them to inbound internet traffic."
     },
     {
       "type": "analogy",
-      "title": "Office Building Analogy",
-      "content": "Imagine a corporate office. **Virtual machines** are private offices — dedicated space with their own keys, even if the building is shared. **Containers** are open-plan hot desks — faster to set up, lighter, but sharing the same floor (host OS). **Object storage** is the filing room — huge, any document, but you retrieve by name (key), not by browsing folders the fast way. **Block storage** is the hard drive in your desk — fast random reads/writes, but only your computer can use it. **Security groups** are the door access card rules — port 443 allowed from the internet, port 5432 only from the app servers. **The load balancer** is the receptionist routing visitors to available team members."
+      "title": "The Corporate Office Campus",
+      "content": "Picture a large corporate campus with several buildings, each serving a different function. **Virtual machines** are private offices — each employee (workload) gets a dedicated room with their own desk, filing cabinet, and door lock, even though the building itself is shared with others. You pay for the room whether you are using it or not. **Containers** are hot-desk co-working spaces on a shared floor — faster to set up, cheaper, you bring only what you need for the day, but you share the elevator shaft (the host OS kernel) with everyone else on the floor.\n\n**Object storage** is the corporate archive room in the basement — vast, climate-controlled, and you can store any document, but you access it by submitting a retrieval request with the document's reference number (an HTTP GET with the object key), not by browsing the shelves yourself at random. You cannot change a page in an archived document — you check it out, modify it, and file a new version. **Block storage** is the filing cabinet bolted to the desk in your private office — fast, your own, great for documents you need to edit constantly (database files), but only your machine has the key. **File storage** is a shared network drive mounted by everyone in the building — great for shared documents, but slower and pricier than the personal cabinet.\n\n**The VPC** is the campus perimeter fence and badge-access system. **Public subnets** are the lobby and visitor areas — anyone off the street can walk in (reach your public IP). **Private subnets** are secured inner floors — only badge-holders can enter (only internal traffic can reach those instances). **Security groups** are the individual room access rules — Marketing can enter Room 80 and 443, but only IT can enter the server room on port 5432. **The load balancer** is the receptionist who routes visitors to whichever available team member can help, automatically skipping anyone who has called in sick (a failed health check)."
     },
     {
       "type": "explanation",
-      "content": "**Virtual Machines** run a full OS on virtualized hardware. AWS EC2, GCE, and Azure VMs. Each instance is billed by type and hour. **Instance families** target workloads: `t3` for burstable general purpose, `c5` for compute-intensive, `r5` for memory-intensive, `p3` for GPU workloads. Sizing correctly matters — over-provisioned instances waste money; under-provisioned ones cause latency spikes.\n\n**Containers** share the host OS kernel (via namespaces and cgroups) and launch in milliseconds vs the minutes a VM takes. They are lighter, more portable, and pack more workloads per host. **ECS** (AWS), **GKE** (Google), and **AKS** (Azure) are managed container platforms. Containers are stateless by design — persistent data lives in external storage.\n\n**Object Storage** (S3, GCS) stores arbitrary blobs — files, images, backups, ML datasets — accessed via HTTP GET/PUT by a unique key. Virtually unlimited capacity, 11-nines durability via cross-AZ replication, and extremely cheap per GB. It is NOT a filesystem: no in-place edits, no directory traversal, and latency is higher than block storage.\n\n**Block Storage** (EBS, Persistent Disk) acts like a physical disk attached to a VM. It supports random reads/writes, is used for databases and OS disks, and offers predictable IOPS. It is **zone-scoped** — an EBS volume in us-east-1a cannot be attached to an instance in us-east-1b without a snapshot-and-restore cycle.\n\n**VPC (Virtual Private Cloud)** is a private, logically isolated network in the cloud. You define the IP range (CIDR block), divide it into **subnets** (public subnets have internet access via an internet gateway; private subnets do not), and control traffic with **security groups** (stateful firewall rules per instance) and **network ACLs** (stateless subnet-level rules).\n\n**Load balancers** distribute incoming traffic across multiple healthy instances. **Application Load Balancers (ALB)** operate at HTTP layer 7 — they can route by URL path, hostname, or headers. **Network Load Balancers (NLB)** operate at layer 4 — ultra-low latency, used for TCP/UDP workloads. Both perform health checks and stop routing to unhealthy targets."
+      "title": "Compute: Virtual Machines — The Foundation",
+      "content": "A **virtual machine (VM)** is an emulated computer running inside a real computer. The physical server (the **host**) runs a piece of software called a **hypervisor** — either bare-metal (Type 1, like AWS Nitro, VMware ESXi, or KVM) or hosted on top of an OS (Type 2, like VirtualBox). The hypervisor intercepts hardware instructions from the guest OS and either executes them directly on the CPU (using hardware virtualization extensions like Intel VT-x or AMD-V) or translates them — giving the illusion of dedicated hardware.\n\nFrom the guest OS's perspective, it owns the CPUs, RAM, and disk it was allocated. In reality, the hypervisor is multiplexing dozens or hundreds of VMs onto one large physical server. AWS Nitro — Amazon's custom hypervisor — offloads networking and storage I/O entirely to dedicated hardware ASICs, freeing nearly all CPU and memory for the guest, which is why cloud VMs can approach bare-metal performance for many workloads.\n\nEach VM runs its own complete operating system — kernel, drivers, system libraries. This isolation is the VM's great strength: a kernel panic in one VM cannot crash another. It is also the VM's cost: booting a full OS takes minutes, and each VM consumes hundreds of megabytes of RAM just for its OS overhead.\n\n**Instance families** on AWS reflect different hardware profiles:\n- `t3`/`t4g` — burstable general-purpose; CPU credits accumulate during idle time and are spent during bursts. Perfect for development, light web servers, and variable workloads.\n- `c6i`/`c7g` — compute-optimized; high CPU-to-RAM ratio; ideal for CPU-bound workloads like video encoding, scientific computing, and game servers.\n- `r6i`/`r7g` — memory-optimized; high RAM-to-CPU ratio; for in-memory databases (Redis clusters), real-time analytics, and large JVM heaps.\n- `p3`/`p4d` — GPU instances with NVIDIA V100 or A100 GPUs; machine learning training and inference, graphics rendering.\n- `i3`/`i4i` — storage-optimized; NVMe SSDs directly attached, not network-attached; for high-throughput databases like Cassandra.\n\n**Right-sizing** matters enormously for cost. An over-provisioned `r5.4xlarge` for a workload that would fit on an `r5.xlarge` wastes four times the money. Cloud providers offer tools like AWS Compute Optimizer that analyze CloudWatch metrics and recommend downsizing or family changes."
+    },
+    {
+      "type": "explanation",
+      "title": "Compute: Containers — Lighter, Faster, More Portable",
+      "content": "**Containers** solve a different problem than VMs. Rather than isolating at the hardware level, they isolate at the **process level** using two Linux kernel features: **namespaces** (which give a process its own view of the filesystem, network stack, process tree, user IDs, and hostname) and **cgroups** (which limit the CPU, memory, and I/O that a process group can consume).\n\nBecause containers share the host OS kernel, they have almost no boot overhead — a container starts in milliseconds. They also carry no per-container OS weight: a minimal Node.js container image might be 100 MB versus 1–2 GB for a full VM snapshot. This density advantage means you can pack ten times as many containers onto a host as VMs, which is why container-based deployment dramatically reduces compute costs for stateless services.\n\nThe trade-off is isolation depth. A kernel vulnerability in the host OS can affect all containers on that host; a kernel bug cannot easily escape a VM's hypervisor boundary (though VM escape vulnerabilities exist, they are rare and high-severity). For this reason, security-sensitive multi-tenant workloads often use VMs, while same-trust microservices within one team use containers.\n\n**Docker** is the dominant container runtime and image format. A `Dockerfile` describes how to build an image — layered filesystem snapshots. **Kubernetes** (K8s) is the de-facto orchestrator: it schedules containers onto a fleet of nodes, handles rolling deployments, scales based on CPU/memory metrics (HPA), and restarts crashed containers. Managed Kubernetes offerings — **EKS** (AWS), **GKE** (Google), **AKS** (Azure) — handle the control plane, so you only manage worker nodes.\n\nContainers are **stateless by design** — when a container restarts, its filesystem changes are lost (unless mounted to a persistent volume). Persistent data lives in external storage: databases use managed services (RDS, Cloud SQL) or block volumes mounted as Kubernetes PersistentVolumes; binary assets go to object storage. This separation of stateless compute from stateful storage is a core cloud-native design principle."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  Internet[\"Internet\"] --> ALB[\"App Load Balancer\\n(Layer 7)\"]\n  subgraph VPC[\"VPC 10.0.0.0/16\"]\n    subgraph Public[\"Public Subnet 10.0.1.0/24\"]\n      ALB\n    end\n    subgraph Private[\"Private Subnet 10.0.2.0/24\"]\n      App1[\"App Server 1\"]\n      App2[\"App Server 2\"]\n      DB[\"RDS Database\"]\n    end\n    ALB --> App1\n    ALB --> App2\n    App1 --> DB\n    App2 --> DB\n  end",
-      "caption": "VPC with public and private subnets: the load balancer is internet-facing in the public subnet; app servers and the database live in the private subnet with no direct internet exposure."
+      "mermaid": "flowchart LR\n  subgraph VM[\"Virtual Machine\"]\n    GOS[\"Guest OS (full kernel)\"]\n    App1[\"App Process\"]\n    GOS --> App1\n  end\n  subgraph Host[\"Physical Host\"]\n    HV[\"Hypervisor\"]\n    VM\n    subgraph Containers[\"Container Runtime\"]\n      C1[\"Container A\\n(namespace + cgroup)\"]\n      C2[\"Container B\\n(namespace + cgroup)\"]\n    end\n    HOS[\"Host OS Kernel\"]\n    HV --> VM\n    HOS --> C1\n    HOS --> C2\n  end",
+      "caption": "VMs each run their own guest OS on top of the hypervisor. Containers share the host OS kernel directly, isolated only by namespaces and cgroups — much lighter, but shallower isolation."
+    },
+    {
+      "type": "explanation",
+      "title": "Storage: Object Storage — The Infinite Filing Room",
+      "content": "**Object storage** (S3, Google Cloud Storage, Azure Blob Storage) stores arbitrary binary data — files, images, videos, backups, ML datasets, log archives — as **objects** in flat **buckets**. Each object is identified by a globally unique **key** (a string like `users/avatars/user-1234.jpg`) and retrieved via HTTP GET/PUT operations through a REST API.\n\nThe internal architecture of object storage is radically different from a filesystem. There are no directories — the key is just a string; the `/` in a key is a naming convention that tools simulate as folders, but the storage layer sees only key-value pairs. Objects are not modified in-place; you always upload a complete new version (though versioning features allow you to keep history). There are no locks, no atomic multi-object updates, and until recently no strong read-after-write consistency across objects (S3 gained strong consistency in December 2020).\n\nWhat makes object storage special is its **scale and durability**. S3 achieves **99.999999999% (11 nines)** durability by storing each object redundantly across multiple Availability Zones — physically separate data centers. Lose one entire AZ to a fire or flood and your data is safe. Capacity is effectively unlimited; S3 stores exabytes of data across its entire fleet. And the price is extraordinary: roughly **$0.023/GB-month** for S3 Standard — roughly three times cheaper than block storage.\n\nObject storage is accessed **over the network** with higher latency (typically 5–50ms per request, depending on object size and region) than block storage. This makes it unsuitable for database files, which need sub-millisecond random reads, but ideal for web assets, backups, and data lake storage where you read large files sequentially. Combined with a CDN like **CloudFront**, object storage serves static content (JavaScript bundles, images, videos) to users globally with low latency, since the CDN caches objects at edge locations near users.\n\n**Storage classes** let you trade access speed for cost: S3 Standard → S3 Standard-IA (infrequent access, cheaper but per-retrieval cost) → S3 Glacier Instant Retrieval → S3 Glacier Deep Archive (~$0.00099/GB-month, retrieval in hours). **Lifecycle policies** can automatically move objects between classes as they age — e.g., move logs to Glacier after 30 days."
+    },
+    {
+      "type": "explanation",
+      "title": "Storage: Block Storage — The Fast Local Disk",
+      "content": "**Block storage** (EBS on AWS, Persistent Disk on GCP, Azure Managed Disks) presents to a VM exactly like a physical hard drive: a fixed-size sequence of fixed-size blocks (512 bytes or 4 KB), readable and writable at arbitrary offsets. The OS formats it with a filesystem (ext4, NTFS, XFS), mounts it, and reads/writes files through the VFS layer just as if it were a local disk.\n\nBehind the scenes, EBS is not physically attached to your EC2 instance — it is a **network-attached virtual disk** served from a distributed storage system over a dedicated, high-throughput internal network (separate from the data-plane network your application uses). AWS Nitro moves EBS I/O to a dedicated hardware card, giving up to **64,000 IOPS** (for `io2 Block Express`) with sub-millisecond latency — close to the performance of a local NVMe SSD.\n\nVolume types reflect different performance-cost tradeoffs:\n- `gp3` (general purpose SSD) — **baseline: 3,000 IOPS, 125 MB/s throughput**, independently configurable up to 16,000 IOPS and 1,000 MB/s. The default for most workloads. ~$0.08/GB-month.\n- `io2`/`io2 Block Express` — provisioned IOPS SSD for **I/O-intensive databases** needing consistent sub-millisecond latency; up to 256,000 IOPS on Block Express. Significantly more expensive.\n- `st1` — HDD-backed throughput-optimized storage for **big sequential reads**: data warehouses, log processing. Cheap per GB, but high latency for random I/O.\n- `sc1` — cold HDD, the cheapest EBS option; for infrequently accessed sequential workloads.\n\nThe critical architectural constraint: **EBS volumes are scoped to a single Availability Zone**. A volume in `us-east-1a` cannot be mounted by an instance in `us-east-1b`. To move data across AZs, you must create a **snapshot** (a point-in-time copy stored in S3), then restore from that snapshot in the target AZ. This is why database high-availability solutions use managed services like **RDS Multi-AZ**, which maintains synchronous standby replicas in a different AZ rather than trying to share a block volume.\n\nAnother critical constraint: **a standard EBS volume can be attached to only one EC2 instance at a time** (though `io1`/`io2` support multi-attach for clustered filesystems that handle their own locking, a specialized use case). If you need shared filesystem access across multiple instances, you need file storage."
+    },
+    {
+      "type": "explanation",
+      "title": "Storage: File Storage — The Shared Network Drive",
+      "content": "**File storage** (AWS EFS, Google Filestore, Azure Files) provides a fully managed **POSIX-compatible network filesystem** that can be mounted simultaneously by hundreds or thousands of compute instances. From the application's perspective it looks and behaves exactly like a local directory — `open()`, `read()`, `write()`, `rename()` all work as expected — but under the hood traffic flows over NFS (Network File System) or SMB.\n\nFile storage fills a specific gap: legacy enterprise applications and some modern workloads (content management systems like WordPress, shared ML training checkpoints, home directories for HPC clusters) were written to expect a POSIX filesystem and cannot easily be refactored to use object storage's HTTP API. EFS lets you lift-and-shift these workloads without code changes.\n\nThe trade-offs are real. EFS Standard costs approximately **$0.30/GB-month** — about 13x more expensive than S3 Standard and 4x more than EBS gp3 per GB. Latency is also higher than block storage because every I/O traverses the network twice (client to NFS server, NFS server to underlying block storage). For latency-sensitive or high-IOPS workloads, EFS is the wrong choice.\n\nFor most greenfield cloud-native applications, the decision tree is simple: object storage for blobs and files you access by key; block storage for databases and OS volumes where you need random I/O performance; file storage only when you need POSIX semantics shared across multiple instances and cannot rewrite the application."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Q1[\"Multiple instances need access?\"] -->|Yes| Q2[\"Need POSIX filesystem?\"]\n  Q1 -->|No| Q3[\"High random IOPS needed?\"]\n  Q2 -->|Yes| FS[\"File Storage\\n(EFS / Filestore)\\n~$0.30/GB-month\"]\n  Q2 -->|No| OBJ2[\"Object Storage\\n(S3 / GCS)\\n~$0.023/GB-month\"]\n  Q3 -->|Yes| BLK[\"Block Storage\\n(EBS / Persistent Disk)\\n~$0.08/GB-month\"]\n  Q3 -->|No| Q4[\"Large blobs / backups?\"]\n  Q4 -->|Yes| OBJ[\"Object Storage\\n(S3 / GCS)\\n~$0.023/GB-month\"]\n  Q4 -->|No| BLK2[\"Block Storage\\n(EBS gp3)\\n~$0.08/GB-month\"]",
+      "caption": "Storage decision tree: start with access pattern (multi-instance or single), then POSIX requirement, then I/O profile. Most use cases land on object or block storage."
     },
     {
       "type": "code_example",
       "language": "bash",
-      "label": "Runtime",
-      "code": "# AWS CLI — explore compute, storage, and networking primitives\n\n# --- COMPUTE ---\n# List running EC2 instances with their type and state\naws ec2 describe-instances \\\n  --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name,PublicIpAddress]' \\\n  --output table --region us-east-1\n\n# --- STORAGE ---\n# Create an S3 bucket and upload an object (object storage)\naws s3 mb s3://my-app-assets-20240101 --region us-east-1\naws s3 cp ./dist/bundle.js s3://my-app-assets-20240101/bundle.js\n\n# Create an EBS volume (block storage) for a database\naws ec2 create-volume \\\n  --size 100 \\\n  --volume-type gp3 \\\n  --availability-zone us-east-1a \\\n  --iops 3000 \\\n  --throughput 125\n\n# --- NETWORKING ---\n# Create a security group allowing HTTPS from internet, Postgres only from app\naws ec2 create-security-group \\\n  --group-name web-sg --description \"Web servers\" --vpc-id vpc-0abc123\naws ec2 authorize-security-group-ingress \\\n  --group-id sg-web --protocol tcp --port 443 --cidr 0.0.0.0/0\naws ec2 authorize-security-group-ingress \\\n  --group-id sg-db  --protocol tcp --port 5432 --source-group sg-web",
-      "explanation": "The security group rules enforce the principle of least privilege: the internet can reach the web tier on port 443, but the database port 5432 is only reachable from the web security group — not the open internet."
+      "label": "Example",
+      "code": "# ── COMPUTE: inspect running EC2 instances ──────────────────────────────────\naws ec2 describe-instances \\\n  --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name,Placement.AvailabilityZone]' \\\n  --output table --region us-east-1\n\n# Launch a t3.micro instance into a private subnet with a security group\naws ec2 run-instances \\\n  --image-id ami-0c55b159cbfafe1f0 \\\n  --instance-type t3.micro \\\n  --subnet-id subnet-0abc123private \\\n  --security-group-ids sg-0webservers \\\n  --count 1 \\\n  --no-associate-public-ip-address\n\n# ── STORAGE: Object Storage (S3) ────────────────────────────────────────────\n# Create a bucket and upload a file\naws s3 mb s3://my-app-assets-20240101 --region us-east-1\naws s3 cp ./dist/bundle.js s3://my-app-assets-20240101/static/bundle.js\n\n# Sync an entire directory (incremental upload)\naws s3 sync ./dist/ s3://my-app-assets-20240101/static/ --delete\n\n# Generate a pre-signed URL (time-limited access without making bucket public)\naws s3 presign s3://my-app-assets-20240101/private/report.pdf --expires-in 3600\n\n# ── STORAGE: Block Storage (EBS) ────────────────────────────────────────────\n# Create a 100 GB gp3 volume in us-east-1a with 6000 IOPS\naws ec2 create-volume \\\n  --size 100 \\\n  --volume-type gp3 \\\n  --availability-zone us-east-1a \\\n  --iops 6000 \\\n  --throughput 250\n\n# Create a snapshot for cross-AZ migration or backup\naws ec2 create-snapshot \\\n  --volume-id vol-0abc123 \\\n  --description \"Pre-deploy snapshot $(date +%Y%m%d)\"\n\n# ── NETWORKING: VPC and Security Groups ─────────────────────────────────────\n# Create a security group for web servers\naws ec2 create-security-group \\\n  --group-name web-sg \\\n  --description \"Web tier: HTTPS from internet\" \\\n  --vpc-id vpc-0abc123\n\n# Allow HTTPS from internet; Postgres only from the web security group\naws ec2 authorize-security-group-ingress \\\n  --group-id sg-web --protocol tcp --port 443 --cidr 0.0.0.0/0\n\naws ec2 authorize-security-group-ingress \\\n  --group-id sg-db  --protocol tcp --port 5432 \\\n  --source-group sg-web  # only instances in sg-web can reach the database",
+      "explanation": "The security group source-group rule (`--source-group sg-web`) is more robust than an IP CIDR rule: as EC2 instances scale in and out, new instances automatically inherit their group membership, so the database rule applies without any IP management. The pre-signed URL pattern lets you serve private S3 objects to authenticated users without making the bucket public — a common pattern for downloadable invoices, reports, and user-uploaded files."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Networking: Virtual Private Cloud — Your Isolated Network",
+      "content": "A **Virtual Private Cloud (VPC)** is a logically isolated section of a cloud provider's network that you define and control. It is software-defined networking: routers, switches, firewalls, and NAT gateways are all running as software on the provider's physical infrastructure, but they behave from your perspective exactly like dedicated hardware you own.\n\nWhen you create a VPC, you assign it a **CIDR block** — a range of private IP addresses (e.g., `10.0.0.0/16` gives you 65,536 addresses from `10.0.0.0` to `10.0.255.255`). You carve this range into **subnets**, each associated with one Availability Zone. A `/24` subnet (e.g., `10.0.1.0/24`) provides 256 addresses, with 5 reserved by AWS for routing, broadcasting, and internal DNS.\n\n**The internet gateway / route table distinction** is fundamental. A subnet is **public** if its route table has a route sending `0.0.0.0/0` traffic to an **Internet Gateway (IGW)**. A subnet is **private** if its default route sends internet-bound traffic to a **NAT Gateway** (or has no route at all). Instances in a public subnet can have public IP addresses and receive inbound traffic from the internet. Instances in a private subnet cannot receive inbound internet traffic under any circumstances — even if you misconfigure a security group to allow it, there is simply no network path. This is the correct defense-in-depth posture for databases and internal services.\n\nFor private instances that need to download software or reach external APIs (outbound internet), a **NAT Gateway** in the public subnet allows outbound connections while keeping the private instance unreachable from outside. The NAT Gateway has a public IP and translates outbound traffic from private instances, but does not forward unsolicited inbound connections back to them.\n\n**VPC Peering** connects two VPCs (in the same or different accounts/regions) so their instances can communicate using private IP addresses without traversing the internet. **AWS PrivateLink** lets you expose a service from one VPC to another through an endpoint, without peering the entire networks. **Transit Gateway** acts as a regional hub, connecting many VPCs and on-premise networks through one managed router — the enterprise-grade alternative to the complex mesh of VPC peering connections that becomes unmanageable at scale."
+    },
+    {
+      "type": "explanation",
+      "title": "Networking: Security Groups and Network ACLs",
+      "content": "Cloud networking provides two layers of traffic filtering that are often confused.\n\n**Security Groups** are **stateful** virtual firewalls attached to individual **network interfaces** (i.e., specific EC2 instances or RDS databases). Stateful means: if you create an inbound rule allowing TCP on port 443, the corresponding outbound response traffic is automatically allowed without needing an explicit outbound rule. Security groups are **deny by default** — all inbound traffic is blocked unless explicitly permitted. You can reference other security groups as a source (e.g., \"allow port 5432 from sg-web\"), which is cleaner than IP ranges because it updates automatically as instances join or leave the group.\n\n**Network ACLs (NACLs)** are **stateless** firewalls attached to entire **subnets**. Stateless means: you must explicitly allow both inbound and outbound traffic for a connection. NACLs evaluate rules in numbered order (100, 200, 300…) and stop at the first match. They are a coarser tool — typically used for subnet-wide blocks (e.g., denying traffic from a known malicious IP range) rather than instance-level policy. For most architectures, security groups provide sufficient control and NACLs add operational complexity without proportional benefit.\n\nThe **principle of least privilege** is the guiding rule: allow only the minimum required traffic from the minimum required sources on the minimum required ports. Common patterns:\n- Public-facing load balancer: allow TCP 80 and 443 from `0.0.0.0/0`; allow nothing else inbound.\n- Application servers: allow traffic only from the load balancer's security group, not from the open internet.\n- Database: allow the database port (5432 for Postgres, 3306 for MySQL) only from the application servers' security group.\n- All outbound: allow all outbound from app servers (they need to reach S3, external APIs, etc.) but restrict database outbound to only what is needed."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Internet[\"Internet\"] --> IGW[\"Internet Gateway\"]\n  subgraph VPC[\"VPC 10.0.0.0/16\"]\n    IGW --> ALB[\"ALB\\nsg: 443 from 0.0.0.0/0\"]\n    subgraph PubSub[\"Public Subnet 10.0.1.0/24\"]\n      ALB\n      NATGW[\"NAT Gateway\"]\n    end\n    subgraph PrivSub[\"Private Subnet 10.0.2.0/24\"]\n      App[\"App Servers\\nsg: 443 from ALB-sg\"]\n      RDS[\"RDS Postgres\\nsg: 5432 from App-sg\"]\n    end\n    ALB --> App\n    App --> RDS\n    App --> NATGW\n    NATGW --> IGW\n  end",
+      "caption": "Security group chaining: the ALB accepts HTTPS from the internet; app servers accept traffic only from the ALB's security group; RDS accepts Postgres connections only from the app servers' security group. Private instances reach the internet via the NAT gateway for outbound calls."
+    },
+    {
+      "type": "explanation",
+      "title": "Networking: Load Balancers — Distributing Traffic for Scale and Resilience",
+      "content": "A **load balancer** sits in front of a fleet of compute instances and distributes incoming requests across them. This achieves two things simultaneously: **horizontal scale** (more traffic handled by adding more instances) and **high availability** (if one instance fails its health check, the load balancer stops routing to it within seconds).\n\nAWS provides three types, reflecting different layers of the OSI model:\n\n**Application Load Balancer (ALB)** operates at Layer 7 (HTTP/HTTPS). It terminates TLS, decrypts the request, inspects HTTP headers, URL path, hostname, and query parameters, and makes routing decisions based on rules. This enables powerful patterns:\n- **Path-based routing**: `/api/*` → backend microservice; `/*` → React SPA; `/images/*` → S3 bucket.\n- **Host-based routing**: `api.example.com` → API service; `admin.example.com` → admin service — all behind one ALB.\n- **Weighted target groups**: send 10% of traffic to a new canary version, 90% to the stable version — for blue/green deployments.\n- **User authentication**: ALB integrates with Cognito or OIDC to require login before routing requests, offloading auth from the application.\n\n**Network Load Balancer (NLB)** operates at Layer 4 (TCP/UDP/TLS). It does not inspect HTTP content — it simply forwards packets to a target based on port and IP. NLB is designed for **ultra-low latency** (sub-millisecond) and **very high throughput** (millions of connections per second). Use it for non-HTTP protocols (database proxies, MQTT, gaming servers, financial data feeds) or when the application requires static Elastic IPs for allowlisting.\n\n**Gateway Load Balancer (GWLB)** is a specialized type for routing traffic through third-party network appliances (firewalls, intrusion detection systems) transparently. It operates at Layer 3.\n\n**Health checks** are how the load balancer detects failures. For an ALB, it sends HTTP requests to each target on a configured path (e.g., `GET /health`) every 30 seconds (configurable) and expects a 2xx response within a timeout. After a configurable number of consecutive failures (unhealthyThresholdCount, default 2), the target is marked unhealthy and removed from rotation. This means an application crash is detected within 60 seconds and traffic automatically fails over to healthy instances — without human intervention."
+    },
+    {
+      "type": "code_example",
       "language": "yaml",
-      "label": "Concept",
-      "code": "# Storage type decision matrix\n\nobject_storage:\n  service: \"S3 / GCS / Azure Blob\"\n  best_for:\n    - \"Static assets, images, videos, backups\"\n    - \"ML training datasets\"\n    - \"Log archival (cheap + durable)\"\n  not_for:\n    - \"Database files (high-frequency random I/O)\"\n    - \"Mutable files needing in-place edits\"\n  pricing_approx: \"$0.023/GB-month (S3 Standard)\"\n\nblock_storage:\n  service: \"EBS / Persistent Disk / Azure Disk\"\n  best_for:\n    - \"Database storage (Postgres, MySQL)\"\n    - \"OS boot volumes\"\n    - \"Workloads needing low-latency random IOPS\"\n  not_for:\n    - \"Sharing across multiple instances simultaneously\"\n    - \"Long-term cold archival\"\n  pricing_approx: \"$0.08/GB-month (gp3)\"\n\nfile_storage:\n  service: \"EFS / Filestore / Azure Files\"\n  best_for:\n    - \"Shared filesystem across multiple instances\"\n    - \"Legacy apps expecting POSIX file access\"\n  pricing_approx: \"$0.30/GB-month (EFS Standard)\""
+      "label": "Example",
+      "code": "# Terraform: ALB with path-based routing to two target groups\n# This illustrates the compute + networking integration clearly\n\nresource \"aws_lb\" \"app\" {\n  name               = \"app-alb\"\n  load_balancer_type = \"application\"\n  security_groups    = [aws_security_group.alb.id]\n  subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]  # must span >= 2 AZs\n  enable_deletion_protection = true\n}\n\nresource \"aws_lb_listener\" \"https\" {\n  load_balancer_arn = aws_lb.app.arn\n  port              = 443\n  protocol          = \"HTTPS\"\n  ssl_policy        = \"ELBSecurityPolicy-TLS13-1-2-2021-06\"\n  certificate_arn   = aws_acm_certificate.cert.arn\n\n  # Default action: forward to frontend target group\n  default_action {\n    type             = \"forward\"\n    target_group_arn = aws_lb_target_group.frontend.arn\n  }\n}\n\n# Route /api/* to the backend service\nresource \"aws_lb_listener_rule\" \"api\" {\n  listener_arn = aws_lb_listener.https.arn\n  priority     = 100\n\n  condition {\n    path_pattern { values = [\"/api/*\"] }\n  }\n\n  action {\n    type             = \"forward\"\n    target_group_arn = aws_lb_target_group.backend.arn\n  }\n}\n\n# Backend target group with health check\nresource \"aws_lb_target_group\" \"backend\" {\n  name        = \"backend-tg\"\n  port        = 3000\n  protocol    = \"HTTP\"\n  vpc_id      = aws_vpc.main.id\n  target_type = \"ip\"  # for containers; use 'instance' for EC2\n\n  health_check {\n    path                = \"/health\"\n    healthy_threshold   = 2      # 2 consecutive successes → healthy\n    unhealthy_threshold = 2      # 2 consecutive failures  → unhealthy\n    interval            = 30     # check every 30 seconds\n    timeout             = 5      # expect response within 5s\n    matcher             = \"200\"  # only 200 OK is healthy\n  }\n}",
+      "explanation": "The ALB is placed in two public subnets across different AZs for high availability — if one AZ loses power, the ALB in the other AZ continues serving traffic. The path rule (priority 100) intercepts `/api/*` before the default rule, routing it to the backend. Health checks with unhealthyThresholdCount=2 and interval=30s mean a crashed container is removed from rotation within 60 seconds."
+    },
+    {
+      "type": "explanation",
+      "title": "Putting It Together: How the Three Pillars Interact",
+      "content": "Understanding each pillar in isolation is necessary but not sufficient. Real systems require careful thinking about how they interact, especially around **failure modes** and **latency boundaries**.\n\nConsider a web application with these components: an ALB distributing traffic to two EC2 instances in private subnets across two AZs, each instance with a mounted EBS volume for temporary work, a PostgreSQL RDS instance (Multi-AZ), and S3 for storing user uploads. What happens when:\n\n**An AZ goes down**: The ALB health checks detect the instance in the failed AZ and removes it. RDS fails over automatically to the standby replica in the healthy AZ (typically 60–120 seconds of downtime during the failover). S3 data is safe — it replicates across multiple AZs by design. The EBS volume in the failed AZ is unavailable, but because the instances used it only for temporary scratch space (not the database), no data is lost.\n\n**Traffic spikes 10x**: The ALB distributes load across the healthy instances. With **Auto Scaling**, the EC2 fleet can launch new instances within 2–5 minutes (time to provision, configure, and pass health checks) and register them with the ALB automatically. RDS may become the bottleneck — **read replicas** can absorb some read load, and **ElastiCache** (Redis) can cache frequent queries in memory, reducing database I/O.\n\n**A developer accidentally deletes a critical S3 object**: With **S3 Versioning** enabled, deleted objects are only soft-deleted (a delete marker is added). The previous version can be restored. Without versioning, the object is gone. For RDS, **automated backups** and **point-in-time recovery** let you restore to any second within the backup retention window (up to 35 days).\n\nThis failure-mode analysis is the core of **Well-Architected** design — understanding not just the happy path but what happens when each component fails, and ensuring that single-component failures do not cause total system outages."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**A brief history of cloud infrastructure abstractions**: AWS launched EC2 (virtual machines) in 2006 and S3 (object storage) the same year — two of the first cloud services ever offered commercially. VPCs were added in 2009 to give customers network isolation; before that, EC2 instances ran in a shared flat network (EC2-Classic) where any instance could potentially talk to any other. The Nitro hypervisor arrived in 2017 and fundamentally changed EC2 performance by offloading I/O to dedicated hardware, allowing VMs to approach bare-metal speeds. Containers reached the mainstream with Docker in 2013; AWS launched ECS in 2014 and EKS (managed Kubernetes) in 2018. This history explains why older AWS accounts may still have resources in EC2-Classic and why older architectures often look nothing like modern VPC-based designs."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "A common networking mistake is putting everything in a **public subnet** for simplicity. Always place databases, caches, and internal services in **private subnets** — they have no direct internet route, so even a misconfigured security group cannot expose them directly. The load balancer in the public subnet is the only internet-facing entry point."
+      "content": "**Common architectural mistakes and interview traps**:\n- **Putting databases in public subnets** — never do this. Even with a security group, a public subnet has a route to the internet. Private subnets are the correct defense-in-depth.\n- **Using object storage for database files** — object storage has 5–50ms latency per request. A database performing thousands of random I/Os per second would be catastrophically slow. Use block storage (EBS) for databases.\n- **Ignoring AZ scoping of EBS volumes** — an EBS volume in `us-east-1a` cannot attach to an instance in `us-east-1b`. This is a frequent source of failed failovers. Use Multi-AZ RDS or Aurora instead of manually managed EBS-attached databases.\n- **ALB vs NLB confusion**: ALB for HTTP/HTTPS (Layer 7, content-aware routing); NLB for raw TCP/UDP (Layer 4, ultra-low latency). Both perform health checks and distribute traffic — they differ in inspection depth and protocol support.\n- **Security group vs NACL**: security groups are stateful (response traffic auto-allowed) and instance-scoped; NACLs are stateless (must allow both directions) and subnet-scoped. In interviews, if asked 'what is stateful about security groups' — the key word is the return traffic rule is implicit."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Virtual machines** are billed, isolated compute units; **containers** share the host OS kernel and are lighter, faster to start, and more portable.",
-        "**Object storage** (S3) is cheap, massively scalable, and durable — ideal for files, backups, and assets; not for database IOPS.",
-        "**Block storage** (EBS) behaves like a physical disk — use it for databases and OS volumes where random I/O performance matters.",
-        "**VPCs** provide network isolation; public subnets have internet access, private subnets do not — always keep databases in private subnets.",
-        "**Security groups** are stateful firewall rules attached to instances; always apply least-privilege rules (deny by default, allow only required ports from required sources).",
-        "**Application Load Balancers** route HTTP traffic at layer 7 (by path, host, headers); **Network Load Balancers** route at layer 4 for ultra-low latency TCP/UDP."
+        "**Virtual machines** virtualize hardware via a hypervisor, running a full guest OS per instance — strong isolation, minutes to boot, high per-instance RAM overhead. Choose instance families by workload: `t`-series for burstable general-purpose, `c`-series for CPU-intensive, `r`-series for memory-intensive, `p`-series for GPU/ML.",
+        "**Containers** share the host OS kernel via Linux namespaces and cgroups — millisecond startup, no OS overhead, 10x denser than VMs, but shallower isolation. Stateless by design; persistent data lives in external storage (managed databases or EBS volumes mounted as K8s PersistentVolumes).",
+        "**Object storage** (S3) is the cheapest (~$0.023/GB-month), most durable (11 nines), and most scalable storage option — ideal for blobs, backups, assets, and data lakes. Access is via HTTP GET/PUT (not POSIX); latency is 5–50ms, making it unsuitable for database random I/O.",
+        "**Block storage** (EBS) behaves like a local disk — low-latency random IOPS for databases and OS volumes. Zone-scoped (an EBS volume in AZ-a cannot attach to an instance in AZ-b). Use `gp3` for general workloads, `io2` for high-IOPS databases. Snapshots enable cross-AZ copies.",
+        "**File storage** (EFS) provides POSIX-compatible shared NFS storage mountable by many instances simultaneously — use only when legacy apps require it or when multiple instances need shared write access to a filesystem. ~13x more expensive than S3 per GB.",
+        "**VPCs** are isolated virtual networks you define; public subnets route internet-bound traffic through an Internet Gateway; private subnets route outbound traffic through a NAT Gateway but have no inbound internet path — always place databases and internal services in private subnets.",
+        "**ALBs** operate at HTTP Layer 7 (path-based, host-based, header-based routing; TLS termination; Cognito auth); **NLBs** at TCP/UDP Layer 4 (ultra-low latency, static IPs, non-HTTP protocols). Security groups are stateful instance-level firewalls; NACLs are stateless subnet-level firewalls — prefer security groups for most access control."
       ]
     }
   ],
@@ -67,133 +125,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "Which storage type should you use for a PostgreSQL database on a cloud VM?",
+      "question": "Which storage type should you use for a PostgreSQL database running on a cloud VM, and why?",
       "type": "mcq",
       "options": [
-        "Object storage (S3) — cheapest per GB",
-        "Block storage (EBS) — low-latency random IOPS for database workloads",
-        "File storage (EFS) — shared across all database replicas",
-        "In-memory storage — fastest possible access"
+        "Object storage (S3) — cheapest per GB and massively durable",
+        "Block storage (EBS gp3) — low-latency random IOPS required for database random read/write patterns",
+        "File storage (EFS) — shared across all database replicas simultaneously",
+        "Local instance store — fastest NVMe, best for all database workloads"
       ],
       "correct": 1,
-      "explanation": "Databases require low-latency random read/write access. Block storage (EBS/Persistent Disk) behaves like a local disk and provides the IOPS and latency characteristics databases need."
+      "explanation": "Databases perform thousands of random reads and writes per second, requiring sub-millisecond latency. Block storage (EBS) behaves like a physical disk with predictable IOPS. Object storage has 5–50ms per-request latency — catastrophic for database I/O. Local instance store is fast but ephemeral (data lost on stop/terminate) and not suitable for production databases."
     },
     {
       "id": "q2",
-      "question": "What is the key difference between containers and virtual machines?",
+      "question": "What is the fundamental technical difference between containers and virtual machines?",
       "type": "mcq",
       "options": [
-        "Containers run a full OS; VMs share the host kernel",
-        "VMs run a full OS; containers share the host OS kernel via namespaces",
-        "Containers are only for stateless workloads; VMs always have persistent storage",
-        "VMs start faster than containers because they are optimized hardware"
+        "Containers run a full guest OS; VMs share the host kernel",
+        "VMs run a full guest OS on a hypervisor; containers share the host OS kernel via namespaces and cgroups",
+        "Containers are only used for stateless workloads; VMs always include persistent storage",
+        "VMs start in milliseconds; containers take minutes because they include more dependencies"
       ],
       "correct": 1,
-      "explanation": "VMs virtualize hardware and run a complete guest OS. Containers share the host OS kernel using Linux namespaces and cgroups, making them faster to start and more resource-efficient."
+      "explanation": "VMs virtualize hardware and run a complete guest OS (kernel included) on top of a hypervisor. Containers share the host OS kernel, using Linux namespaces for isolation and cgroups for resource limits. This makes containers lighter (~millisecond startup) but with shallower isolation than VMs."
     },
     {
       "id": "q3",
-      "question": "An application needs to serve 10 TB of static images to users. Which storage type is most cost-effective?",
+      "question": "An application needs to serve 50 TB of user-uploaded images globally with low cost. Which architecture is most appropriate?",
       "type": "mcq",
       "options": [
-        "Block storage attached to EC2 instances",
-        "File storage mounted via NFS across app servers",
-        "Object storage (S3) with CloudFront CDN",
-        "In-memory Redis cache"
+        "EBS gp3 volumes attached to EC2 instances in each region",
+        "EFS shared filesystem mounted by web servers in each AZ",
+        "S3 object storage with CloudFront CDN for global edge caching",
+        "An in-memory Redis cluster for maximum throughput"
       ],
       "correct": 2,
-      "explanation": "Object storage is ~$0.023/GB-month vs ~$0.08/GB-month for block storage. Combined with a CDN, it serves static content with low latency globally at minimal cost — the standard pattern for image/asset serving."
+      "explanation": "S3 at ~$0.023/GB-month is 3.5x cheaper than EBS and 13x cheaper than EFS for the same data volume. Combined with CloudFront CDN, images are cached at edge locations near users globally. EBS cannot be accessed by multiple instances simultaneously (single-attach). Redis is an in-memory cache unsuitable for 50 TB of durable storage."
     },
     {
       "id": "q4",
-      "question": "A private subnet differs from a public subnet in that:",
+      "question": "You need to move an EBS volume from us-east-1a to us-east-1b. What is the correct approach?",
       "type": "mcq",
       "options": [
-        "Private subnets use IPv6; public subnets use IPv4",
-        "Private subnets have no route to an internet gateway; resources cannot receive direct internet traffic",
-        "Private subnets are only for databases; public subnets are for web servers",
-        "Private subnets are cheaper because they use shared bandwidth"
+        "Detach from the instance in 1a and attach directly to an instance in 1b — EBS is regional",
+        "Create an EBS snapshot of the volume, then restore it as a new volume in us-east-1b",
+        "Enable EBS Multi-AZ replication in the volume settings",
+        "Use S3 Cross-Region Replication to copy the EBS data to 1b"
       ],
       "correct": 1,
-      "explanation": "A public subnet has a route to an internet gateway, allowing instances to have public IPs and receive inbound internet traffic. A private subnet has no such route — resources can initiate outbound connections via a NAT gateway but cannot receive unsolicited inbound traffic."
+      "explanation": "EBS volumes are zone-scoped — a volume in us-east-1a physically resides in that AZ and cannot be directly attached to an instance in us-east-1b. The correct process is: create a snapshot (stored durably in S3), then create a new volume from the snapshot in the target AZ. EBS does not have a built-in Multi-AZ replication feature."
     },
     {
       "id": "q5",
-      "question": "An Application Load Balancer (ALB) operates at which OSI layer and what capability does that enable?",
+      "question": "What is the critical difference between a public subnet and a private subnet in a VPC?",
       "type": "mcq",
       "options": [
-        "Layer 4 (Transport) — routes by TCP port number",
-        "Layer 3 (Network) — routes by IP address",
-        "Layer 7 (Application) — routes by HTTP path, hostname, or headers",
-        "Layer 2 (Data Link) — routes by MAC address"
+        "Private subnets use IPv6; public subnets use IPv4",
+        "Public subnets have a route to an Internet Gateway, allowing inbound internet traffic; private subnets do not",
+        "Private subnets are cheaper because they do not use an internet gateway",
+        "Public subnets are only for load balancers; private subnets are only for databases"
       ],
-      "correct": 2,
-      "explanation": "ALBs inspect HTTP/HTTPS traffic (layer 7) and can route based on URL path (/api/* → backend service, /* → frontend), hostname, or custom headers. This enables path-based routing for microservices behind a single load balancer."
+      "correct": 1,
+      "explanation": "The distinction is purely routing: a public subnet has a route table entry sending 0.0.0.0/0 to an Internet Gateway, allowing instances to receive inbound internet traffic (if they also have a public IP). Private subnets lack this route, so instances cannot receive unsolicited inbound internet traffic regardless of security group configuration — defense in depth."
     },
     {
       "id": "q6",
-      "question": "A security group rule allows port 5432 from security group `sg-web`. What does this mean?",
+      "question": "An Application Load Balancer (ALB) operates at OSI Layer 7. What routing capability does this enable that a Network Load Balancer (Layer 4) cannot provide?",
       "type": "mcq",
       "options": [
-        "Any server on the internet can reach port 5432",
-        "Only instances associated with sg-web can reach port 5432 on the protected resource",
-        "Port 5432 traffic is encrypted end-to-end",
-        "Only the specific IP addresses in sg-web's inbound rules can connect"
+        "Distributing traffic across multiple EC2 instances",
+        "Performing health checks on target instances",
+        "Routing based on HTTP URL path, hostname, or headers — for example /api/* to a backend service",
+        "Terminating TLS and decrypting HTTPS traffic"
       ],
-      "correct": 1,
-      "explanation": "Referencing a security group as the source means only instances that belong to that security group can send traffic to the protected port. This is safer than IP-based rules because it adapts automatically as instances are added or removed."
+      "correct": 2,
+      "explanation": "ALBs inspect decrypted HTTP content (Layer 7) and can route based on URL path (/api/* → backend microservice, /* → frontend SPA), hostname (api.example.com vs admin.example.com), or request headers. NLBs operate at Layer 4 (TCP/UDP) and route only based on IP and port — they cannot inspect HTTP content. Both can perform health checks and terminate TLS."
     },
     {
       "id": "q7",
-      "question": "An EBS volume created in `us-east-1a` cannot be directly attached to an EC2 instance in `us-east-1b`. Why?",
+      "question": "A security group rule on your database allows port 5432 from source sg-app (the application server security group). A new application server instance is launched and added to sg-app. Can this new instance reach the database?",
       "type": "mcq",
       "options": [
-        "EBS is a global service and availability zones are irrelevant",
-        "EBS volumes are zone-scoped and bound to a single availability zone",
-        "Cross-AZ attachment requires upgrading to the gp3 volume type",
-        "Security groups prevent cross-AZ block storage access"
+        "No — the security group rule caches the instance IPs at rule creation time",
+        "Yes — security group source references are dynamic and automatically include all instances in the referenced group",
+        "Only if the new instance is in the same Availability Zone as the database",
+        "Yes, but only after the security group rule is manually refreshed"
       ],
       "correct": 1,
-      "explanation": "EBS volumes are tied to a single AZ. To use one in another AZ, you must create a snapshot and restore it in the target AZ. This is why databases should use managed services (RDS Multi-AZ) for cross-AZ resilience."
+      "explanation": "When a security group is referenced as a source, the rule dynamically applies to all instances currently associated with that security group — including newly launched instances. This is the key advantage of group-to-group rules over CIDR-based rules: no IP management required as the fleet scales."
     },
     {
       "id": "q8",
-      "question": "Which compute instance family would you choose for a machine learning training workload?",
+      "question": "Why is EFS (Elastic File System) approximately 13x more expensive per GB than S3 Standard?",
       "type": "mcq",
       "options": [
-        "t3 — burstable general purpose for variable workloads",
-        "r5 — memory-optimized for in-memory databases",
-        "p3 — GPU instances for ML training",
-        "c5 — compute-optimized for CPU-bound web servers"
+        "EFS stores data in multiple regions simultaneously for global access",
+        "EFS provides POSIX-compatible shared filesystem semantics with synchronous consistency, requiring more complex distributed storage infrastructure",
+        "EFS automatically encrypts all data at rest with dedicated hardware security modules",
+        "EFS uses faster NVMe hardware than S3"
       ],
-      "correct": 2,
-      "explanation": "ML training is GPU-intensive. AWS p3 instances include NVIDIA V100 GPUs. t3 is for general-purpose burstable workloads, r5 for memory-heavy workloads, and c5 for CPU-intensive compute."
+      "correct": 1,
+      "explanation": "EFS must maintain POSIX semantics (atomic rename, file locking, synchronous consistency) across a distributed NFS system mountable by hundreds of instances simultaneously. This requires significantly more complex infrastructure than S3's eventually-consistent key-value store model. The added complexity — not hardware differences — drives the price premium. S3 ~$0.023/GB-month; EFS ~$0.30/GB-month."
     },
     {
       "id": "q9",
-      "question": "What is the VPC's CIDR block (e.g., 10.0.0.0/16) used for?",
+      "question": "What is the key architectural reason to always place an ALB in at least two public subnets across different Availability Zones?",
       "type": "mcq",
       "options": [
-        "It sets the maximum bandwidth for the VPC",
-        "It defines the private IP address range allocated to the VPC",
-        "It specifies which AWS regions the VPC spans",
-        "It controls the number of security groups allowed"
+        "ALBs require two subnets to distribute SSL certificate processing load",
+        "AWS billing is cheaper with multi-AZ ALB configurations",
+        "If one AZ experiences an outage, the ALB nodes in the surviving AZs continue serving traffic, providing high availability",
+        "Security groups can only be attached to multi-AZ load balancers"
       ],
-      "correct": 1,
-      "explanation": "The CIDR block defines the private IP address space of the VPC. /16 provides 65,536 addresses. Subnets carve out smaller ranges (/24 = 256 addresses) from this pool for different tiers."
+      "correct": 2,
+      "explanation": "An ALB deploys load balancer nodes in each specified AZ. If an AZ fails (power, networking, hardware), the nodes in other AZs take over automatically. A single-AZ ALB is a single point of failure — if that AZ has an outage, the entire application goes down. Multi-AZ deployment is a fundamental high availability requirement."
     },
     {
       "id": "q10",
-      "question": "File storage (EFS/Filestore) is the right choice when:",
+      "question": "What is the key difference between Security Groups and Network ACLs (NACLs) in a VPC?",
       "type": "mcq",
       "options": [
-        "You need the cheapest possible storage per GB",
-        "Multiple compute instances need simultaneous read/write access to the same filesystem",
-        "You need maximum random IOPS for a relational database",
-        "You are storing immutable objects accessed via HTTP"
+        "Security groups apply to subnets; NACLs apply to individual instances",
+        "Security groups are stateful (return traffic auto-allowed) and instance-scoped; NACLs are stateless (must explicitly allow both directions) and subnet-scoped",
+        "NACLs support security group references as sources; security groups only support CIDR blocks",
+        "Security groups evaluate all rules simultaneously; NACLs only evaluate the first matching rule and require numbered priorities"
       ],
       "correct": 1,
-      "explanation": "File storage provides a POSIX-compatible shared filesystem mountable by multiple instances simultaneously. This is the key use case — block storage is single-instance; object storage is HTTP-based, not POSIX."
+      "explanation": "Security groups are stateful: an allowed inbound connection automatically permits the corresponding outbound response without an explicit rule. NACLs are stateless: you must create separate inbound and outbound rules for each allowed traffic flow, including ephemeral port ranges for responses. Security groups attach to instances/ENIs; NACLs attach to subnets and affect all resources in the subnet. Note: NACLs do evaluate rules in order and stop at the first match — but this is a secondary detail; the stateful vs stateless distinction is the primary difference."
     }
   ]
 }

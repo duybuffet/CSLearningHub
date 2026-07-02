@@ -5,57 +5,138 @@
   "week": 26,
   "icon": "database",
   "tagline": "The four guarantees that keep your data sane, and the tree structures that make queries fast.",
-  "readTime": "~12 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Every time a bank transfer moves money between accounts, two things must happen or neither should happen. Databases enforce this with **transactions** — a unit of work that either commits fully or rolls back entirely. The rules governing correct behavior are captured by the **ACID** properties: Atomicity, Consistency, Isolation, and Durability.\n\nBeyond correctness, speed matters. A table with millions of rows responds to `WHERE email = ?` in milliseconds only because of **indexes** — auxiliary data structures, most commonly **B-trees**, that let the database binary-search rather than full-scan."
+      "content": "Imagine a bank transfer: $100 leaves account A and arrives in account B. Two separate write operations, separated in time by microseconds. What happens if the server crashes after the debit but before the credit? Without special guarantees, the money simply vanishes — debited from one account, never credited to another. Databases solve this with **transactions** and a contract called **ACID**.\n\n**ACID** stands for Atomicity, Consistency, Isolation, and Durability. These four properties, codified in the late 1970s by Jim Gray and Andreas Reuter, describe what a database must guarantee for every unit of work it processes. They are not optional niceties — they are the minimum bar for software that handles real money, healthcare records, or any data that cannot afford to be wrong.\n\nBut correctness alone is not enough. A fully ACID database that takes three seconds to answer `SELECT * FROM orders WHERE user_id = 42` on a million-row table is nearly useless in production. Speed comes from **indexes** — auxiliary data structures that let the database jump directly to matching rows instead of scanning every page on disk. The most common index type, the **B-tree**, is a masterpiece of practical computer science: self-balancing, disk-friendly, and capable of supporting both exact lookups and range queries in O(log n) time.\n\nThis chapter builds a deep understanding of both pillars. We will trace a transaction through all four ACID properties, understand what the database actually does on disk to provide these guarantees, explore isolation anomalies and how different isolation levels prevent them, then switch to indexes — how B-trees are structured, when the query planner chooses them, and how to read `EXPLAIN ANALYZE` output to diagnose slow queries. We will also cover normalization, which determines how data is laid out across tables and directly affects both query performance and data integrity."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  A[\"BEGIN TRANSACTION\"] --> B[\"Write op 1\\nDebit $100\"]\n  B --> C[\"Write op 2\\nCredit $100\"]\n  C --> D{\"All OK?\"}\n  D -->|\"YES\"| E[\"COMMIT\\nDurable on disk\"]\n  D -->|\"NO / crash\"| F[\"ROLLBACK\\nAll writes undone\"]\n  E --> G[\"Consistent state\"]\n  F --> G",
-      "caption": "A transaction is atomic: both writes land or neither does. COMMIT makes changes durable; ROLLBACK erases them."
+      "mermaid": "flowchart TD\n  A[\"Application\"] --> B[\"BEGIN TRANSACTION\"]\n  B --> C[\"Write 1: Debit $100\"]\n  C --> D[\"Write 2: Credit $100\"]\n  D --> E{\"All OK?\"}\n  E -->|\"YES\"| F[\"COMMIT\"]\n  E -->|\"ERROR or crash\"| G[\"ROLLBACK\"]\n  F --> H[\"WAL flushed to disk\"]\n  G --> I[\"All writes undone\"]\n  H --> J[\"Consistent durable state\"]\n  I --> J",
+      "caption": "A transaction is an all-or-nothing unit. COMMIT flushes the write-ahead log (WAL) for durability; ROLLBACK erases every partial write."
     },
     {
       "type": "analogy",
-      "title": "The Restaurant Bill",
-      "content": "Think of a transaction like splitting a restaurant bill. Either the waiter charges your card AND marks the table paid, or neither happens. If the terminal crashes mid-swipe, the transaction rolls back — your card shows no charge and the table is still open. ACID is the set of contracts between you and the restaurant that ensures no money vanishes or duplicates in the process."
+      "title": "The Restaurant Bill — and the Hotel Safe",
+      "content": "Picture splitting a restaurant bill with a friend. The waiter charges your card and marks the table paid. If the terminal crashes mid-swipe, the transaction rolls back — your card shows no charge and the table is still open. Nothing is lost or duplicated. That is **Atomicity**: the charge and the table-mark happen together or not at all.\n\nNow imagine the waiter also records every transaction in a tamper-proof ledger before touching anything else. Even if the restaurant burns down after you sign the receipt, the ledger (stored off-site) proves you paid. That is **Durability** — the write-ahead log is the database's off-site ledger.\n\n**Isolation** is the privacy screen between your table and the next. Your party's unfinished order does not appear on their bill, and their drinks do not show up on yours, even though the kitchen handles both simultaneously.\n\n**Consistency** is the restaurant's rule book: every meal must have a seat, every charge must map to an order. No transaction is allowed to leave the database in a state that violates those rules."
     },
     {
       "type": "explanation",
-      "content": "**Atomicity** means every statement in a transaction succeeds together or fails together — no partial state. **Consistency** means a transaction must leave the database in a state that satisfies all defined rules (foreign keys, unique constraints, check constraints). **Isolation** controls what a running transaction can see of other concurrent transactions; the default in most databases is *Read Committed*, but stronger levels like *Serializable* prevent phantom reads entirely. **Durability** means once COMMIT returns, the data survives crashes — achieved by writing to a **write-ahead log (WAL)** before touching data pages.\n\n**Normalization** reduces redundancy by decomposing tables into forms. **1NF** demands atomic, single-valued cells with no repeating groups. **2NF** removes partial dependencies (non-key columns must depend on the *whole* primary key). **3NF** removes transitive dependencies (non-key columns must depend only on the key, not on other non-key columns). Over-normalizing hurts read performance; real systems often intentionally denormalize hot read paths.\n\n**Query optimization** starts with `EXPLAIN ANALYZE` — the database's execution plan. Key signals: `Seq Scan` means full table scan (add an index), `Index Scan` is fast, and high-cost nested loops on large tables often need a join rewrite. The optimizer uses table statistics (`ANALYZE`) to choose between scan strategies automatically."
+      "title": "Atomicity — All or Nothing",
+      "content": "**Atomicity** is the simplest ACID property to understand but surprisingly hard to implement correctly. It guarantees that all the SQL statements in a transaction execute as a single indivisible unit. Either every statement succeeds and the transaction commits, or an error occurs and the database rolls every statement back, leaving the data exactly as it was before `BEGIN`.\n\nThe database implements atomicity using an **undo log** (sometimes called a rollback segment). Before modifying any row, the database writes the *old* version of that row to the undo log. If a rollback is needed — whether triggered by application code, a constraint violation, or a crash — the database reads the undo log and reapplies the old values in reverse order.\n\nThis means `ROLLBACK` is not free. The database must undo every change in the transaction in reverse chronological order. Long-running transactions with thousands of writes can take seconds or even minutes to roll back, which is why keeping transactions short is a best practice.\n\nA subtle point: **DDL statements** (like `ALTER TABLE` or `DROP INDEX`) are atomic in PostgreSQL — you can roll them back. In MySQL with InnoDB they are also transactional. But in many older or simpler databases, DDL implicitly commits any open transaction. Always check your database's documentation before running schema changes inside a transaction."
+    },
+    {
+      "type": "explanation",
+      "title": "Consistency — Rules That Cannot Be Broken",
+      "content": "**Consistency** is the one ACID property that the *application* shares responsibility for with the database. The database enforces the consistency rules you define — primary keys, foreign key constraints, `NOT NULL`, `CHECK` constraints, `UNIQUE` constraints — and guarantees that no transaction can commit if it would violate any of them. But it is up to the developer to define those rules correctly.\n\nFor example: if you define a foreign key from `orders.user_id` to `users.id`, the database will reject any attempt to insert an order referencing a non-existent user, or to delete a user who still has orders (depending on your `ON DELETE` clause). Consistency means the database always remains in a **valid state** with respect to these invariants.\n\nNotice that Consistency overlaps with Atomicity and Isolation — it is actually *derived* from them. A system that is atomic and isolated will naturally maintain consistency provided the invariants were satisfied at the start of the transaction. This is why some database theorists consider Consistency slightly redundant in the acronym, but it remains important as a reminder that the application must declare its invariants to the database.\n\nReal-world consistency also includes **application-level invariants** the database cannot automatically enforce — for instance, \"account balances must never go negative.\" These require `CHECK` constraints, triggers, or application-level validation within the transaction."
+    },
+    {
+      "type": "explanation",
+      "title": "Isolation — Concurrent Transactions and Their Anomalies",
+      "content": "**Isolation** is the most complex ACID property. In production, dozens or thousands of transactions execute concurrently. Isolation controls what each transaction is allowed to *see* of the changes made by others that have not yet committed.\n\nWithout isolation, three classic anomalies can occur:\n\n**Dirty read**: Transaction A reads a row that Transaction B has modified but not yet committed. If B then rolls back, A has read data that never officially existed.\n\n**Non-repeatable read**: Transaction A reads a row, Transaction B updates and commits that row, then A reads the same row again and gets a different value. The same query returns different results within the same transaction.\n\n**Phantom read**: Transaction A runs a range query (e.g., `SELECT COUNT(*) FROM orders WHERE total > 100`), gets 50 rows. Transaction B inserts a new order with total 150 and commits. Transaction A runs the same range query again and gets 51 rows. A \"phantom\" row appeared.\n\nSQL defines four **isolation levels** that trade off correctness against throughput:\n\n- **Read Uncommitted** — allows dirty reads. Rarely used outside of very specific reporting scenarios.\n- **Read Committed** — the default in PostgreSQL and Oracle. Each statement sees only committed data *at the moment the statement starts*. Prevents dirty reads; allows non-repeatable reads and phantoms.\n- **Repeatable Read** — each transaction sees a consistent snapshot of committed data *at the moment the transaction starts*. Prevents dirty reads and non-repeatable reads; prevents phantoms in PostgreSQL (via MVCC) but not in the SQL standard.\n- **Serializable** — the strongest level. Transactions appear to execute one at a time, serially. Prevents all three anomalies. Implemented via predicate locking or optimistic concurrency control with cycle detection. Highest correctness but lowest throughput.\n\nMost production applications use **Read Committed** for OLTP (online transaction processing) and use `SELECT ... FOR UPDATE` when they need to lock specific rows for the duration of a transaction."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  Root[\"Root Node\\nkeys: 40\"] --> L[\"Internal Node\\nkeys: 10, 20\"]\n  Root --> R[\"Internal Node\\nkeys: 60, 80\"]\n  L --> LL[\"Leaf\\n1, 5, 10\"]\n  L --> LM[\"Leaf\\n15, 20\"]\n  L --> LR[\"Leaf\\n25, 30\"]\n  R --> RL[\"Leaf\\n45, 55\"]\n  R --> RR[\"Leaf\\n65, 70, 80\"]",
-      "caption": "B-tree index: a balanced tree where each lookup descends O(log n) nodes. Leaf nodes hold pointers to table rows."
+      "mermaid": "flowchart LR\n  A[\"Read Uncommitted\"] --> B[\"Read Committed\"]\n  B --> C[\"Repeatable Read\"]\n  C --> D[\"Serializable\"]\n  A -->|\"allows\"| E[\"Dirty reads\"]\n  B -->|\"allows\"| F[\"Non-repeatable reads\"]\n  C -->|\"allows in SQL std\"| G[\"Phantom reads\"]\n  D -->|\"prevents all\"| H[\"All anomalies blocked\"]",
+      "caption": "Each isolation level adds stronger guarantees at the cost of concurrency. Read Committed is the production default."
+    },
+    {
+      "type": "explanation",
+      "title": "Durability — Surviving Crashes with the Write-Ahead Log",
+      "content": "**Durability** guarantees that once a transaction commits, the changes survive any subsequent crash — power failure, OS panic, hardware fault. The database achieves this through the **write-ahead log (WAL)**, also called the redo log in some systems.\n\nThe WAL works like this: before the database modifies any actual data page in memory (the buffer pool), it first writes a description of the change to a sequential log file on disk. The log is written sequentially, which is far faster than random writes to data pages. Only after the WAL record is safely on disk does `COMMIT` return to the application.\n\nAfter a crash, during recovery, the database replays the WAL from the last checkpoint. Any transaction that had committed (its commit record is in the WAL) gets re-applied to the data pages. Any transaction that had not committed is simply ignored — those WAL records are discarded.\n\nThis two-phase approach — **WAL then data pages** — gives you the best of both worlds: sequential log writes for performance, and guaranteed recoverability. PostgreSQL calls this **WAL**; MySQL/InnoDB calls it the **redo log**; Oracle calls it the **redo log** as well.\n\nA critical subtlety: `fsync`. For WAL to guarantee durability, the log must actually reach the physical disk platter (or persistent SSD storage). Databases call `fsync()` or `fdatasync()` after writing the commit record to force the OS buffer cache to flush. Disabling `fsync` (a common but dangerous performance optimization) can destroy durability — your database may acknowledge commits that vanish on power loss. Never disable `fsync` in production unless you can afford to lose the last few seconds of transactions."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant App\n  participant DB\n  participant WAL\n  participant DataPages\n  App->>DB: BEGIN + write statements\n  DB->>WAL: Write change records\n  WAL-->>DB: fsync confirmed\n  DB->>App: COMMIT OK\n  Note over DB,DataPages: Data pages updated lazily\n  Note over WAL: On crash: replay WAL to restore",
+      "caption": "WAL is written and fsynced before COMMIT returns. Data pages are updated asynchronously for performance."
     },
     {
       "type": "code_example",
       "language": "sql",
-      "label": "Runtime",
-      "code": "-- 1. Run a transfer inside a transaction\nBEGIN;\n  UPDATE accounts SET balance = balance - 100 WHERE id = 1;\n  UPDATE accounts SET balance = balance + 100 WHERE id = 2;\n  -- If any error occurs, ROLLBACK is called; else COMMIT\nCOMMIT;\n\n-- 2. Create a B-tree index on a high-cardinality column\nCREATE INDEX idx_orders_user_id ON orders (user_id);\n\n-- 3. Inspect the query plan (PostgreSQL)\nEXPLAIN ANALYZE\n  SELECT * FROM orders WHERE user_id = 42;\n-- Look for: \"Index Scan using idx_orders_user_id\" — that's fast.\n-- \"Seq Scan\" means the planner ignored the index (low cardinality\n-- or table too small); add ANALYZE to refresh statistics.",
-      "explanation": "The transaction wraps both UPDATEs so a crash between them rolls both back. The index creation is a one-time O(n log n) cost that makes future WHERE user_id = ? queries O(log n) instead of O(n). EXPLAIN ANALYZE shows actual versus estimated row counts — divergence means stale statistics."
+      "label": "Example",
+      "code": "-- Bank transfer: the classic ACID transaction\nBEGIN;\n\n  -- Debit source account\n  UPDATE accounts\n  SET balance = balance - 100\n  WHERE id = 1;\n\n  -- Verify the account didn't go negative (application-level consistency)\n  -- In PostgreSQL you can use a CHECK constraint: balance >= 0\n  -- Here we abort manually if violated\n  DO $$\n  BEGIN\n    IF (SELECT balance FROM accounts WHERE id = 1) < 0 THEN\n      RAISE EXCEPTION 'Insufficient funds';\n    END IF;\n  END $$;\n\n  -- Credit destination account\n  UPDATE accounts\n  SET balance = balance + 100\n  WHERE id = 2;\n\nCOMMIT;\n-- If any statement raises an error, PostgreSQL automatically rolls back.\n-- The EXCEPTION in the DO block triggers ROLLBACK, leaving both\n-- accounts unchanged.\n\n-- Lock a row for the duration of a transaction (Repeatable Read semantics)\n-- Prevents another transaction from modifying user 42 until we commit\nBEGIN;\n  SELECT * FROM users WHERE id = 42 FOR UPDATE;\n  UPDATE users SET email = 'new@example.com' WHERE id = 42;\nCOMMIT;",
+      "explanation": "The DO block enforces an application-level invariant (non-negative balance) that the database CHECK constraint would catch automatically if defined on the schema. `FOR UPDATE` acquires a row-level lock, preventing phantom updates in concurrent transactions — useful when you need to read-then-write a row atomically."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "MVCC — How Modern Databases Achieve High Concurrency",
+      "content": "Locking every row that a transaction reads would serialize all concurrent work and destroy throughput. Modern databases instead use **Multi-Version Concurrency Control (MVCC)**. The key idea: instead of locking, the database keeps *multiple versions* of each row, stamped with transaction IDs. Readers see the version that was current when their transaction (or statement, depending on isolation level) started. Writers create a new version rather than overwriting the old one.\n\nIn PostgreSQL, every row has hidden system columns: `xmin` (the transaction ID that created this version) and `xmax` (the transaction ID that deleted or superseded it). When you read a row, PostgreSQL checks your transaction's snapshot — the set of transaction IDs that were committed when your snapshot was taken — and returns the row version whose `xmin` is in the snapshot and `xmax` is not.\n\nThe consequence is that **readers never block writers and writers never block readers**. Two transactions can both be reading and writing the same table simultaneously without either waiting for the other (unless they write the *same* row, which requires a brief lock).\n\nThe cost of MVCC is **dead tuples** (old row versions that no longer match any live snapshot). PostgreSQL's `VACUUM` process periodically reclaims these. A table that receives many updates without regular VACUUM will grow large with dead tuples, causing table bloat and degraded scan performance — a real production concern.\n\nMySQL/InnoDB implements MVCC differently, using a separate **undo tablespace** to reconstruct old row versions rather than storing them inline with live data. The mechanics differ, but the external behavior is similar: high read concurrency with minimal blocking."
+    },
+    {
+      "type": "explanation",
+      "title": "Indexes — Why Full Table Scans Kill Performance",
+      "content": "Consider a `users` table with 5 million rows. Each row is about 200 bytes. That is 1 GB of data stored across tens of thousands of 8 KB disk pages. When you run `SELECT * FROM users WHERE email = 'alice@example.com'`, without an index the database must read *every single page* — a **sequential scan**. On a typical disk, reading 1 GB takes hundreds of milliseconds. On a server under load, with many concurrent queries competing for I/O, that becomes seconds.\n\nAn **index** is a separate data structure that maps column values to the physical location of matching rows (heap tuples). Instead of scanning all 5 million rows, the database descends a tree in O(log n) steps — roughly 23 comparisons for 5 million rows — and jumps directly to the matching pages. The difference between a sequential scan and an index scan on a large table is often three to four orders of magnitude in wall clock time.\n\nEvery index trades **write overhead for read speed**. When you insert or update a row, every index on that table must also be updated. This is why a table with 20 indexes can be significantly slower to write to than a table with 3 — each write triggers 20 separate index updates. The art of indexing is choosing which columns deserve an index based on the actual query patterns and the write-to-read ratio of the workload."
+    },
+    {
+      "type": "explanation",
+      "title": "B-Trees — The Index Structure Behind 99% of Database Indexes",
+      "content": "The **B-tree** (Balanced tree) was invented by Rudolf Bayer and Edward McCreight at Boeing in 1970, in a paper titled 'Organization and Maintenance of Large Ordered Indexes'. It was designed specifically to work efficiently with *disk storage* — where reading a single page from disk is orders of magnitude slower than reading the next memory word, so minimizing the number of disk reads matters enormously.\n\nA B-tree has three kinds of nodes:\n\n**Root node**: the top of the tree. Every search starts here. In a large index, the root is typically cached permanently in memory.\n\n**Internal nodes**: each holds an array of keys and pointers to child nodes. The keys partition the search space: if you are looking for key K, you follow the pointer between the key just less than K and the key just greater than K.\n\n**Leaf nodes**: the bottom level. Each leaf holds actual index entries — the indexed column value plus a pointer (physical location, called a `ctid` in PostgreSQL or a `rowid` in Oracle) to the actual heap row. In a **B+ tree** (the variant most databases use), all data lives in leaf nodes, and leaf nodes are linked in a doubly-linked list for efficient range scans.\n\nThe `B` in B-tree is sometimes said to stand for Bayer, sometimes Boeing, sometimes Balanced. The defining property is that **all leaf nodes are at the same depth**, and every node is kept between half-full and completely full. Insertions and deletions are followed by rebalancing (splits and merges) to maintain this invariant. This guarantees O(log n) height regardless of insertion order.\n\nA critical disk-friendly property: each node corresponds to one disk page (typically 8 KB in PostgreSQL). A single node can hold hundreds of keys. A B-tree over 1 billion rows typically has a height of only 4–5 — meaning a lookup touches at most 5 disk pages, regardless of table size. Compare that to a binary search tree over the same data, which would have height ~30 and require 30 random disk reads."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Root[\"Root Node\\nkeys: 30, 70\"] --> L[\"Internal Node\\nkeys: 10, 20\"]\n  Root --> M[\"Internal Node\\nkeys: 40, 55\"]\n  Root --> R[\"Internal Node\\nkeys: 80, 90\"]\n  L --> LL[\"Leaf: 1,5,10\"]\n  L --> LM[\"Leaf: 12,18,20\"]\n  L --> LR[\"Leaf: 22,25,29\"]\n  M --> ML[\"Leaf: 31,38,40\"]\n  M --> MR[\"Leaf: 45,50,55\"]\n  R --> RL[\"Leaf: 71,75,80\"]\n  R --> RR[\"Leaf: 82,90,95\"]",
+      "caption": "B+ tree: internal nodes route searches; leaf nodes store data and are linked for range scans. All leaves are at the same depth."
+    },
+    {
+      "type": "explanation",
+      "title": "Range Scans, Composite Indexes, and Index-Only Scans",
+      "content": "B-trees support not just exact lookups (`WHERE id = 42`) but also **range queries** (`WHERE created_at BETWEEN '2024-01-01' AND '2024-06-30'`). Because leaf nodes are sorted and linked, the database descends to the first matching leaf, then walks the linked list rightward until it exits the range. This is why B-trees vastly outperform hash indexes (which support only equality lookups) for range queries.\n\n**Composite indexes** (multi-column indexes) are powerful but require understanding the **leftmost prefix rule**. An index on `(last_name, first_name)` can serve queries on `last_name` alone or on `(last_name, first_name)` together, but *cannot* efficiently serve queries on `first_name` alone. The index is sorted first by `last_name`, then by `first_name` within each `last_name` — searching only by `first_name` requires a full index scan, which offers no benefit over a table scan.\n\nColumn order in a composite index matters: put the most selective column (the one that eliminates the most rows) first, and put columns used in range conditions last. An index on `(status, created_at)` works well for `WHERE status = 'pending' AND created_at > '2024-01-01'` — the equality predicate on `status` narrows to a small subset, then `created_at` is scanned as a range within that subset.\n\n**Index-only scans** are a performance superpower. If all the columns needed by a query are present in the index itself (either as indexed columns or as `INCLUDE`d columns in PostgreSQL 11+), the database never needs to touch the heap at all. `SELECT email FROM users WHERE email = 'alice@example.com'` with an index on `email` requires only the index — the heap row is never fetched. This eliminates the most expensive part of an index scan: the random heap access."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Q[\"Query: WHERE status='pending' AND created_at > 2024\"] --> I[\"Composite Index\\n(status, created_at)\"]\n  I --> L1[\"Descend to status='pending' section\"]\n  L1 --> L2[\"Walk leaves where created_at > 2024\"]\n  L2 --> H[\"Fetch heap rows by rowid\"]\n  H --> R[\"Return result set\"]",
+      "caption": "Composite index lookup: equality predicate narrows to a subtree, then range scan walks sorted leaves within that subtree."
+    },
+    {
+      "type": "code_example",
       "language": "sql",
-      "label": "Concept",
-      "code": "-- Normalization quick reference\n-- 1NF: no arrays in a cell\n--   BAD:  orders(id, items='pen,ruler,glue')\n--   GOOD: order_items(order_id, item_name)\n\n-- 2NF: no partial key dependency (composite keys)\n--   BAD:  order_items(order_id, product_id, product_name) -- name depends only on product_id\n--   GOOD: products(product_id, product_name)\n\n-- 3NF: no transitive dependency\n--   BAD:  employees(id, dept_id, dept_name) -- dept_name depends on dept_id not id\n--   GOOD: departments(dept_id, dept_name)\n\n-- Isolation levels (PostgreSQL)\n-- READ COMMITTED  -- default; sees committed rows at statement start\n-- REPEATABLE READ -- same rows throughout transaction\n-- SERIALIZABLE    -- full isolation, slowest"
+      "label": "Example",
+      "code": "-- 1. Create a simple B-tree index (the default type)\nCREATE INDEX idx_users_email ON users (email);\n\n-- 2. Composite index — order matters: equality columns first, range last\nCREATE INDEX idx_orders_status_created\n  ON orders (status, created_at DESC);\n\n-- 3. Index with INCLUDE for index-only scans (PostgreSQL 11+)\n--    The query below can be satisfied entirely from the index\nCREATE INDEX idx_users_email_include_name\n  ON users (email) INCLUDE (first_name, last_name);\n\nSELECT first_name, last_name FROM users WHERE email = 'alice@example.com';\n-- -> Index Only Scan (never touches heap)\n\n-- 4. Partial index — only index the rows you actually query\n--    This index is far smaller and faster than indexing all orders\nCREATE INDEX idx_orders_pending\n  ON orders (created_at)\n  WHERE status = 'pending';\n\n-- 5. EXPLAIN ANALYZE — read the actual execution plan\nEXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)\n  SELECT * FROM orders WHERE status = 'pending' AND created_at > '2024-01-01';\n-- Look for:\n--   \"Index Scan using idx_orders_status_created\" -> good\n--   \"Seq Scan\" on large table                    -> needs index\n--   actual rows vs. rows estimate divergence     -> stale stats, run ANALYZE\n--   Buffers: shared hit=X read=Y                 -> Y > 0 means disk I/O\n\n-- 6. Refresh table statistics (let planner make better decisions)\nANALYZE orders;",
+      "explanation": "The `INCLUDE` clause stores extra columns in leaf nodes without affecting sort order — they are invisible to the search but available for index-only scans. Partial indexes are a powerful tool: a partial index on `status = 'pending'` is tiny (only pending orders) and blazing fast for the common case of querying open work. `EXPLAIN (BUFFERS)` reveals whether the query hit disk or served from cache — a critical production tuning signal."
+    },
+    {
+      "type": "explanation",
+      "title": "Reading EXPLAIN ANALYZE — Diagnosing Slow Queries",
+      "content": "PostgreSQL's `EXPLAIN ANALYZE` is the primary tool for understanding why a query is slow. It executes the query, captures actual row counts and timings at each plan node, and returns the full execution plan. Learning to read it fluently is one of the highest-leverage database skills.\n\nKey terms in the output:\n\n**Seq Scan**: The planner is reading every row in the table. On a small table (<10,000 rows) this is often faster than an index scan because the overhead of the index is not worth it. On a large table with a selective WHERE clause, it almost always means a missing index.\n\n**Index Scan**: The planner uses an index to find rows, then fetches each matching heap row by its physical location. Each heap fetch is a random I/O, which is expensive if many rows match (say, >5-10% of the table). For large result sets, the planner may prefer a sequential scan.\n\n**Index Only Scan**: All needed columns are in the index; no heap access needed. The fastest read path.\n\n**Bitmap Heap Scan**: Used when many rows match the index condition. The database first collects all matching heap locations from the index into a bitmap, sorts them by physical location, then scans the heap in order (converting random I/Os to sequential I/Os). More efficient than a plain Index Scan when many rows match.\n\n**Hash Join / Nested Loop / Merge Join**: Join strategies. Nested Loop is fast when the inner table is small or indexed. Hash Join materializes one side into a hash table — good for large equi-joins. Merge Join works when both sides are sorted on the join key.\n\n**`rows=X` vs `actual rows=Y`**: A large divergence means the planner's statistics are stale. Run `ANALYZE table_name` to update them. Stale statistics are a leading cause of bad query plans.\n\nThe number to minimize is **cost** (in arbitrary units) and especially **actual time** in milliseconds. Filter nodes that discard many rows after fetching them suggest the wrong index or a missing composite index covering the filter column."
+    },
+    {
+      "type": "explanation",
+      "title": "Normalization — Designing Tables to Eliminate Redundancy",
+      "content": "**Normalization** is the process of organizing a relational schema to reduce data redundancy and prevent **update anomalies** — situations where updating one fact requires updating multiple rows, or where deleting a row inadvertently destroys unrelated data.\n\nThe normal forms are a hierarchy of increasingly strict rules:\n\n**First Normal Form (1NF)**: Every cell must contain a single, atomic value. No arrays in a column, no repeating groups, and each row must be uniquely identifiable (a primary key). \n\nViolation example: `orders(id, items='pen,ruler,glue')`. The `items` column contains a list — you cannot efficiently query for all orders containing 'ruler'. Fix: `order_items(order_id, item_name)`.\n\n**Second Normal Form (2NF)**: Applies only to tables with composite primary keys. Every non-key column must depend on the *entire* primary key, not just part of it.\n\nViolation example: `order_items(order_id, product_id, product_name, quantity)` where the primary key is `(order_id, product_id)`. `product_name` depends only on `product_id` — a partial dependency. Fix: extract `products(product_id, product_name)` and reference it by foreign key.\n\n**Third Normal Form (3NF)**: Every non-key column must depend *directly* on the primary key, not transitively through another non-key column.\n\nViolation example: `employees(id, dept_id, dept_name)`. `dept_name` depends on `dept_id`, which depends on `id`. The chain `id → dept_id → dept_name` is a transitive dependency. Fix: extract `departments(dept_id, dept_name)`.\n\n**Boyce-Codd Normal Form (BCNF)**: A stricter variant of 3NF that handles edge cases where a table has multiple overlapping candidate keys. Most production schemas in 3NF are also in BCNF.\n\nBeyond 3NF are 4NF (eliminates multi-valued dependencies) and 5NF (eliminates join dependencies). These are mainly academic in standard OLTP design.\n\n**Intentional denormalization**: Normalization reduces redundancy at the cost of requiring more JOIN operations to reassemble data. High-traffic read paths (product listing pages, dashboards) often justify storing **denormalized data** — duplicating columns that would otherwise require a JOIN — to avoid join overhead. The tradeoff is that denormalized copies must be kept in sync on writes, typically via application logic or triggers. Evaluate with `EXPLAIN ANALYZE` before denormalizing; a well-indexed join is often fast enough."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Unnormalized Table\"] --> B[\"1NF: Atomic cells\\nNo repeating groups\"]\n  B --> C[\"2NF: No partial\\nkey dependencies\"]\n  C --> D[\"3NF: No transitive\\ndependencies\"]\n  D --> E[\"BCNF: All determinants\\nare candidate keys\"]\n  E --> F[\"4NF / 5NF\\n(academic)\"]",
+      "caption": "Each normal form adds a stricter rule. Most production schemas target 3NF and denormalize deliberately where read performance demands it."
+    },
+    {
+      "type": "code_example",
+      "language": "sql",
+      "label": "Example",
+      "code": "-- NORMALIZATION: fixing common violations\n\n-- BAD (1NF violation): array in a cell\nCREATE TABLE orders_bad (\n  id      SERIAL PRIMARY KEY,\n  items   TEXT   -- 'pen,ruler,glue'\n);\n-- GOOD (1NF): separate table\nCREATE TABLE order_items (\n  order_id  INT REFERENCES orders(id),\n  item_name TEXT NOT NULL,\n  PRIMARY KEY (order_id, item_name)\n);\n\n-- BAD (2NF violation): partial key dependency\nCREATE TABLE order_items_bad (\n  order_id    INT,\n  product_id  INT,\n  product_name TEXT, -- depends only on product_id\n  quantity    INT,\n  PRIMARY KEY (order_id, product_id)\n);\n-- GOOD (2NF): extract products table\nCREATE TABLE products (\n  id   SERIAL PRIMARY KEY,\n  name TEXT NOT NULL\n);\n-- order_items references products(id)\n\n-- BAD (3NF violation): transitive dependency\nCREATE TABLE employees_bad (\n  id        SERIAL PRIMARY KEY,\n  dept_id   INT,\n  dept_name TEXT  -- depends on dept_id, not directly on id\n);\n-- GOOD (3NF): extract departments table\nCREATE TABLE departments (\n  id   SERIAL PRIMARY KEY,\n  name TEXT NOT NULL\n);\nCREATE TABLE employees (\n  id      SERIAL PRIMARY KEY,\n  dept_id INT REFERENCES departments(id)\n);\n\n-- Isolation level example\nBEGIN;\nSET TRANSACTION ISOLATION LEVEL SERIALIZABLE;\n  -- Both transactions will be checked for serializability conflicts\n  SELECT * FROM accounts WHERE balance > 1000;\n  UPDATE accounts SET balance = balance + 50 WHERE id = 99;\nCOMMIT; -- May raise: ERROR: could not serialize access due to read/write dependencies",
+      "explanation": "Normalization violations are fixed by decomposing tables and using foreign keys. The SERIALIZABLE example shows how the database enforces the strongest isolation level: if two concurrent serializable transactions would produce a result that could not have occurred if they ran serially, one is aborted with a serialization error and must be retried by the application."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Other index types beyond B-trees**: PostgreSQL supports several specialized index types. **Hash indexes** are O(1) for equality lookups but cannot support range queries or be used after a crash without being rebuilt (prior to PostgreSQL 10). **GIN (Generalized Inverted Index)** is used for full-text search and JSONB column querying — it maps each word or key to a list of rows containing it. **GiST (Generalized Search Tree)** supports geometric data, nearest-neighbor queries, and IP address range containment. **BRIN (Block Range Index)** is extremely compact and useful for very large tables with naturally ordered data (like time-series), where it stores only the min/max value per block of pages instead of an entry per row. Choosing the right index type is as important as choosing which columns to index."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Add indexes on foreign-key columns and any column that appears frequently in `WHERE`, `JOIN ON`, or `ORDER BY`. But don't index everything — each index costs an extra write on INSERT/UPDATE. A table with 20 indexes on a write-heavy path is often slower than one with 3 well-chosen indexes."
+      "content": "**Common mistakes and interview traps**: (1) Creating an index on a low-cardinality column like `status` (with values 'active'/'inactive') on a table where 90% of rows are 'active' — the planner will often ignore such an index and do a sequential scan, because a random index lookup followed by heap fetch for 90% of rows is slower than just scanning. (2) Forgetting that indexes must be updated on every write — a table with 15 indexes can be 3x slower to insert into than one with 2. (3) Using `SELECT *` when the index covers only a subset of columns — forces heap fetches that would be avoided with a more selective column list. (4) Running ROLLBACK after a long transaction without realizing the rollback itself can take as long as the forward transaction. (5) Disabling `fsync` in PostgreSQL to speed up tests without realizing this destroys durability guarantees — never carry this setting to production. (6) Confusing `REPEATABLE READ` in PostgreSQL (which uses MVCC snapshots and is phantom-safe) with the SQL standard definition (which does not prevent phantoms) — this PostgreSQL extension of the isolation level is stronger than the standard requires."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Atomicity** — all statements in a transaction commit or all roll back; no partial writes survive.",
-        "**Isolation** — concurrent transactions don't see each other's uncommitted changes; stronger levels prevent phantom reads at a cost to throughput.",
-        "**Durability** — COMMIT writes to a WAL first so data survives crashes even before flushing data pages.",
-        "**B-tree indexes** cut point-lookup and range-query cost from O(n) to O(log n); create them on high-cardinality filter columns.",
-        "**Normalization** (1NF → 2NF → 3NF) eliminates redundancy and anomalies; measure with EXPLAIN ANALYZE and denormalize deliberately when read speed demands it."
+        "**Atomicity** guarantees all-or-nothing execution: every statement in a transaction commits together or rolls back together, implemented via an undo log that reverses partial writes on failure.",
+        "**Isolation** controls visibility between concurrent transactions; the four levels (Read Uncommitted, Read Committed, Repeatable Read, Serializable) trade anomaly prevention against throughput, with Read Committed as the production default.",
+        "**Durability** is achieved by the write-ahead log (WAL): changes are written sequentially to a log and fsynced before COMMIT returns, so recovery replays the log after any crash.",
+        "**MVCC** (Multi-Version Concurrency Control) allows readers and writers to run concurrently without blocking each other by maintaining multiple timestamped row versions — but requires periodic VACUUM to reclaim dead tuple space.",
+        "**B-trees** keep all leaf nodes at the same depth (O(log n) height), support both equality and range queries via a linked leaf list, and are structured to minimize disk page reads — a height-5 tree handles a billion rows with five I/Os.",
+        "**Composite index column order** follows the leftmost prefix rule: put equality columns before range columns, and the most selective column first; an index on `(a, b)` cannot serve `WHERE b = ?` alone.",
+        "**Normalization** (1NF: atomic cells, 2NF: no partial key dependencies, 3NF: no transitive dependencies) eliminates update anomalies; intentional denormalization is acceptable when read performance requires it, but must be maintained carefully on writes."
       ]
     }
   ],
@@ -66,7 +147,7 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "Which ACID property guarantees that if a power outage occurs immediately after COMMIT, the data is still saved?",
+      "question": "Which ACID property guarantees that if the server crashes immediately after COMMIT returns, the committed data is still saved?",
       "type": "mcq",
       "options": [
         "Atomicity",
@@ -75,124 +156,124 @@
         "Durability"
       ],
       "correct": 3,
-      "explanation": "Durability ensures committed data persists across crashes, typically via a write-ahead log (WAL) that is flushed to disk before COMMIT returns."
+      "explanation": "Durability ensures committed data survives crashes. It is implemented via the write-ahead log (WAL), which is fsynced to disk before COMMIT returns to the application. On recovery, the database replays the WAL to restore the committed state."
     },
     {
       "id": "q2",
-      "question": "A transaction debits one account but crashes before crediting the other. What happens under correct ACID Atomicity?",
+      "question": "Transaction A reads a row. Transaction B updates and commits that row. Transaction A reads the same row again and sees a different value. Which isolation anomaly is this?",
       "type": "mcq",
       "options": [
-        "The debit is committed; the credit is retried later",
-        "Both operations are rolled back to the original state",
-        "The database marks the row as locked until manual fix",
-        "Only the debit is undone; credit is applied at restart"
+        "Dirty read",
+        "Non-repeatable read",
+        "Phantom read",
+        "Serialization failure"
       ],
       "correct": 1,
-      "explanation": "Atomicity means all-or-nothing. A crash rolls back the entire transaction, restoring both accounts to their pre-transaction values."
+      "explanation": "A non-repeatable read occurs when the same row is read twice within a transaction and yields different values because another transaction committed a change between the two reads. Repeatable Read isolation level prevents this."
     },
     {
       "id": "q3",
-      "question": "What data structure does most relational databases use for their default index?",
+      "question": "Why do B-trees (used in database indexes) have a much larger branching factor than binary trees, typically storing hundreds of keys per node?",
       "type": "mcq",
       "options": [
-        "Hash table",
-        "Skip list",
-        "B-tree",
-        "Red-black tree"
+        "To reduce memory usage in the buffer pool",
+        "To minimize the number of disk page reads per lookup",
+        "To allow faster key comparison using SIMD instructions",
+        "To support concurrent writers without locking"
       ],
-      "correct": 2,
-      "explanation": "B-trees (and their variant B+ trees) are the standard index structure because they stay balanced, support range queries, and map efficiently to disk pages."
+      "correct": 1,
+      "explanation": "Each B-tree node corresponds to one disk page. A large branching factor means fewer levels in the tree, so a lookup touches fewer disk pages. Disk I/O is orders of magnitude slower than memory access, so minimizing page reads is the primary design goal of B-trees."
     },
     {
       "id": "q4",
-      "question": "Which SQL command shows you the execution plan the database will use for a query?",
+      "question": "You have a composite index on (status, created_at). Which query can use this index efficiently?",
       "type": "mcq",
       "options": [
-        "DESCRIBE",
-        "ANALYZE",
-        "EXPLAIN ANALYZE",
-        "PROFILE"
+        "WHERE created_at > '2024-01-01'",
+        "WHERE status = 'pending' AND created_at > '2024-01-01'",
+        "WHERE created_at > '2024-01-01' AND status = 'pending'",
+        "Both B and C"
       ],
-      "correct": 2,
-      "explanation": "EXPLAIN ANALYZE executes the query and returns the actual plan with row counts and timing, helping identify sequential scans that need indexes."
+      "correct": 3,
+      "explanation": "The query optimizer can reorder WHERE predicates, so both B and C effectively use the index the same way: the equality predicate on status narrows to a B-tree subtree, then the range predicate on created_at is scanned within that subtree. Option A alone cannot use this index efficiently because status (the leading column) is not constrained."
     },
     {
       "id": "q5",
-      "question": "A table has columns (order_id, product_id, product_name, quantity). The primary key is (order_id, product_id). Which normal form violation does storing product_name here represent?",
+      "question": "A table has columns (order_id, product_id, product_name, quantity) with primary key (order_id, product_id). Storing product_name here violates which normal form, and why?",
       "type": "mcq",
       "options": [
-        "1NF violation — cells contain non-atomic values",
-        "2NF violation — product_name depends only on product_id, not the full composite key",
-        "3NF violation — product_name transitively depends on order_id",
-        "No violation — product_name is fine in this table"
+        "1NF — product_name contains non-atomic values",
+        "2NF — product_name depends only on product_id, not the full composite key",
+        "3NF — product_name transitively depends on order_id through product_id",
+        "BCNF — product_id is not a candidate key in this table"
       ],
       "correct": 1,
-      "explanation": "2NF requires every non-key attribute to depend on the entire primary key. product_name depends only on product_id (part of the key), which is a partial dependency — a 2NF violation."
+      "explanation": "2NF requires every non-key attribute to depend on the entire primary key. product_name is determined by product_id alone (a partial dependency on part of the composite key), which violates 2NF. The fix is to move product_name to a separate products table keyed by product_id."
     },
     {
       "id": "q6",
-      "question": "Which isolation level prevents 'phantom reads' (new rows appearing in a repeated range query)?",
+      "question": "What does MVCC (Multi-Version Concurrency Control) primarily eliminate?",
       "type": "mcq",
       "options": [
-        "Read Uncommitted",
-        "Read Committed",
-        "Repeatable Read",
-        "Serializable"
+        "The need for a write-ahead log",
+        "Read-write blocking between concurrent transactions",
+        "The need for table-level locks during DDL",
+        "Phantom reads at the Read Committed isolation level"
       ],
-      "correct": 3,
-      "explanation": "Serializable is the strictest level and prevents phantom reads by effectively making concurrent transactions appear as if they ran one after another."
+      "correct": 1,
+      "explanation": "MVCC allows readers to see a consistent snapshot of data without acquiring locks, while writers create new row versions rather than overwriting. This means readers never block writers and writers never block readers, dramatically increasing concurrency."
     },
     {
       "id": "q7",
-      "question": "You run EXPLAIN ANALYZE and see 'Seq Scan' on a 10-million-row table with WHERE email = ?. The best immediate fix is:",
+      "question": "EXPLAIN ANALYZE shows 'Seq Scan' on a 2-million-row table with filter WHERE email = ?. The most effective immediate fix is:",
       "type": "mcq",
       "options": [
-        "Add more RAM to the database server",
-        "Rewrite the query using a subquery",
+        "Run VACUUM on the table",
+        "Increase the work_mem configuration setting",
         "CREATE INDEX on the email column",
-        "Increase the work_mem setting"
+        "Rewrite the query as a subquery"
       ],
       "correct": 2,
-      "explanation": "A sequential scan on a large table for a point lookup means no usable index exists. Creating an index on the email column turns the scan into an O(log n) index lookup."
+      "explanation": "A sequential scan on a large table for a point lookup on a high-cardinality column means no usable index exists. Creating a B-tree index on email converts the O(n) table scan into an O(log n) index lookup, typically reducing query time by orders of magnitude."
     },
     {
       "id": "q8",
-      "question": "What is the write-ahead log (WAL) used for?",
+      "question": "What is a 'phantom read' and which isolation level is guaranteed to prevent it?",
       "type": "mcq",
       "options": [
-        "Storing query execution plans",
-        "Replicating data to read replicas",
-        "Recording changes before applying them so crashes can be recovered",
-        "Caching frequently read rows in memory"
+        "Reading a deleted row; prevented by Repeatable Read",
+        "New rows appearing in a repeated range query due to another transaction's commit; prevented by Serializable",
+        "Reading uncommitted data from another transaction; prevented by Read Committed",
+        "Two transactions writing the same row concurrently; prevented by Repeatable Read"
       ],
-      "correct": 2,
-      "explanation": "The WAL records every change sequentially before the actual data pages are modified. On crash recovery, the database replays the WAL to restore a consistent, durable state."
+      "correct": 1,
+      "explanation": "A phantom read occurs when a range query run twice in the same transaction returns different rows because another transaction inserted (or deleted) rows matching the range between the two reads. Only Serializable isolation is guaranteed by the SQL standard to prevent all phantom reads."
     },
     {
       "id": "q9",
-      "question": "Why should you NOT index every column in a write-heavy table?",
+      "question": "Why should you almost never create more than a handful of indexes on a write-heavy table?",
       "type": "mcq",
       "options": [
-        "Indexes take too much RAM during SELECT queries",
-        "Each index must be updated on every INSERT and UPDATE, adding write overhead",
-        "The query planner cannot use more than two indexes per query",
-        "Indexes only work on columns with unique values"
+        "The query planner cannot consider more than 8 indexes per query",
+        "Each index must be updated on every INSERT, UPDATE, and DELETE, multiplying write I/O",
+        "Indexes consume too much memory in the shared buffer pool",
+        "More than 5 indexes causes the autovacuum daemon to skip the table"
       ],
       "correct": 1,
-      "explanation": "Every index is a separate data structure that must stay in sync with the table. On write-heavy tables, maintaining many indexes causes significant overhead and can make writes slower than a full table scan."
+      "explanation": "Every index is a separate B-tree that must stay synchronized with the heap table. Each INSERT adds a key to every index; each UPDATE that changes an indexed column deletes the old key and inserts a new one in every affected index. On write-heavy tables, this overhead can make writes dramatically slower and even cause the table's write throughput to be index-bound."
     },
     {
       "id": "q10",
-      "question": "A 3NF violation called a 'transitive dependency' means:",
+      "question": "An Index Only Scan is faster than an Index Scan because:",
       "type": "mcq",
       "options": [
-        "A non-key column depends on another non-key column rather than directly on the primary key",
-        "Two tables reference each other with circular foreign keys",
-        "A column contains a list of values instead of a single value",
-        "A foreign key references a non-unique column"
+        "It uses a hash table instead of a B-tree for lookups",
+        "It skips the heap entirely — all needed columns are in the index",
+        "It runs in parallel across all CPU cores automatically",
+        "It uses BRIN compression to reduce I/O"
       ],
-      "correct": 0,
-      "explanation": "3NF requires every non-key attribute to depend directly on the primary key. If column C depends on column B which depends on the key A, that's a transitive dependency (A → B → C) and a 3NF violation."
+      "correct": 1,
+      "explanation": "In an Index Only Scan, all columns required by the query (in SELECT, WHERE, and ORDER BY) are present in the index itself. The database finds the rows in the index and returns results without fetching the corresponding heap pages, eliminating the typically expensive random-I/O heap access that makes a plain Index Scan slower."
     }
   ]
 }

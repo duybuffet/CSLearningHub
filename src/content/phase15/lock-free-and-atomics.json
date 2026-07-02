@@ -5,58 +5,116 @@
   "week": 47,
   "icon": "os",
   "tagline": "Concurrent data structures without mutexes",
-  "readTime": "14 min",
+  "readTime": "~20 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Mutexes are the standard tool for protecting shared data, but they carry real costs: a thread waiting on a lock is blocked and wasted, priority inversion can cause high-priority threads to stall behind low-priority ones, and a process that dies holding a lock can deadlock all waiters permanently.\n\n**Lock-free programming** is an alternative: design data structures so that concurrent threads can always make progress without ever blocking each other. The foundation is **atomic operations** — CPU instructions guaranteed to be indivisible. A read-modify-write that completes atomically cannot be interleaved with another thread's operation, eliminating the race condition without a mutex."
+      "content": "Every modern program that touches shared state faces the same fundamental dilemma: two threads reading and modifying the same variable at the same moment produce unpredictable, often catastrophic results. The classical solution is a **mutex** — a lock that allows only one thread at a time into a critical section. Mutexes work, but they carry real costs that compound at scale.\n\nA thread blocked on a mutex is descheduled and contributes nothing while it waits. Under heavy contention, threads spend more time sleeping and waking than doing actual work. Worse, if a process dies while holding a lock — say, it receives `SIGKILL` or panics — every thread waiting on that lock will block forever. This is a **deadlock** that no scheduler can resolve, and it requires a restart to clear. Priority inversion adds another layer of pain: a high-priority thread blocked behind a low-priority one is effectively demoted, defeating the purpose of thread priorities entirely.\n\n**Lock-free programming** offers a different contract: design data structures so that threads never block each other. No thread can prevent another from making progress by sleeping with a lock held. The mechanism underlying every lock-free algorithm is the **atomic operation** — a CPU instruction that executes as a single indivisible step. No other thread can observe a partial result of an atomic operation; from every observer's perspective, the operation either has not started or is already complete.\n\nThis chapter covers the full mental model: what atomic operations are at the hardware level, how **Compare-And-Swap (CAS)** turns a simple primitive into a universal building block for lock-free algorithms, the notorious **ABA problem** and its solutions, the distinction between **lock-free** and **wait-free** progress guarantees, why **memory ordering** is non-trivial, and the real performance tradeoffs that determine when lock-free is faster and when it is not."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  A[\"Thread wants to update shared value\"] --> B[\"Read current value\"]\n  B --> C[\"Compute new value locally\"]\n  C --> D[\"CAS: if value == expected\\nthen write new value\"]\n  D -->|\"Success\"| E[\"Update complete\"]\n  D -->|\"Fail - value changed\"| B",
-      "caption": "Compare-And-Swap (CAS) loop: read, compute, attempt atomic swap. On collision, retry. No thread blocks — all make progress eventually."
+      "mermaid": "flowchart TD\n  A[\"Thread needs to update shared value\"] --> B[\"Read current value\\n(Atomics.load)\"] \n  B --> C[\"Compute new value locally\"]\n  C --> D[\"CAS attempt:\\nif value == expected → write new\"]\n  D -->|\"Success\"| E[\"Operation complete\"]\n  D -->|\"Fail: value changed\\nby another thread\"| B\n  style E fill:#22c55e,color:#fff\n  style D fill:#f59e0b,color:#fff",
+      "caption": "The CAS retry loop: read the current value, compute a new value locally, attempt an atomic swap. On collision, retry with a fresh read. No thread ever blocks — all eventually succeed."
     },
     {
       "type": "analogy",
-      "title": "The Optimistic Checkout Analogy",
-      "content": "Imagine editing a shared Google Doc offline. You download a copy (read), make your changes locally (compute), and try to sync (CAS). If nobody else changed the doc while you were offline, your changes apply immediately — success. If someone else changed it first, you see a conflict and retry with their latest version — the CAS failed and you loop.\n\nThis is **optimistic concurrency**: assume no conflict, attempt the operation, retry on collision. Compare this to a **mutex** (pessimistic concurrency): lock the door, make changes, unlock — others are blocked the entire time you're working.\n\nOptimistic works best when conflicts are **rare** (reads heavily outnumber writes). Under high contention — everyone editing simultaneously — the retry loop becomes a spin that wastes CPU. This is the key tradeoff: lock-free is not always faster; it shines for read-heavy workloads or low-contention writes."
+      "title": "Optimistic Locking: The Offline Google Doc",
+      "content": "Imagine editing a shared Google Doc while offline. You download a snapshot of the document (this is the **read** step), make your edits locally without any coordination with other editors (this is the **compute** step), and then attempt to sync your changes back to the server (this is the **CAS** step). The server checks: has the document changed since you downloaded your copy?\n\nIf nobody else touched the document while you were offline, your edits apply cleanly — **success, the CAS wins**. If someone else has already pushed changes, you get a conflict notification and must merge or retry with the latest version — **failure, the CAS returns the current value and you loop**.\n\nThis is **optimistic concurrency**: assume no conflict is the common case, attempt the operation immediately, and retry only on the rare collision. It contrasts sharply with **pessimistic concurrency** (the mutex model): before making any changes, explicitly lock the document so nobody else can even read it while you work. Every other editor is blocked for the entire duration of your editing session.\n\nOptimistic works best when **conflicts are rare** — reads dominate over writes, or different threads tend to touch different parts of the data. When conflicts are frequent — everyone competing to modify the same hot counter simultaneously — the retry loop degenerates into a busy spin that burns CPU without making useful progress. This is the central insight that determines when you choose lock-free over mutex-based designs."
     },
     {
       "type": "explanation",
-      "title": "Atomic Operations, CAS, and the ABA Problem",
-      "content": "**Atomic operations** are CPU-level primitives that complete in a single indivisible step. Common atomic operations:\n- `load` / `store` — read/write a value atomically.\n- `fetch-and-add` — atomically increment and return the old value.\n- `compare-and-swap (CAS)` — atomically: if `*addr == expected`, then `*addr = new`; return whether the swap succeeded.\n\n**CAS** is the cornerstone of lock-free algorithms. Most lock-free data structures (queues, stacks, counters) reduce to loops that read, compute, and CAS, retrying on failure.\n\nHowever, CAS has a famous flaw: the **ABA problem**. A CAS only checks if a value *equals* the expected value — not whether it *was stable* throughout the interval. Suppose thread T1 reads `A`, gets preempted, thread T2 changes the value `A → B → A`, and T1's CAS succeeds because the value is `A` again — even though the underlying structure has changed. Solutions include:\n- **Tagged pointers / version stamps**: pair the value with a monotonically increasing counter. `CAS(addr, {A, v1}, {new, v2})` fails if the version changed, even if the value reverted.\n- **Hazard pointers / epoch-based reclamation**: for pointer-based structures, defer freeing memory until no thread holds a reference.\n\n**Lock-free vs wait-free:**\n- **Lock-free**: at least one thread makes progress in a finite number of steps. Other threads may retry indefinitely under adversarial scheduling, but the *system* as a whole does not stall.\n- **Wait-free**: every individual thread completes its operation in a bounded number of steps, regardless of other threads. Stronger guarantee, much harder to implement (e.g., Fetch-And-Add for counters is naturally wait-free).\n\n**Memory barriers / fences** are equally critical. Modern CPUs and compilers reorder instructions for performance. Without barriers, a thread might observe a stale cached value even after another thread has written a new one. `Atomics.store` / `Atomics.load` in JavaScript and `std::atomic` in C++ include appropriate barriers by default."
+      "title": "What Makes an Operation Atomic: The Hardware View",
+      "content": "The word **atomic** comes from Greek *atomos* — indivisible. In the context of shared memory, an operation is atomic if every other CPU core sees it as having happened instantaneously: there is no moment where the operation is half-done.\n\nOn a modern x86 processor, simple aligned reads and writes of native-sized values (1, 2, 4, or 8 bytes) are already atomic in practice due to the architecture's internal bus locking. But compound operations — read a value, modify it, write it back — are not atomic by default. The three steps can be interrupted by another core's write between any two of them, producing a **data race**.\n\nTo make compound operations atomic, CPUs provide **locked instructions**. On x86, the `LOCK` prefix can be prepended to instructions like `XADD` (exchange-and-add) and `CMPXCHG` (compare-and-exchange). The `LOCK` prefix causes the processor to assert control of the memory bus for the duration of the instruction, preventing any other core from accessing that cache line mid-operation.\n\nThe key atomic primitives available across modern architectures:\n- **Load** (`Atomics.load` in JS, `std::atomic::load` in C++) — read a value with ordering guarantees.\n- **Store** (`Atomics.store`) — write a value with ordering guarantees.\n- **Fetch-And-Add** (`Atomics.add`) — atomically add a delta and return the old value. Maps to `LOCK XADD` on x86. This is **wait-free**: every caller succeeds in exactly one instruction with no retry.\n- **Compare-And-Swap / Compare-And-Exchange** (`Atomics.compareExchange`, `CMPXCHG`) — the universal primitive: atomically check if a memory location holds an expected value, and if so, replace it with a new value. Returns the value found, whether or not the swap succeeded.\n- **Fetch-And-Or / Fetch-And-And** — for bitmasking shared flags atomically.\n\nARM uses a different mechanism: **Load-Link / Store-Conditional (LL/SC)**. A load-link reads a value and tags the cache line. A store-conditional writes only if no other core has touched that cache line since the load-link. The hardware detects interference and the store-conditional returns a success/failure flag. This achieves the same semantics as CAS but allows more flexibility (e.g., avoiding the ABA problem at the hardware level, since the cache line tag changes even if the value reverts)."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n  participant T1 as \"Thread 1\"\n  participant MEM as \"Shared Memory\"\n  participant T2 as \"Thread 2\"\n  T1->>MEM: \"read: value = A\"\n  Note over T1: \"Preempted\"\n  T2->>MEM: \"CAS A→B: success\"\n  T2->>MEM: \"CAS B→A: success\"\n  Note over T1: \"Resumes\"\n  T1->>MEM: \"CAS A→new: success!\"\n  Note over MEM: \"ABA problem: T1 succeeded\\nbut structure changed underneath\"",
-      "caption": "ABA problem: T1's CAS succeeds because the value returned to A, but the intermediate B→A change may have invalidated structural invariants."
+      "mermaid": "flowchart LR\n  A[\"x86: LOCK prefix\"] --> B[\"Bus lock\\nfor one instruction\"]\n  C[\"ARM: LL/SC\"] --> D[\"Tag cache line\\non load\"]\n  D --> E[\"Store-conditional:\\nfails if tag cleared\"]\n  B --> F[\"CAS semantics\"]\n  E --> F\n  F --> G[\"Lock-free\\nalgorithms\"]",
+      "caption": "Two hardware approaches to atomicity: x86 locks the bus for the entire instruction; ARM uses cache-line tagging with Load-Link/Store-Conditional. Both provide the CAS semantics needed for lock-free algorithms."
+    },
+    {
+      "type": "explanation",
+      "title": "Compare-And-Swap: The Universal Lock-Free Building Block",
+      "content": "**Compare-And-Swap (CAS)** is arguably the most important primitive in concurrent systems programming. Its contract is simple:\n\n```\nCAS(address, expected, new_value) -> actual_value\n  atomically:\n    actual = *address\n    if actual == expected:\n      *address = new_value\n    return actual\n```\n\nThe caller checks: if `actual == expected`, the swap succeeded and `*address` now holds `new_value`. If `actual != expected`, another thread changed the value since we last read it — the swap did not happen, and we retry.\n\nThe CAS retry loop is the skeleton of nearly every lock-free algorithm:\n\n1. **Read** the current value of the shared variable.\n2. **Compute** the new value based on the old one (locally, no shared state touched).\n3. **CAS**: attempt to write the new value only if the shared variable still holds the old one.\n4. If CAS fails, another thread modified it first — go back to step 1 with the fresh value CAS returned.\n\nThis pattern works for **counters**, **stacks** (update the head pointer), **queues** (update the tail pointer), and many other structures. The key invariant is that the computation in step 2 depends only on the value read in step 1 — no other shared state is read between steps 1 and 3.\n\nNot all problems reduce cleanly to a single CAS. Multi-word atomic updates — where you need to change two or more variables atomically — require more sophisticated techniques like **double-wide CAS** (DCAS, available on some architectures as `CMPXCHG16B`), **software transactional memory (STM)**, or restructuring the data so a single pointer update captures the entire state change (a common pattern in functional data structures using persistent immutable nodes)."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "const { Worker, isMainThread, parentPort } = require('worker_threads');\n\n// Demonstrates Atomics.add (wait-free counter) vs naive increment (data race)\n\nconst ITERATIONS = 100_000;\n\nif (isMainThread) {\n  // Shared memory: 2 Int32 slots — [0] for atomic counter, [1] for racy counter\n  const sab = new SharedArrayBuffer(8);\n  const shared = new Int32Array(sab);\n\n  // Spawn 4 worker threads all incrementing simultaneously\n  const workers = Array.from({ length: 4 }, () =>\n    new Promise((resolve, reject) => {\n      const w = new Worker(__filename, {\n        workerData: null,\n        // Pass SAB via workerData is not needed; use transferList trick:\n      });\n      // Simpler: workers receive SAB through postMessage\n      w.once('online', () => w.postMessage(sab));\n      w.on('message', resolve);\n      w.on('error', reject);\n    })\n  );\n\n  Promise.all(workers).then(() => {\n    const expected = 4 * ITERATIONS;\n    console.log(`Expected:       ${expected}`);\n    console.log(`Atomic counter: ${shared[0]}  (should equal expected)`);\n    console.log(`Racy counter:   ${shared[1]}  (likely LESS due to lost updates)`);\n    // Atomic: always correct — Atomics.add is indivisible\n    // Racy:   lost updates — read-modify-write not atomic, threads overwrite each other\n  });\n} else {\n  parentPort.once('message', (sab) => {\n    const shared = new Int32Array(sab);\n    for (let i = 0; i < ITERATIONS; i++) {\n      // CORRECT: atomic fetch-and-add (wait-free)\n      Atomics.add(shared, 0, 1);\n\n      // RACY (illustrative — do not do this):\n      // const val = shared[1];  // read\n      // shared[1] = val + 1;    // write — another thread may overwrite!\n    }\n    parentPort.postMessage('done');\n  });\n}",
-      "explanation": "`Atomics.add` is a single indivisible CPU instruction — no two threads can interleave their read-modify-write. The atomic counter will always equal `4 × ITERATIONS`. The racy counter (non-atomic increment) loses updates when threads read the same value before either writes back, demonstrating the data race that lock-free programming eliminates."
+      "label": "Example",
+      "code": "// Demonstrates atomic counter vs. racy counter using Worker Threads\n// Run with: node --experimental-vm-modules lock-free-demo.js\n\nconst { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n\nconst ITERATIONS = 200_000;\nconst NUM_WORKERS = 4;\n\nif (isMainThread) {\n  // SharedArrayBuffer: slot 0 = atomic counter, slot 1 = racy counter\n  const sab = new SharedArrayBuffer(8);\n  const shared = new Int32Array(sab);\n\n  const workers = Array.from({ length: NUM_WORKERS }, () =>\n    new Promise((resolve, reject) => {\n      const w = new Worker(__filename);\n      w.once('online', () => w.postMessage(sab));\n      w.on('message', resolve);\n      w.on('error', reject);\n    })\n  );\n\n  Promise.all(workers).then(() => {\n    const expected = NUM_WORKERS * ITERATIONS;\n    console.log(`Expected        : ${expected}`);\n    console.log(`Atomic (slot 0) : ${shared[0]}  <- always correct`);\n    console.log(`Racy   (slot 1) : ${shared[1]}  <- lost updates!`);\n    // Racy will be LESS than expected: read-modify-write is not atomic,\n    // so two threads can read the same value, both add 1, and write\n    // back the same result — one increment is silently lost.\n  });\n\n} else {\n  parentPort.once('message', (sab) => {\n    const shared = new Int32Array(sab);\n    for (let i = 0; i < ITERATIONS; i++) {\n      // CORRECT: single atomic fetch-and-add (wait-free)\n      Atomics.add(shared, 0, 1);\n\n      // RACY: three separate steps — another thread can interleave between any two\n      const old = Atomics.load(shared, 1); // read\n      // <-- another thread may read the same 'old' value right here\n      Atomics.store(shared, 1, old + 1);   // write: silently overwrites concurrent write\n    }\n    parentPort.postMessage('done');\n  });\n}",
+      "explanation": "`Atomics.add` is a single `LOCK XADD` instruction — indivisible on x86. No matter how many workers run concurrently, each increment is guaranteed to be seen. The racy counter uses a separate load and store, leaving a gap where another thread can read the old value, causing both threads to write the same incremented result and losing one update. Run this and slot 1 will almost always be significantly less than the expected total."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "The ABA Problem: When CAS Succeeds but Shouldn't",
+      "content": "CAS has a subtle flaw that makes lock-free programming genuinely hard: it checks **equality of value**, not **stability of value over time**. This creates the notorious **ABA problem**.\n\nImagine a lock-free stack implemented with a single `top` pointer CAS. Thread T1 reads `top = A` and is about to CAS `A → C` (push C as the new top). T1 gets preempted. While T1 sleeps:\n\n1. Thread T2 pops `A` from the stack (CAS `A → B`). Now `top = B`.\n2. Thread T2 pops `B`. Now `top = null`.\n3. Thread T2 pushes `A` back (maybe it was reused from a pool). Now `top = A`.\n\nT1 wakes up. It attempts `CAS(top, A, C)`. The check `top == A` passes — the pointer looks the same. T1's CAS succeeds and `C` becomes the new top. But `B` has been lost entirely from the stack! The intermediate pops changed the structural invariants, but T1 had no way to detect this because the value returned to `A`.\n\n**Why it matters most in memory-managed systems:** If T2 *freed* node `A` and a new allocation *happened* to return the same address, T1 would be operating on a recycled, potentially-invalid node. This is a classic use-after-free bug produced by lock-free data structure misuse.\n\nThere are several standard mitigations:\n\n**1. Version stamps (tagged pointers):** Pair every pointer with a monotonically increasing counter. Store both as a single 128-bit value (or pack the counter into unused pointer bits). The CAS checks both the pointer and the version. `A@v1 → B@v2 → A@v3`: T1's CAS expects `A@v1` but finds `A@v3` — ABA detected, retry.\n\n**2. Hazard pointers:** Before dereferencing a pointer, a thread publishes it in a per-thread \"hazard pointer\" slot. A thread freeing a node checks all hazard slots first; if any thread holds a hazard pointer to that node, the free is deferred. This prevents use-after-free without stopping concurrent operations.\n\n**3. Epoch-based reclamation (EBR):** Divide time into epochs. A thread can only free nodes from two or more epochs ago, by which time all threads operating during that epoch must have advanced. This is simpler than hazard pointers and used in Linux RCU (Read-Copy-Update).\n\n**4. Use LL/SC instead of CAS (ARM):** Because LL/SC detects any modification to the cache line, A→B→A causes the store-conditional to fail at the hardware level. The ABA problem effectively does not exist at the LL/SC level, only at the software CAS level built on top."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant T1 as \"Thread 1\"\n  participant Stack as \"Lock-Free Stack\"\n  participant T2 as \"Thread 2\"\n  T1->>Stack: \"read top = A (expect A)\"\n  Note over T1: \"Preempted before CAS\"\n  T2->>Stack: \"pop A  → top = B\"\n  T2->>Stack: \"pop B  → top = null\"\n  T2->>Stack: \"push A → top = A  (A reused)\"\n  Note over T1: \"Resumes\"\n  T1->>Stack: \"CAS(A → C): sees A, SUCCEEDS\"\n  Note over Stack: \"B is lost forever\\nABA problem!\"",
+      "caption": "ABA problem on a lock-free stack: T1's CAS succeeds because the pointer reverted to A, but the intermediate pop of B corrupted the stack invariant. Node B is now orphaned."
+    },
+    {
+      "type": "explanation",
+      "title": "Lock-Free vs Wait-Free: Progress Guarantees",
+      "content": "Lock-free programming has precise theoretical definitions. These are not marketing terms — they define guarantees about how threads behave under adversarial scheduling.\n\n**Blocking (mutex-based):** A thread blocked on a mutex can be descheduled indefinitely. If the thread holding the mutex is suspended by the OS, all waiters are blocked for an unbounded time. The system as a whole stalls.\n\n**Lock-free:** In any finite sequence of steps, *at least one thread* makes progress. No thread can prevent all others from making forward progress simultaneously. However, a single unlucky thread can be **starved** — if the scheduler always preempts it at exactly the wrong moment, its CAS keeps failing. The system makes progress, but one thread may spin for a long time.\n\n**Wait-free:** Every individual thread completes its operation in a **bounded** number of steps, regardless of what other threads do. Wait-free is strictly stronger than lock-free. Starvation is impossible.\n\n**Obstruction-free:** The weakest non-blocking guarantee. A thread makes progress if it runs in isolation (other threads suspended). Used in software transactional memory as a starting point, with additional mechanisms to detect and handle conflicts.\n\nIn practice:\n- **`Atomics.add` (Fetch-And-Add)** is **wait-free**: maps to a single `LOCK XADD` instruction. Every thread completes in O(1) steps.\n- **A CAS retry loop** is **lock-free** but not wait-free: under adversarial scheduling, one thread might retry indefinitely while others succeed. In practice, collisions are rare and loops terminate quickly.\n- **A mutex** is **blocking**: a holder can stall all waiters indefinitely.\n\nThe hierarchy: wait-free ⊂ lock-free ⊂ obstruction-free ⊂ blocking. Most production lock-free code uses CAS loops (lock-free, not wait-free), which is sufficient for most use cases. Wait-free algorithms are significantly more complex to implement and often have higher constant factors that make them slower in practice despite the stronger theoretical guarantee."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Wait-Free\\nEvery thread finishes\\nin bounded steps\"] --> B[\"Lock-Free\\nAt least one thread\\nfinishes in finite steps\"]\n  B --> C[\"Obstruction-Free\\nThread finishes if\\nrun in isolation\"]\n  C --> D[\"Blocking\\nThread may wait\\nindefinitely\"]\n  style A fill:#22c55e,color:#fff\n  style B fill:#3b82f6,color:#fff\n  style C fill:#f59e0b,color:#fff\n  style D fill:#ef4444,color:#fff",
+      "caption": "Progress guarantee hierarchy: each level is strictly stronger (narrower) than the one below. Most lock-free code uses CAS loops (lock-free). Fetch-and-Add counters are wait-free. Mutexes are blocking."
+    },
+    {
+      "type": "explanation",
+      "title": "Memory Ordering: Why Atomicity Alone Is Not Enough",
+      "content": "A common misconception is that atomic operations alone are sufficient for correct concurrent programs. They are not. **Memory ordering** — the rules governing when one thread's writes become visible to other threads — is a separate and equally critical concern.\n\nModern CPUs execute instructions **out of order** to maximise throughput. A CPU may reorder a store with a subsequent load if they touch different addresses, because there is no data dependency between them. Compilers perform similar reorderings for optimization. In a single-threaded program, this is invisible — the final result is always the same as if instructions ran sequentially. In a multi-threaded program, another thread may observe writes in a different order than the writing thread performed them.\n\nConsider a classic example. Thread A writes a data buffer and then sets a `ready` flag. Thread B reads the `ready` flag and then reads the buffer. Without memory barriers, Thread B might observe `ready = true` *before* it can see Thread A's writes to the buffer — because the CPU reordered A's stores, or Thread B's cache is stale.\n\n```\nThread A:                        Thread B:\ndata.value = 42;  // store 1    while (!ready) {}  // spin\nready = true;     // store 2    print(data.value); // may print 0!\n```\n\nThis is not hypothetical — it happens on ARM and PowerPC architectures. x86 has a stronger memory model (Total Store Order) that prevents many of these reorderings, but even x86 can reorder loads with stores under specific conditions.\n\n**Memory barriers** (also called **fences**) are instructions that prevent certain reorderings. A **store barrier** ensures all preceding stores are visible to other cores before any subsequent stores. A **load barrier** ensures all preceding loads complete before any subsequent loads. A **full barrier** enforces both.\n\nThe C++ `std::atomic` and JavaScript `Atomics` APIs expose this through **memory order** parameters:\n- `relaxed` — only atomicity, no ordering constraints. Suitable for statistics counters where exact ordering doesn't matter.\n- `acquire` — for loads: no subsequent reads/writes can be reordered before this load. Used when reading a flag before accessing protected data.\n- `release` — for stores: no preceding reads/writes can be reordered after this store. Used when writing data before setting a flag.\n- `seq_cst` (sequentially consistent) — the default in C++ atomics and all JavaScript `Atomics` operations. Provides a single total order of all seq_cst operations across all threads. Correct but most expensive.\n\nJavaScript's `Atomics` always uses `seq_cst` semantics — every `Atomics.load`, `Atomics.store`, and `Atomics.compareExchange` acts as a full memory barrier. This is safe and correct but prevents some low-level optimizations available in C++ with explicit memory orders."
+    },
+    {
+      "type": "explanation",
+      "title": "Building a Lock-Free Stack: A Worked Example",
+      "content": "A lock-free stack is one of the simplest and most instructive lock-free data structures. Its push and pop operations reduce to a single CAS on the `top` pointer.\n\n**Push (inserting a new node):**\n1. Allocate a new node, populate its value.\n2. Read `top` (the current stack head).\n3. Set `new_node.next = top`.\n4. CAS `top` from old value to `new_node`. If another thread pushed between steps 2 and 4, the CAS fails and we retry from step 2 with the new `top` value.\n\n**Pop (removing the top node):**\n1. Read `top`. If null, the stack is empty.\n2. Read `top.next` (the node below).\n3. CAS `top` from old `top` to `top.next`. If another thread popped first, retry from step 1.\n\nThe correctness argument: the CAS in push ensures two threads cannot simultaneously insert both claiming to be the new head — exactly one CAS wins per attempt. Similarly for pop.\n\n**The ABA hazard:** The pop operation is vulnerable to ABA if nodes can be reallocated. A thread reads `top = A`, preempts, another thread pops A, pops the next node, and pushes A back. The first thread's CAS succeeds with `top = A.next` — but `A.next` now points to a freed or reused node. The fix is versioned pointers: `top` is stored as `{pointer, version}` and the CAS checks both.\n\nIn JavaScript, nodes would be objects and `top` an atomic reference in a `SharedArrayBuffer` offset. In practice, JavaScript's garbage collector makes the ABA use-after-free scenario impossible (GC prevents address reuse of live references), but logical ABA (the structural corruption described above) can still occur in linked structures."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Compare-And-Swap (CAS) loop — the building block of lock-free structures\n// Simulated with Atomics.compareExchange (actual CAS instruction)\n\nconst sab = new SharedArrayBuffer(4);\nconst view = new Int32Array(sab);\nview[0] = 0; // initial value\n\nfunction atomicIncrement(arr, index, amount) {\n  // CAS loop: read → compute → swap atomically, retry on failure\n  while (true) {\n    const expected = Atomics.load(arr, index);  // read current value\n    const desired = expected + amount;           // compute new value\n    // CAS: only writes if arr[index] === expected\n    const actual = Atomics.compareExchange(arr, index, expected, desired);\n    if (actual === expected) {\n      return desired; // CAS succeeded — we are done\n    }\n    // CAS failed — another thread changed the value; retry with fresh read\n  }\n}\n\n// Version-stamped value to prevent ABA problem\nconst vab = new SharedArrayBuffer(8); // [value, version]\nconst vstamp = new Int32Array(vab);\n\nfunction casWithVersion(arr, expectedVal, expectedVer, newVal) {\n  // Atomically check BOTH value and version before updating\n  // In real systems, use a 128-bit CAS or tagged pointer\n  const curVal = Atomics.load(arr, 0);\n  const curVer = Atomics.load(arr, 1);\n  if (curVal === expectedVal && curVer === expectedVer) {\n    Atomics.store(arr, 0, newVal);\n    Atomics.add(arr, 1, 1); // increment version\n    return true;\n  }\n  return false; // ABA detected — version mismatch\n}"
+      "label": "Example",
+      "code": "// CAS loop as lock-free building block\n// Atomics.compareExchange is the direct JavaScript CAS\n\nconst sab = new SharedArrayBuffer(4);\nconst counter = new Int32Array(sab);\nAtomics.store(counter, 0, 0);\n\n/**\n * Lock-free increment by arbitrary delta using CAS loop.\n * This is lock-free (not wait-free) — retries on collision.\n * Compare to Atomics.add which IS wait-free (single instruction).\n */\nfunction lockFreeAdd(arr, index, delta) {\n  while (true) {\n    const expected = Atomics.load(arr, index);   // Step 1: read current\n    const desired  = expected + delta;            // Step 2: compute new\n    // Step 3: CAS — only writes if arr[index] === expected\n    const actual = Atomics.compareExchange(arr, index, expected, desired);\n    if (actual === expected) {\n      return desired; // swap succeeded\n    }\n    // actual !== expected: another thread modified arr[index]\n    // 'actual' is the current value — we could use it as next expected\n    // but the spec requires a fresh Atomics.load to get correct ordering\n  }\n}\n\n// Version-stamped value in a 2-slot SharedArrayBuffer\n// Slot 0 = value, slot 1 = version (prevents ABA)\nconst vab = new SharedArrayBuffer(8);\nconst stamped = new Int32Array(vab);\nAtomics.store(stamped, 0, 100); // initial value\nAtomics.store(stamped, 1, 0);   // initial version\n\nfunction casWithVersionStamp(arr, expectedVal, expectedVer, newVal) {\n  // Note: in real multi-core code, both reads must be a single atomic\n  // 128-bit operation (CMPXCHG16B). This JS simulation is illustrative only.\n  const curVal = Atomics.load(arr, 0);\n  const curVer = Atomics.load(arr, 1);\n  if (curVal === expectedVal && curVer === expectedVer) {\n    // Would be a single 128-bit CAS in real hardware\n    Atomics.store(arr, 0, newVal);\n    Atomics.add(arr, 1, 1);  // bump version — ABA prevented\n    return { success: true, version: curVer + 1 };\n  }\n  return { success: false, curVal, curVer };\n}\n\nconsole.log(casWithVersionStamp(stamped, 100, 0, 200));\n// { success: true, version: 1 }\nconsole.log(casWithVersionStamp(stamped, 100, 0, 300));\n// { success: false, curVal: 200, curVer: 1 } — version mismatch catches ABA",
+      "explanation": "The CAS loop in `lockFreeAdd` manually implements what `Atomics.add` does atomically in a single instruction. The key difference: `lockFreeAdd` is lock-free (may retry) while `Atomics.add` is wait-free (never retries). The version stamp example shows the ABA mitigation pattern — the second CAS attempt fails not because the value is wrong, but because the version counter has advanced, indicating an intervening write even if the value happened to revert."
+    },
+    {
+      "type": "explanation",
+      "title": "Real-World Applications of Lock-Free Structures",
+      "content": "Lock-free techniques are not academic curiosities — they are in production across the highest-throughput systems in the world.\n\n**Linux kernel RCU (Read-Copy-Update):** RCU is an epoch-based reclamation scheme that allows read-side critical sections to run completely lock-free and wait-free — not even a single atomic instruction is needed to read. Writers make a copy of the data, modify the copy, and atomically publish the new version with a single pointer swap. Old versions are reclaimed after all readers from the previous epoch have completed. The Linux networking stack, file system path lookup, and scheduling use RCU extensively because reads vastly outnumber writes.\n\n**LMAX Disruptor (high-frequency trading):** The Disruptor is a lock-free ring buffer designed for inter-thread messaging at tens of millions of events per second. It replaces a blocking queue with a ring buffer where producers CAS a sequence number to claim a slot, and consumers read up to the claimed sequence. Cache-line padding prevents false sharing between producer and consumer state.\n\n**Java's `java.util.concurrent` package:** `AtomicLong`, `AtomicReference`, `ConcurrentLinkedQueue` — all implemented with CAS loops. `LongAdder` solves the high-contention counter problem by maintaining per-CPU cells and summing lazily, dramatically reducing CAS retry rates under write-heavy workloads.\n\n**JavaScript `SharedArrayBuffer` + `Atomics`:** Introduced to allow Web Workers to share memory without copying. The `Atomics` API provides the primitives needed to implement lock-free structures in JavaScript: `add`, `sub`, `and`, `or`, `xor`, `load`, `store`, `compareExchange`, and `exchange`. `Atomics.wait` and `Atomics.notify` implement a futex-like mechanism for blocking coordination when you do need to block (e.g., the main thread cannot use `Atomics.wait`, but workers can).\n\n**Database systems (MVCC):** Multi-Version Concurrency Control, used in PostgreSQL, MySQL InnoDB, and most modern databases, is a conceptual cousin of optimistic locking. Readers see a consistent snapshot without blocking writers; writers create new versions rather than modifying data in-place. Conflicts are detected at commit time rather than prevented at the start of the transaction."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Lock-Free Ring Buffer\\n(Disruptor)\"] --> B[\"Producer CAS\\nclaim sequence slot\"]\n  B --> C[\"Write data\\nto claimed slot\"]\n  C --> D[\"Publish: barrier\\n+ store sequence\"]\n  D --> E[\"Consumer reads\\nup to published seq\"]\n  E --> F[\"No locks\\nno contention\"]\n  style F fill:#22c55e,color:#fff",
+      "caption": "LMAX Disruptor pattern: producers claim ring buffer slots with CAS on a sequence number, write data, then publish. Consumers poll up to the published sequence. No mutex required anywhere in the critical path."
+    },
+    {
+      "type": "explanation",
+      "title": "Performance Tradeoffs: When Lock-Free Wins and When It Loses",
+      "content": "Lock-free is not universally faster than mutex-based code. The performance profile depends heavily on contention level, critical section length, and hardware characteristics.\n\n**Lock-free wins when:**\n- **Reads are heavily dominant.** RCU-style algorithms allow reads with zero atomic overhead. A counter read by thousands of threads and written rarely is a textbook case.\n- **Critical sections are very short.** A mutex acquisition and release (even uncontended) costs ~20–100 ns due to memory barriers and potential cache coherence traffic. A single `Atomics.add` costs ~5–20 ns on modern hardware.\n- **Contention is low.** CAS retry rates stay near zero, so the retry loop overhead is negligible.\n- **Avoiding priority inversion matters.** Real-time systems where a high-priority thread must never block behind a low-priority one.\n- **Avoiding deadlock matters.** A system where processes can die holding locks prefers lock-free designs for safety.\n\n**Lock-free loses when:**\n- **Contention is high.** Under heavy write contention — many threads all CASing the same variable — most CAS attempts fail. Threads spin, consuming CPU and thrashing the cache line between cores (cache line bouncing). A mutex at high contention actually performs better: the loser thread is descheduled and the CPU is freed for something useful.\n- **Critical sections are long.** Lock-free assumes the computation step (between read and CAS) is fast. If it's long, contention increases and retry rates spike.\n- **The update is multi-word.** CAS operates on a single aligned word (4 or 8 bytes). Atomically updating two unrelated fields requires either a lock, DCAS, or restructuring to point to an immutable struct updated with a single pointer CAS.\n\n**Practical guidance:** For shared counters under high write contention, use `LongAdder`-style **striped counters** — maintain one counter per CPU core, increment locally, and sum across cores only when the total is needed. This eliminates inter-core CAS traffic entirely. For shared queues, benchmark before choosing: `ArrayBlockingQueue` (mutex-based) often outperforms `ConcurrentLinkedQueue` (CAS-based) when both producer and consumer are very active, because the mutex conveniently signals the consumer to wake rather than spin.\n\n**The iron rule:** measure first. Lock-free code is harder to write, harder to reason about, and easier to get subtly wrong. Do not reach for it until you have profiled and confirmed that a mutex is the bottleneck."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context:** The theoretical foundations of lock-free programming were laid by Maurice Herlihy in his landmark 1991 paper *Wait-Free Synchronization*, which proved that CAS (and more generally, any operation with *consensus number* ≥ N) can implement wait-free N-thread concurrent objects. This established that CAS is in a sense the *universal* primitive — any concurrent data structure can be built from it. Herlihy received the Dijkstra Prize and the ACM Turing Award (2022) in part for this work. The term 'lock-free' itself was formalized by Herlihy and Shavit in *The Art of Multiprocessor Programming* (2008), which remains the definitive textbook on the subject."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Lock-free is not always faster.** Under low contention, atomic operations beat mutexes significantly. Under high contention, CAS retry loops become spin-waste — threads thrash and burn CPU without progress. Always benchmark your actual contention level. For most application-level code, a well-tuned mutex or a message-passing actor is simpler and nearly as fast. Reserve lock-free structures for proven bottlenecks: counters, ring buffers, and concurrent queues in hot paths."
+      "content": "**Common mistakes and interview traps:**\n- **'Lock-free means no synchronization.'** False. Lock-free code uses atomic operations and memory barriers — that IS synchronization. It just avoids blocking.\n- **'Atomics.add is just a faster mutex.'** Wrong mental model. `Atomics.add` is a wait-free single instruction; it has no concept of blocking, scheduling, or ownership.\n- **'CAS loops are always faster than mutexes.'** False under high contention. Benchmark, don't assume.\n- **'The ABA problem only affects pointer-based structures.'** It affects any CAS that semantically depends on stability, not just equality. Integer CAS for a stack push can suffer ABA too.\n- **'Memory ordering doesn't matter in JavaScript.'** JavaScript's `Atomics` always uses seq_cst, so you are safe — but understanding *why* helps when reading C++ or Java concurrent code.\n- **Interview insight:** Be ready to explain the CAS loop, draw the ABA scenario, define lock-free vs. wait-free, and give one real example (`LongAdder`, `ConcurrentLinkedQueue`, Linux RCU). These four points cover ~80% of interview questions on this topic."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Atomic operations** are indivisible CPU instructions — no thread can observe a partial execution, eliminating the read-modify-write race condition without locks.",
-        "**Compare-And-Swap (CAS)** is the fundamental primitive: atomically write a new value only if the current value equals an expected one; retry in a loop on failure.",
-        "The **ABA problem** occurs when a value changes A→B→A between a CAS read and write; the swap succeeds incorrectly. Fix with version stamps or tagged pointers.",
-        "**Lock-free** guarantees system-wide progress (at least one thread advances); **wait-free** guarantees per-thread bounded progress — a strictly stronger guarantee.",
-        "**Memory barriers** prevent compiler and CPU reordering from exposing stale cached values; JavaScript's `Atomics` API includes implicit barriers on every operation."
+        "**Atomic operations** are indivisible CPU instructions — no other thread can observe a partial execution — eliminating the read-modify-write race condition without any lock.",
+        "**Compare-And-Swap (CAS)** is the universal building block: atomically write a new value only if the current value equals an expected one; retry on failure. Nearly all lock-free data structures reduce to CAS loops.",
+        "The **ABA problem** occurs when a value changes A→B→A between a CAS read and its swap; the CAS succeeds incorrectly because it checks value equality, not stability. Fix with version stamps, hazard pointers, or epoch-based reclamation.",
+        "**Lock-free** guarantees system-wide progress (at least one thread advances in finite steps); **wait-free** guarantees per-thread bounded progress (every thread finishes in bounded steps). `Atomics.add` is wait-free; a CAS retry loop is lock-free but not wait-free.",
+        "**Memory barriers** prevent compiler and CPU instruction reordering from exposing stale cached values to other threads. JavaScript's `Atomics` API always applies full sequential-consistency barriers; C++ `std::atomic` lets you choose weaker orderings for performance.",
+        "**Lock-free is not always faster.** It excels for read-heavy workloads and low-contention writes. Under high write contention, CAS retry loops burn CPU; a mutex with thread sleeping is often faster and always simpler.",
+        "**Production examples:** Linux RCU (wait-free reads), LMAX Disruptor (lock-free ring buffer), Java `LongAdder` (striped counter), and JavaScript `SharedArrayBuffer` + `Atomics` (cross-worker shared memory) all apply these techniques in latency-critical paths."
       ]
     }
   ],
@@ -67,130 +125,130 @@
       "question": "What makes an operation 'atomic' in the context of concurrent programming?",
       "type": "mcq",
       "options": [
-        "It executes faster than non-atomic operations",
+        "It executes faster than all non-atomic operations on the same CPU",
         "It completes as a single indivisible step — no other thread can observe a partial execution",
-        "It uses a mutex internally",
-        "It runs on a dedicated CPU core"
+        "It acquires a mutex internally to prevent interference",
+        "It runs on a dedicated hardware thread separate from worker threads"
       ],
       "correct": 1,
-      "explanation": "An atomic operation appears instantaneous to all other threads — they either see the state before or after the operation, never a halfway state. This eliminates the window for race conditions without requiring a lock."
+      "explanation": "An atomic operation appears instantaneous to all other threads. From any observer's perspective, the operation has either not yet started or is already fully complete — there is no observable intermediate state. This property eliminates data races without requiring a lock."
     },
     {
       "id": "q2",
-      "question": "In a CAS (Compare-And-Swap) operation, when does the swap FAIL?",
+      "question": "In a CAS (Compare-And-Swap) operation `CAS(addr, expected, new)`, when does the swap FAIL?",
       "type": "mcq",
       "options": [
-        "When the new value equals the expected value",
-        "When the memory address is not cache-aligned",
-        "When the current value of the target differs from the expected value",
-        "When more than two threads attempt the CAS simultaneously"
+        "When the new value is equal to the expected value",
+        "When more than two threads attempt the CAS simultaneously",
+        "When the current value at addr differs from the expected value",
+        "When the memory address is not aligned on a 4-byte boundary"
       ],
       "correct": 2,
-      "explanation": "CAS atomically checks if `*addr == expected`. If another thread has modified `*addr` since the reading thread last checked, the values differ and the CAS returns without writing. The calling thread typically retries by re-reading the current value."
+      "explanation": "CAS atomically reads `*addr` and compares it to `expected`. If another thread has modified `*addr` since the reading thread last checked, the values differ and the CAS returns without writing. The return value is the actual value found, which the caller uses as the new `expected` for the retry."
     },
     {
       "id": "q3",
-      "question": "What is the ABA problem?",
+      "question": "What is the ABA problem in lock-free programming?",
       "type": "mcq",
       "options": [
-        "A deadlock caused by three threads acquiring locks in the wrong order",
-        "A CAS succeeding incorrectly because a value changed A→B→A, making the swap appear safe when the underlying structure has changed",
-        "An algorithm that requires alternating read and write operations",
-        "A memory leak caused by atomic operations not releasing memory"
+        "A deadlock where three threads acquire locks in alphabetical order",
+        "A CAS succeeding incorrectly because a value changed A→B→A, making the swap appear safe when underlying structure invariants have been violated",
+        "An algorithm that requires alternating atomic reads and non-atomic writes",
+        "A memory leak caused by atomic operations not decrementing reference counts"
       ],
       "correct": 1,
-      "explanation": "ABA: Thread T1 reads A, gets preempted. Thread T2 changes A→B→A. T1's CAS succeeds because the value is A again, but the intermediate changes may have invalidated invariants (e.g., freed and reallocated memory at the same address)."
+      "explanation": "ABA: Thread T1 reads value A and is preempted. Thread T2 changes A→B→A. T1's CAS succeeds because the value equals A again — but the intermediate changes may have invalidated invariants (e.g., freed and reallocated a node at the same address, or popped intermediate elements from a stack)."
     },
     {
       "id": "q4",
-      "question": "What is the difference between lock-free and wait-free progress guarantees?",
+      "question": "What is the key distinction between lock-free and wait-free progress guarantees?",
       "type": "mcq",
       "options": [
-        "Lock-free means no locks; wait-free means threads wait for each other",
-        "Lock-free guarantees system-wide progress (at least one thread advances); wait-free guarantees every individual thread completes in bounded steps",
-        "They are identical guarantees with different names",
-        "Wait-free is weaker than lock-free because threads may wait indefinitely"
+        "Lock-free means no locks at all; wait-free means threads can wait for each other once",
+        "Lock-free guarantees system-wide progress (at least one thread advances); wait-free guarantees every individual thread completes in a bounded number of steps",
+        "They are equivalent guarantees with different names used in different communities",
+        "Wait-free is weaker than lock-free because individual threads may stall indefinitely"
       ],
       "correct": 1,
-      "explanation": "Lock-free ensures the system always makes progress — at least one thread finishes. Wait-free is stronger: every thread finishes within a bounded number of steps regardless of what other threads do. `Atomics.add` is wait-free; a CAS retry loop is lock-free but not wait-free."
+      "explanation": "Lock-free ensures the system makes progress — at least one thread finishes in finite steps. Wait-free is strictly stronger: every thread individually finishes within a bounded number of steps regardless of what other threads do. Starvation is impossible in a wait-free algorithm. `Atomics.add` is wait-free; a CAS retry loop is lock-free but not wait-free."
     },
     {
       "id": "q5",
-      "question": "Which JavaScript API provides atomic operations on a `SharedArrayBuffer`?",
+      "question": "Why might a CAS-based lock-free counter perform WORSE than a mutex-protected counter under high write contention?",
       "type": "mcq",
       "options": [
-        "Mutex",
-        "SharedLock",
+        "CAS instructions are not supported on modern multi-core processors",
+        "Multiple threads spin in CAS retry loops, burning CPU without making net progress, while mutex losers are descheduled",
+        "Mutexes use specialized hardware acceleration that CAS cannot access",
+        "The operating system throttles CAS instructions to prevent overheating"
+      ],
+      "correct": 1,
+      "explanation": "Under high contention, many threads attempt CAS simultaneously and most fail. They immediately retry, burning CPU in a tight spin — a phenomenon called a 'CAS storm'. A mutex loser is descheduled by the OS and wastes no CPU while waiting. For heavily contested single variables, striped counters (one per CPU core, summed lazily) often outperform both."
+    },
+    {
+      "id": "q6",
+      "question": "Which JavaScript API provides atomic operations on a SharedArrayBuffer?",
+      "type": "mcq",
+      "options": [
+        "SharedMutex",
+        "ConcurrentMap",
         "Atomics",
         "Interlocked"
       ],
       "correct": 2,
-      "explanation": "JavaScript's `Atomics` object provides atomic read, write, add, and CAS operations on typed arrays backed by a `SharedArrayBuffer`. It also provides `Atomics.wait` and `Atomics.notify` for blocking/signaling between workers."
-    },
-    {
-      "id": "q6",
-      "question": "Why do modern CPUs and compilers sometimes reorder memory operations, and how does this affect concurrent code?",
-      "type": "mcq",
-      "options": [
-        "Reordering is always safe — CPUs guarantee sequential consistency",
-        "Reordering optimizes single-threaded performance but can cause other threads to observe stale or out-of-order values without memory barriers",
-        "Reordering only affects single-threaded programs",
-        "CPUs never reorder writes, only reads"
-      ],
-      "correct": 1,
-      "explanation": "Out-of-order execution and store buffering optimize performance for single threads. In concurrent code, another thread may observe a stale cached value or see writes in a different order than they occurred. Memory barriers / fences enforce ordering constraints across threads."
+      "explanation": "JavaScript's `Atomics` object provides atomic operations (`add`, `sub`, `and`, `or`, `xor`, `load`, `store`, `compareExchange`, `exchange`) on typed arrays backed by a `SharedArrayBuffer`. It also provides `Atomics.wait` and `Atomics.notify` for futex-style blocking and signaling between workers."
     },
     {
       "id": "q7",
-      "question": "What is the standard fix for the ABA problem in pointer-based lock-free data structures?",
+      "question": "Why do modern CPUs reorder memory instructions, and what does this mean for concurrent code?",
       "type": "mcq",
       "options": [
-        "Use a global mutex around all CAS operations",
-        "Pair each pointer with a monotonically increasing version stamp and include both in the CAS",
-        "Avoid all pointer-based structures and use arrays only",
-        "Require threads to register before performing CAS"
+        "CPUs never reorder instructions — this is a myth propagated by low-level programmers",
+        "Reordering optimizes single-threaded throughput but can cause other threads to observe stale or out-of-order writes without memory barriers",
+        "Reordering only affects reads, never writes, so stores are always observed in program order",
+        "Reordering is only visible on ARM processors; x86 always provides sequential consistency"
       ],
       "correct": 1,
-      "explanation": "A version stamp (or tag) increases on every write. A CAS checks both the pointer and the version, so A→B→A results in version v1→v2→v3. T1's CAS expects version v1 but finds v3, detecting the ABA cycle even though the pointer reverted."
+      "explanation": "Out-of-order execution and store buffering are fundamental to modern CPU performance. In single-threaded code, reorderings are invisible because the CPU ensures self-consistency. In multi-threaded code, another thread may observe writes in a different order. Memory barriers (fences) enforce ordering. Even x86 (Total Store Order) can reorder a store followed by a load to a different address."
     },
     {
       "id": "q8",
-      "question": "Under high contention, a CAS-based lock-free counter performs WORSE than a mutex-protected counter because:",
+      "question": "What is the standard fix for the ABA problem in pointer-based lock-free data structures?",
       "type": "mcq",
       "options": [
-        "CAS cannot handle more than two threads",
-        "Multiple threads spin in retry loops, wasting CPU cycles without making net progress",
-        "Mutexes use hardware acceleration unavailable to CAS",
-        "Atomics are not supported by all CPUs"
+        "Protect all CAS operations with a global mutex to ensure exclusive access",
+        "Pair each pointer with a monotonically increasing version stamp and include both in the CAS check",
+        "Avoid pointer-based structures entirely and use only array-indexed structures",
+        "Require all threads to acquire a read lock before performing any CAS"
       ],
       "correct": 1,
-      "explanation": "Under high contention, many threads attempt CAS simultaneously. Most fail and retry — burning CPU in a tight spin loop. A mutex-blocked thread is descheduled and wastes no CPU. For hot write paths, mutex + sleep or partitioned counters (one per core, summed when needed) often outperform a single atomic."
+      "explanation": "A version stamp (or tag) increases on every write. A CAS checks both the pointer and the version, so A→B→A results in versions v1→v2→v3. T1's CAS expects pointer A with version v1 but finds version v3, correctly detecting the ABA cycle even though the pointer value reverted. This is often packed into unused high bits of a pointer (tagged pointer)."
     },
     {
       "id": "q9",
-      "question": "`Atomics.add(view, 0, 1)` is considered wait-free because:",
+      "question": "`Atomics.add(view, 0, 1)` is classified as wait-free (rather than lock-free) because:",
       "type": "mcq",
       "options": [
-        "It uses a CAS retry loop internally",
-        "It acquires a lock for exactly one instruction",
-        "It completes in a single hardware instruction with no retry — every caller succeeds immediately",
-        "It is limited to one thread at a time"
+        "It uses a CAS retry loop that always converges within two attempts",
+        "It acquires an exclusive lock on the SharedArrayBuffer for exactly one instruction",
+        "It maps to a single hardware instruction (LOCK XADD on x86) that always completes with no retry",
+        "It schedules the increment on a dedicated atomic thread so the caller never waits"
       ],
       "correct": 2,
-      "explanation": "Fetch-and-Add is a single atomic machine instruction on x86 (`LOCK XADD`) and ARM. Every thread that calls it completes immediately — there is no retry loop and no thread can be delayed by another. This is the definition of wait-free."
+      "explanation": "Fetch-and-Add maps to the `LOCK XADD` instruction on x86 — a single atomic machine instruction. Every calling thread completes immediately regardless of how many other threads call concurrently. There is no retry loop and no thread can be delayed by another. This is the defining property of wait-free: every thread finishes in O(1) steps unconditionally."
     },
     {
       "id": "q10",
-      "question": "When is a lock-free approach most appropriate over a mutex?",
+      "question": "Linux RCU (Read-Copy-Update) achieves wait-free reads by:",
       "type": "mcq",
       "options": [
-        "When critical sections are long and complex",
-        "When contention is high and many threads compete for the same data",
-        "For read-heavy workloads or short, low-contention writes in performance-critical paths",
-        "Whenever you need correctness — lock-free is always safer"
+        "Using a reader-writer mutex that allows multiple concurrent readers with no writer waiting",
+        "Requiring readers to acquire a sequence lock and retry if a write occurred",
+        "Allowing readers to run without any synchronization primitives; writers copy, modify, then atomically publish a new version pointer, deferring reclamation until all prior-epoch readers finish",
+        "Batching all reads into a single-threaded event loop to eliminate concurrent access"
       ],
       "correct": 2,
-      "explanation": "Lock-free shines for read-heavy access (reads can proceed without any blocking) or infrequent writes where CAS rarely retries. Under high write contention, retrying CAS loops waste CPU. Always profile first: mutexes with low contention can be faster than any lock-free structure."
+      "explanation": "RCU's insight: if readers only ever read a consistent snapshot, they need no synchronization at all. Writers copy the data structure, modify the copy offline, and publish with a single pointer-swap CAS. Old versions are reclaimed after an epoch boundary guarantees no reader is still using them. Readers are genuinely wait-free — not even one atomic operation on the read path."
     }
   ]
 }

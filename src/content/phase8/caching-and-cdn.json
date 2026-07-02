@@ -5,58 +5,123 @@
   "week": 29,
   "icon": "architecture",
   "tagline": "The single biggest performance win in distributed systems — understanding where data lives and how long it stays valid.",
-  "readTime": "~12 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Most performance problems in web systems are not CPU-bound — they are **latency-bound**. A database query that takes 20ms, repeated by 100,000 users per second, becomes the bottleneck long before the CPU is stressed. **Caching** solves this by keeping computed results in faster storage so that expensive operations are done once and reused many times.\n\nCaches exist at multiple layers of the stack: the user's browser, a **CDN edge node** geographically close to the user, a reverse proxy in your data center, an in-process memory cache inside each app server, and the database's own buffer pool. Each layer trades **capacity** for **speed**. Understanding which layer to target — and how to keep data consistent when it changes — separates a well-designed system from one that is fast for the first user and slow for the tenth thousand."
+      "content": "Most performance problems in web systems are not CPU-bound — they are **latency-bound**. A database query that takes 20ms, executed once per request, becomes catastrophic at scale: 100,000 users per second means 100,000 trips to the database every second, each round-trip burning 20ms of waiting. The server is not thinking during those 20ms — it is just waiting for the disk. **Caching** is the discipline of short-circuiting that wait by keeping a copy of the answer somewhere faster, closer, and cheaper to reach.\n\nThe word 'cache' comes from the French word for 'hiding place' — a cache is a place where you stash something valuable so you can retrieve it quickly later without having to go back to the original source. In computing, that original source might be a database on a remote server, a file on a slow disk, or an API endpoint on another continent. The cache is the local hiding place: a Redis cluster in the same data center, a CDN edge node in the same city, or a tiny in-memory dictionary in the same process.\n\nCaches exist at every layer of the modern web stack. The CPU has L1, L2, and L3 caches measured in nanoseconds. The operating system has a page cache that holds recently accessed disk blocks in RAM. Your application has an in-process object cache. A Redis or Memcached cluster provides a shared cache across your fleet of app servers. A reverse proxy like Nginx or Varnish caches HTTP responses. A **CDN** (Content Delivery Network) caches assets on servers distributed across the globe. The user's own browser caches images, scripts, and API responses locally. Every layer trades **capacity** for **speed**: the CPU's L1 cache is 32 KB and takes 1ns; your distributed Redis cluster is 100 GB and takes 1ms; your database is 10 TB and takes 20ms.\n\nUnderstanding which layer to cache in, how to express what data is cacheable and for how long, and most critically — how to keep all those caches consistent when the underlying data changes — is one of the most practical and high-value skills in systems engineering. This chapter builds that understanding from first principles."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  User[\"Browser\"] -->|\"1. Browser cache hit\"| Browser[\"Browser Cache\"]\n  User -->|\"2. CDN edge hit\"| CDN[\"CDN Edge Node\"]\n  CDN -->|\"3. App cache hit\"| AppCache[\"Redis / App Cache\"]\n  AppCache -->|\"4. DB buffer hit\"| DBBuffer[\"DB Buffer Pool\"]\n  DBBuffer -->|\"5. Disk read\"| Disk[\"Database Disk\"]\n  Browser -->|\"miss\"| CDN\n  CDN -->|\"miss\"| AppCache\n  AppCache -->|\"miss\"| DBBuffer",
-      "caption": "The cache hierarchy: each layer catches misses from the layer above. The browser is fastest (0ms network), disk is slowest (20–100ms). The goal is to satisfy as many requests as possible at the highest layers."
+      "mermaid": "flowchart TD\n  User[\"User Request\"] --> BC[\"Browser Cache\\n~0ms\"]\n  BC -->|\"miss\"| CDN[\"CDN Edge Node\\n~5-20ms\"]\n  CDN -->|\"miss\"| RP[\"Reverse Proxy\\n~1ms\"]\n  RP -->|\"miss\"| RC[\"Redis Cache\\n~1ms\"]\n  RC -->|\"miss\"| DB[\"Database\\n~20-100ms\"]\n  BC -->|\"hit\"| User\n  CDN -->|\"hit\"| User\n  RP -->|\"hit\"| User\n  RC -->|\"hit\"| User\n  DB -->|\"result\"| User",
+      "caption": "The cache hierarchy. Each layer catches misses from the layer above. Latency numbers are approximate round-trip times. The goal is to satisfy as many requests as high up this chain as possible — ideally from the browser cache at 0ms network cost."
     },
     {
       "type": "analogy",
-      "title": "The Library System",
-      "content": "Imagine a massive library with books stored in a warehouse (the database). The **CDN** is a local branch library near your neighborhood — popular books are stocked locally so you do not drive across town. **Redis** is a reading desk at the front of the branch where the most recently requested books are left out in case someone wants them again. Your **browser cache** is your own bookshelf at home — if you own the book already, no trip at all. The **cache invalidation problem** is the librarian's nightmare: if the warehouse updates a book's edition, every local copy and desktop copy needs to know."
+      "title": "The Library Branch System",
+      "content": "Imagine a central library warehouse on the edge of town that holds every book ever printed — millions of titles, but it takes 45 minutes to drive there and back. The city also runs neighbourhood branch libraries: smaller collections of only the most popular books, but they are a 5-minute walk away. **The CDN is your local branch library.** Popular content is replicated there so most people never have to make the long drive to the warehouse.\n\nNow imagine the branch librarian keeps a small cart at the front desk with books that were returned in the last hour — these are the ones most likely to be requested again. **Redis is that front-desk cart.** Retrieving from the cart takes seconds; retrieving from the shelves takes minutes.\n\nFinally, you own a small bookshelf at home with books you have read recently. You never leave the house to get those. **The browser cache is your home bookshelf.**\n\nThe librarian's hardest problem: what happens when the warehouse receives a new, corrected edition of a book? Every branch library and every home bookshelf that holds the old edition is now wrong. The librarian sends notices (invalidation), some people tear out pages and paste in corrections (update), and some people just wait until their copy is old enough that they naturally return it and pick up the new one (TTL expiry). **Cache invalidation is the library's correction problem** — and it is famously the hardest problem in computer science."
     },
     {
       "type": "explanation",
-      "content": "**Cache-aside** (lazy loading) is the most common application pattern. The application checks the cache first; on a miss, it queries the database and writes the result into the cache with a **TTL** (time-to-live). Cache-aside is simple and only caches data that is actually requested, but the first request after a miss (or after expiry) is always slow.\n\n**Write-through** caching writes to the cache and the database simultaneously on every mutation. This keeps the cache consistently warm but adds write latency and wastes cache space on data that may never be read again.\n\n**Write-back** (write-behind) writes to the cache immediately and asynchronously flushes to the database later. This is extremely fast for writes but risks data loss if the cache crashes before flushing.\n\n**TTL** (time-to-live) is the expiry window on a cached entry. A well-chosen TTL balances staleness risk against cache effectiveness. Short TTLs (seconds) suit rapidly changing data; long TTLs (hours or days) suit stable data like product catalogs.\n\n**Cache invalidation** — removing or updating stale entries when source data changes — is the hardest part of caching. The common strategies are: delete the key on write (cache-aside re-fetches on next read), update the key on write (write-through), or rely solely on TTL expiry for tolerant use cases.\n\nA **CDN** (Content Delivery Network) is a globally distributed fleet of caching servers called **edge nodes**. Static assets (JavaScript bundles, images, CSS) are cached at edges. When a user in Tokyo requests `app.js`, the CDN serves it from a Tokyo edge node rather than an origin server in Virginia — reducing latency from 200ms to 5ms. Modern CDNs also cache API responses for public content and support **stale-while-revalidate**, serving a slightly stale cached response immediately while asynchronously fetching a fresh one."
+      "title": "The Cache Hierarchy: From Nanoseconds to Seconds",
+      "content": "To reason about caching, you need to internalise the latency numbers at each layer. These are rough but canonical figures that experienced engineers keep in their heads:\n\n- **CPU L1 cache**: ~1 nanosecond, ~32 KB per core\n- **CPU L2 cache**: ~4 nanoseconds, ~256 KB per core\n- **CPU L3 cache**: ~40 nanoseconds, ~8 MB shared\n- **Main RAM**: ~100 nanoseconds, tens of GB\n- **In-process object cache** (dictionary in your app): ~100 nanoseconds (no serialisation, no network)\n- **Redis on the same LAN**: ~0.5–1 millisecond (one network round-trip + parsing)\n- **Same-region database query**: ~1–5 ms (cached in DB buffer pool) or ~20–100 ms (disk I/O)\n- **CDN edge node in same country**: ~5–20 ms\n- **Origin server across continent**: ~150–300 ms\n- **Cold disk I/O (spinning disk)**: ~10 ms seek + transfer\n\nThe jump from nanoseconds to milliseconds is a factor of one million. When you move from an in-process cache hit to a database miss, you are paying roughly 100,000× more latency. This is why the choice of which cache layer to use is not a micro-optimisation — it fundamentally determines whether your system can serve 10 users or 10 million users.\n\n**Why not cache everything at the fastest layer?** Capacity and cost. Your process's heap is limited to a few GB, and data there is not shared with other processes. Redis costs money to provision and requires network overhead. Browser caches are on the user's device and cannot be purged server-side. Every cache layer has different capacity, sharing characteristics, and invalidation mechanisms."
+    },
+    {
+      "type": "explanation",
+      "title": "Caching Strategies: The Three Patterns",
+      "content": "There are three canonical strategies for using a cache, and each makes different tradeoffs between simplicity, write latency, consistency, and durability.\n\n**Cache-aside (lazy loading)** is by far the most common application-level pattern. The application manages the cache explicitly. On a read, it checks the cache first; on a miss, it queries the data source and stores the result in the cache with a TTL. On a write, it updates the data source and either deletes or updates the cache key. Cache-aside is simple because the cache is purely advisory — if it fails or is empty, the system degrades gracefully to hitting the database. The downside is the **cold start problem**: every unique key is slow on its first access, and an empty cache after a Redis restart means a traffic spike to the database.\n\n**Write-through** caches are updated synchronously on every write. The application writes to both the cache and the database in the same operation (or the cache is an intermediary that writes through to the database). The cache is always warm for recently written data. The tradeoff: every write pays twice (cache + DB latency), and data that is written but never read wastes cache space.\n\n**Write-back (write-behind)** writes to the cache immediately and returns success to the client, then asynchronously flushes data to the database in the background. Writes are extremely fast (just a cache write), but if the cache crashes before the flush happens, those writes are permanently lost. Write-back is appropriate for high-throughput, loss-tolerant workloads like analytics event counts or leaderboard scores, but is dangerous for financial transactions or user account data.\n\nA fourth variant, **read-through**, is where the cache itself (rather than the application) is responsible for populating from the database on a miss. Redis does not natively support this, but caching frameworks like Ehcache do. The application always talks to the cache, which transparently fetches from the DB when needed. This moves cache logic out of application code but makes the database completely dependent on the cache's availability."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n  participant C as Client\n  participant CDN as CDN Edge\n  participant O as Origin Server\n  participant R as Redis\n  participant DB as Database\n  C->>CDN: GET /api/products\n  alt CDN cache hit\n    CDN-->>C: 200 (from edge, ~5ms)\n  else CDN cache miss\n    CDN->>O: forward request\n    O->>R: get products:all\n    alt Redis hit\n      R-->>O: cached JSON\n    else Redis miss\n      O->>DB: SELECT * FROM products\n      DB-->>O: rows\n      O->>R: SET products:all EX 300\n    end\n    O-->>CDN: 200 + Cache-Control header\n    CDN-->>C: 200 (caches at edge)\n  end",
-      "caption": "Request flow through CDN and Redis layers. A CDN hit costs ~5ms; a Redis hit ~1ms network + 0.5ms lookup; a DB miss is 20–100ms. Cache headers on the origin response control how long the CDN retains the entry."
+      "mermaid": "flowchart LR\n  subgraph CA[\"Cache-Aside\"]\n    A1[\"App\"] -->|\"1. check cache\"| C1[\"Cache\"]\n    C1 -->|\"2. miss: query DB\"| D1[\"DB\"]\n    D1 -->|\"3. store + return\"| C1\n  end\n  subgraph WT[\"Write-Through\"]\n    A2[\"App\"] -->|\"write\"| C2[\"Cache\"]\n    C2 -->|\"write-through\"| D2[\"DB\"]\n  end\n  subgraph WB[\"Write-Back\"]\n    A3[\"App\"] -->|\"write returns immediately\"| C3[\"Cache\"]\n    C3 -->|\"async flush later\"| D3[\"DB\"]\n  end",
+      "caption": "Three caching strategies. Cache-aside is most common for reads; write-through keeps cache warm on writes; write-back maximises write throughput at the cost of durability."
+    },
+    {
+      "type": "explanation",
+      "title": "TTL: Time-to-Live and the Staleness Tradeoff",
+      "content": "Every cache entry should have a **TTL** (Time-to-Live) — an expiry window after which the entry is automatically evicted. Without a TTL, a missed invalidation (a bug in your write path that forgets to delete a cache key) means a user sees stale data forever. With a TTL, at worst they see stale data for TTL seconds before the cache auto-expires and the next read fetches fresh data.\n\nChoosing the right TTL is a product and engineering decision, not just a technical one. The question is: **how stale can this data be before the user or the business is harmed?**\n\n- **Very short TTLs (1–10 seconds)**: Real-time counters, live inventory levels, stock prices. Staleness of 10 seconds is tolerable; staleness of 60 seconds is not.\n- **Short TTLs (60–300 seconds)**: Search results, product listings, user news feeds. Users tolerate a few minutes of staleness in exchange for fast responses.\n- **Medium TTLs (1–24 hours)**: User profile data, product descriptions, configuration. These change occasionally but not in real time.\n- **Long TTLs (days to weeks)**: Reference data, country/city lists, static content not handled by content hashing. Rarely changes.\n- **Effectively infinite (immutable)**: Content-addressed assets like `app.a1b2c3.js` where the URL itself changes when content changes. These can be cached forever because the URL guarantees freshness.\n\nA key operational insight: **always set a TTL even when you are also doing explicit invalidation**. Your invalidation code will have bugs, deploys will fail, cache flushes will be missed. TTL is your safety net — it bounds the worst-case staleness window. A missed invalidation with a 5-minute TTL means 5 minutes of staleness, not permanent staleness.\n\nAnother subtlety: **staggering TTLs** prevents a thundering herd when many keys expire simultaneously. If you cache 1,000 user profiles all with TTL=3600 and they were all loaded at the same second (e.g., at server startup), they all expire at the same time, causing a simultaneous spike of 1,000 DB queries. Adding a small random jitter — `TTL = 3600 + Math.random() * 300` — spreads the expirations."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Cache-aside with write-invalidation (Node.js / ioredis)\nimport { Redis } from 'ioredis';\nconst redis = new Redis(process.env.REDIS_URL);\n\nconst CACHE_TTL = 300; // seconds\n\n// READ — lazy population\nasync function getProduct(id) {\n  const key = `product:${id}`;\n  const hit = await redis.get(key);\n  if (hit) return JSON.parse(hit); // cache hit: ~0.5ms\n\n  const row = await db.query(\n    'SELECT * FROM products WHERE id = $1', [id]\n  );\n  if (row) await redis.setex(key, CACHE_TTL, JSON.stringify(row));\n  return row; // cache miss: ~20ms, populates cache\n}\n\n// WRITE — invalidate stale entry\nasync function updateProductPrice(id, price) {\n  await db.query(\n    'UPDATE products SET price = $1 WHERE id = $2', [price, id]\n  );\n  await redis.del(`product:${id}`); // next read re-fetches fresh data\n}\n\n// CDN cache headers on Express response\napp.get('/api/public/products', async (req, res) => {\n  const products = await getProductList();\n  res\n    .set('Cache-Control', 'public, max-age=60, stale-while-revalidate=30')\n    .json(products);\n  // CDN caches 60s; serves stale for 30s while revalidating in background\n});",
-      "explanation": "The `setex` call stores the value with a TTL atomically — no race between SET and EXPIRE. On mutation, `del` removes the stale key rather than updating it, which is simpler and avoids serialization bugs. The CDN header uses `stale-while-revalidate` so edge users never see a slow origin miss — they get the 60-second-old copy while the CDN refreshes in background."
+      "label": "Example",
+      "code": "// Cache-aside with TTL jitter and write-invalidation (Node.js / ioredis)\nimport { Redis } from 'ioredis';\nconst redis = new Redis(process.env.REDIS_URL);\n\nconst BASE_TTL = 300; // 5 minutes base\n\n// Add ±10% jitter to prevent thundering herd on mass expiry\nfunction jitteredTTL(base) {\n  const jitter = Math.floor(base * 0.1 * Math.random());\n  return base + jitter;\n}\n\n// READ — cache-aside lazy loading\nasync function getProduct(id) {\n  const key = `product:${id}`;\n\n  const cached = await redis.get(key);\n  if (cached !== null) {\n    return JSON.parse(cached); // cache HIT: ~0.5ms round-trip\n  }\n\n  // Cache MISS: query source of truth\n  const row = await db.query(\n    'SELECT * FROM products WHERE id = $1 AND deleted_at IS NULL',\n    [id]\n  );\n\n  if (row) {\n    // SETEX is atomic: set value AND TTL in one command.\n    // Never use SET then EXPIRE — a crash between the two leaves\n    // a key with no TTL that persists forever.\n    await redis.setex(key, jitteredTTL(BASE_TTL), JSON.stringify(row));\n  }\n\n  return row; // ~20ms DB latency on miss, but cache warm for next requests\n}\n\n// WRITE — invalidate on mutation\nasync function updateProductPrice(id, newPrice) {\n  // Always write source of truth first\n  await db.query(\n    'UPDATE products SET price = $1, updated_at = NOW() WHERE id = $2',\n    [newPrice, id]\n  );\n  // Then invalidate cache — next read re-populates with fresh data\n  await redis.del(`product:${id}`);\n  // Alternative: redis.setex(key, TTL, JSON.stringify(updated)) — write-through\n  // But del is simpler and avoids stale-serialisation bugs\n}\n\n// CDN-facing HTTP endpoint\napp.get('/api/public/products', async (req, res) => {\n  const products = await getProductList();\n  res\n    // 'public': CDN and shared caches may store this response\n    // max-age=60: serve from CDN cache for up to 60 seconds\n    // stale-while-revalidate=30: after max-age, serve stale for 30s\n    //   while asynchronously fetching fresh from origin\n    .set('Cache-Control', 'public, max-age=60, stale-while-revalidate=30')\n    .json(products);\n});",
+      "explanation": "Several subtle patterns here: `redis.setex` is atomic — it sets the value AND the TTL in one Redis command, preventing the race condition where a crash between `SET` and `EXPIRE` leaves a key with no TTL. TTL jitter spreads expiration times across a window to avoid simultaneous cache misses. The write path deletes the key rather than updating it — this is simpler, avoids serialisation bugs (what if the DB row format changed?), and means the cache is populated lazily on the next read. The HTTP `stale-while-revalidate` directive tells CDNs to serve an expired entry immediately to the user while fetching fresh content in the background — eliminating the latency spike users would otherwise see on cache expiry."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Cache Invalidation: The Hardest Problem",
+      "content": "Phil Karlton's famous quip — \"There are only two hard things in Computer Science: cache invalidation and naming things\" — has become a cliché precisely because it is so accurate. Cache invalidation is hard because it requires **distributed coordination under failure**: you need to ensure that every cache holding a stale copy of a data item is updated or evicted when the source data changes, even when networks partition, caches crash, and writes happen concurrently.\n\nThe main strategies:\n\n**Delete on write (invalidation)**: The simplest approach. When data changes, delete all cache keys that depend on it. The next read for any deleted key will miss the cache, fetch fresh data from the DB, and repopulate the cache. This is correct by default because the worst case is a cache miss (slow), not a cache hit on stale data. The challenge is knowing which keys to delete — if a product update affects a product detail page, a search results page, and a recommendation engine response, you need to invalidate all three.\n\n**Update on write (write-through invalidation)**: Instead of deleting the key, update it with the new serialised value atomically. This keeps the cache warm (no cold-start spike after every write) but is harder to implement correctly — the serialised cache value must exactly match what a fresh cache-aside read would produce.\n\n**Event-driven invalidation**: A message queue (Kafka, RabbitMQ, Redis Streams) broadcasts `ProductUpdated` events. All services that maintain a cache for products subscribe to the event and invalidate their local caches. This decouples the writer from the cache holders and is more scalable for multi-service architectures, but introduces eventual consistency — there is a window between the write and the event being processed.\n\n**Tag-based invalidation**: Associate cache keys with tags (`product:42`, `category:electronics`). On update, invalidate all keys with a given tag. This elegantly handles the problem of one data change invalidating multiple cache entries. Varnish and some CDNs support `Surrogate-Key` headers for this purpose. Redis does not natively support tags but they can be implemented with Redis Sets as indexes.\n\n**Version-based invalidation**: Store a version number or timestamp with each cache key. On write, increment the version. Readers check the version before trusting a cached result. This is often used for cases where full invalidation is too expensive."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant App as Application\n  participant Cache as Redis Cache\n  participant DB as Database\n  participant Bus as Event Bus\n  App->>DB: UPDATE products SET price=99\n  DB-->>App: OK\n  App->>Bus: publish ProductUpdated {id:42}\n  App->>Cache: DEL product:42\n  Note over Cache: key evicted\n  Bus-->>App: (other services receive event)\n  App->>Cache: GET product:42\n  Cache-->>App: nil (miss)\n  App->>DB: SELECT * FROM products WHERE id=42\n  DB-->>App: {id:42, price:99}\n  App->>Cache: SETEX product:42 300 {price:99}",
+      "caption": "Write path with invalidation. The cache key is deleted immediately after the DB write. The event bus notifies other services. The next read re-populates the cache with fresh data from the DB. There is a brief window between DEL and re-population where all reads hit the DB."
+    },
+    {
+      "type": "explanation",
+      "title": "CDN Architecture: Edge Nodes and PoPs",
+      "content": "A **CDN** (Content Delivery Network) is a globally distributed fleet of caching servers. The key insight is geographic: network latency is fundamentally limited by the speed of light. A request from Tokyo to a server in Virginia takes at least 70ms just for the photons to travel through the fibre (the actual RTT is typically 200–300ms including routing and processing). A CDN edge server in Tokyo serves that same content in 5–10ms.\n\nCDN vendors (Cloudflare, Fastly, Akamai, AWS CloudFront) operate **Points of Presence (PoPs)** — data centers in dozens or hundreds of cities worldwide. Each PoP contains multiple **edge nodes** (caching servers). When a user requests `https://example.com/images/hero.jpg`, DNS resolves to the nearest PoP's IP address. The edge node checks its cache; on a hit, it serves the asset directly. On a miss, the edge node **pulls from origin** — fetches from your actual server — and caches the response for subsequent requests from the same region.\n\nThis pulling model is called **pull-based CDN**. Your origin only needs to handle the first request from each region for each unique URL. After that, the edge serves from cache until the TTL expires or you explicitly purge the edge cache.\n\nCDNs are not just for static files anymore. Modern CDNs support:\n- **API caching**: Cache `GET /api/products` at the edge with `Cache-Control: public, max-age=60`. The first request from any region hits origin; the next 10,000 requests in that region are served from the edge at 10ms each.\n- **Edge computing**: Run JavaScript or WebAssembly at the edge node before even consulting your origin (Cloudflare Workers, Fastly Compute). This enables personalisation, A/B testing, and auth validation at edge latency.\n- **Dynamic site acceleration**: Even for uncacheable content, CDNs accelerate delivery by maintaining persistent TCP connections to your origin and routing over optimised private networks instead of the public internet.\n\nCDNs are also your first line of **DDoS defence**. A volumetric attack that sends 100 Gbps of traffic to your domain hits CDN edge nodes — which have far more capacity than your origin — and can absorb or filter the attack before it reaches your servers."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant Tokyo as User in Tokyo\n  participant Edge as CDN Edge Tokyo\n  participant Origin as Origin Server\n  Tokyo->>Edge: GET /images/hero.jpg\n  alt Cache HIT\n    Edge-->>Tokyo: 200 OK (5ms, cached)\n  else Cache MISS\n    Edge->>Origin: GET /images/hero.jpg\n    Origin-->>Edge: 200 OK + Cache-Control: public max-age=86400\n    Edge->>Edge: Store in edge cache\n    Edge-->>Tokyo: 200 OK (200ms, from origin)\n    Note over Edge: Next request from Tokyo: 5ms\n  end",
+      "caption": "CDN pull model. Only the first request per region per resource hits origin. Every subsequent request in that region is served from the edge at ~5ms latency, regardless of origin server load."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP Cache Headers: The Language of Web Caching",
+      "content": "The `Cache-Control` header is how your server communicates caching policy to browsers, CDNs, and proxies. It is arguably the most important HTTP header for performance engineering. Understanding its directives deeply lets you precisely control caching behaviour at every layer.\n\n**`Cache-Control: public`** — This response may be cached by any shared cache (CDN, proxy). Use for content that is identical for all users.\n\n**`Cache-Control: private`** — Only the end user's browser may cache this. CDNs and shared proxies must not store it. Use for authenticated or personalised content.\n\n**`Cache-Control: no-store`** — Do not cache this response anywhere, not even the browser. Use for truly sensitive data (bank account details, medical records).\n\n**`Cache-Control: no-cache`** — A confusingly named directive that does NOT mean 'do not cache'. It means: you may store the response, but you must revalidate it with the origin before serving it again (using `ETag` or `Last-Modified`). This adds a conditional request round-trip but avoids serving outdated content.\n\n**`max-age=N`** — The response is considered fresh for N seconds. After N seconds, the cache considers it stale.\n\n**`s-maxage=N`** — Like `max-age` but applies only to shared caches (CDNs). Lets you set a different TTL for CDN vs browser. E.g., `Cache-Control: public, max-age=60, s-maxage=3600` — browsers cache for 1 minute, CDNs cache for 1 hour.\n\n**`stale-while-revalidate=N`** — After `max-age` expires, serve the stale cached response immediately for up to N additional seconds, while asynchronously fetching a fresh copy. This eliminates the latency spike users see when a cache entry expires.\n\n**`immutable`** — The response body will never change. Combined with a long `max-age`, browsers will not even attempt to revalidate on a hard refresh. Only use with content-addressed URLs.\n\nPractical recipes:\n- **Content-hashed JS/CSS** (`app.a1b2c3.js`): `Cache-Control: public, max-age=31536000, immutable`\n- **Public API response**: `Cache-Control: public, max-age=60, stale-while-revalidate=30`\n- **User dashboard HTML**: `Cache-Control: private, no-store`\n- **CDN-cached API, browser-private**: `Cache-Control: public, s-maxage=300, private, max-age=0`"
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Caching strategy decision guide\n\n// Cache-aside (lazy loading)\n// Best for: read-heavy, tolerates brief staleness, unpredictable access patterns\n// Pro:  only caches accessed data — efficient memory usage\n// Con:  first request after miss/expiry is slow (thundering herd risk)\n\n// Write-through\n// Best for: write + read symmetry, low write frequency, zero stale tolerance\n// Pro:  cache always warm on writes\n// Con:  every write pays cache + DB latency; pollutes cache with unread data\n\n// Write-back\n// Best for: write-heavy workloads where some loss is acceptable (analytics, counters)\n// Pro:  writes return in <1ms\n// Con:  data loss window if cache crashes before flush\n\n// TTL guide (rough)\nconst TTL = {\n  sessionTokens:     3600,      // 1 hour — security-sensitive\n  productCatalog:    86400,     // 24 hours — rarely changes\n  userProfile:       300,       // 5 min — changes occasionally\n  searchResults:     60,        // 1 min — freshness matters\n  realtimeCounters:  1,         // 1 sec — near-realtime\n};\n\n// CDN Cache-Control cheat sheet\n// Versioned static files: Cache-Control: public, max-age=31536000, immutable\n// Public API responses:   Cache-Control: public, max-age=60, stale-while-revalidate=30\n// Personalized responses: Cache-Control: private, no-store",
-      "explanation": ""
+      "label": "Example",
+      "code": "// HTTP cache header patterns in an Express.js API\n\n// 1. PUBLIC CONTENT — cacheable at CDN and browser\n// Product listing page — public, CDN caches 5 min, browser 1 min\napp.get('/api/products', async (req, res) => {\n  const products = await getProductsWithCache();\n  res\n    .set('Cache-Control', 'public, max-age=60, s-maxage=300, stale-while-revalidate=60')\n    // ETag enables conditional requests: browser sends If-None-Match on revalidation\n    .set('ETag', computeETag(products))\n    .json(products);\n});\n\n// 2. PRIVATE CONTENT — only browser may cache, never CDN\n// User account page — private, short TTL\napp.get('/api/user/profile', authenticate, async (req, res) => {\n  const profile = await getUserProfile(req.user.id);\n  res\n    .set('Cache-Control', 'private, max-age=300')\n    .json(profile);\n});\n\n// 3. SENSITIVE — no caching anywhere\n// Payment/financial data\napp.get('/api/user/payment-methods', authenticate, async (req, res) => {\n  const methods = await getPaymentMethods(req.user.id);\n  res\n    .set('Cache-Control', 'no-store')\n    .json(methods);\n});\n\n// 4. VERSIONED STATIC ASSET — effectively immutable\n// Served by CDN; URL changes when content changes (content hashing via Vite/Webpack)\napp.use('/static', express.static('dist', {\n  setHeaders: (res, path) => {\n    if (path.match(/\\.[a-f0-9]{8}\\.(js|css|woff2)$/)) {\n      // Hash in filename guarantees new URL on new content — safe to cache forever\n      res.set('Cache-Control', 'public, max-age=31536000, immutable');\n    } else {\n      // Non-hashed files (favicon.ico, robots.txt) — cache for 1 day\n      res.set('Cache-Control', 'public, max-age=86400');\n    }\n  }\n}));\n\n// 5. CDN PURGE — invalidate edge cache after deploy or content update\n// Using Cloudflare API as example\nasync function purgeEdgeCache(paths) {\n  await fetch(\n    `https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/purge_cache`,\n    {\n      method: 'POST',\n      headers: { Authorization: `Bearer ${CF_TOKEN}`, 'Content-Type': 'application/json' },\n      body: JSON.stringify({ files: paths }),\n    }\n  );\n}",
+      "explanation": "Notice the layering: `s-maxage` lets CDNs cache longer than browsers (`s-maxage=300` vs `max-age=60`). ETags enable conditional requests — when the browser revalidates after max-age, it sends `If-None-Match: <etag>` and the server can respond with `304 Not Modified` (no body) instead of the full response, saving bandwidth. Content-hashed files get `max-age=31536000` (one year) safely because the URL itself changes when content changes. Purge API calls are necessary after deploys that change non-hashed content."
+    },
+    {
+      "type": "explanation",
+      "title": "The Thundering Herd: Cache Stampedes and How to Prevent Them",
+      "content": "Imagine a Redis key for your homepage's product listing with a TTL of 5 minutes. Your site gets 50,000 requests per minute. At the moment the key expires, all 50,000 concurrent in-flight requests simultaneously get a cache miss. Every one of them queries the database. Your database, which is sized for 100 queries/second with the cache, suddenly receives 833 queries/second. It buckles, response times spike, and users see errors. The cache was protecting the database — now that protection is temporarily gone, and the load spike may prevent the cache from ever re-warming.\n\nThis is the **thundering herd** (also called **cache stampede**).\n\n**Mitigation 1: Mutex / distributed lock**. When a miss occurs, only one process is allowed to query the database and repopulate the cache. All other processes wait (or serve a stale value) until the lock holder finishes. In Redis, this can be implemented with `SET lock:product_list 1 NX EX 5` (set only if not exists, with a 5-second TTL as a safety expiry). The NX (Not eXists) flag makes it atomic. Processes that fail to acquire the lock can either wait and retry, or serve the previous stale value if available.\n\n**Mitigation 2: Stale-while-revalidate**. The CDN or caching proxy serves the stale entry to all users immediately while exactly one background request fetches the fresh copy. By the time the background fetch completes, the cache is warm again. No users experience a slow response. This is built into the HTTP `stale-while-revalidate` directive and is the simplest solution for HTTP-level caching.\n\n**Mitigation 3: Probabilistic early expiry (XFetch algorithm)**. Rather than waiting for a key to fully expire, proactively regenerate it slightly before expiry based on a probability that increases as the key approaches its TTL. A key with 10 seconds remaining has a low probability of early regeneration; a key with 1 second remaining has a high probability. This amortises the regeneration cost across many requests, preventing the simultaneous miss.\n\n**Mitigation 4: Background refresh pattern**. A separate background worker continuously refreshes hot cache keys a few seconds before they expire, completely decoupled from the request path. The request always finds a warm cache. This is ideal for keys that are always needed (e.g., homepage data, global configuration).\n\n**Mitigation 5: TTL jitter**. When pre-warming many keys simultaneously (e.g., at startup), add random jitter to each key's TTL. Instead of all 10,000 user profiles expiring at T+3600, they expire between T+3400 and T+3800. This spreads the miss load across 400 seconds rather than concentrating it at one moment."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Key expires\"] --> B[\"1000 concurrent requests\\nall get cache MISS\"]\n  B --> C{\"Mutex acquired?\"}\n  C -->|\"YES: 1 request\"| D[\"Query DB\\nrepopulate cache\"]\n  C -->|\"NO: 999 requests\"| E[\"Serve stale value\\nor wait for lock\"]\n  D --> F[\"Cache warm again\"]\n  E --> F",
+      "caption": "Mutex pattern for thundering herd prevention. Only the request that wins the distributed lock queries the database. All others serve the previous stale value immediately. After the lock holder repopulates the cache, all future requests hit the cache again."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Thundering herd prevention: mutex with stale-value fallback\n// Uses Redis SET NX (atomic acquire) pattern\n\nasync function getWithMutex(key, fetchFn, ttl = 300) {\n  // 1. Try fast path: cache hit\n  const cached = await redis.get(key);\n  if (cached !== null) return JSON.parse(cached);\n\n  // 2. Cache miss — try to acquire a distributed lock\n  const lockKey = `lock:${key}`;\n  const lockTTL = 10; // safety expiry in case the lock holder crashes\n  const acquired = await redis.set(lockKey, '1', 'NX', 'EX', lockTTL);\n\n  if (acquired === 'OK') {\n    // 3. We hold the lock — fetch fresh data\n    try {\n      const fresh = await fetchFn();\n      await redis.setex(key, jitteredTTL(ttl), JSON.stringify(fresh));\n      return fresh;\n    } finally {\n      await redis.del(lockKey); // always release the lock\n    }\n  } else {\n    // 4. Another process is fetching — wait briefly, then return stale or retry\n    await new Promise(r => setTimeout(r, 100));\n    const retried = await redis.get(key);\n    if (retried !== null) return JSON.parse(retried);\n    // Last resort: fetch directly (rare — only if lock holder was very slow)\n    return fetchFn();\n  }\n}\n\n// Usage\nconst products = await getWithMutex(\n  'products:featured',\n  () => db.query('SELECT * FROM products WHERE featured = true'),\n  300\n);\n\n// XFetch: probabilistic early expiry\n// Regenerate before TTL with probability proportional to proximity to expiry\nasync function getWithEarlyExpiry(key, fetchFn, ttl) {\n  const cached = await redis.get(key);\n  const remaining = await redis.ttl(key); // seconds until expiry\n\n  if (cached !== null) {\n    // Probability of early refresh increases as remaining TTL decreases\n    const beta = 1.0; // tuning parameter\n    const shouldRefresh = Math.random() * ttl < beta * Math.log(ttl / remaining);\n\n    if (!shouldRefresh) return JSON.parse(cached); // serve cached\n  }\n\n  // Fetch fresh and update cache\n  const fresh = await fetchFn();\n  await redis.setex(key, jitteredTTL(ttl), JSON.stringify(fresh));\n  return fresh;\n}",
+      "explanation": "The `SET key value NX EX N` Redis command is the canonical distributed mutex primitive: it sets the key only if it does not exist (NX = Not eXists), and sets an expiry (EX) as a safety net in case the lock holder crashes before releasing. The `finally` block ensures the lock is always released. The XFetch algorithm uses a probabilistic formula where the probability of early refresh grows as remaining TTL shrinks — this naturally amortises cache regeneration without requiring a separate background worker."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache Eviction Policies: What Gets Dropped When the Cache is Full",
+      "content": "A cache has finite memory. When it is full and a new item needs to be stored, something must be evicted. The **eviction policy** determines what gets dropped. Redis supports several policies, configured via `maxmemory-policy`:\n\n**LRU (Least Recently Used)** — evict the entry that was accessed least recently. The intuition: if you have not used something in a long time, you probably will not need it soon. Redis's `allkeys-lru` evicts any key; `volatile-lru` only evicts keys that have a TTL set.\n\n**LFU (Least Frequently Used)** — evict the entry that has been accessed the fewest times. Better than LRU for workloads with a mix of hot and cold data — a key accessed once a long time ago beats a key accessed frequently recently under LRU, but LFU correctly identifies the frequently-used one as more valuable.\n\n**Random** — evict a random key. Simple, predictable performance overhead, but suboptimal hit rate.\n\n**No eviction (the default)** — return an error when the cache is full. This is suitable when Redis is used as a primary data store rather than a cache. As a cache, this policy is almost always wrong.\n\nFor application caches, `allkeys-lru` or `allkeys-lfu` are the most common choices. LFU is generally better for cases with highly skewed access patterns (20% of keys serve 80% of traffic — the classic Pareto distribution of web workloads). LRU is simpler and works well when recency is the best predictor of future access.\n\n**Cache capacity planning**: A useful heuristic is that a cache achieving a 90% hit rate stores roughly 10% of the working set by count but handles 90% of the load. You do not need to cache everything — you need to cache the hot portion. For most web applications, the top 10% of content serves 80–90% of traffic."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context**: The concept of CPU caching dates to the 1960s. IBM introduced the first hardware cache in the IBM System/360 Model 85 in 1968. Web-scale caching as we know it was pioneered by Akamai, founded in 1998 as a CDN born out of Tim Berners-Lee's challenge at MIT to 'solve the Internet's infrastructure problems'. Redis was created by Salvatore Sanfilippo in 2009, initially to improve the performance of a real-time web log analyser — the write-back pattern was its original use case. Memcached, the other dominant in-memory cache, was created by Brad Fitzpatrick at LiveJournal in 2003 to handle the site's database load as it scaled. The web caching ecosystem we use today was largely invented to handle MySpace, LiveJournal, and YouTube's growth — problems of a scale that no one had faced before."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Thundering herd**: when a popular cache key expires, thousands of requests simultaneously miss the cache and all query the database at once, potentially crashing it. Mitigate with a **mutex lock** on cache population (only one request fetches, others wait), a **probabilistic early expiry** (regenerate the cache slightly before TTL), or by using `stale-while-revalidate` so the CDN/proxy serves the old entry while one background request refreshes it."
+      "content": "**Common mistakes and interview insights:**\n\n**Mistake: caching without a TTL.** `redis.set(key, value)` with no expiry means the entry lives until explicitly deleted or Redis is flushed. One missed invalidation creates stale data forever.\n\n**Mistake: caching mutable per-user data at the CDN.** Setting `Cache-Control: public` on `/api/user/dashboard` will cause the CDN to serve one user's private data to another user. Always use `private` or `no-store` for personalised responses.\n\n**Mistake: not testing the cache-miss path.** Developers test with a warm cache and never see the miss path. In production, a Redis restart or first deploy creates a cold cache. The miss path must handle gracefully.\n\n**Interview insight: 'What is cache invalidation?'** Answer: the process of removing or updating stale cached entries when the source data changes. Explain the three strategies (delete on write, update on write, TTL expiry) and why TTL is a safety net even when you also invalidate explicitly.\n\n**Interview insight: 'What is a CDN and how does it work?'** Answer: globally distributed fleet of caching servers at Points of Presence. DNS routes users to the nearest edge node. Edges pull from origin on miss, then cache based on response `Cache-Control` headers. Describe the latency savings (200ms → 10ms) and the pull model."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Caches form a hierarchy**: browser → CDN edge → Redis → DB buffer → disk. Each layer has lower latency and lower capacity; the goal is to satisfy requests at the highest layer possible.",
-        "**Cache-aside** is the default application pattern: read from cache, miss falls through to DB, result is stored with a TTL. Simple, efficient, and tolerates imperfect invalidation.",
-        "**TTL is mandatory** — always set one even if you also invalidate explicitly. A missed invalidation then causes bounded staleness (TTL seconds) rather than permanent staleness.",
-        "**CDN edge caching** reduces latency from hundreds of milliseconds to single-digit milliseconds for static assets and cacheable API responses. Use `Cache-Control` headers to control CDN behavior from the origin.",
-        "**Cache invalidation** — keeping caches consistent with the source of truth after writes — is the hardest part. The simplest strategy: delete the cache key on write and let the next read re-populate it."
+        "**Caches form a hierarchy from nanoseconds to seconds**: CPU L1/L2/L3 → RAM → in-process cache → Redis → CDN edge → database. Each layer is slower but larger. Satisfying requests at a higher layer yields exponential latency reductions.",
+        "**Three core caching strategies**: cache-aside (app manages cache on reads and writes — most common), write-through (cache updated synchronously on every write — always warm), write-back (write to cache, flush async — fastest writes but durability risk). Choose based on your read/write ratio and staleness tolerance.",
+        "**Always set a TTL** — even when you have explicit invalidation. TTL is your safety net: a missed invalidation becomes bounded staleness (TTL seconds) instead of permanent staleness. Add jitter to TTLs set in batch to prevent simultaneous expiry stampedes.",
+        "**Cache-Control headers are the interface between your server and the caching infrastructure.** Know the key directives: `public` vs `private`, `max-age` vs `s-maxage`, `no-store` vs `no-cache`, `stale-while-revalidate`, and `immutable`. Content-hashed files can be cached for a year; personalised responses should use `private` or `no-store`.",
+        "**CDN edge caching** reduces latency from 200ms (cross-continent) to 5ms (nearby edge node) for static assets and cacheable API responses. CDNs also absorb DDoS attacks, offload bandwidth from origin, and — with edge computing — can personalise content without hitting your origin at all.",
+        "**Cache invalidation** is the hardest part: keeping caches consistent when source data changes. The safest strategy is delete-on-write (cache key is deleted after DB update; next read repopulates it fresh). More advanced approaches include event-driven invalidation via a message bus and tag-based invalidation for CDNs.",
+        "**Thundering herd** (cache stampede) occurs when a popular key expires and many concurrent requests simultaneously miss the cache. Mitigate with a distributed mutex lock (Redis `SET NX EX`), `stale-while-revalidate`, or probabilistic early expiry (XFetch). Always test your cache-miss path — it is what users see after deploys and Redis restarts."
       ]
     }
   ],
@@ -67,72 +132,72 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "In the cache-aside pattern, what happens when the application gets a cache miss?",
+      "question": "In the cache-aside (lazy loading) pattern, what happens on a cache miss?",
       "type": "mcq",
       "options": [
-        "The request returns a 503 error until the cache is warm",
-        "The load balancer retries the request on a different server",
+        "The request returns a 503 error until the cache is manually warmed",
+        "The load balancer retries the request on a different cache node",
         "The application queries the database and stores the result in the cache with a TTL",
-        "The cache automatically fetches from the database without application code"
+        "The cache automatically fetches from the database without any application code"
       ],
       "correct": 2,
-      "explanation": "Cache-aside (lazy loading) puts cache management in the application. On a miss the app queries the DB, writes the result into the cache with a TTL, and returns the data. Future requests for the same key are served from cache."
+      "explanation": "Cache-aside puts cache management in the application. On a miss the app queries the DB directly, writes the fresh result into the cache with a TTL, and returns the data to the caller. Future requests for the same key hit the cache. The cache is advisory — if it fails, the system gracefully falls back to the DB."
     },
     {
       "id": "q2",
-      "question": "Which caching strategy writes to the cache and database simultaneously on every write operation?",
+      "question": "What is the key difference between write-through and write-back caching?",
       "type": "mcq",
       "options": [
-        "Cache-aside",
-        "Write-through",
-        "Write-back",
-        "Read-through"
+        "Write-through uses TTL expiry; write-back uses explicit invalidation",
+        "Write-through updates both cache and DB synchronously; write-back writes to cache immediately and flushes to DB asynchronously",
+        "Write-through only caches read results; write-back only caches write results",
+        "Write-through is used for CDNs; write-back is used for in-process caches"
       ],
       "correct": 1,
-      "explanation": "Write-through updates the cache and the database in the same write path. The cache is always warm after a write, but every write pays the combined latency of both operations."
+      "explanation": "Write-through keeps the cache consistent by updating it synchronously with every DB write (both succeed before returning to the caller). Write-back writes only to the cache immediately (low latency) and defers the DB flush to a background process — at the risk of data loss if the cache crashes before flushing."
     },
     {
       "id": "q3",
-      "question": "What does TTL stand for and why is it important for caches?",
+      "question": "Why should you use `redis.setex(key, ttl, value)` instead of `redis.set(key, value)` followed by `redis.expire(key, ttl)`?",
       "type": "mcq",
       "options": [
-        "Total Transfer Limit — controls how many times a key can be read",
-        "Time-to-Live — sets an expiry window so stale entries are automatically evicted",
-        "Token Transfer Layer — authenticates cache read requests",
-        "Throughput Threshold Level — triggers cache eviction when load is high"
+        "SETEX is faster because it uses a binary wire protocol",
+        "SETEX is atomic — it sets value and TTL in one command, preventing a race condition where a crash leaves a key with no expiry",
+        "EXPIRE only works on keys containing integers, not JSON strings",
+        "SETEX supports larger values than the two-command approach"
       ],
       "correct": 1,
-      "explanation": "TTL (Time-to-Live) is the number of seconds before a cache entry is automatically deleted. It ensures stale data does not persist indefinitely, even if explicit invalidation is missed due to a bug."
+      "explanation": "If the process crashes or the connection drops between the SET and EXPIRE commands, the key has no TTL and will persist forever — a missed invalidation becomes permanent staleness. SETEX is a single atomic command that sets both value and TTL together, eliminating this race condition entirely."
     },
     {
       "id": "q4",
-      "question": "A CDN primarily improves performance by:",
+      "question": "What does the `stale-while-revalidate=30` directive in a Cache-Control header tell a CDN or browser?",
       "type": "mcq",
       "options": [
-        "Compressing database query results before sending them to app servers",
-        "Distributing caching servers geographically close to end users",
-        "Load balancing write traffic across multiple primary databases",
-        "Encrypting static assets to reduce parsing time in browsers"
+        "Reject all requests for 30 seconds after the max-age expires",
+        "After max-age expires, serve the stale cached response immediately for up to 30 seconds while fetching a fresh copy in the background",
+        "Revalidate the cached response every 30 seconds using ETag headers",
+        "Delay serving the response by 30 seconds to allow the cache to warm up"
       ],
       "correct": 1,
-      "explanation": "CDN edge nodes cache content in data centers worldwide. A user in Tokyo is served from a nearby edge node (~5ms) rather than an origin server in another continent (~200ms), dramatically reducing latency."
+      "explanation": "stale-while-revalidate lets the cache serve a slightly stale response immediately (avoiding the latency of an origin round-trip) while simultaneously fetching fresh content in the background. The stale content is served during revalidation, so users never experience the latency spike that would occur if the cache simply expired and forced an origin fetch."
     },
     {
       "id": "q5",
-      "question": "What is the 'thundering herd' problem in caching?",
+      "question": "What is the 'thundering herd' (cache stampede) problem?",
       "type": "mcq",
       "options": [
         "A cache that grows too large and evicts useful entries too aggressively",
-        "Many requests simultaneously hitting the database when a popular cache key expires",
-        "A CDN edge node that caches private user data and serves it to other users",
-        "Write-back cache losing data because the flush worker is too slow"
+        "Many concurrent requests simultaneously missing the cache when a popular key expires and all hitting the database at once",
+        "A CDN that accidentally caches private user data and serves it to other users",
+        "Write-back cache losing data because the background flush worker cannot keep up"
       ],
       "correct": 1,
-      "explanation": "When a hot cache key expires, all concurrent requests miss the cache at the same moment and hammer the database simultaneously. This can cause a spike that overwhelms the DB. Mitigations include mutex locks on cache population or stale-while-revalidate."
+      "explanation": "When a hot cache key expires, all concurrent requests get a cache miss at the same moment and simultaneously query the database. The DB, which was sized for low load thanks to the cache, receives a sudden massive spike that can cause it to buckle. The cache was providing protection — when it briefly disappears at key expiry, the full load hits the DB. Mitigations include distributed mutex locks, stale-while-revalidate, and TTL jitter."
     },
     {
       "id": "q6",
-      "question": "Which Cache-Control header is appropriate for a content-hashed JavaScript bundle (e.g., app.a1b2c3.js)?",
+      "question": "Which Cache-Control header is correct for a content-hashed JavaScript file (e.g., `app.a1b2c3d4.js`)?",
       "type": "mcq",
       "options": [
         "Cache-Control: no-store",
@@ -141,59 +206,59 @@
         "Cache-Control: no-cache, must-revalidate"
       ],
       "correct": 2,
-      "explanation": "A content-hashed filename changes whenever the file content changes, so caching it for a year is safe — the hash guarantees a new URL for new content. The `immutable` directive tells browsers not to revalidate even on hard refresh."
+      "explanation": "A content-hashed filename includes a hash of the file's contents in the URL. When content changes, the URL changes — so browsers and CDNs always request the correct version. This makes it completely safe to cache for a year (31536000 seconds). The `immutable` directive tells browsers not to revalidate even on a hard refresh, eliminating unnecessary conditional requests."
     },
     {
       "id": "q7",
-      "question": "Write-back caching is best suited for which scenario?",
+      "question": "A CDN serves users with low latency primarily by:",
       "type": "mcq",
       "options": [
-        "Financial transactions where every write must be durably persisted immediately",
-        "User authentication tokens that must never be stale",
-        "High-frequency counters or analytics events where brief data loss is acceptable",
-        "Product catalog pages that change once per day"
+        "Compressing database query results before forwarding to app servers",
+        "Caching content at geographically distributed edge nodes close to end users",
+        "Load balancing write traffic across multiple database replicas",
+        "Encrypting assets at the network layer to reduce TLS handshake time"
       ],
-      "correct": 2,
-      "explanation": "Write-back stores data in the cache first and flushes to the database asynchronously. Writes are extremely fast, but if the cache crashes before flushing, recent writes are lost. This is acceptable for counters and analytics but dangerous for financial data."
+      "correct": 1,
+      "explanation": "CDN edge nodes are located in data centers worldwide. A user in Tokyo is served from a nearby Tokyo edge node at ~5-10ms rather than an origin server across the Pacific at ~200ms. The CDN caches content on first pull from origin, so all subsequent requests from that region are served at edge latency. Physical distance and the speed of light are the fundamental constraints CDNs address."
     },
     {
       "id": "q8",
-      "question": "What does `stale-while-revalidate` do in an HTTP Cache-Control header?",
+      "question": "What does `Cache-Control: private` tell a CDN edge node?",
       "type": "mcq",
       "options": [
-        "Forces the CDN to reject requests after the max-age expires",
-        "Allows the cache to serve a stale response while asynchronously fetching a fresh one",
-        "Instructs the browser to revalidate the cache on every request using ETags",
-        "Prevents personalized responses from being cached at CDN edges"
+        "Cache this response and encrypt it before storing at the edge",
+        "Do not store this response — it may only be cached by the end user's browser",
+        "Cache this response only for users with a valid authentication token",
+        "Store the response for 60 seconds then require revalidation"
       ],
       "correct": 1,
-      "explanation": "stale-while-revalidate lets the CDN or browser immediately serve a slightly stale cached entry (avoiding a slow origin round-trip) while simultaneously fetching an updated version in the background for the next request."
+      "explanation": "`private` means the response is specific to one user and must not be stored in any shared cache (CDNs, proxies). Only the end user's own browser may cache it. Using `public` on personalised content is a critical security mistake — the CDN could serve one user's private data to a different user who requests the same URL."
     },
     {
       "id": "q9",
-      "question": "Why should you use `redis.setex(key, ttl, value)` instead of `redis.set(key, value)` followed by `redis.expire(key, ttl)`?",
+      "question": "Redis's `allkeys-lfu` eviction policy evicts which key when the cache is full?",
       "type": "mcq",
       "options": [
-        "setex is faster because it uses a binary protocol",
-        "setex is atomic — it sets value and TTL in a single command, preventing a race condition",
-        "setex supports larger values than the two-command approach",
-        "expire only works on numeric values, not JSON strings"
+        "The key with the shortest remaining TTL",
+        "The key that was accessed least recently",
+        "The key that has been accessed the fewest times overall",
+        "A randomly selected key regardless of access pattern"
       ],
-      "correct": 1,
-      "explanation": "If the process crashes between SET and EXPIRE, the key has no TTL and lives forever. `SETEX` is atomic — both value and TTL are set in one command — eliminating the race condition."
+      "correct": 2,
+      "explanation": "LFU (Least Frequently Used) tracks access counts and evicts the key accessed the fewest total times. This is better than LRU for skewed workloads: a key accessed thousands of times but not recently (like a popular product page that is momentarily quiet) is more valuable than a key accessed once recently. LFU correctly preserves the high-frequency key."
     },
     {
       "id": "q10",
-      "question": "A personalized API response (e.g., /api/user/dashboard with user-specific data) should use which Cache-Control directive?",
+      "question": "You want to add a TTL jitter to prevent thundering herd on mass cache population. Which implementation is correct?",
       "type": "mcq",
       "options": [
-        "Cache-Control: public, max-age=3600",
-        "Cache-Control: public, max-age=60, stale-while-revalidate=30",
-        "Cache-Control: private, no-store",
-        "Cache-Control: immutable, max-age=86400"
+        "Set all keys with the same TTL but different key names",
+        "Add a random value within ±10% of the base TTL to each key's expiry",
+        "Set TTL to zero and rely on explicit invalidation only",
+        "Use LRU eviction so Redis naturally staggers expirations"
       ],
-      "correct": 2,
-      "explanation": "`private` prevents CDN and proxy caches from storing the response (only the user's browser may cache it). `no-store` tells even the browser not to store it. This prevents one user's private data from being served to another user by a shared cache."
+      "correct": 1,
+      "explanation": "Jitter adds randomness to TTL values, spreading expiry events over time rather than concentrating them at a single moment. For example, with a base TTL of 3600 seconds and 10% jitter, keys expire between 3240 and 3960 seconds — a 720-second window instead of a single instant. This prevents all keys set at startup from expiring simultaneously and causing a mass cache miss. LRU eviction addresses memory pressure, not expiry timing."
     }
   ]
 }

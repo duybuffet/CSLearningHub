@@ -5,57 +5,116 @@
   "week": 58,
   "icon": "gear",
   "tagline": "Counters, gauges, histograms, the RED and USE methods, Prometheus, dashboards, and alerting — knowing what your system is doing at all times.",
-  "readTime": "~15 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "You cannot improve what you cannot measure. **Monitoring** is the practice of continuously collecting, storing, and visualising data about a running system so you can detect problems before users do — or understand them quickly after they happen. **Metrics** are the numeric time-series that power monitoring: request rates, error counts, CPU usage, database query latency.\n\nGood monitoring answers three questions: **Is the system up?** (availability), **Is it behaving correctly?** (correctness), and **Is it performing well?** (latency and throughput). Without metrics, debugging a production incident means guessing. With metrics, you open a dashboard, see the error rate spike at 14:32, correlate it with a deployment, and have a root cause in minutes."
+      "content": "You cannot improve what you cannot measure — and you cannot fix what you cannot see. **Monitoring** is the discipline of continuously collecting, storing, and making sense of numeric data about running systems. Without it, a production incident is an archaeological dig: you sift through logs and hearsay, reconstruct a timeline after the fact, and hope you understand what broke. With good monitoring, you open a dashboard, see an error-rate spike at 14:32, correlate it with a deployment event, and have a root cause in minutes.\n\n**Metrics** are the raw material of monitoring: numeric time-series that capture system state over time. They answer questions like: How many requests per second is this API handling right now? What fraction of those requests are returning 5xx errors? How long does the p99 request take? Is the database connection pool saturating? Unlike logs — which capture discrete events — metrics aggregate continuously and are cheap to store and query at scale.\n\nAt the heart of modern metrics practice sits a small vocabulary of **metric types**, two powerful mental frameworks (**RED** for services, **USE** for resources), and an open-source tool stack (**Prometheus + Grafana + Alertmanager**) that has become the default choice across the industry. Mastering these gives you a universal language for understanding any production system, regardless of whether it is a tiny side-project on a single VPS or a microservices platform running across thousands of pods.\n\nThis chapter covers: why monitoring matters and what makes a good metric; the four fundamental metric types (counter, gauge, histogram, summary); the RED method for measuring service health from a user perspective; the USE method for measuring resource health from an infrastructure perspective; how Prometheus works end-to-end; PromQL — the query language that makes metrics useful; how to instrument an application; how to write alert rules that actually help instead of creating noise; and the four golden signals from Google's SRE book that underpin all of this."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n    A[\"Application\\n(instrumented)\"]\n    A -- \"expose /metrics\" --> B[\"Prometheus\\n(scrapes every 15s)\"]\n    B -- \"store TSDB\" --> C[\"Prometheus\\nQuery Engine\"]\n    C -- \"PromQL queries\" --> D[\"Grafana\\nDashboard\"]\n    C -- \"alert rules\" --> E[\"Alertmanager\"]\n    E -- \"route\" --> F[\"PagerDuty\\nor Slack\"]",
-      "caption": "Prometheus pull model: the application exposes metrics; Prometheus scrapes them; Grafana visualises; Alertmanager routes firing alerts."
+      "mermaid": "flowchart LR\n    A[\"Application\\n(instrumented code)\"]\n    A -- \"expose /metrics\" --> B[\"Prometheus\\n(scrape every 15s)\"]\n    B -- \"write TSDB\" --> C[\"Time-Series DB\"]\n    C -- \"PromQL\" --> D[\"Grafana\\nDashboards\"]\n    C -- \"alert rules\" --> E[\"Alertmanager\"]\n    E -- \"route + deduplicate\" --> F[\"PagerDuty\\nor Slack\"]",
+      "caption": "End-to-end Prometheus pull model: instrumented applications expose a /metrics endpoint; Prometheus scrapes it on a fixed interval; Grafana visualises; Alertmanager routes firing alerts to on-call channels."
     },
     {
       "type": "analogy",
       "title": "The Aircraft Instrument Panel",
-      "content": "A commercial aircraft has hundreds of sensors feeding an instrument panel: airspeed (a **gauge** — current value), fuel burned (a **counter** — always increasing), and turbulence intensity over time (a **histogram** — distribution of magnitudes). The pilot does not check every sensor manually — the panel aggregates them into meaningful readouts and triggers audible alerts when values cross thresholds.\n\n**Monitoring** is that instrument panel for software. A **counter** is the odometer — it only goes up (total HTTP requests served). A **gauge** is the speedometer — it can go up or down (current memory usage in MB). A **histogram** is the altimeter — it shows how values distribute across buckets (how many requests took 0-10ms, 10-50ms, 50-200ms, 200ms+). **The RED method** (Rate, Errors, Duration) is the pilot's essential cockpit scan: is traffic normal? Are errors spiking? Is latency increasing? **The USE method** (Utilisation, Saturation, Errors) is for the engine room: is the CPU overloaded, is the request queue growing, are hardware errors appearing?"
+      "content": "A commercial airliner has hundreds of sensors feeding a glass cockpit: airspeed (a **gauge** — the current value right now, could go up or down), total fuel burned since engine start (a **counter** — always increasing, never resets mid-flight), and turbulence magnitude logged in 10-second buckets over the past hour (a **histogram** — shows the distribution of jolt intensities, not just the worst or the average).\n\nThe pilot does not watch every sensor individually — the panel synthesises them into meaningful readouts and sounds an alarm only when a value crosses a threshold that matters to flight safety. And critically, the pilot has a checklist: for every phase of flight, scan *this set* of instruments in *this order*. That is the **RED method** for a service (Rate, Errors, Duration) — the cockpit scan that answers whether your API is serving users correctly right now. The **USE method** (Utilisation, Saturation, Errors) is the engine-room checklist: is the CPU overloaded, is the request queue growing faster than it drains, are there hardware errors?\n\nJust as an aircraft's black box records all instrument readings for post-incident analysis, **Prometheus** stores time-series data so you can rewind to any moment in the past and answer: what was the system doing at the exact moment it failed? That time-travel capability is one of the most powerful properties of a metrics-driven observability stack."
     },
     {
       "type": "explanation",
-      "content": "**Metric Types** are the vocabulary of monitoring:\n\n- **Counter**: A monotonically increasing integer. Reset only on process restart. Examples: `http_requests_total`, `errors_total`. Use `rate()` in queries to convert to a per-second rate over a window.\n- **Gauge**: A value that can go up or down. Examples: `memory_usage_bytes`, `active_connections`, `queue_depth`. Represents current state at a point in time.\n- **Histogram**: Samples observations and counts them in configurable buckets, plus a running sum and count. Examples: `http_request_duration_seconds`. Enables percentile calculations (p50, p95, p99) which are far more informative than averages for latency.\n- **Summary**: Similar to histogram but calculates quantiles client-side. Less flexible for aggregation across replicas — prefer histograms.\n\n**The RED Method** (coined by Tom Wilkie) focuses on *services* — anything that handles requests:\n- **Rate**: How many requests per second is the service handling?\n- **Errors**: What fraction of those requests are failing?\n- **Duration**: How long do requests take (p50, p95, p99)?\n\n**The USE Method** (from Brendan Gregg) focuses on *resources* — CPUs, memory, disks, network:\n- **Utilisation**: What percentage of time is the resource busy?\n- **Saturation**: Is work queuing up because the resource is over-capacity?\n- **Errors**: Are hardware or OS-level errors occurring?\n\n**Prometheus** is the de-facto standard open-source metrics system. Applications expose a `/metrics` HTTP endpoint in a text format. Prometheus scrapes it on a configurable interval (typically 15 seconds), stores the data in a time-series database (TSDB), and evaluates alerting rules. **Grafana** connects to Prometheus via PromQL queries and renders dashboards. **Alertmanager** receives firing alerts from Prometheus and routes them to PagerDuty, Slack, email, etc., with deduplication and silencing."
+      "title": "Metric Types: The Vocabulary of Monitoring",
+      "content": "Prometheus defines four metric types. Choosing the right one is not pedantic — it determines what queries are valid and what conclusions you can draw.\n\n**Counter** is a monotonically increasing integer that resets only when the process restarts. Examples: `http_requests_total`, `errors_total`, `bytes_sent_total`. You never read a counter's raw value directly; you always apply `rate()` or `increase()` to convert it into a per-second or per-window rate. The reason: the raw value tells you cumulative volume but not current rate, and process restarts make the raw value jump backwards. `rate()` handles restarts automatically by detecting a decrease and accounting for it.\n\n**Gauge** is a value that can go up or down at any time. Examples: `memory_usage_bytes`, `active_connections`, `queue_depth_current`, `temperature_celsius`. Gauges represent instantaneous state. You can safely compute `avg_over_time()`, `max_over_time()`, or just plot the raw value — there is no need for `rate()` because the gauge is already a current-state snapshot.\n\n**Histogram** samples observations and classifies each one into one of a set of configurable buckets, while also maintaining a running `_sum` and `_count`. If you create an `http_request_duration_seconds` histogram with buckets `[0.01, 0.05, 0.1, 0.5, 1, 5]`, every request is recorded both in the appropriate bucket *and* in every bucket above it (the buckets are cumulative). This allows `histogram_quantile(0.99, rate(metric_bucket[5m]))` to compute approximate percentiles server-side. Histograms are the right choice for latency and response sizes.\n\n**Summary** is similar to histogram but calculates quantiles *client-side*, inside the application, before data is ever scraped. This gives exact quantiles but with two serious drawbacks: (1) you cannot aggregate summaries across multiple replicas because pre-computed quantiles cannot be re-quantiled, and (2) the quantiles you want must be specified at instrumentation time. In most cases, prefer histograms."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n    A[\"Incoming request\"]\n    A --> B[\"Handler\"]\n    B --> C[\"Increment\\nhttp_requests_total counter\"]\n    B --> D[\"Observe duration in\\nhttp_duration_seconds histogram\"]\n    B --> E[\"Set active_requests\\ngauge +1 / -1\"]\n    C --> F[\"/metrics endpoint\"]\n    D --> F\n    E --> F\n    F --> G[\"Prometheus scrapes\\nevery 15 s\"]",
-      "caption": "Instrumentation flow: each request updates counters, histograms, and gauges; Prometheus pulls the accumulated state."
+      "mermaid": "flowchart TD\n    A[\"Incoming HTTP Request\"]\n    A --> B[\"Handler executes\"]\n    B --> C[\"Counter: http_requests_total++\"]\n    B --> D[\"Histogram: observe duration\"]\n    B --> E[\"Gauge: active_requests +1 then -1\"]\n    C --> F[\"/metrics endpoint\"]\n    D --> F\n    E --> F\n    F --> G[\"Prometheus scrape (15s)\"]",
+      "caption": "Three metric types work together on a single request: counter tracks cumulative volume, histogram records latency distribution, gauge tracks in-flight concurrency."
+    },
+    {
+      "type": "explanation",
+      "title": "Labels: The Superpower of Dimensional Metrics",
+      "content": "A metric name alone is rarely enough. A single counter called `http_requests_total` cannot tell you which route is slow, which HTTP method is failing, or which upstream service is responsible. **Labels** are key-value pairs attached to a metric that add dimensions without creating separate metric names.\n\nFor example: `http_requests_total{method=\"POST\", route=\"/orders\", status_code=\"500\"}`. Now a single metric family captures all routes, all methods, and all status codes. You can query:\n- Total error rate across all routes: `rate(http_requests_total{status_code=~\"5..\"}[5m])`\n- Error rate for a specific route: `rate(http_requests_total{route=\"/orders\", status_code=~\"5..\"}[5m])`\n- Break down by route: `sum by(route)(rate(http_requests_total[5m]))`\n\nLabels are powerful but come with a warning: **label cardinality**. If you use a label whose value has many distinct possibilities — say, `user_id` with millions of users — Prometheus creates a separate time-series for each unique combination of label values. A million-user metric explodes into millions of time-series, consuming enormous memory and storage. Always use labels for low-cardinality dimensions: HTTP method (5-10 values), status code (dozens), service name, environment. Never use user IDs, session tokens, or URLs with dynamic path segments as label values."
+    },
+    {
+      "type": "explanation",
+      "title": "The RED Method: Measuring Service Health",
+      "content": "The **RED method**, coined by Tom Wilkie at Weaveworks, provides a minimal but complete checklist for monitoring any service that handles requests — HTTP APIs, gRPC services, message consumers, database query handlers. The three signals are:\n\n**Rate** — how many requests per second is the service currently handling? This answers 'Is the service alive and receiving traffic?' A sudden drop in rate (when you would normally expect traffic) often indicates a bug or network partition upstream — callers have stopped reaching the service. Useful PromQL: `sum(rate(http_requests_total[5m]))`.\n\n**Errors** — what fraction of requests are resulting in errors? This is the most direct user-impact metric. An error rate above your SLO is always worth a page. Distinguish different error classes: client errors (4xx) are often not your fault but can indicate bugs in callers; server errors (5xx) are almost always your responsibility. Useful PromQL: `sum(rate(http_requests_total{status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m]))`.\n\n**Duration** — how long do requests take, expressed as percentiles? The p50 (median) tells you what a typical user experiences. The p95 or p99 tells you what the slowest users experience — and these are often your most important users or your most expensive operations. **Averages hide the long tail.** A service with p50=50ms and p99=8000ms has a terrible user experience for 1 in 100 requests, which an average of ~130ms completely obscures. Histograms enable accurate percentile calculation: `histogram_quantile(0.99, sum by(le)(rate(http_request_duration_seconds_bucket[5m])))`.\n\nThe power of RED is its universality. Any service that processes requests can be assessed with exactly these three questions. If all three look healthy, users are not impacted — regardless of what CPU or disk metrics look like."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    R[\"Rate\\n(requests/sec)\"]\n    E[\"Errors\\n(fraction failing)\"]\n    D[\"Duration\\n(p50 / p95 / p99)\"]\n    R --> S[\"Service\\nHealth\"]\n    E --> S\n    D --> S\n    S --> OK[\"All healthy?\\nUsers are fine\"]\n    S --> BAD[\"Any unhealthy?\\nInvestigate immediately\"]",
+      "caption": "RED method: three signals that collectively answer whether a service is serving users correctly. Start here for every service-level incident."
+    },
+    {
+      "type": "explanation",
+      "title": "The USE Method: Measuring Resource Health",
+      "content": "While RED focuses on user-visible service behavior, the **USE method** (coined by Brendan Gregg, Netflix) focuses on the physical and virtual **resources** that services depend on: CPUs, memory, disk I/O, network interfaces, database connection pools, thread pools, message queue workers. For each resource, check three things:\n\n**Utilisation** — what percentage of the resource's total capacity is currently in use? A CPU at 30% utilisation is fine. At 90%, you are getting close to a ceiling. Utilisation is expressed as a ratio (0.0–1.0) or percentage. Important nuance: 100% utilisation does not always mean saturation. A CPU at 100% with no run queue simply means it is being fully used with no backlog.\n\n**Saturation** — is there excess work queuing up that the resource cannot immediately service? A CPU at 90% utilisation with a run queue length of 10 (tasks waiting for CPU time) is saturated. Saturation is the more dangerous signal because it means latency is growing. Resources can be at 100% utilisation with no saturation (if requests complete before new ones arrive) or highly saturated at 70% utilisation (if requests take so long they pile up). For databases: the connection pool queue depth. For Kubernetes: pod pending time due to resource pressure.\n\n**Errors** — are there hardware or OS-level errors occurring? Disk I/O errors, network packet drops, memory ECC errors, TCP retransmit rates. These often appear before a resource fails completely and can be the first indicator of hardware degradation.\n\nUSE is most powerful when combined with RED: if RED shows high latency, USE tells you *which resource* is the bottleneck. High p99 latency + high database connection pool saturation = the database is the chokepoint. High p99 latency + CPU at 95% + growing run queue = the service itself needs more CPU or optimization."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    U[\"Utilisation\\n% of resource in use\"]\n    S[\"Saturation\\nwork queued up\"]\n    E[\"Errors\\nhardware or OS faults\"]\n    U --> R[\"Resource\\nHealth\"]\n    S --> R\n    E --> R\n    R --> BOTTLENECK[\"Identify bottleneck\\nfor high RED latency\"]",
+      "caption": "USE method: applied to every resource (CPU, memory, disk, network, thread pool). Saturation is the earliest warning — queuing begins before utilisation reaches 100%."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// ── Node.js instrumentation with prom-client ────────────────────\nimport express from 'express';\nimport client from 'prom-client';\n\nconst app = express();\n\n// 1. Collect default Node.js metrics (event loop lag, GC, heap, etc.)\nclient.collectDefaultMetrics({ prefix: 'api_' });\n\n// 2. Counter — total requests, labelable by method, route, status\nconst httpRequestsTotal = new client.Counter({\n  name: 'http_requests_total',\n  help: 'Total number of HTTP requests',\n  labelNames: ['method', 'route', 'status_code'],\n});\n\n// 3. Histogram — request duration in seconds, with sensible buckets\nconst httpRequestDuration = new client.Histogram({\n  name: 'http_request_duration_seconds',\n  help: 'HTTP request duration in seconds',\n  labelNames: ['method', 'route', 'status_code'],\n  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5],\n});\n\n// 4. Gauge — currently active (in-flight) requests\nconst activeRequests = new client.Gauge({\n  name: 'http_active_requests',\n  help: 'Number of in-flight HTTP requests',\n});\n\n// 5. Middleware: instrument every request\napp.use((req, res, next) => {\n  const end = httpRequestDuration.startTimer();\n  activeRequests.inc();\n\n  res.on('finish', () => {\n    const labels = {\n      method: req.method,\n      route: req.route?.path ?? req.path,\n      status_code: String(res.statusCode),\n    };\n    httpRequestsTotal.inc(labels);\n    end(labels);          // stops timer and records observation\n    activeRequests.dec();\n  });\n\n  next();\n});\n\n// 6. /metrics endpoint scraped by Prometheus\napp.get('/metrics', async (req, res) => {\n  res.set('Content-Type', client.register.contentType);\n  res.send(await client.register.metrics());\n});\n\napp.get('/orders/:id', async (req, res) => {\n  // ... business logic ...\n  res.json({ id: req.params.id, status: 'fulfilled' });\n});\n\napp.listen(3000);\nconsole.log('Server on :3000, metrics on :3000/metrics');",
-      "explanation": "The counter tracks total requests, labelled by method, route, and HTTP status — enabling per-route error rates with `rate(http_requests_total{status_code=~'5..'}[5m])`. The histogram records latency distribution; `histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))` gives the p99 latency. The gauge shows instantaneous concurrency. Together these three metrics answer the entire RED method for this service."
+      "label": "Example",
+      "code": "// ── Node.js full instrumentation with prom-client ─────────────────\nimport express from 'express';\nimport client from 'prom-client';\n\nconst app = express();\n\n// 1. Collect built-in Node.js metrics (event loop lag, GC duration,\n//    heap used/total, active handles, active requests, etc.)\nclient.collectDefaultMetrics({ prefix: 'api_' });\n\n// 2. Counter — label by method, route, and HTTP status code\n//    This single metric powers all three RED signals:\n//    Rate   = rate(http_requests_total[5m])\n//    Errors = rate(http_requests_total{status_code=~\"5..\"}[5m])\n//               / rate(http_requests_total[5m])\nconst httpRequestsTotal = new client.Counter({\n  name: 'http_requests_total',\n  help: 'Total HTTP requests received',\n  labelNames: ['method', 'route', 'status_code'],\n});\n\n// 3. Histogram — buckets tuned for a typical web API\n//    Duration = histogram_quantile(0.99,\n//                 rate(http_request_duration_seconds_bucket[5m]))\nconst httpRequestDurationSeconds = new client.Histogram({\n  name: 'http_request_duration_seconds',\n  help: 'HTTP request latency in seconds',\n  labelNames: ['method', 'route', 'status_code'],\n  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],\n});\n\n// 4. Gauge — in-flight requests (USE: saturation proxy)\nconst httpActiveRequests = new client.Gauge({\n  name: 'http_active_requests',\n  help: 'Number of in-flight HTTP requests currently being processed',\n});\n\n// 5. Gauge — queue depth (USE: saturation for a background worker)\nconst jobQueueDepth = new client.Gauge({\n  name: 'job_queue_depth',\n  help: 'Number of jobs waiting in the processing queue',\n});\n\n// 6. Middleware: instrument every request transparently\napp.use((req, res, next) => {\n  const timer = httpRequestDurationSeconds.startTimer();\n  httpActiveRequests.inc();\n\n  res.on('finish', () => {\n    const labels = {\n      method: req.method,\n      route: req.route?.path ?? 'unknown',\n      status_code: String(res.statusCode),\n    };\n    httpRequestsTotal.inc(labels);\n    timer(labels);           // records elapsed seconds into histogram\n    httpActiveRequests.dec();\n  });\n\n  next();\n});\n\n// 7. /metrics endpoint — Prometheus scrapes this every 15 seconds\napp.get('/metrics', async (_req, res) => {\n  res.set('Content-Type', client.register.contentType);\n  res.send(await client.register.metrics());\n});\n\n// 8. Business endpoint — all instrumentation is in the middleware\napp.get('/orders/:id', async (req, res) => {\n  const order = await db.findOrder(req.params.id);\n  if (!order) return res.status(404).json({ error: 'not found' });\n  res.json(order);\n});\n\napp.listen(3000, () =>\n  console.log('Server :3000 | metrics :3000/metrics')\n);",
+      "explanation": "Every request passes through the middleware, which starts a histogram timer, increments the active-requests gauge, and on response completion records all three labels into both the counter and histogram while decrementing the gauge. The single /metrics endpoint, scraped every 15 seconds by Prometheus, exposes the full state of all these metrics in Prometheus text format. From just these three metric families you can answer the entire RED method for this service."
     },
     {
-      "type": "code_concept",
-      "language": "bash",
-      "label": "Concept",
-      "code": "# ── PromQL: common queries ───────────────────────────────────────\n\n# RED: Rate — requests per second over the last 5 minutes\n# rate(http_requests_total[5m])\n\n# RED: Error rate — fraction of 5xx responses\n# rate(http_requests_total{status_code=~\"5..\"}[5m])\n#   / rate(http_requests_total[5m])\n\n# RED: p99 latency (requires histogram metric type)\n# histogram_quantile(0.99,\n#   rate(http_request_duration_seconds_bucket[5m]))\n\n# USE: CPU utilisation across all cores\n# 1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))\n\n# USE: Memory saturation — swap usage\n# node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes\n\n# ── Prometheus alerting rule (prometheus.yml) ────────────────────\n# groups:\n#   - name: api.rules\n#     rules:\n#       - alert: HighErrorRate\n#         expr: |\n#           rate(http_requests_total{status_code=~\"5..\"}[5m])\n#             / rate(http_requests_total[5m]) > 0.01\n#         for: 2m           # must be true for 2 min before firing\n#         labels:\n#           severity: critical\n#         annotations:\n#           summary: \"Error rate > 1% for 2 minutes\"\n\n# ── Key alerting principles ──────────────────────────────────────\n# Alert on SYMPTOMS (high error rate, high latency) not CAUSES\n# (high CPU). Users don't care about CPU; they care about 5xx.\n# Use 'for: Xm' to avoid flapping alerts on transient spikes.\n# Keep alert count low — alert fatigue kills on-call effectiveness.\n\necho \"Golden signals: latency, traffic, errors, saturation\""
+      "type": "explanation",
+      "title": "PromQL: Querying Time-Series Data",
+      "content": "**PromQL** (Prometheus Query Language) is a functional language designed specifically for time-series data. Understanding its core patterns unlocks everything from dashboards to alerting rules.\n\nThe building block is a **selector**: `http_requests_total` returns all time-series with that name. Add label matchers to filter: `http_requests_total{status_code=~\"5..\"}` returns only 5xx series (the `=~` operator uses RE2 regex). The `!=` and `!~` operators exclude matches.\n\n`rate(metric[window])` computes the per-second rate of increase of a counter over the window, handling resets. `rate(http_requests_total[5m])` gives the per-second request rate over the last 5 minutes — this is the R in RED. The window must be at least 2× the scrape interval (use 5m when scraping every 15s; shorter windows produce noisy, unreliable rates).\n\n`sum by(label)(expression)` aggregates across time-series, keeping only the specified labels. `sum by(route)(rate(http_requests_total[5m]))` shows per-route throughput. Drop the `by(route)` to get the total across all routes.\n\n`histogram_quantile(phi, rate(metric_bucket[window]))` computes an approximate quantile from a histogram. `histogram_quantile(0.99, sum by(le)(rate(http_request_duration_seconds_bucket[5m])))` gives the p99 latency across all instances. The `le` label (less-than-or-equal) is the bucket boundary label that Prometheus auto-generates for histograms — you must include it in the `by()` clause.\n\n`avg_over_time(gauge[window])` gives the time-averaged value of a gauge — useful for smoothing noisy instantaneous readings. `max_over_time(gauge[window])` catches spikes in a window."
+    },
+    {
+      "type": "code_example",
+      "language": "yaml",
+      "label": "Example",
+      "code": "# ── PromQL queries for a RED dashboard (Grafana panel expressions) ───\n\n# R — Request rate: total requests/sec across all instances\n# sum(rate(http_requests_total[5m]))\n\n# R — Request rate per route (use in a table panel)\n# sum by(route)(rate(http_requests_total[5m]))\n\n# E — Error rate: fraction of 5xx responses\n# sum(rate(http_requests_total{status_code=~\"5..\"}[5m]))\n#   / sum(rate(http_requests_total[5m]))\n\n# E — Absolute 5xx count per second (easier to alert on)\n# sum(rate(http_requests_total{status_code=~\"5..\"}[5m]))\n\n# D — p50 latency\n# histogram_quantile(0.50,\n#   sum by(le)(rate(http_request_duration_seconds_bucket[5m])))\n\n# D — p99 latency (the slow users' experience)\n# histogram_quantile(0.99,\n#   sum by(le)(rate(http_request_duration_seconds_bucket[5m])))\n\n# ── USE for CPU ──────────────────────────────────────────────────\n\n# Utilisation: fraction of CPU time NOT idle (averaged across all cores)\n# 1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))\n\n# Saturation: system load average vs. number of CPUs\n# node_load1 / count(count by(cpu)(node_cpu_seconds_total))\n\n# ── USE for Memory ───────────────────────────────────────────────\n\n# Utilisation: used memory as fraction of total\n# 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)\n\n# Saturation: swap usage (proxy for memory pressure)\n# node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes\n\n# ── Alerting rule (prometheus.yml) ───────────────────────────────\n# groups:\n#   - name: api.rules\n#     rules:\n#       - alert: HighErrorRate\n#         expr: |\n#           sum(rate(http_requests_total{status_code=~\"5..\"}[5m]))\n#             / sum(rate(http_requests_total[5m])) > 0.01\n#         for: 2m\n#         labels:\n#           severity: critical\n#           team: backend\n#         annotations:\n#           summary: \"Error rate > 1% for 2+ minutes\"\n#           runbook_url: \"https://wiki.internal/runbooks/high-error-rate\"\n#\n#       - alert: SlowP99Latency\n#         expr: |\n#           histogram_quantile(0.99,\n#             sum by(le)(rate(http_request_duration_seconds_bucket[5m])))\n#             > 2.0\n#         for: 5m\n#         labels:\n#           severity: warning\n#         annotations:\n#           summary: \"p99 latency exceeded 2 seconds for 5+ minutes\"",
+      "explanation": "Real Grafana dashboards use these PromQL expressions directly in panel queries. The alerting rules live in Prometheus configuration files and are reloaded without restart via `curl -X POST localhost:9090/-/reload`. The 'for: 2m' duration means the condition must be continuously true for 2 minutes before the alert transitions from 'pending' to 'firing' — preventing noisy pages from transient spikes."
+    },
+    {
+      "type": "explanation",
+      "title": "How Prometheus Works Internally",
+      "content": "**Scraping and the pull model**: Prometheus operates on a pull model — it reaches out to each configured target and downloads its metrics, rather than targets pushing data in. Every target exposes a `/metrics` HTTP endpoint that returns plain text in the Prometheus exposition format: one metric per line, with labels, values, and timestamps. The scrape interval is configurable per target group (default 15 seconds globally, often 30s for node exporters and 5s for critical services during incidents).\n\n**Service discovery**: In a dynamic environment (Kubernetes, EC2 with auto-scaling), the set of targets changes constantly. Prometheus supports native service discovery integrations: Kubernetes SD auto-discovers all pods with a specific annotation; EC2 SD queries the AWS API; Consul SD queries the service registry. You configure a relabeling pipeline to select which discovered targets to scrape and what labels to attach.\n\n**The TSDB (Time-Series Database)**: Prometheus stores data in a chunked columnar format on local disk. Each time-series (unique combination of metric name + labels) has its own compressed series of `(timestamp, value)` pairs. Data is written to an in-memory WAL (write-ahead log) first, then compacted into immutable block files every 2 hours. This design gives excellent write performance and good query performance for recent data. Older blocks are optionally stored in remote object storage (via remote_write to Thanos, Cortex, or Mimir) for long-term retention beyond what local disk can hold.\n\n**Retention and federation**: By default Prometheus retains 15 days of data locally. For longer retention, most production setups use remote_write to a distributed TSDB like Thanos or Grafana Mimir, which can store years of data in S3-compatible object storage at a fraction of the cost of local SSDs. Global views across multiple Prometheus instances (one per Kubernetes cluster, for example) are handled by Thanos Query or Mimir's federated query layer.\n\n**Exporters**: Not all systems expose Prometheus metrics natively. Exporters are small sidecar processes that speak to a system's native API and translate its metrics into Prometheus format. The **node_exporter** exposes Linux host metrics (CPU, memory, disk, network). The **postgres_exporter** queries pg_stat_* tables. The **redis_exporter** calls Redis INFO. There are hundreds of community exporters covering virtually every data store, message queue, and infrastructure component."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant P as Prometheus\n    participant A as App :3000\n    participant G as Grafana\n    participant AM as Alertmanager\n    P->>A: GET /metrics (every 15s)\n    A-->>P: 200 OK text/plain\n    P->>P: Write to local TSDB\n    G->>P: PromQL query (dashboard refresh)\n    P-->>G: Result set\n    P->>P: Evaluate alert rules\n    P->>AM: POST /api/v1/alerts (firing)\n    AM->>AM: Deduplicate + route\n    AM-->>G: Slack / PagerDuty notification",
+      "caption": "Prometheus pull cycle: every 15s it scrapes /metrics, stores the data, evaluates alert rules, and (if rules fire) forwards alerts to Alertmanager which handles deduplication and routing."
+    },
+    {
+      "type": "explanation",
+      "title": "The Four Golden Signals",
+      "content": "Google's Site Reliability Engineering book (the 'SRE Book') distilled years of production monitoring experience into four signals that, between them, capture everything that matters for a user-facing service. These **four golden signals** have become the canonical framing for high-level service health:\n\n**Latency** — how long requests take, specifically distinguishing successful requests from failed ones. A failed request that returns in 1ms might look great on an average latency graph but should be tracked separately — fast failures can mask cascading problems. The SRE book recommends tracking both success latency and error latency independently.\n\n**Traffic** — the demand on your system: requests per second, messages consumed per second, queries per second. Traffic is the denominator for error rate and provides context for latency changes ('latency increased, but traffic also tripled — did we just hit a capacity ceiling?').\n\n**Errors** — the rate of requests that fail, whether explicitly (5xx), implicitly (2xx but with wrong content), or by policy (responses exceeding a latency SLO). Distinguishing these three failure modes matters: explicit errors are easy to detect; implicit errors require content inspection or canary checks; policy violations require SLO tracking.\n\n**Saturation** — how 'full' the service is, which predicts near-future failures. High CPU utilisation, a growing request queue, near-full connection pool, memory approaching swap — all of these are saturation signals. Saturation is leading rather than lagging: you can often detect it before error rate rises, giving you time to act (scale out, shed load, restart a slow dependency) before users are impacted.\n\nThe relationship to RED and USE: RED is essentially latency + traffic + errors applied specifically to request-handling services. USE is saturation + utilisation + errors applied to resources. The golden signals unify both frameworks into a single vocabulary."
+    },
+    {
+      "type": "explanation",
+      "title": "Alerting: Writing Rules That Actually Help",
+      "content": "Alert rules are where monitoring pays off — or fails disastrously. **Alert fatigue** is a real and serious problem: when on-call engineers receive too many alerts, many of which are noisy or not actionable, they learn to ignore them. A culture of ignored alerts means real incidents get missed. Good alerting is therefore as much a product design problem as a technical one.\n\n**Alert on symptoms, not causes.** 'CPU > 80%' is a cause-based alert: high CPU does not directly mean users are experiencing problems (many workloads are CPU-intensive by design). 'Error rate > 1% for 2 minutes' is a symptom-based alert: users are definitely experiencing failures right now, and this is always actionable. Prefer symptom-based alerts for all user-facing services.\n\n**Use `for:` duration to prevent flapping.** `for: 2m` means the condition must be continuously true for 2 minutes before the alert fires. Without this, a single slow scrape or transient spike (common in shared-cloud environments) generates a page that resolves itself before the on-call engineer can even look at it. A `for: 5m` for a warning-severity alert, `for: 2m` for critical, is a reasonable starting point.\n\n**Write runbook links into every alert.** The `annotations` field supports arbitrary key-value metadata. A `runbook_url` that points to a wiki page describing how to diagnose and mitigate this specific alert is the single highest-impact improvement you can make to alert quality. When it is 3am, the on-call engineer needs specific instructions, not open-ended investigation.\n\n**Eliminate duplicate alerts with Alertmanager.** If the same alert fires from multiple Prometheus instances (one per region), Alertmanager deduplicates them based on the alert's label fingerprint. Grouping rules aggregate related alerts (all pod restart alerts in the same namespace) into a single notification. Silences suppress alerts during known maintenance windows.\n\n**SLO-based alerting** is the modern evolution: instead of alerting on raw thresholds, you track an error budget (e.g., 99.9% of requests must succeed over a 30-day rolling window) and alert when the burn rate is high enough that the budget will be exhausted before the window closes. This approach, described in detail in the SRE Workbook, dramatically reduces noise while ensuring critical SLO violations are never missed."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Histograms vs. averages for latency.** Averages can be deeply misleading for latency. Consider a service processing 1000 requests per minute: 990 take 20ms (fast) and 10 take 5000ms (very slow, probably hitting a cache miss or database lock). The average is (990×20 + 10×5000) / 1000 = 69.8ms — which looks acceptable. The p99 is 5000ms — which means 1% of your users are waiting 5 full seconds. For a checkout API or login endpoint, that 1% represents real, painful user experiences. This is why every latency SLO should be expressed as a percentile (p95, p99, p99.9) rather than a mean, and why histograms — not averages — are the right metric type for latency measurement."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Alert on symptoms, not causes.** An alert for 'CPU > 80%' wakes someone up but gives no context about user impact. An alert for 'error rate > 1% for 2 minutes' tells you users are experiencing failures right now. Prefer the **four golden signals** (latency, traffic, errors, saturation) from Google's SRE book as your alerting foundation. Also: always add a `for: 2m` duration to alert rules — this prevents noisy alerts from transient 15-second spikes that self-heal."
+      "content": "**Common mistakes and interview insights.** (1) Using `limit/offset` on Prometheus raw data — PromQL does not have LIMIT; design dashboards to pre-aggregate with `topk(N, expression)`. (2) Forgetting `sum by(le)` before `histogram_quantile` — without aggregating by the `le` label, the quantile calculation silently produces wrong results. (3) Creating high-cardinality labels (user_id, URL path with IDs) — this creates millions of time-series and will OOM your Prometheus within hours; always validate cardinality before shipping new metrics to production. (4) Alerting directly on a gauge without a `for:` duration — a momentary CPU spike fires a page that resolves in 15 seconds, destroying trust in the alert system. (5) Interview tip: when asked 'how would you monitor service X?', always start with RED (rate, errors, duration), then add USE for the key resources (database connection pool, thread pool, external dependency latency), and finish with the golden signals framing — this structure demonstrates systems thinking."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Counters** only increase (total requests); **gauges** can rise and fall (active connections); **histograms** bucket observations and enable accurate percentile (p99) calculations.",
-        "The **RED method** (Rate, Errors, Duration) measures service health from the user's perspective; the **USE method** (Utilisation, Saturation, Errors) measures resource health.",
-        "**Prometheus** scrapes a `/metrics` endpoint on a configurable interval, storing data in a time-series database queryable with **PromQL**.",
-        "**Alert on symptoms** (error rate, latency) rather than causes (CPU usage) to ensure alerts are actionable and directly tied to user impact.",
-        "Use **histogram percentiles** (p95, p99) rather than averages for latency metrics — averages hide the long tail of slow requests that affect real users."
+        "**Counters** only increase (use `rate()` to get per-second rates); **gauges** represent current state (can go up or down); **histograms** bucket observations and enable accurate `histogram_quantile()` percentile calculations across multiple replicas — prefer them over summaries for latency.",
+        "The **RED method** (Rate, Errors, Duration) answers whether a request-handling service is serving users correctly. Use it as your first dashboard for every API or microservice.",
+        "The **USE method** (Utilisation, Saturation, Errors) answers whether a resource (CPU, memory, disk, connection pool) is the bottleneck. Saturation — work queuing up — is the leading indicator of future failures.",
+        "**Prometheus** uses a pull/scrape model: applications expose `/metrics`; Prometheus scrapes every 15s, stores in a local TSDB, evaluates alert rules, and ships firing alerts to Alertmanager. Labels add dimensions to metrics but must have low cardinality.",
+        "**Alert on symptoms** (error rate, high latency) not causes (CPU%) — symptom alerts directly indicate user impact and are always actionable. Use `for: 2m` to prevent flapping alerts from transient spikes.",
+        "**Averages lie about latency** — always track p95 and p99 percentiles. A service with p50=20ms and p99=5000ms has terrible tail latency that an average of ~70ms completely conceals.",
+        "The **four golden signals** (latency, traffic, errors, saturation) from Google's SRE book unify RED and USE into a universal vocabulary for measuring any production service."
       ]
     }
   ],
@@ -63,94 +122,94 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "Which metric type is best suited for measuring HTTP request duration distribution?",
+      "question": "Which metric type should you use to measure HTTP request latency distribution and compute p99?",
       "type": "mcq",
       "options": [
-        "Counter — because request count is always increasing.",
-        "Gauge — because latency can go up or down.",
-        "Histogram — because it buckets observations, enabling percentile calculations.",
-        "Summary — because it calculates quantiles with higher precision."
+        "Counter — because request count is always increasing and latency is cumulative.",
+        "Gauge — because latency can go up or down between requests.",
+        "Histogram — because it buckets observations and enables histogram_quantile() for percentile calculations.",
+        "Summary — because it computes quantiles at higher precision than histograms."
       ],
       "correct": 2,
-      "explanation": "Histograms record how many observations fall into each configured latency bucket. This allows `histogram_quantile()` in PromQL to compute p50, p95, p99 across multiple replicas. Summaries compute quantiles client-side and cannot be aggregated across instances."
+      "explanation": "Histograms record how many observations fall into each configured bucket plus a running sum and count. This allows histogram_quantile(0.99, ...) in PromQL to compute approximate percentiles server-side, and crucially the results can be aggregated across multiple replicas by summing the bucket counts before computing the quantile. Summaries compute quantiles client-side and cannot be re-aggregated across instances."
     },
     {
       "id": "q2",
-      "question": "In the RED method, what does 'Duration' measure?",
+      "question": "Why do you use rate(http_requests_total[5m]) instead of reading the raw counter value?",
       "type": "mcq",
       "options": [
-        "How long the service has been running without a restart.",
-        "The time spent waiting for the database to respond.",
-        "How long requests take to complete, typically expressed as percentiles (p50, p95, p99).",
-        "The duration of the last deployment window."
-      ],
-      "correct": 2,
-      "explanation": "Duration in RED is request latency — how long a caller waits for a response. Expressing it as percentiles (especially p99) captures the worst-case experience of the slowest users, which averages obscure."
-    },
-    {
-      "id": "q3",
-      "question": "Why should you use `rate(counter[5m])` instead of reading a counter's raw value to compute request rate?",
-      "type": "mcq",
-      "options": [
-        "Raw counter values are stored as strings in Prometheus.",
-        "Counters reset to zero on process restart; `rate()` handles resets and returns a per-second rate over the time window.",
-        "`rate()` smooths values so dashboards look cleaner.",
+        "Raw counter values are stored as strings in Prometheus TSDB.",
+        "Counters reset to zero on process restart; rate() detects resets and returns a meaningful per-second rate over the window.",
+        "rate() smooths values so Grafana dashboards render faster.",
         "Raw counter values only update every 5 minutes in Prometheus."
       ],
       "correct": 1,
-      "explanation": "Counters reset when a process restarts. `rate()` detects counter resets (a decrease in value) and accounts for them, returning a meaningful per-second rate. The raw counter value by itself grows arbitrarily large and resets unpredictably."
+      "explanation": "A counter's raw value grows unboundedly and resets to zero whenever the process restarts. If you plot or alert on the raw value, a restart looks like a sudden drop to zero, which is meaningless. rate() detects when the counter decreases (a reset) and accounts for it, returning a stable per-second rate of increase over the specified time window."
+    },
+    {
+      "id": "q3",
+      "question": "In the RED method, what does 'Errors' specifically measure?",
+      "type": "mcq",
+      "options": [
+        "The total count of errors since the service started.",
+        "The fraction (or rate) of requests that result in failures, typically expressed as a ratio against total request rate.",
+        "The number of hardware errors reported by the operating system.",
+        "The error budget remaining before an SLO breach."
+      ],
+      "correct": 1,
+      "explanation": "The E in RED is the fraction of requests that are failing — rate(requests{status=~'5..'}[5m]) / rate(requests[5m]). It directly measures user-visible failures. Expressing it as a ratio (not raw count) normalises for traffic volume: 10 errors/second is catastrophic at 100 req/s but negligible at 1,000,000 req/s."
     },
     {
       "id": "q4",
-      "question": "In the USE method, what is 'Saturation'?",
+      "question": "In the USE method, what is the difference between Utilisation and Saturation?",
       "type": "mcq",
       "options": [
-        "The maximum percentage of CPU cores that can be allocated to a single process.",
-        "The degree to which a resource has extra work it cannot service yet — work queuing up because the resource is at capacity.",
-        "The number of errors recorded per minute by a resource.",
-        "The percentage of total disk capacity that is currently used."
+        "Utilisation measures errors; saturation measures request rates.",
+        "Utilisation is the fraction of time a resource is busy; saturation is whether excess work is queuing up because the resource is at or near capacity.",
+        "Utilisation applies to CPUs only; saturation applies to network interfaces only.",
+        "They are synonyms — both measure how much of a resource is being consumed."
       ],
       "correct": 1,
-      "explanation": "Saturation measures the queue depth or excess demand for a resource. A CPU running at 95% utilisation with a growing run queue is saturated — new work cannot be served immediately. Saturation predicts future performance problems before utilisation peaks."
+      "explanation": "Utilisation (e.g., 85% CPU busy) tells you how loaded a resource is. Saturation (e.g., run queue length = 8) tells you whether work is piling up because the resource cannot keep up. A resource can be at 100% utilisation with zero saturation (if new requests complete before arriving), or can be saturated at 70% utilisation (if requests take so long they accumulate). Saturation is the earlier warning signal."
     },
     {
       "id": "q5",
-      "question": "What is the Prometheus scraping model?",
+      "question": "What is the purpose of the 'for: 2m' clause in a Prometheus alert rule?",
       "type": "mcq",
       "options": [
-        "Applications push metrics to Prometheus on each request.",
-        "Prometheus polls a `/metrics` HTTP endpoint on each application instance at a configured interval.",
-        "A metrics agent on each host reads log files and forwards them to Prometheus.",
-        "Applications send UDP datagrams to Prometheus as metrics are recorded."
+        "The alert auto-resolves after 2 minutes even if the condition is still true.",
+        "The alert is evaluated every 2 minutes instead of every scrape interval.",
+        "The alert condition must be continuously true for 2 minutes before transitioning from pending to firing.",
+        "Alertmanager delays sending notifications by 2 minutes for deduplication."
       ],
-      "correct": 1,
-      "explanation": "Prometheus uses a pull (scrape) model: it sends an HTTP GET to each target's `/metrics` endpoint every scrape interval (default 15 seconds) and stores the returned time-series data. This makes discovery and debugging easier — you can curl the endpoint yourself."
+      "correct": 2,
+      "explanation": "The 'for:' duration creates a pending period: if the alert expression becomes true, the alert enters 'pending' state. Only if the condition remains true for the full duration does it transition to 'firing' and notifications are sent. This eliminates noisy pages from transient spikes (a single slow scrape, a 15-second GC pause) that self-heal before any human could act."
     },
     {
       "id": "q6",
-      "question": "An alert rule has `for: 2m`. What does this mean?",
+      "question": "Which PromQL expression correctly computes the p99 latency from a histogram metric?",
       "type": "mcq",
       "options": [
-        "The alert fires immediately but auto-resolves after 2 minutes.",
-        "The alert is evaluated every 2 minutes instead of every scrape interval.",
-        "The alert condition must be continuously true for 2 minutes before the alert fires.",
-        "The alert notification is delayed by 2 minutes for deduplication."
+        "avg(http_request_duration_seconds)",
+        "max_over_time(http_request_duration_seconds[5m])",
+        "histogram_quantile(0.99, sum by(le)(rate(http_request_duration_seconds_bucket[5m])))",
+        "quantile(0.99, rate(http_request_duration_seconds[5m]))"
       ],
       "correct": 2,
-      "explanation": "`for: 2m` is a 'pending' duration. If the alert condition is true for less than 2 minutes it never fires. This prevents noisy alerts from transient spikes (e.g. a single slow scrape) that self-resolve before they become user-impacting problems."
+      "explanation": "histogram_quantile requires the cumulative bucket counts (the _bucket series), which must be rate()-ed to get per-second rates, then summed by(le) to aggregate across all instances while preserving the bucket boundary label. The 'le' label (less-than-or-equal) encodes the bucket upper bound and must be included in the by() clause. The other options are not valid PromQL for histogram percentiles."
     },
     {
       "id": "q7",
-      "question": "Why is alerting on CPU > 80% generally discouraged compared to alerting on error rate?",
+      "question": "Why is high label cardinality (e.g., using user_id as a label) dangerous in Prometheus?",
       "type": "mcq",
       "options": [
-        "CPU metrics are not available in Prometheus.",
-        "High CPU does not always cause user-visible errors and is not directly actionable; high error rate directly indicates user impact.",
-        "CPU alerts require special kernel modules to be installed.",
-        "Error rate metrics cannot be computed in PromQL."
+        "Prometheus rejects metrics with more than 10 unique label values.",
+        "Each unique combination of label values creates a separate time-series; millions of users create millions of series, consuming enormous memory and storage.",
+        "High cardinality labels cause PromQL queries to return incorrect results.",
+        "Labels with more than 64 characters are silently dropped by Prometheus."
       ],
       "correct": 1,
-      "explanation": "Symptom-based alerting (error rate, latency) directly correlates with user experience. A service can run at 90% CPU and still serve requests correctly. A cause-based alert on CPU creates alert fatigue — many pages that require no immediate action."
+      "explanation": "Prometheus stores one time-series per unique set of label values. A metric with a user_id label and 1 million users creates 1 million separate time-series for that single metric family. Each series occupies memory in the active head block and on-disk storage. This 'cardinality explosion' can OOM a Prometheus server within hours and dramatically slow down queries. Always use low-cardinality labels: HTTP method, status code, service name, environment."
     },
     {
       "id": "q8",
@@ -159,37 +218,37 @@
       "options": [
         "It stores time-series data when Prometheus TSDB is full.",
         "It evaluates PromQL alert expressions against the Prometheus database.",
-        "It receives firing alerts from Prometheus, deduplicates them, applies routing rules, and sends notifications to PagerDuty, Slack, etc.",
-        "It generates Grafana dashboards automatically from alert rules."
+        "It receives firing alerts from Prometheus, deduplicates them, applies routing rules, and dispatches notifications to PagerDuty, Slack, email, etc.",
+        "It generates Grafana dashboards automatically from Prometheus alert rules."
       ],
       "correct": 2,
-      "explanation": "Prometheus evaluates alert expressions and pushes firing alerts to Alertmanager. Alertmanager handles: deduplication (multiple identical alerts → one notification), grouping, silencing, inhibition, and routing to the appropriate receiver (email, Slack, PagerDuty)."
+      "explanation": "Prometheus evaluates alert expressions and pushes firing alerts to Alertmanager via its API. Alertmanager is responsible for: deduplication (multiple identical alerts collapse to one notification), grouping (related alerts in one namespace become one message), inhibition (a critical alert suppresses lower-severity ones), silencing (suppress all alerts during a planned maintenance window), and routing (send different alerts to different receivers based on label matchers)."
     },
     {
       "id": "q9",
-      "question": "A p99 latency of 2 seconds means:",
+      "question": "A service has p50 latency of 30ms and p99 latency of 4000ms. What does this tell you?",
       "type": "mcq",
       "options": [
-        "The average request takes 2 seconds.",
-        "99% of requests complete within 2 seconds; 1% are slower.",
-        "2% of requests take longer than 1 second.",
-        "The maximum recorded request duration is 2 seconds."
+        "The average latency is approximately 2015ms — the midpoint between the two values.",
+        "50% of requests take longer than 4000ms.",
+        "Most requests (50th percentile) complete in 30ms, but the slowest 1% take 4 seconds — there is a severe long tail that averages would completely hide.",
+        "The service is within normal parameters since p99 below 5 seconds is acceptable."
       ],
-      "correct": 1,
-      "explanation": "The 99th percentile means 99% of observations fall at or below this value. If p99 = 2s, 1% of requests take longer than 2 seconds. For user-facing services, optimising p99 improves the experience for the slowest (often most valuable) users."
+      "correct": 2,
+      "explanation": "p50 = 30ms means half of all requests complete within 30ms — the typical user experience is fast. p99 = 4000ms means 1% of requests take 4 full seconds — 1 in 100 users has a terrible experience. If this is a checkout or authentication endpoint, that 1% represents real revenue loss and user frustration. This is exactly why averages are misleading for latency: a weighted average of these would look acceptable while hiding an unacceptable tail."
     },
     {
       "id": "q10",
-      "question": "Which of the following is a `gauge` metric (not a counter)?",
+      "question": "Which of the following best describes why Prometheus uses a pull (scrape) model rather than a push model?",
       "type": "mcq",
       "options": [
-        "Total number of HTTP requests served since startup.",
-        "Total number of bytes written to disk since startup.",
-        "Current number of goroutines running in a Go process.",
-        "Total number of errors since the last deployment."
+        "Push models require applications to install a Prometheus client library, whereas pull models do not.",
+        "Pulling makes it easy to detect when a target is down (scrape fails), allows manual inspection of /metrics via curl, and avoids the need for applications to know the Prometheus address.",
+        "Pull models allow Prometheus to collect metrics faster than push models because it bypasses HTTP.",
+        "Push models are insecure because they require opening inbound firewall ports on the Prometheus server."
       ],
-      "correct": 2,
-      "explanation": "The current goroutine count can increase and decrease as goroutines are created and destroyed — it represents current state, making it a gauge. Total requests, total bytes written, and total errors are monotonically increasing counters."
+      "correct": 1,
+      "explanation": "The pull model has several practical advantages: (1) a failed scrape immediately reveals a target is down, generating a synthetic 'up=0' time-series — automatic health checking for free; (2) developers can inspect /metrics with a browser or curl during debugging without needing any special tools; (3) Prometheus controls the scrape rate centrally rather than having every application instance independently manage its push schedule. The main downside is that pull requires Prometheus to be able to reach every target's network address, which can be challenging in highly segmented networks."
     }
   ]
 }

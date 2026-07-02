@@ -5,58 +5,128 @@
   "week": 52,
   "icon": "network",
   "tagline": "From URL to pixels: DNS resolution, TCP connection, HTTP request, HTML parsing, and the critical rendering path that turns bytes into what you see.",
-  "readTime": "~15 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Every time you visit a website, the browser silently executes a complex pipeline: it resolves the domain to an IP, opens a TCP/TLS connection, fetches resources over HTTP, parses HTML and CSS, runs JavaScript, computes layout, paints pixels, and composites layers on the GPU — often in under a second.\n\nUnderstanding this pipeline is essential for debugging performance issues, knowing why a page feels slow, and making informed decisions about when to use `defer`, `async`, lazy loading, or server-side rendering. **The browser is your runtime environment** — knowing how it works makes you a far more effective web developer."
+      "content": "Every time you type a URL and press Enter, the browser silently executes one of software engineering's most sophisticated pipelines. It resolves the domain name to an IP address, negotiates a secure connection, fetches bytes over the network, incrementally parses HTML and CSS into structured trees, executes JavaScript that may rewrite the entire document, computes the precise geometry of every element on screen, rasterizes pixels, and composites GPU layers — often completing the entire sequence in under a second on a cold first visit.\n\nThis pipeline is not merely academic knowledge. **Every front-end performance decision you make is really a decision about which steps in this pipeline you are accelerating or delaying.** Why does `<script>` block rendering? Because of where parsing sits relative to JavaScript execution. Why does inlining critical CSS help? Because it removes a network round-trip from the critical path. Why does HTTP/2 make domain sharding counterproductive? Because it multiplexes requests that HTTP/1.1 could not. If you can trace the pipeline in your head, these answers become obvious rather than cargo-culted rules.\n\nThis chapter walks through the entire browser pipeline from first keystroke to painted pixels, diving deep into DNS, TCP/TLS, HTTP, the HTML and CSS parsers, the JavaScript engine, the render tree, layout, paint, and compositing. We will look at where things go wrong, how to measure each phase, and which optimizations actually matter. By the end you will have a mental model that makes performance debugging feel like following a map rather than guessing."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n    A[\"User types URL\"] --> B[\"DNS Lookup\"]\n    B --> C[\"TCP + TLS Handshake\"]\n    C --> D[\"HTTP Request\"]\n    D --> E[\"Server Response (HTML)\"]\n    E --> F[\"Parse HTML → DOM\"]\n    F --> G[\"Fetch Sub-resources (CSS/JS/Images)\"]\n    G --> H[\"Parse CSS → CSSOM\"]\n    H --> I[\"JavaScript Execution\"]\n    I --> J[\"Render Tree\"]\n    J --> K[\"Layout\"]\n    K --> L[\"Paint & Composite\"]",
-      "caption": "The full browser pipeline from URL entry to painted pixels. Sub-resources fetched in step G may block or delay later steps."
+      "mermaid": "flowchart TD\n    A[\"User types URL\"] --> B[\"1. DNS Lookup\"]\n    B --> C[\"2. TCP Handshake\"]\n    C --> D[\"3. TLS Negotiation\"]\n    D --> E[\"4. HTTP Request\"]\n    E --> F[\"5. Server Response\"]\n    F --> G[\"6. HTML Parsing → DOM\"]\n    G --> H[\"7. CSS Parsing → CSSOM\"]\n    G --> I[\"8. JS Execution\"]\n    H --> J[\"9. Render Tree\"]\n    I --> J\n    J --> K[\"10. Layout\"]\n    K --> L[\"11. Paint\"]\n    L --> M[\"12. Composite\"]",
+      "caption": "The full browser pipeline. Steps 6-9 happen in parallel and can stall each other. Steps 10-12 repeat on every frame for animations."
     },
     {
       "type": "analogy",
-      "title": "Browser as a Construction Crew",
-      "content": "Think of the browser as a construction crew building a house from a blueprint:\n\n- **DNS** is finding the address of the blueprint warehouse.\n- **TCP/TLS** is the secure truck that drives to the warehouse and picks up the blueprints.\n- **HTML parsing** is reading the blueprint and making a list of all the rooms (DOM nodes).\n- **CSS parsing** is reading the interior design spec (CSSOM) and deciding what each room looks like.\n- **JavaScript** is the foreman who can change the blueprints mid-build — which is why a crew boss (main thread) must pause building to listen.\n- **Layout** is measuring and placing every wall and window precisely.\n- **Paint** is actually applying paint and wallpaper.\n- **Composite** is the crane that stacks all the floors (GPU layers) into the final building.\n\nJust like a foreman who keeps redesigning rooms slows the entire crew, JavaScript that triggers layout recalculations (reflow) mid-paint is expensive."
+      "title": "Browser as a Construction Crew Building from a Blueprint",
+      "content": "Think of the browser as a large construction crew hired to build a house from a blueprint that is delivered piecemeal.\n\n**DNS** is the process of finding which warehouse holds your blueprints. You have the warehouse name (the domain), but you need the physical address (the IP) before anyone can drive there.\n\n**TCP/TLS** is the secure armored truck that drives to the warehouse, shows credentials, and picks up the blueprints. The truck cannot leave until security clearance (TLS handshake) is complete.\n\n**HTML parsing** is the foreman reading the blueprints room by room as pages arrive and making an itemized list of everything that needs to exist — walls, doors, windows. This is the DOM. Crucially, the foreman reads the blueprints *as they arrive*, not waiting for all pages to be delivered first.\n\n**CSS parsing** is the interior design specification: what color every wall is, how tall every door frame should be. Until this spec is complete, no painter can start work — even if the walls are already built. This is why CSS is render-blocking.\n\n**JavaScript** is the general contractor who can walk in at any moment and say \"tear down that wall, add a skylight, move the kitchen.\" The rest of the crew must stop what they are doing and wait for the contractor to finish, because any change could invalidate their current work. This is why `<script>` blocks parsing.\n\n**Layout** is the surveyor who measures and places every element precisely — not approximate, but exact pixel positions and sizes, accounting for the relationship between every element.\n\n**Paint** is the crew that applies wallpaper, paint, and flooring — converting the geometric plan into colored pixels.\n\n**Composite** is the crane operator who stacks independently built sections of the building (GPU layers) into a final assembled structure. GPU-accelerated properties like `transform` and `opacity` only affect this final stacking step, which is why they are cheaper to animate."
     },
     {
       "type": "explanation",
-      "content": "**Browser Components**: Modern browsers have several key subsystems. The **Networking layer** handles DNS caching, HTTP/2 multiplexing, and connection pooling. The **HTML Parser** builds the DOM incrementally as bytes arrive — it does not wait for the full document. The **CSS Parser** builds the CSSOM. The **JavaScript Engine** (V8 in Chrome, SpiderMonkey in Firefox) compiles and runs JS. The **Rendering Engine** (Blink, Gecko) orchestrates the render pipeline. The **Compositor** manages GPU layers for smooth scrolling and animations.\n\n**Critical Rendering Path** is the sequence of steps the browser must complete before showing the first pixel: HTML → DOM, CSS → CSSOM, DOM + CSSOM → Render Tree, Layout, Paint. **Render-blocking resources** interrupt this path. By default, `<script>` tags without `async` or `defer` pause HTML parsing — the browser must download and execute the script before continuing. CSS in `<head>` is also render-blocking (you cannot build CSSOM until CSS is loaded). Use `defer` to download JS in parallel but execute after HTML is parsed, and `async` for independent scripts (analytics, ads) that execute as soon as downloaded.\n\n**HTTP/2 and HTTP/3** change the networking layer significantly. HTTP/1.1 browsers opened 6 parallel TCP connections per origin. HTTP/2 multiplexes many requests over one TCP connection using streams. HTTP/3 replaces TCP with QUIC (UDP-based) eliminating head-of-line blocking entirely. These improvements mean the old practice of domain sharding is now counter-productive under HTTP/2."
+      "title": "Step 1: DNS Resolution — Translating Names to Addresses",
+      "content": "The Domain Name System is a distributed hierarchical database that maps human-readable domain names like `example.com` to machine-routable IP addresses like `93.184.216.34`. When you type a URL, the browser first checks its own DNS cache. If the name is not cached (or has expired), it asks the operating system's resolver, which checks its own cache. If still not found, the resolver asks a **recursive resolver** — typically provided by your ISP or a public service like `8.8.8.8` (Google) or `1.1.1.1` (Cloudflare).\n\nThe recursive resolver itself climbs the DNS hierarchy if necessary. It starts at the **root name servers** (thirteen root server clusters, labeled a through m), which delegate to **TLD name servers** (`.com`, `.org`, `.io`), which delegate to the **authoritative name server** for the specific domain. The authoritative server returns the actual IP address, which is then cached at every layer with a **TTL (Time to Live)** that controls how long it stays cached.\n\nFor a fresh DNS query with no caching, this round-trip adds **20–120ms** of latency before the browser can even begin opening a TCP connection. This is why `<link rel=\"dns-prefetch\">` and `<link rel=\"preconnect\">` are impactful: they trigger DNS resolution (and optionally TCP+TLS) for third-party origins while the browser is still parsing the HTML, so those lookups are already complete when the resources are actually requested.\n\n**DNS over HTTPS (DoH)** and **DNS over TLS (DoT)** are modern alternatives that encrypt DNS queries, preventing eavesdropping and manipulation. Chrome, Firefox, and modern operating systems support DoH natively. From a performance standpoint they add negligible overhead; the privacy benefits are significant."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant P as HTML Parser\n    participant N as Network\n    participant JS as JS Engine\n    participant R as Renderer\n    P->>N: Parse <link rel=stylesheet>\n    Note over N: Download CSS (render-blocking)\n    P->>N: Parse <script> (no defer)\n    Note over N: Download JS\n    Note over P: HTML parsing PAUSED\n    N->>JS: Execute script\n    JS->>P: Resume parsing\n    P->>R: DOM complete\n    N->>R: CSSOM complete\n    R->>R: Build Render Tree → Layout → Paint",
-      "caption": "A parser-blocking script halts HTML parsing until downloaded and executed. Use defer/async to avoid this bottleneck."
+      "mermaid": "sequenceDiagram\n    participant B as Browser\n    participant OS as OS Cache\n    participant R as Recursive Resolver\n    participant Root as Root NS\n    participant TLD as .com NS\n    participant Auth as example.com NS\n    B->>OS: \"What is example.com?\"\n    OS-->>B: Cache miss\n    B->>R: \"What is example.com?\"\n    R->>Root: Delegates to .com?\n    Root-->>R: TLD NS address\n    R->>TLD: Who handles example.com?\n    TLD-->>R: Auth NS address\n    R->>Auth: IP for example.com?\n    Auth-->>R: 93.184.216.34\n    R-->>B: 93.184.216.34 (TTL=3600s)",
+      "caption": "A full recursive DNS resolution. Each hop adds latency. Caching at every layer reduces this to a single local lookup on repeat visits."
+    },
+    {
+      "type": "explanation",
+      "title": "Step 2–3: TCP Handshake and TLS Negotiation",
+      "content": "Once the browser has an IP address, it opens a **TCP connection**. TCP (Transmission Control Protocol) guarantees reliable, ordered delivery of bytes. Establishing a TCP connection requires a **three-way handshake**: the client sends `SYN`, the server replies `SYN-ACK`, and the client confirms with `ACK`. This costs one full network **round-trip time (RTT)** — about 20ms on a local network, 80ms for cross-continent, 400ms for satellite.\n\nFor HTTPS (which is now the overwhelming default), a **TLS handshake** follows immediately after TCP is established. TLS 1.3 (the current standard, mandatory in modern browsers) requires only one additional RTT for a fresh connection — down from two in TLS 1.2. TLS 1.3 also supports **0-RTT resumption**: if the client has previously connected to this server and both sides support it, the client can send data in the very first packet of the TCP handshake, eliminating the TLS overhead entirely for repeat visitors.\n\nDuring the TLS handshake, the client and server:\n1. Agree on a cipher suite and TLS version\n2. The server presents its X.509 certificate (signed by a trusted Certificate Authority)\n3. The client verifies the certificate chain up to a trusted root\n4. Both sides derive a shared symmetric encryption key using Diffie-Hellman key exchange\n5. All subsequent data is encrypted with that symmetric key\n\nFor a new visitor to a new HTTPS origin over a high-latency connection, TCP + TLS alone can add **160–240ms** before the first byte of HTTP is sent. This is why the `preconnect` resource hint is so valuable — it performs this entire handshake sequence during the HTML parsing phase for origins you know you will need.\n\n**HTTP/3 and QUIC** address this differently: QUIC is built on UDP and combines the TCP and TLS handshakes into a single round-trip (or zero for resumed sessions), cutting connection setup latency in half."
+    },
+    {
+      "type": "explanation",
+      "title": "Step 4–5: HTTP Request and the Server Response",
+      "content": "With a secure connection established, the browser sends an **HTTP request**. A typical GET request includes: the method (`GET`), the path (`/index.html`), the HTTP version, and a set of headers — `Host`, `Accept`, `Accept-Encoding` (advertising compression support), `Cookie`, and browser-generated headers like `User-Agent` and `Accept-Language`.\n\nThe server processes the request and returns a **response**: a status code (200 OK, 301 Redirect, 404 Not Found, 500 Server Error), response headers, and the body. The first critical metric here is **TTFB (Time To First Byte)** — measured from when the request is fully sent to when the browser receives the first byte of the response. TTFB captures server-side processing time (database queries, template rendering) plus network latency. A TTFB above 800ms is a red flag per Core Web Vitals guidance.\n\nThe response body for an HTML page is **streamed** — the browser does not wait for the complete document. As soon as the first chunks of HTML arrive, the parser begins working. This is why placing critical content early in the HTML document helps: the browser can begin rendering before the full document downloads.\n\n**HTTP/1.1 vs HTTP/2 vs HTTP/3** significantly affect how resources are fetched after the initial HTML:\n- HTTP/1.1 allows only one in-flight request per connection. Browsers work around this by opening up to six parallel TCP connections per origin.\n- HTTP/2 multiplexes all requests over one TCP connection using **binary-framed streams**. Each resource gets its own stream with an independent flow-control window. This eliminates the artificial six-connection limit and the overhead of multiple TCP handshakes.\n- HTTP/3 runs over **QUIC** (a UDP-based transport protocol co-designed with TLS 1.3). QUIC eliminates TCP's head-of-line blocking at the transport layer — in HTTP/2, a single dropped TCP packet stalls all streams; in HTTP/3, only the affected QUIC stream is paused.\n\nA historically common optimization — **domain sharding** (spreading resources across `cdn1.example.com`, `cdn2.example.com`, etc.) — allowed more than six parallel connections under HTTP/1.1. Under HTTP/2, domain sharding is actively harmful: it defeats connection multiplexing by splitting streams across multiple connections and prevents the server from prioritizing resources optimally."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"HTTP/1.1\"] --> B[\"6 TCP connections\\nOne request each\"]\n    C[\"HTTP/2\"] --> D[\"1 TCP connection\\nMany streams\"]\n    E[\"HTTP/3\"] --> F[\"1 QUIC connection\\nMany streams\\nNo HOL blocking\"]",
+      "caption": "HTTP version evolution. HTTP/2 multiplexing eliminates the need for connection pooling hacks. HTTP/3 eliminates transport-level head-of-line blocking."
+    },
+    {
+      "type": "explanation",
+      "title": "Step 6–8: Parsing HTML, CSS, and JavaScript",
+      "content": "As bytes arrive from the network, the browser's **HTML parser** begins tokenizing the stream into tags, attributes, text nodes, and comments, then constructs the **DOM (Document Object Model)** — a tree of nodes representing the document structure. The DOM is the live, in-memory representation of the page that JavaScript interacts with.\n\nThe HTML parser is **incremental and fault-tolerant**. Unlike XML parsers that fail on syntax errors, HTML parsers follow the HTML5 parsing algorithm which defines exactly how to handle malformed markup — so even tag-soup HTML produces a predictable DOM. The parser also runs a **speculative preload scanner** in parallel: while the main parser is blocked waiting for a script to download and execute, the preload scanner looks ahead in the HTML stream to discover and begin fetching CSS, scripts, and images before they are formally parsed. This lookahead is one reason why `<script>` at the bottom of `<body>` used to matter less than developers thought — the preload scanner found future resources regardless.\n\nWhen the parser encounters a `<link rel=\"stylesheet\">`, it hands that URL to the network layer and continues parsing HTML — but it **cannot build the render tree** until the CSSOM is complete, because CSS properties can override each other in cascading order and the browser must know the final computed style for every element before it can lay anything out. CSS is thus **render-blocking** but not **parser-blocking** (the HTML parser keeps running).\n\nWhen the parser encounters a plain `<script>` tag (no `defer` or `async`), it is both **parser-blocking** and **render-blocking**: the browser must stop, wait for the script to download, execute it synchronously on the main thread, then resume parsing. This is the historical reason developers placed `<script>` tags just before `</body>` — by that point, the entire HTML was already parsed.\n\nThe **CSS parser** builds the **CSSOM (CSS Object Model)** — a tree of style rules with computed specificity and cascade resolution. Like the DOM, the CSSOM is a live object accessible from JavaScript via `document.styleSheets`. Building the CSSOM requires all CSS files to be fully downloaded and parsed; a single slow stylesheet can delay the entire render tree.\n\nThe **JavaScript engine** (V8 in Chrome/Edge, SpiderMonkey in Firefox, JavaScriptCore in Safari) compiles and executes JS on the main thread. Modern engines use **JIT (Just-In-Time) compilation** — they interpret code first, identify hot paths, and recompile those paths to native machine code optimized for the observed types. V8 uses a multi-tier pipeline: Ignition (interpreter) → Sparkplug (baseline JIT) → Maglev → Turbofan (optimizing JIT). The optimizing tier can be 10–100x faster than the interpreter for hot functions."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant P as HTML Parser\n    participant Net as Network\n    participant CSS as CSS Parser\n    participant JS as JS Engine\n    participant R as Renderer\n    P->>Net: Discover link rel=stylesheet\n    Net-->>CSS: CSS bytes stream in\n    P->>Net: Discover script (no defer)\n    Note over P: Parsing PAUSED\n    Net-->>JS: Script downloaded\n    JS->>JS: Execute (may touch DOM)\n    JS->>P: Resume parsing\n    P->>R: DOM complete\n    CSS->>R: CSSOM complete\n    R->>R: Build Render Tree\n    R->>R: Layout → Paint → Composite",
+      "caption": "A parser-blocking script halts the HTML parser. Note CSS parsing runs in parallel — but render tree construction waits for both DOM and CSSOM."
+    },
+    {
+      "type": "explanation",
+      "title": "Script Loading Strategies: defer, async, and module",
+      "content": "The `defer` and `async` attributes on `<script>` tags fundamentally change the interaction between script loading and HTML parsing:\n\n**No attribute (default)**: The HTML parser halts the moment it encounters the tag. The browser downloads the script synchronously, executes it, then resumes parsing. The script can access any DOM nodes defined before it in the HTML. Scripts execute in document order.\n\n**`defer`**: The browser begins downloading the script immediately, in parallel with HTML parsing. Execution is deferred until the HTML parser finishes building the DOM (just before `DOMContentLoaded` fires). Scripts with `defer` execute in document order, even if the second script finishes downloading before the first. This is the right choice for virtually all application scripts that interact with the DOM.\n\n**`async`**: Like `defer`, download begins immediately in parallel. Unlike `defer`, execution happens as soon as the script is downloaded — which may be before or after HTML parsing completes, and in any order relative to other `async` scripts. The parser is still blocked during execution, but only for the brief moment the script runs. Best for truly independent scripts like analytics or A/B testing tools that do not depend on other scripts or DOM structure.\n\n**`type=\"module\"`**: ES modules are deferred by default (they behave like `defer`). Module scripts also get a private scope — top-level `var` declarations do not leak to `window`. They support `import` statements for static dependencies.\n\nThe practical rule: **use `defer` for everything that touches the DOM, `async` for truly independent analytics-type scripts, and `type=\"module\"` for modern ES module entry points**. Avoid plain `<script>` in `<head>` except for inline critical scripts.\n\n**The `modulepreload` hint** is a newer performance technique: `<link rel=\"modulepreload\" href=\"/app.js\">` tells the browser to fetch, parse, and compile a module (and its dependencies, if a module graph is provided) before the `<script type=\"module\">` tag is encountered. This can significantly reduce Time to Interactive for module-heavy applications."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// ── Observe browser loading phases via Performance API ───────\nwindow.addEventListener('load', () => {\n  const nav = performance.getEntriesByType('navigation')[0];\n\n  const phases = {\n    dns:        nav.domainLookupEnd  - nav.domainLookupStart,\n    tcp:        nav.connectEnd       - nav.connectStart,\n    tls:        nav.connectEnd       - nav.secureConnectionStart,\n    request:    nav.responseStart    - nav.requestStart,\n    response:   nav.responseEnd      - nav.responseStart,\n    domParsing: nav.domInteractive   - nav.responseEnd,\n    subResources: nav.domContentLoadedEventStart - nav.domInteractive,\n    loadEvent:  nav.loadEventEnd     - nav.loadEventStart,\n    total:      nav.loadEventEnd     - nav.fetchStart,\n  };\n\n  console.table(\n    Object.fromEntries(\n      Object.entries(phases).map(([k, v]) => [k, `${v.toFixed(1)}ms`])\n    )\n  );\n});\n\n// ── Detect render-blocking scripts programmatically ──────────\n// Check if a critical resource is loaded before DOMContentLoaded\ndocument.addEventListener('DOMContentLoaded', () => {\n  const resources = performance.getEntriesByType('resource');\n  const blocking = resources.filter(r =>\n    r.renderBlockingStatus === 'blocking'\n  );\n  if (blocking.length) {\n    console.warn('Render-blocking resources:', blocking.map(r => r.name));\n  }\n});\n\n// ── Resource hints: tell the browser what's coming ───────────\n// In HTML <head>:\n// <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\">\n// <link rel=\"dns-prefetch\" href=\"https://cdn.example.com\">\n// <link rel=\"preload\" as=\"script\" href=\"/app.js\">\n// Or dynamically:\nfunction preloadResource(href, as) {\n  const link = document.createElement('link');\n  link.rel  = 'preload';\n  link.href = href;\n  link.as   = as;\n  document.head.appendChild(link);\n}\n\n// ── Defer vs Async explained with timing ─────────────────────\n// <script src=\"a.js\">        → blocks parser until downloaded + run\n// <script src=\"a.js\" defer>  → parallel download, run after HTML parsed\n// <script src=\"a.js\" async>  → parallel download, run immediately when ready\n//\n// Rule of thumb:\n//  - defer  → scripts that need DOM (most app scripts)\n//  - async  → independent scripts (analytics, ads)\n//  - module → defer by default\nconsole.log('script/defer/async demonstration — check your HTML <head>');\n",
-      "explanation": "The `PerformanceNavigationTiming` API exposes precise timing for every phase of page load — DNS, TCP, TLS, TTFB, DOM parsing, and full load. `renderBlockingStatus` on resource entries lets you detect resources blocking the critical path programmatically. Resource hints (`preconnect`, `dns-prefetch`, `preload`) communicate future needs to the browser early, reducing latency."
+      "label": "Example",
+      "code": "// ── Observe every phase of the browser pipeline ──────────────\nwindow.addEventListener('load', () => {\n  const nav = performance.getEntriesByType('navigation')[0];\n\n  // Each property is a DOMHighResTimeStamp (ms since navigationStart)\n  const phases = {\n    'DNS lookup':        nav.domainLookupEnd  - nav.domainLookupStart,\n    'TCP connect':       nav.connectEnd       - nav.connectStart,\n    'TLS negotiate':     nav.secureConnectionStart > 0\n                           ? nav.connectEnd - nav.secureConnectionStart\n                           : 0,\n    'Request queued':    nav.requestStart     - nav.fetchStart,\n    'TTFB':              nav.responseStart    - nav.requestStart,\n    'Response download': nav.responseEnd      - nav.responseStart,\n    'DOM parsing':       nav.domInteractive   - nav.responseEnd,\n    'Sub-resources':     nav.domContentLoadedEventStart - nav.domInteractive,\n    'Load event':        nav.loadEventEnd     - nav.loadEventStart,\n    'Total':             nav.loadEventEnd     - nav.fetchStart,\n  };\n\n  console.table(\n    Object.fromEntries(\n      Object.entries(phases).map(([k, v]) => [k, `${v.toFixed(1)} ms`])\n    )\n  );\n});\n\n// ── Detect render-blocking resources ─────────────────────────\ndocument.addEventListener('DOMContentLoaded', () => {\n  const resources = performance.getEntriesByType('resource');\n\n  // renderBlockingStatus is available in Chrome 107+\n  const blocking = resources.filter(\n    r => r.renderBlockingStatus === 'blocking'\n  );\n\n  if (blocking.length > 0) {\n    console.warn(\n      'Render-blocking resources detected:',\n      blocking.map(r => ({ url: r.name, duration: r.duration.toFixed(1) + 'ms' }))\n    );\n  }\n});\n\n// ── Measure Core Web Vitals programmatically ──────────────────\nconst observer = new PerformanceObserver(list => {\n  for (const entry of list.getEntries()) {\n    if (entry.entryType === 'largest-contentful-paint') {\n      console.log('LCP:', entry.startTime.toFixed(0), 'ms');\n    }\n    if (entry.entryType === 'layout-shift' && !entry.hadRecentInput) {\n      console.log('CLS contribution:', entry.value.toFixed(4));\n    }\n  }\n});\nobserver.observe({ entryTypes: ['largest-contentful-paint', 'layout-shift'] });\n\n// ── Inject resource hints dynamically ────────────────────────\n// Useful when you know an origin will be needed before HTML discovery\nfunction preconnect(origin) {\n  const link = document.createElement('link');\n  link.rel = 'preconnect';\n  link.href = origin;\n  link.crossOrigin = 'anonymous';\n  document.head.appendChild(link);\n}\n\n// Warm up the connection to your API server before any fetch() calls\npreconnect('https://api.example.com');\n",
+      "explanation": "The `PerformanceNavigationTiming` API (accessed via `performance.getEntriesByType('navigation')[0]`) exposes precise timestamps for every phase of the load pipeline. Subtracting pairs of timestamps gives you DNS, TCP, TLS, TTFB, DOM parsing, and load event durations individually. The `PerformanceObserver` API is the modern way to collect Core Web Vitals (LCP, CLS, FID/INP) from real user sessions."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Step 9: Building the Render Tree",
+      "content": "Once both the DOM and CSSOM are complete, the browser constructs the **Render Tree** — a new tree that contains only the nodes that are actually visible on screen. The render tree is derived by walking the DOM and attaching computed styles from the CSSOM to each node.\n\nImportant distinctions during render tree construction:\n- Nodes with `display: none` are **entirely excluded** from the render tree (they take no space and are not painted)\n- Nodes with `visibility: hidden` are **included** in the render tree (they occupy space, just not painted)\n- Pseudo-elements like `::before` and `::after` are **added** to the render tree even though they do not exist in the DOM\n- Elements inside `<head>` (scripts, styles, meta) are excluded\n\nEach visible node in the render tree becomes a **render object** (called a `LayoutObject` in Blink/Chrome's source) that holds: the computed style for that node, a reference to its DOM node, and geometry information that will be filled in during Layout.\n\nThe render tree directly feeds into layout. Nodes are processed in tree order — a parent's layout must be computed before its children can be positioned. This strict ordering is one reason why deeply nested DOM trees with many absolutely positioned children can be expensive to lay out."
+    },
+    {
+      "type": "explanation",
+      "title": "Step 10: Layout — Computing Exact Geometry",
+      "content": "**Layout** (historically called **Reflow** in Firefox) is the phase where the browser computes the precise position and size of every element in the render tree. Inputs are: the viewport dimensions, the CSS box model properties (width, height, padding, border, margin), and the positioning scheme (flow, flex, grid, absolute, sticky).\n\nLayout is one of the most computationally expensive steps. A single CSS property change that affects geometry — changing `width`, adding `padding`, toggling `display` — can trigger a **reflow** that invalidates and recomputes large portions of the layout tree. **Layout thrashing** occurs when JavaScript alternately reads and writes layout-affecting properties in a loop, forcing the browser to recompute layout synchronously on every write:\n\n```js\n// BAD: forces reflow on every iteration\nfor (const el of elements) {\n  el.style.width = el.offsetWidth + 10 + 'px'; // read offsetWidth → force reflow, then write\n}\n\n// GOOD: batch reads first, then writes\nconst widths = elements.map(el => el.offsetWidth); // one reflow\nfor (let i = 0; i < elements.length; i++) {\n  elements[i].style.width = widths[i] + 10 + 'px'; // writes only\n}\n```\n\nModern browsers implement **incremental layout**: only the subtrees that are marked dirty are re-laid out. But if the root element changes, the entire document is re-laid out. **Flexbox** and **CSS Grid** have their own layout algorithms that are generally efficient, though a flex container with many items that change dynamically can be expensive.\n\n**Intrinsic sizing** (using `width: fit-content`, `min-content`, `max-content`) and **aspect-ratio** help the browser reserve space for elements before their content loads, reducing layout shifts — a key factor in the **Cumulative Layout Shift (CLS)** Core Web Vital."
+    },
+    {
+      "type": "explanation",
+      "title": "Steps 11–12: Paint and Compositing",
+      "content": "**Paint** (rasterization) converts the render tree's geometry into actual pixel data. The browser traverses the render tree and calls drawing commands: fill rectangle, draw text, draw image, draw border. Internally, Chrome uses **Skia** as its 2D graphics library; Firefox uses **Moz2D**.\n\nNot every element is painted on the same layer. The browser promotes certain elements to their own **compositing layers** (also called GPU layers or stacking contexts). An element gets its own layer when it:\n- Has `will-change: transform` or `will-change: opacity`\n- Uses `transform: translateZ(0)` or `transform: translate3d(0,0,0)` (the classic GPU promotion hack)\n- Is a `<video>`, `<canvas>`, or `<iframe>`\n- Has `position: fixed` or `position: sticky`\n- Has a CSS filter, mask, or clip-path\n\nEach compositing layer is rasterized independently and stored in GPU memory as a **texture**. The **Compositor thread** (running separately from the main thread) then assembles these textures into the final frame — applying transform matrices and opacity values entirely on the GPU, without involving the main thread.\n\n**This is the key insight behind CSS animation performance**: `transform` and `opacity` are the only CSS properties that can be animated without triggering layout or paint — they only affect the compositing step. Animating `left`/`top` or `width`/`height` requires layout, which runs on the main thread and can drop frames. Animating `transform: translateX()` instead runs entirely on the compositor thread and stays smooth even when the main thread is busy executing JavaScript.\n\nThe full per-frame sequence for an animation is:\n1. JavaScript executes (if any)\n2. Style recalculation\n3. Layout (only if geometry changed)\n4. Paint (only if visual appearance changed)\n5. Composite: GPU assembles textures into the frame\n\nFor a 60fps experience, this entire sequence must complete in **16.67ms** per frame. At 120Hz (ProMotion displays, many Android devices), the budget shrinks to 8.33ms."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"JS / Style Change\"] --> B{\"Geometry changed?\"}\n    B -- Yes --> C[\"Layout (Reflow)\"]\n    B -- No --> D{\"Visual changed?\"}\n    C --> D\n    D -- Yes --> E[\"Paint (Rasterize)\"]\n    D -- No --> F[\"Composite only\"]\n    E --> F\n    F --> G[\"GPU: Draw frame\"]",
+      "caption": "The browser skips expensive steps when possible. Animating only transform/opacity skips Layout and Paint entirely, going straight to Composite — the cheapest path."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// ── Browser loading event timeline ───────────────────────────\n//\n// fetchStart\n//   │── DNS lookup (domainLookupStart → domainLookupEnd)\n//   │── TCP connect (connectStart → connectEnd)\n//   │   └── TLS handshake (secureConnectionStart → connectEnd)\n//   │── Request sent (requestStart)\n//   │── First byte received (responseStart)   ← TTFB\n//   │── Last byte received (responseEnd)\n//   │── DOM parsing begins\n//   │── DOMContentLoaded event fires (domContentLoadedEventStart)\n//   │   └── defer scripts execute here\n//   │── Sub-resources (images, iframes) load\n//   └── load event fires (loadEventStart → loadEventEnd)\n//\n// Key milestones:\nconst EVENTS = {\n  TTFB:             'responseStart - fetchStart    (server speed + network)',\n  FCP:              'First Contentful Paint        (PerformanceObserver)',\n  DOMContentLoaded: 'HTML parsed + deferred JS run',\n  Load:             'All resources including images',\n};\n\n// ── Script loading strategies ─────────────────────────────────\nconst SCRIPT_STRATEGIES = [\n  { attr: 'none (default)', parsesHTML: 'blocked', executes: 'immediately on download' },\n  { attr: 'defer',          parsesHTML: 'parallel', executes: 'after DOM, in order' },\n  { attr: 'async',          parsesHTML: 'parallel', executes: 'immediately, any order' },\n  { attr: 'type=module',    parsesHTML: 'parallel', executes: 'deferred, in order' },\n];\n\n// ── HTTP version comparison ───────────────────────────────────\nconst HTTP_VERSIONS = {\n  'HTTP/1.1': 'One request per connection; browsers open 6 parallel connections per origin',\n  'HTTP/2':   'Multiplexed streams over one TCP; server push; header compression (HPACK)',\n  'HTTP/3':   'QUIC (UDP); no head-of-line blocking; faster connection setup (0-RTT)',\n};\n",
-      "explanation": "Understanding the loading event order helps you place scripts correctly. DOMContentLoaded fires when the HTML is fully parsed and deferred scripts have run — a good time to initialize UI. The `load` event fires only after all resources (including images) are downloaded, often much later. For performance monitoring, prefer FCP and LCP (Core Web Vitals) over `load`."
+      "label": "Example",
+      "code": "// ── Avoid layout thrashing: batch DOM reads before writes ─────\nfunction resizeElementsBadly(elements) {\n  // Each iteration: read offsetWidth (forces reflow) then write style\n  // Browser cannot batch: every write invalidates cached layout\n  elements.forEach(el => {\n    const w = el.offsetWidth;           // FORCES synchronous reflow\n    el.style.width = (w + 10) + 'px';   // invalidates layout again\n  });\n}\n\nfunction resizeElementsWell(elements) {\n  // Phase 1: read all widths in one pass (one reflow total)\n  const widths = Array.from(elements, el => el.offsetWidth);\n\n  // Phase 2: write all widths (no reads — no forced reflow)\n  elements.forEach((el, i) => {\n    el.style.width = (widths[i] + 10) + 'px';\n  });\n}\n\n// ── Prefer transform over position for animation ──────────────\n// BAD: triggers layout + paint every frame (slow)\nfunction animateBad(el) {\n  let x = 0;\n  function tick() {\n    x += 2;\n    el.style.left = x + 'px';  // forces Layout every frame\n    requestAnimationFrame(tick);\n  }\n  requestAnimationFrame(tick);\n}\n\n// GOOD: only compositor step — no Layout, no Paint\nfunction animateGood(el) {\n  let x = 0;\n  function tick() {\n    x += 2;\n    el.style.transform = `translateX(${x}px)`;  // Composite only\n    requestAnimationFrame(tick);\n  }\n  requestAnimationFrame(tick);\n}\n\n// ── Use requestAnimationFrame for visual updates ──────────────\n// rAF batches updates to the next paint cycle, keeping JS + DOM\n// writes in sync with the browser's rendering schedule.\n// Never use setTimeout(fn, 0) for animations — it is asynchronous\n// and can fire at any point in the frame, causing jank.\nfunction smoothProgress(progressEl, targetWidth) {\n  let current = 0;\n  function step() {\n    current = Math.min(current + 2, targetWidth);\n    progressEl.style.width = current + '%';\n    if (current < targetWidth) requestAnimationFrame(step);\n  }\n  requestAnimationFrame(step);\n}\n\n// ── Force GPU layer for an element ────────────────────────────\n// Use will-change to hint the browser about upcoming animations\n// Do not apply to everything — each layer consumes GPU memory\nfunction promoteToGPULayer(el) {\n  el.style.willChange = 'transform';  // browser pre-creates GPU layer\n}\n\nfunction demoteFromGPULayer(el) {\n  el.style.willChange = 'auto';  // release GPU layer when animation ends\n}\n",
+      "explanation": "Layout thrashing is one of the most common causes of janky scrolling and slow animations in JavaScript-heavy pages. Reading a layout-affecting property like `offsetWidth`, `getBoundingClientRect()`, or `scrollTop` after writing a style forces the browser to synchronously recompute layout to return an accurate value. The fix is always the same: batch all reads before any writes. `requestAnimationFrame` ensures your visual updates are synchronized with the browser's rendering loop."
+    },
+    {
+      "type": "explanation",
+      "title": "The Critical Rendering Path and How to Optimize It",
+      "content": "The **Critical Rendering Path (CRP)** is the minimum sequence of steps required to render the first visible frame: HTML → DOM, CSS → CSSOM, DOM + CSSOM → Render Tree → Layout → Paint → Composite. Any resource that must be downloaded and processed before this sequence can complete is a **critical resource**.\n\nOptimizing the CRP means:\n\n**1. Minimize render-blocking CSS.** CSS in `<head>` is render-blocking by design (to prevent FOUC — Flash of Unstyled Content). But you only need the CSS for above-the-fold content before the first paint. Identify your critical CSS (what is visible without scrolling) and inline it in `<style>` in `<head>`. Load the rest asynchronously:\n\n```html\n<style>/* critical above-the-fold CSS here */</style>\n<link rel=\"preload\" href=\"/styles.css\" as=\"style\" onload=\"this.rel='stylesheet'\">\n```\n\n**2. Eliminate parser-blocking JavaScript.** Every plain `<script>` in `<head>` is a guaranteed delay. Use `defer` for all DOM-dependent scripts. Use `async` for analytics. Never use synchronous `document.write()` — it is parser-blocking and forces a full re-parse.\n\n**3. Reduce critical resource count and size.** Fewer bytes to transfer = faster CRP. Minify CSS and JS, compress with Brotli or gzip, use HTTP/2 to eliminate multiple handshake costs.\n\n**4. Use resource hints strategically:**\n- `<link rel=\"dns-prefetch\" href=\"//cdn.example.com\">` — warm up DNS for third-party origins (cheap, low risk)\n- `<link rel=\"preconnect\" href=\"//api.example.com\">` — warm up DNS + TCP + TLS (more expensive, only for origins used soon)\n- `<link rel=\"preload\" as=\"font\" href=\"/font.woff2\" crossorigin>` — prioritize loading a specific resource before the parser discovers it\n- `<link rel=\"prefetch\" href=\"/next-page.html\">` — low-priority fetch of a resource likely needed soon (next navigation)\n\n**5. Understand First Contentful Paint (FCP) vs Largest Contentful Paint (LCP).** FCP marks when any content first appears. LCP marks when the largest visible element (usually a hero image or headline) has rendered. Google's Core Web Vitals use LCP as the primary load performance signal — target under 2.5 seconds. Slow LCP is almost always caused by: slow server (TTFB), render-blocking CSS/JS, slow resource load time (unoptimized images, no CDN), or client-side rendering that delays content until JavaScript runs."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// ── Script loading strategy reference ────────────────────────\n//\n// <script src=\"app.js\">              — blocks parser + render until done\n// <script src=\"app.js\" defer>        — parallel download, runs after DOM\n// <script src=\"app.js\" async>        — parallel download, runs ASAP\n// <script type=\"module\" src=\"app.js\"> — deferred by default, ES module\n//\n// DOMContentLoaded fires AFTER defer scripts finish\n// window.load fires AFTER all resources (including images)\n//\n// ── Preload critical resources in HTML <head> ─────────────────\n//\n// Fonts (critical — prevents invisible text during load)\n// <link rel=\"preload\" href=\"/inter.woff2\" as=\"font\" crossorigin>\n//\n// LCP image (hero image appears faster)\n// <link rel=\"preload\" href=\"/hero.webp\" as=\"image\">\n//\n// ── Measure Largest Contentful Paint (Core Web Vital) ────────\nconst lcpObserver = new PerformanceObserver(list => {\n  const entries = list.getEntries();\n  const last = entries[entries.length - 1];  // last = most recent large element\n  console.log('LCP element:', last.element);\n  console.log('LCP time:', last.startTime.toFixed(0) + 'ms');\n  // Google thresholds: Good < 2500ms, Needs Improvement < 4000ms, Poor >= 4000ms\n  const rating = last.startTime < 2500 ? 'Good'\n    : last.startTime < 4000 ? 'Needs Improvement'\n    : 'Poor';\n  console.log('LCP rating:', rating);\n});\nlcpObserver.observe({ entryTypes: ['largest-contentful-paint'] });\n\n// ── Measure Interaction to Next Paint (INP, replaces FID) ────\nconst inpObserver = new PerformanceObserver(list => {\n  for (const entry of list.getEntries()) {\n    if (entry.interactionId) {\n      const delay = entry.processingStart - entry.startTime;\n      console.log(`Input delay: ${delay.toFixed(1)}ms (target < 100ms)`);\n    }\n  }\n});\ninpObserver.observe({ entryTypes: ['event'], durationThreshold: 16 });\n\n// ── Inline critical CSS pattern (done at build time) ─────────\n// This is typically handled by tools like Critters or Critical (npm)\n// The manual pattern is:\n// 1. Identify CSS needed for above-the-fold rendering\n// 2. Embed it in <style> in <head>\n// 3. Load full stylesheet asynchronously:\nfunction loadCSS(href) {\n  const link = document.createElement('link');\n  link.rel = 'stylesheet';\n  link.href = href;\n  link.media = 'print';  // trick: 'print' = non-blocking\n  link.onload = function() { this.media = 'all'; };  // swap to 'all' on load\n  document.head.appendChild(link);\n}\n",
+      "explanation": "The `media='print'` trick loads a stylesheet non-blocking: the browser fetches it (since it may be printed) but does not block rendering, then the `onload` handler switches `media` to `all` to apply it. This pattern predates `<link rel=preload as=style>` but still works everywhere. Prefer the preload approach in modern projects."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**A brief history of browser engines**: The browser engine landscape has consolidated dramatically. In the 1990s, Netscape Navigator used the Gecko engine, while Internet Explorer used Trident. Apple forked KHTML (from the KDE project) to create WebKit for Safari (2003), which Google later forked to create Blink for Chrome (2013). Today, Blink (Chrome, Edge, Opera, Samsung Internet, ~65% of web usage), Gecko (Firefox, ~4%), and WebKit (Safari, ~19%) are the three active layout engines. All three implement the same web standards, but differ in implementation details, performance characteristics, and how quickly they adopt new features. Understanding that Chrome and Edge share Blink is important: a bug or behavior in one is usually present in both."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**The single most impactful browser performance practice**: put `<link rel=\"stylesheet\">` in `<head>` and `<script>` tags with `defer` (or at end of `<body>`). This ensures CSS is loaded before the page renders (avoiding FOUC) while JS doesn't block HTML parsing. For critical CSS, inline the above-the-fold styles directly in `<head>` and load the rest asynchronously. These two practices alone can cut Time to Interactive by 30–50% on content-heavy pages."
+      "content": "**Common interview questions and misconceptions to get right:**\n\n- `DOMContentLoaded` fires when HTML is parsed and `defer` scripts run — not when images load. Use it to initialize UI.\n- `window.load` fires when all resources (including images) are loaded. Typically too late for most initialization.\n- CSS is render-blocking, not parser-blocking. The HTML parser keeps running while CSS downloads.\n- Plain `<script>` is both parser-blocking AND render-blocking.\n- `transform` and `opacity` are the only CSS properties that never trigger Layout or Paint during animation — everything else does at least one of them.\n- HTTP/2 multiplexing makes domain sharding *harmful* — it breaks multiplexing and creates unnecessary TLS overhead.\n- LCP, CLS, and INP are the three Core Web Vitals (as of 2024). FID was retired in favor of INP. Know the thresholds: LCP < 2.5s, CLS < 0.1, INP < 200ms."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**The browser pipeline** is: DNS → TCP/TLS → HTTP → Parse HTML (DOM) → Parse CSS (CSSOM) → Execute JS → Render Tree → Layout → Paint → Composite. Each step feeds the next.",
-        "**Render-blocking resources** — plain `<script>` tags and CSS — pause the critical rendering path. Use `defer` for most scripts and inline critical CSS to minimize blocking time.",
-        "**HTTP/2** multiplexes requests over one TCP connection (no need for domain sharding). **HTTP/3** uses QUIC/UDP to eliminate head-of-line blocking entirely.",
-        "**The Performance API** (`PerformanceNavigationTiming`, `PerformanceObserver`) exposes precise timing for DNS, TCP, TTFB, DOM parsing, and paint events — use it for real measurement, not guessing.",
-        "**Resource hints** (`preconnect`, `dns-prefetch`, `preload`, `prefetch`) let you warm up connections and start fetching critical assets before the parser discovers them, reducing latency for key resources."
+        "**The full browser pipeline** runs: DNS lookup → TCP handshake → TLS negotiation → HTTP request → server response → HTML parsing (DOM) → CSS parsing (CSSOM) → JavaScript execution → render tree construction → layout → paint → composite. Understanding this sequence explains every browser performance optimization.",
+        "**Render-blocking vs parser-blocking**: CSS is render-blocking (prevents the render tree) but not parser-blocking (HTML parser continues). Plain `<script>` is both. Use `defer` for DOM-dependent scripts, `async` for independent scripts — both download in parallel with parsing.",
+        "**DNS, TCP, and TLS add 100–400ms on cold visits** to new origins. The `preconnect` and `dns-prefetch` resource hints warm these up during HTML parsing, so connections are ready when resources are actually requested.",
+        "**HTTP/2 multiplexing** sends all requests over one TCP connection using streams. This makes the old HTTP/1.1 workaround of domain sharding actively harmful under HTTP/2, and HTTP/3/QUIC eliminates transport-level head-of-line blocking entirely.",
+        "**`transform` and `opacity` are the only CSS properties that animate without triggering layout or paint** — they only affect the compositor step, which runs on a separate GPU thread. All other animatable properties trigger layout (geometry) or paint (visuals) on every frame.",
+        "**Layout thrashing** (alternating DOM reads and writes) forces synchronous reflows. Always batch all reads before any writes. Use `requestAnimationFrame` to schedule visual updates in sync with the browser's rendering loop.",
+        "**The Performance API** (`PerformanceNavigationTiming`, `PerformanceObserver`) exposes precise timestamps for DNS, TCP, TLS, TTFB, FCP, LCP, CLS, and INP — use these for real-user measurement. Core Web Vital targets: LCP < 2.5s, CLS < 0.1, INP < 200ms."
       ]
     }
   ],
@@ -67,133 +137,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "Which event fires when the HTML document is fully parsed and deferred scripts have executed, but before images load?",
+      "question": "Which browser event fires when the HTML document is fully parsed and all `defer` scripts have executed, but BEFORE images and stylesheets finish loading?",
       "type": "mcq",
       "options": [
         "window.onload",
         "DOMContentLoaded",
-        "readystatechange",
+        "readystatechange with state 'loading'",
         "visibilitychange"
       ],
       "correct": 1,
-      "explanation": "DOMContentLoaded fires when the HTML is fully parsed and deferred scripts have run. window.onload fires later, after all resources including images and stylesheets have finished loading. DOMContentLoaded is usually the right event for initializing UI."
+      "explanation": "DOMContentLoaded fires when the HTML parser finishes building the DOM and all deferred scripts have executed. window.onload fires much later, only after all sub-resources including images, stylesheets, and iframes have finished loading. DOMContentLoaded is the right event for DOM initialization code."
     },
     {
       "id": "q2",
-      "question": "A `<script src=\"app.js\">` tag (no attributes) placed in `<head>` will:",
+      "question": "A `<script src=\"app.js\">` tag (no attributes) in `<head>` will cause the browser to:",
       "type": "mcq",
       "options": [
-        "Download in parallel and run after the DOM is ready",
-        "Pause HTML parsing until the script is downloaded and executed",
-        "Download after all CSS is loaded",
-        "Be executed asynchronously in a worker thread"
+        "Download the script in parallel and run it after the DOM is fully built",
+        "Pause HTML parsing, download the script, execute it, then resume parsing",
+        "Defer execution until after CSS is fully loaded",
+        "Execute the script in a Web Worker to avoid blocking"
       ],
       "correct": 1,
-      "explanation": "A plain `<script>` in `<head>` is parser-blocking: the HTML parser pauses, the browser downloads the script, executes it, then resumes parsing. Use `defer` to download in parallel and execute after parsing, or `async` for independent scripts."
+      "explanation": "A plain script tag with no attributes is parser-blocking: the HTML parser halts the moment it encounters the tag. The browser downloads the script, executes it synchronously on the main thread, then resumes parsing. Use `defer` to download in parallel and execute after parsing, preserving document order."
     },
     {
       "id": "q3",
-      "question": "What is TTFB (Time To First Byte)?",
+      "question": "Which of the following is TRUE about how CSS stylesheets affect the browser pipeline?",
       "type": "mcq",
       "options": [
-        "Time from user click to first DNS query",
-        "Time from request sent to receiving the first byte of the response",
-        "Time from page load to first JavaScript execution",
-        "Time for the first CSS file to be fully downloaded"
+        "CSS is both parser-blocking and render-blocking",
+        "CSS is render-blocking but NOT parser-blocking — the HTML parser continues while CSS downloads",
+        "CSS is parser-blocking but not render-blocking",
+        "CSS has no blocking effect; the browser renders without waiting for it"
       ],
       "correct": 1,
-      "explanation": "TTFB measures server responsiveness: from when the browser sends the request to when it receives the first byte of the response. High TTFB indicates slow server processing, database queries, or network latency. It is measured as responseStart - requestStart in the Navigation Timing API."
+      "explanation": "CSS in <head> is render-blocking (the browser cannot build the render tree without the CSSOM) but not parser-blocking (the HTML parser keeps building the DOM while CSS downloads). A plain <script> tag is both parser-blocking and render-blocking — a key distinction."
     },
     {
       "id": "q4",
-      "question": "What advantage does HTTP/2 multiplexing provide over HTTP/1.1?",
+      "question": "What is TTFB (Time To First Byte), and what does a high TTFB usually indicate?",
       "type": "mcq",
       "options": [
-        "It encrypts headers with a stronger cipher",
-        "It allows many requests over one TCP connection, eliminating head-of-line blocking per origin",
-        "It compresses the response body with Brotli automatically",
-        "It eliminates the need for a TCP handshake"
+        "Time from navigation start to first byte of DNS response; indicates slow DNS",
+        "Time from the HTTP request being sent to receiving the first byte of the response; indicates slow server processing or high network latency",
+        "Time from page load to first JavaScript execution; indicates heavy scripts",
+        "Time from navigation start to first CSS byte; indicates slow stylesheet server"
       ],
       "correct": 1,
-      "explanation": "HTTP/2 multiplexes multiple request/response streams over a single TCP connection using binary framing. This eliminates the HTTP/1.1 limitation of 6 parallel connections per origin and avoids the overhead of multiple TCP handshakes. Note: head-of-line blocking at the TCP level still exists in HTTP/2; HTTP/3/QUIC solves that."
+      "explanation": "TTFB is measured as responseStart minus requestStart in the Navigation Timing API. It captures the round-trip time plus server-side processing time (database queries, template rendering). Google recommends TTFB below 800ms. High TTFB usually means slow origin server, no CDN, or expensive database queries."
     },
     {
       "id": "q5",
-      "question": "What does the `rel=\"preconnect\"` resource hint do?",
-      "type": "mcq",
-      "options": [
-        "Downloads the resource immediately and caches it",
-        "Establishes a TCP/TLS connection to a future origin before it is needed",
-        "Tells the browser to load the resource only when it appears in the viewport",
-        "Prefetches the next page the user is likely to navigate to"
-      ],
-      "correct": 1,
-      "explanation": "preconnect tells the browser to perform DNS lookup, TCP connection, and TLS handshake to an origin ahead of time, so when a resource is actually requested, the connection is already warm. It is especially useful for third-party origins like CDNs, fonts, or API servers."
-    },
-    {
-      "id": "q6",
-      "question": "Which script loading attribute preserves execution order while not blocking HTML parsing?",
+      "question": "Which script loading attribute ensures scripts download in parallel with HTML parsing AND execute in document order after the DOM is fully built?",
       "type": "mcq",
       "options": [
         "async",
         "defer",
-        "module (without async)",
-        "Both defer and module"
+        "crossorigin",
+        "type='text/javascript'"
       ],
-      "correct": 3,
-      "explanation": "Both `defer` and `type=module` (without async) download in parallel with HTML parsing and execute after the DOM is parsed, in document order. `async` also downloads in parallel but executes as soon as downloaded, in any order — not suitable when scripts depend on each other."
+      "correct": 1,
+      "explanation": "defer downloads scripts in parallel with HTML parsing and executes them in document order just before DOMContentLoaded, after the DOM is complete. async also downloads in parallel but executes immediately when downloaded, in any order — not suitable for scripts that depend on each other or on DOM structure."
+    },
+    {
+      "id": "q6",
+      "question": "Why is animating `transform: translateX()` more performant than animating `left` for moving an element?",
+      "type": "mcq",
+      "options": [
+        "transform uses hardware acceleration automatically; left does not support acceleration",
+        "transform only requires the Composite step (GPU thread); changing left triggers Layout and Paint on the main thread every frame",
+        "left animations require JavaScript; transform animations use pure CSS",
+        "transform values are cached by the browser; left values are recalculated each frame"
+      ],
+      "correct": 1,
+      "explanation": "transform and opacity are the only CSS properties that bypass Layout and Paint during animation — they only affect the Compositor step, which runs on a separate GPU thread independent of the main thread. Changing left or top triggers Layout (geometry recomputation) on every frame, which must run on the main thread and competes with JavaScript execution."
     },
     {
       "id": "q7",
-      "question": "The Critical Rendering Path includes which sequence?",
+      "question": "What key advantage did HTTP/2 multiplexing provide over HTTP/1.1, and what practice did it make counterproductive?",
       "type": "mcq",
       "options": [
-        "DNS → HTTP → DOM → Render Tree → Layout → Paint",
-        "DOM → CSSOM → Render Tree → Layout → Paint → Composite",
-        "CSSOM → DOM → JavaScript → HTTP → Paint",
-        "Layout → Paint → DOM → CSSOM → Composite"
+        "HTTP/2 added TLS encryption by default; it made HTTP connections counterproductive",
+        "HTTP/2 multiplexes all requests over one TCP connection via streams, making domain sharding counterproductive",
+        "HTTP/2 introduced server push, making client-side caching counterproductive",
+        "HTTP/2 compressed response bodies, making gzip compression counterproductive"
       ],
       "correct": 1,
-      "explanation": "The Critical Rendering Path starts after bytes arrive: HTML is parsed into the DOM, CSS into the CSSOM. Together they form the Render Tree (only visible nodes). Layout computes geometry. Paint rasterizes. Composite assembles GPU layers. This sequence must complete for the first visible frame."
+      "explanation": "HTTP/2 multiplexes multiple request/response streams over a single TCP connection using binary framing. Under HTTP/1.1, browsers opened 6 parallel connections per origin as a workaround for the one-request-per-connection limit. Domain sharding (spreading resources across multiple subdomains) increased this to 12+ connections. Under HTTP/2, domain sharding defeats multiplexing and adds unnecessary TLS overhead."
     },
     {
       "id": "q8",
-      "question": "Why did HTTP/1.1 browsers open up to 6 TCP connections per origin?",
+      "question": "What does `<link rel=\"preconnect\" href=\"https://api.example.com\">` do?",
       "type": "mcq",
       "options": [
-        "To satisfy the HTTP spec requirement for redundancy",
-        "To work around the limitation of one request per connection, enabling parallel downloads",
-        "Because TCP connections time out after one request",
-        "To distribute load across multiple server IPs"
+        "Downloads and caches the resource at that URL immediately",
+        "Performs DNS lookup, TCP handshake, and TLS negotiation to that origin before any resource from it is requested",
+        "Tells the browser to load that resource only when the user scrolls it into view",
+        "Prefetches the next page the user is likely to navigate to"
       ],
       "correct": 1,
-      "explanation": "HTTP/1.1 is limited to one in-flight request per connection (pipelining was unreliable). Browsers opened 6 parallel connections per origin to fetch multiple resources simultaneously. HTTP/2 makes this unnecessary by multiplexing all requests on one connection."
+      "explanation": "preconnect triggers the full connection setup (DNS + TCP + TLS) to an origin ahead of time, warming the connection. When a resource from that origin is actually needed, the connection is already established, eliminating 100-400ms of latency. Use it for origins you know will be needed soon (API servers, CDNs, font providers)."
     },
     {
       "id": "q9",
-      "question": "What does the `PerformanceNavigationTiming` API expose?",
+      "question": "What is layout thrashing, and what is the correct way to avoid it?",
       "type": "mcq",
       "options": [
-        "Only the total page load time",
-        "Precise timestamps for each phase: DNS, TCP, TLS, TTFB, DOM parsing, and load events",
-        "User interaction events like clicks and scrolls",
-        "CPU and memory usage during page load"
+        "Applying too many CSS transitions at once; avoided by using will-change",
+        "Alternately reading and writing layout-affecting DOM properties in a loop, forcing synchronous reflows; avoided by batching all reads before writes",
+        "Nesting too many DOM elements; avoided by flattening the DOM tree",
+        "Using JavaScript to change styles instead of CSS classes; avoided by using classList"
       ],
       "correct": 1,
-      "explanation": "PerformanceNavigationTiming (accessed via performance.getEntriesByType('navigation')[0]) exposes detailed timing: domainLookupStart/End (DNS), connectStart/End (TCP), secureConnectionStart (TLS), requestStart, responseStart (TTFB), domInteractive, domContentLoadedEventStart, loadEventStart/End, and more."
+      "explanation": "Layout thrashing occurs when code reads a layout-affecting property (like offsetWidth, getBoundingClientRect) after writing a style — the browser must perform a synchronous layout to return accurate values. In a loop, this causes one reflow per iteration. The fix: collect all measurements first in one pass (one reflow), then write all style changes in a second pass."
     },
     {
       "id": "q10",
-      "question": "What is FOUC (Flash of Unstyled Content) and how is it prevented?",
+      "question": "Which THREE are Google Core Web Vitals as of 2024, and what does each measure?",
       "type": "mcq",
       "options": [
-        "A JavaScript error that causes the page to briefly show raw JSON; prevented with error boundaries",
-        "Momentarily visible unstyled HTML before CSS loads; prevented by putting CSS in <head> so it blocks rendering",
-        "A flicker when images load; prevented with width/height attributes",
-        "A delay before fonts render; prevented with font-display: swap"
+        "FCP (first content), TTI (time to interactive), TBT (total blocking time)",
+        "LCP (load performance of largest element), CLS (visual stability/layout shifts), INP (interaction responsiveness)",
+        "TTFB (server response time), FID (first input delay), Speed Index",
+        "DNS time, TCP time, and TLS time"
       ],
       "correct": 1,
-      "explanation": "FOUC happens when HTML renders before the CSS is loaded, showing unstyled content momentarily. Placing `<link rel=stylesheet>` in `<head>` makes CSS render-blocking, ensuring the browser waits for CSSOM before showing anything. While this delays first paint, it prevents the jarring visual flash."
+      "explanation": "The three Core Web Vitals are: LCP (Largest Contentful Paint, target < 2.5s — measures when the main content loads), CLS (Cumulative Layout Shift, target < 0.1 — measures unexpected layout shifts), and INP (Interaction to Next Paint, target < 200ms — measures responsiveness to user input). FID was retired in March 2024 and replaced by INP."
     }
   ]
 }

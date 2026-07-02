@@ -5,57 +5,121 @@
   "week": 26,
   "icon": "database",
   "tagline": "How bytes move from RAM to disk — pages, B+ trees, LSM trees, and the write-ahead log that ties it all together.",
-  "readTime": "~12 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Every database ultimately stores data on disk, and the way it organizes those bytes determines whether reads or writes are fast. Relational databases use **pages** (typically 8 KB blocks) as the atomic unit of I/O — even changing one byte reads and rewrites the whole page. Rows are packed into pages, and pages are linked by index structures.\n\nTwo index families dominate: **B+ trees**, which optimize for reads by keeping data sorted and immediately seekable, and **LSM trees (Log-Structured Merge-trees)**, which optimize for writes by batching updates in memory and flushing sorted runs to disk. Understanding these structures explains why PostgreSQL is great for mixed workloads, while Cassandra and RocksDB excel at write-heavy ones."
+      "content": "Every time you run `SELECT * FROM orders WHERE id = 42`, a chain of precisely orchestrated mechanical decisions fires underneath: which disk block to read, which RAM addresses to check first, how to traverse a tree of sorted keys, and how to guarantee that an interrupted write does not corrupt your table. The answer to each question is shaped by the storage engine — the layer of software that sits between SQL and raw bytes on disk.\n\nUnderstanding database storage internals is not just academic trivia. It is the knowledge that lets you explain why adding an index makes a query 1000× faster, why a write-heavy application should consider Cassandra over PostgreSQL, why `VACUUM` matters, and why a poorly timed crash does not lose committed transactions. It shapes every performance diagnosis and architecture decision you will ever make with a database.\n\nAt the core are two competing philosophies. **B+ tree** storage engines (PostgreSQL, MySQL InnoDB, SQLite) are optimized around the assumption that data must be readable in sorted order with minimal disk seeks — ideal for mixed read/write OLTP workloads. **LSM tree** storage engines (RocksDB, Cassandra, LevelDB, HBase) are optimized around the assumption that writes should be as fast as possible and that reads can pay a small extra cost — ideal for high-throughput write-heavy workloads. Both philosophies sit on top of the same physical reality: spinning disks and SSDs expose bytes in fixed-size blocks, and random seeks are expensive compared to sequential access.\n\nIn this chapter we build these ideas from the ground up: the page as the atomic I/O unit, the buffer pool as a RAM cache of hot pages, the B+ tree's sorted leaf structure, the LSM tree's write-optimized append design, the write-ahead log as the universal crash-recovery mechanism, and the concrete trade-offs that drive real-world database choices."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  A[\"Client Write\"] --> B[\"WAL (Write-Ahead Log)\nsequential append\"]\n  B --> C[\"Buffer Pool (RAM pages)\"]\n  C --> D{\"Page dirty?\"}\n  D -->|\"Yes at checkpoint\"| E[\"Flush to Data File\\n(B+ tree page)\"]\n  D -->|\"No, cache hit\"| F[\"Serve from memory\"]\n  E --> G[\"Disk: .data pages\"]\n  B --> H[\"Disk: WAL segment\"]",
-      "caption": "Every write hits the WAL first (sequential, fast), then modifies in-memory buffer pages. Dirty pages are flushed to data files at checkpoints."
+      "mermaid": "flowchart TD\n  A[\"Client SQL Query\"] --> B[\"Query Planner\"]\n  B --> C[\"Storage Engine\"]\n  C --> D[\"Buffer Pool\\n(hot pages in RAM)\"]\n  D -->|\"cache miss\"| E[\"Disk: Data File\\n(.data pages)\"]\n  C --> F[\"WAL\\n(Write-Ahead Log)\"]\n  F --> G[\"Disk: WAL Segments\"]\n  D -->|\"dirty page checkpoint\"| E",
+      "caption": "The storage engine sits between SQL and disk. The buffer pool caches hot pages in RAM; the WAL records every change before it touches a data page."
     },
     {
       "type": "analogy",
-      "title": "The Library with a Draft Shelf",
-      "content": "Think of the database as a library where books (rows) live in filing cabinets (pages). A B+ tree is the card catalog — perfectly sorted alphabetically so you can find any book in seconds. But re-filing every card every time a new book arrives is slow. An LSM tree is like a draft shelf: new books land on the shelf immediately, and a librarian periodically sorts and merges the draft shelf with the main cabinets in batches. Writes are instant; reads may need to check both shelf and cabinets."
+      "title": "The Library with a Draft Shelf and a Fire-Resistant Logbook",
+      "content": "Imagine a vast library where every book (a row) lives in one of thousands of filing cabinets, each cabinet holding exactly 8 KB of pages. The card catalog (a B+ tree index) is sorted alphabetically — find any author in seconds by following dividers down through the catalog to the exact drawer, then reading left-to-right through the connected drawers for a range of authors. The catalog is beautifully organized, but re-filing every card when a new book arrives is slow — each insertion might require reshuffling half a drawer.\n\nAn LSM tree library works differently. A draft shelf sits at the entrance. Every new book lands on the shelf first — instant. A librarian periodically gathers a full shelf's worth of books, sorts them, and merges them into the main cabinets in a single sweeping operation. Reads must check both the draft shelf and the main cabinets, but writes are instant because they never touch the cabinets directly.\n\nThe fire-resistant logbook (the write-ahead log) is kept near the door. Every time any book is moved — before the cabinet is touched — the librarian writes the move in the logbook in pen. If an earthquake hits mid-reshelving, the logbook lets you replay exactly where each book was supposed to go. Without the logbook you might find half a book moved, the other half lost."
     },
     {
       "type": "explanation",
-      "content": "**Pages** are the fundamental I/O unit. A page stores a fixed number of rows along with a page header (LSN — log sequence number — checksum, free space pointer). When a query reads a row, the entire page is loaded into the **buffer pool** in RAM. The buffer pool is shared across all connections and is typically configured to 25–40% of total RAM.\n\n**B+ trees** (the variant used by PostgreSQL, MySQL InnoDB, and most SQL databases) differ from B-trees in that all data lives in **leaf nodes**, which are linked in a doubly-linked list for fast range scans. Internal nodes only store keys as routing guides. A lookup descends O(log n) levels; a range scan follows leaf pointers. A typical height-3 B+ tree with 4 KB pages can index ~100 million rows with only 3 disk reads per lookup.\n\n**LSM trees (Log-Structured Merge-trees)** work differently. Writes go to an in-memory sorted structure called a **MemTable**. When the MemTable fills, it is flushed as an immutable **SSTable (Sorted String Table)** on disk. Over time, multiple SSTables accumulate; a background **compaction** process merges and sorts them, discarding deleted keys. Reads may need to check multiple SSTables (mitigated by **Bloom filters** that probabilistically rule out SSTables that don't contain a key). LSM trees power RocksDB, LevelDB, Cassandra, and HBase.\n\n**Write-Ahead Logging (WAL)** ensures durability and crash recovery. Before any page is modified, the change is recorded sequentially in the WAL (also called redo log in MySQL). On crash, the database replays WAL records from the last checkpoint to restore all committed changes. WAL writes are sequential and far faster than random page writes, so they add minimal latency to commits.\n\n**Compaction** in LSM trees is the key trade-off: it reclaims space and keeps read performance acceptable, but it consumes I/O bandwidth. Strategies like **leveled compaction** (used by LevelDB, RocksDB) organize SSTables into levels with size multipliers, limiting read amplification at the cost of higher write amplification."
+      "title": "Pages: The Atomic Unit of Disk I/O",
+      "content": "The fundamental insight of all disk-based storage systems is that disks do not read or write individual bytes. Every disk access — whether you want one byte or a thousand — transfers a fixed-size **block**. Database engines align their storage to these blocks, calling them **pages**.\n\nPostgreSQL uses **8 KB pages** by default (configurable at compile time to 4, 8, 16, or 32 KB). MySQL InnoDB defaults to 16 KB. SQLite uses 4 KB. The page size is a tuning lever: larger pages reduce the number of index levels needed (good for range scans) but waste space when rows are small; smaller pages reduce read amplification for point lookups but increase tree depth.\n\nEach page has a **header** containing:\n- **LSN (Log Sequence Number)**: the WAL record that last modified this page, used during crash recovery\n- **Checksum**: detects corruption (torn writes, hardware failure)\n- **Free space pointer**: byte offset separating live tuples from the free space in the middle\n- **Page type**: heap data, index leaf, index internal, etc.\n\nRows (tuples in PostgreSQL's terminology) are stored with their content plus a **tuple header** encoding visibility information for MVCC — which transaction inserted this row, which transaction deleted it, and whether it is currently visible to the reading transaction. This means the same physical row can appear in multiple versions simultaneously; **dead tuples** (old versions no longer visible to any transaction) accumulate until `VACUUM` reclaims the space.\n\nEven changing **one byte** in a row reads and rewrites the entire 8 KB page. This is not waste — it is the inherent granularity of disk I/O. The goal of the buffer pool is to avoid paying that disk cost as often as possible."
+    },
+    {
+      "type": "explanation",
+      "title": "The Buffer Pool: RAM as a Disk Cache",
+      "content": "The **buffer pool** (called the **shared buffer cache** in PostgreSQL) is a region of RAM that holds copies of recently accessed pages. Every read goes through the buffer pool:\n\n1. The storage engine computes which page on disk contains the requested row.\n2. It checks the buffer pool's **page table** (a hash map from page address to buffer slot).\n3. If the page is in the pool (**cache hit**), the row is served from RAM — no disk I/O.\n4. If not (**cache miss**), the engine finds a free buffer slot (possibly evicting a cold page), reads the page from disk, and inserts it into the pool.\n\nPostgreSQL's `shared_buffers` parameter controls the buffer pool size. The conventional starting point is **25% of total RAM**, though read-heavy workloads benefit from going higher (40-50%). A properly sized buffer pool means the hot working set of tables fits entirely in RAM — a well-tuned system achieves a **cache hit rate above 98%** measured via `pg_statio_user_tables`.\n\n**Dirty pages** are pages modified in RAM but not yet written to disk. The engine uses a **clock-sweep** (PostgreSQL) or **LRU** (InnoDB) eviction policy. When a dirty page must be evicted, it is flushed to disk first. **Checkpoints** proactively flush all dirty pages at regular intervals (controlled by `checkpoint_timeout` and `max_wal_size` in PostgreSQL), reducing the amount of WAL that must be replayed on crash and making page evictions cheaper during normal operation.\n\nThe buffer pool is shared across all connections. Connection A and connection B reading the same page see the same buffer slot — making the pool's effective capacity the working set of the entire database, not just one session."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  A[\"Write\"] --> B[\"MemTable\\n(in RAM, sorted)\"]\n  B -->|\"full\"| C[\"SSTable L0\\n(immutable, on disk)\"]\n  C -->|\"compaction\"| D[\"SSTable L1\\n(larger, merged)\"]\n  D -->|\"compaction\"| E[\"SSTable L2\\n(largest, sorted)\"]\n  F[\"Read\"] --> G[\"Check MemTable\"]\n  G --> H[\"Check Bloom Filter\"]\n  H --> C\n  H --> D\n  H --> E",
-      "caption": "LSM tree write path: writes land in RAM, flush to L0 SSTables, and compact into deeper levels. Bloom filters prune which SSTables to check on reads."
+      "mermaid": "flowchart LR\n  A[\"Read Row\"] --> B{\"In Buffer Pool?\"}  \n  B -->|\"Hit\"| C[\"Return from RAM\\n(microseconds)\"]\n  B -->|\"Miss\"| D[\"Find free slot\\n(evict if needed)\"]\n  D --> E[\"Read from Disk\\n(milliseconds)\"]\n  E --> F[\"Insert into Pool\"]\n  F --> C",
+      "caption": "Buffer pool read path. Cache hits cost microseconds; misses cost milliseconds. Sizing shared_buffers so the hot working set fits in RAM eliminates most disk reads."
+    },
+    {
+      "type": "explanation",
+      "title": "B+ Trees: The Dominant Index Structure",
+      "content": "The **B+ tree** is the data structure behind almost every SQL database index. It is a variant of the general **B-tree** with one critical modification: **all actual data lives in leaf nodes**. Internal nodes contain only routing keys — enough information to navigate downward, but not to answer a query themselves.\n\n**Structure:**\n- **Root**: the single entry point, may have a minimum of 2 children\n- **Internal nodes**: each stores k routing keys and k+1 child pointers (where k is the branching factor, determined by page size and key size)\n- **Leaf nodes**: store all (key, value) pairs, sorted by key; crucially, leaf nodes are **linked in a doubly-linked list**, enabling efficient range scans without returning to the root\n\n**Why B+ trees over binary search trees?** A binary tree of 100 million nodes has depth ~27. Each level is potentially a different page, meaning 27 disk reads per lookup. A B+ tree with 8 KB pages and 8-byte keys can store ~500 keys per internal node. A height-3 tree covers 500² × 500 = 125 million leaf pages. **Three disk reads** to find any key in 100 million records.\n\n**Lookup** (`SELECT WHERE id = X`): start at the root, compare X against routing keys to choose the correct child pointer, repeat until a leaf is reached. O(log_B n) where B is the branching factor. In practice, the root page and top-level internal nodes are almost always in the buffer pool (they are accessed on every query), so a lookup costs 1-2 actual disk reads.\n\n**Range scan** (`SELECT WHERE id BETWEEN X AND Y`): find the leaf containing X, then follow the right sibling pointer, reading consecutive leaves until Y is exceeded. This is why sorted indexes make range queries fast — the linked leaf list is a sorted linked list on disk.\n\n**Insert**: find the correct leaf, insert the key. If the leaf is full, **split** it — create a new leaf, redistribute keys, and push the new separator key up to the parent. Splitting can cascade up to the root, where the tree grows one level. This is the expensive random-write operation that gives B+ trees their write amplification.\n\n**Delete**: similar, with possible **merging** of underflowing nodes. PostgreSQL uses a lazy deletion strategy — leaves can be slightly underflowing rather than merging immediately, trading space for fewer writes."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  R[\"Root\\n[50, 100]\"] --> L[\"Internal\\n[25, 37]\"]  \n  R --> M[\"Internal\\n[75, 88]\"]  \n  R --> N[\"Internal\\n[120, 150]\"]  \n  L --> LA[\"Leaf [10,20,25]\"]  \n  L --> LB[\"Leaf [26,30,37]\"]  \n  LA -->|\"next\"| LB",
+      "caption": "B+ tree: internal nodes hold only routing keys. All data lives in leaf nodes, which are linked left-to-right for range scans. Only three levels here, but each level can fan out hundreds of children."
+    },
+    {
+      "type": "explanation",
+      "title": "LSM Trees: Optimizing for Writes",
+      "content": "The **Log-Structured Merge-tree (LSM tree)**, introduced by Patrick O'Neil et al. in 1996, inverts the B+ tree trade-off: make writes as cheap as possible at the cost of slightly more expensive reads.\n\nThe key insight is that **sequential writes are orders of magnitude faster than random writes**, even on SSDs. A B+ tree insert might require reading the target leaf page, modifying it, and writing it back to a specific location on disk — a random write. An LSM tree never overwrites anything. It only appends.\n\n**The write path:**\n1. **MemTable**: every write goes into an in-memory sorted structure (a skip list or red-black tree). This is instant — pure RAM.\n2. **WAL (Write-Ahead Log)**: simultaneously, the write is appended sequentially to the on-disk WAL for durability. If the process crashes before the MemTable is flushed, the WAL enables replay.\n3. **SSTable flush**: when the MemTable reaches its size limit (typically 64-256 MB), it is flushed as an immutable **Sorted String Table (SSTable)** — a file of key-value pairs, sorted by key, written sequentially from start to finish. The MemTable is then discarded.\n\n**SSTables** are immutable once written. They are never updated in place. Instead, new versions of keys (including tombstones for deleted keys) appear in newer SSTables.\n\n**The read path**: to find a key, check the MemTable first (the most recent writes). Then check each SSTable level from newest to oldest. The first occurrence of the key is the correct (most recent) value. A **tombstone** (a delete marker) means the key was deleted.\n\n**The compaction problem**: over time, dozens or hundreds of SSTables accumulate. Reads must check all of them in the worst case. **Compaction** solves this: a background process merges multiple SSTables into a single, larger, deduplicated SSTable, discarding old versions and tombstones. The result is fewer SSTables to check on reads and reclaimed disk space."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  W[\"Write\"] --> MT[\"MemTable\\n(RAM, sorted)\"]\n  MT -->|\"full: flush\"| L0[\"SSTable L0\\n(newest writes)\"]\n  L0 -->|\"compact\"| L1[\"SSTable L1\\n(merged, larger)\"]\n  L1 -->|\"compact\"| L2[\"SSTable L2\\n(largest, oldest)\"]\n  R[\"Read\"] --> MT\n  R --> BF[\"Bloom Filter\"]\n  BF -->|\"maybe here\"| L0\n  BF -->|\"maybe here\"| L1\n  BF -->|\"definitely not\"| SKIP[\"Skip SSTable\"]",
+      "caption": "LSM write path: RAM MemTable flushes to L0, compacts into L1/L2. Reads check MemTable first, then use Bloom filters to prune unnecessary SSTable reads."
+    },
+    {
+      "type": "explanation",
+      "title": "Compaction Strategies: Leveled vs. Size-Tiered",
+      "content": "How SSTables are organized into levels and how compaction is triggered is a major design decision that affects the read/write amplification trade-off.\n\n**Size-tiered compaction** (used by Cassandra's default, early LevelDB): SSTables are grouped by size. When a tier accumulates N SSTables of similar size, they are merged into a single larger SSTable in the next tier. This is write-efficient (fewer rewrites) but can lead to high read amplification — a read may need to check many SSTables across all tiers. Also, space amplification is high during compaction: you temporarily hold both the old and new SSTables on disk.\n\n**Leveled compaction** (used by RocksDB, LevelDB by default, Cassandra's LCS mode): SSTables are organized into levels (L0, L1, L2, ...) with strict size quotas per level. Each level is roughly 10× the size of the previous. Within a level (except L0), SSTables have **non-overlapping key ranges** — any given key exists in at most one SSTable per level. This means a read at level L1+ only needs to check **one SSTable** per level, drastically reducing read amplification. The downside is higher **write amplification** — a key may be rewritten many times as it is compacted across levels.\n\n**FIFO compaction**: the simplest strategy — oldest SSTables are deleted when disk space is low, without merging. Only appropriate for time-series data where old data can simply be dropped.\n\n**The fundamental trade-off** is expressed in three amplification metrics:\n- **Write amplification (WA)**: how many bytes are physically written per logical write byte. B+ trees: ~5-10×. LSM leveled: ~10-30×. LSM size-tiered: ~3-10×.\n- **Read amplification (RA)**: how many disk reads per logical read. B+ trees: 1-5 (tree height). LSM: 1-L (number of levels), mitigated by Bloom filters.\n- **Space amplification (SA)**: how much disk space is consumed vs. logical data size. B+ trees: ~1.5-2×. LSM size-tiered during compaction: up to 2×.\n\nBloom filters are the key tool for controlling LSM read amplification. Each SSTable has an associated Bloom filter — a compact bit array that can answer 'definitely not in this SSTable' with certainty, or 'maybe in this SSTable' probabilistically. A false positive (checking an SSTable unnecessarily) is acceptable; a false negative (skipping an SSTable that contains the key) is impossible by construction."
+    },
+    {
+      "type": "explanation",
+      "title": "Write-Ahead Logging: The Universal Crash-Recovery Mechanism",
+      "content": "**Durability** — the D in ACID — means that once a transaction is committed, its changes survive any subsequent crash. But data pages live in the buffer pool in RAM, and RAM is volatile. If the machine crashes before dirty pages are written to disk, those changes are lost.\n\nThe solution is the **Write-Ahead Log (WAL)**, also called the **redo log** in MySQL or the **commit log** in Cassandra. The rule is simple: **before modifying any page in the buffer pool, the change must be recorded in the WAL on disk**. The WAL is written sequentially — always appending to the end of the current segment file — which is fast on both spinning disks (no head seeks) and SSDs.\n\nWhen a transaction commits, PostgreSQL ensures the WAL records for that transaction are **fsynced** to disk before returning success to the client. Only then is the commit truly durable. The actual data pages may still be dirty in the buffer pool — they will be written to disk later at a checkpoint.\n\n**Crash recovery** procedure:\n1. Find the most recent **checkpoint record** in the WAL. A checkpoint is a point where all dirty pages up to that moment were guaranteed to be on disk.\n2. Starting from the checkpoint LSN, **replay every WAL record forward** (redo phase), applying each change to the data pages. Since WAL records are idempotent (each is tagged with the page LSN it targets), replaying a record that was already written to disk is harmless.\n3. **Undo uncommitted transactions** — roll back any transactions that were in-progress at crash time by applying their undo records.\n\nThe WAL also enables **replication**: a standby server can receive WAL records from the primary and replay them continuously, staying seconds behind the primary (streaming replication). Point-in-time recovery (PITR) archives WAL segments so you can restore a database to any second in its history.\n\n**LSN (Log Sequence Number)** is the unique monotonically increasing identifier for each WAL record. Every page in a PostgreSQL data file stores the LSN of the last WAL record that modified it. During recovery, if a page's LSN is already >= the replayed WAL record's LSN, the record is skipped (it was already flushed before the crash)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant C as Client\n  participant E as Engine\n  participant W as WAL Disk\n  participant D as Data Disk\n  C->>E: BEGIN; UPDATE orders SET status='shipped' WHERE id=42\n  E->>W: Append WAL record (page 17, offset 320, new value)\n  E->>E: Modify page 17 in buffer pool (dirty)\n  C->>E: COMMIT\n  E->>W: Append COMMIT record + fsync\n  E->>C: OK (commit confirmed)\n  Note over E,D: Later, at checkpoint\n  E->>D: Flush dirty page 17 to data file",
+      "caption": "WAL write path: the WAL record is fsynced before COMMIT returns. The data page is written to disk only later at a checkpoint. On crash between commit and checkpoint, WAL replay recovers the change."
     },
     {
       "type": "code_example",
       "language": "sql",
-      "label": "Runtime",
-      "code": "-- Inspect PostgreSQL page internals (pageinspect extension)\nCREATE EXTENSION IF NOT EXISTS pageinspect;\n\n-- See raw page header of the first page of a table\nSELECT lsn, checksum, lower, upper, special, pagesize\nFROM page_header(get_raw_page('orders', 0));\n-- lsn: last WAL record that modified this page\n-- lower/upper: byte offsets of live tuple area vs free space\n\n-- Count live vs dead tuples per page (bloat from MVCC dead rows)\nSELECT n_live_tup, n_dead_tup, last_autovacuum\nFROM pg_stat_user_tables\nWHERE relname = 'orders';\n\n-- Check buffer pool hit rate (should be > 95% on a warm cache)\nSELECT\n  heap_blks_read  AS disk_reads,\n  heap_blks_hit   AS cache_hits,\n  ROUND(heap_blks_hit::numeric /\n        NULLIF(heap_blks_hit + heap_blks_read, 0) * 100, 2) AS hit_rate_pct\nFROM pg_statio_user_tables\nWHERE relname = 'orders';\n\n-- Force a checkpoint (flush dirty pages to disk)\nCHECKPOINT;",
-      "explanation": "The buffer pool hit rate reveals whether RAM is sufficient. Below 95% means frequent disk reads — increase `shared_buffers`. Dead tuple counts show MVCC garbage; if autovacuum isn't keeping up, tune `autovacuum_vacuum_scale_factor` or run `VACUUM ANALYZE orders` manually."
+      "label": "Example",
+      "code": "-- Inspect PostgreSQL storage internals with the pageinspect extension\nCREATE EXTENSION IF NOT EXISTS pageinspect;\n\n-- View the raw page header of the first page of the orders table\nSELECT\n  lsn,        -- WAL LSN of last modification to this page\n  checksum,   -- page integrity checksum\n  lower,      -- byte offset: start of free space (after tuple pointers)\n  upper,      -- byte offset: end of free space (before tuple data)\n  special,    -- byte offset: start of special area (index pages use this)\n  pagesize    -- should be 8192 (8 KB default)\nFROM page_header(get_raw_page('orders', 0));\n\n-- View individual tuples (rows) on the first page\n-- Each tuple has a header encoding MVCC visibility info\nSELECT t_xmin, t_xmax, t_ctid, t_infomask\nFROM heap_page_items(get_raw_page('orders', 0))\nLIMIT 10;\n-- t_xmin: transaction that inserted this row version\n-- t_xmax: transaction that deleted this row version (0 = still alive)\n-- t_ctid: physical location (page, slot) - self-referential for live rows\n\n-- Check buffer pool hit rate (target > 95%)\nSELECT\n  relname,\n  heap_blks_read  AS disk_reads,\n  heap_blks_hit   AS cache_hits,\n  ROUND(\n    heap_blks_hit::numeric /\n    NULLIF(heap_blks_hit + heap_blks_read, 0) * 100, 2\n  ) AS hit_rate_pct\nFROM pg_statio_user_tables\nWHERE relname = 'orders';\n\n-- Check live vs dead tuples (MVCC bloat indicator)\nSELECT\n  n_live_tup,\n  n_dead_tup,\n  ROUND(n_dead_tup::numeric / NULLIF(n_live_tup + n_dead_tup, 0) * 100, 1) AS dead_pct,\n  last_autovacuum\nFROM pg_stat_user_tables\nWHERE relname = 'orders';\n\n-- Manually trigger a checkpoint (flushes all dirty pages)\nCHECKPOINT;\n\n-- View current WAL insert position\nSELECT pg_current_wal_insert_lsn();",
+      "explanation": "The `lower` and `upper` offsets in the page header show exactly how much free space is left on a page. `t_xmax = 0` means the tuple is live; non-zero means it was deleted or updated by that transaction ID. A high `dead_pct` from `pg_stat_user_tables` signals that autovacuum is not keeping up — consider tuning `autovacuum_vacuum_scale_factor` or running `VACUUM ANALYZE orders` manually. A buffer pool hit rate below 95% means `shared_buffers` needs to be increased."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "MVCC: Multi-Version Concurrency Control",
+      "content": "Most modern databases — PostgreSQL, MySQL InnoDB, Oracle, SQL Server — implement **MVCC** to allow readers and writers to proceed concurrently without locking each other. The key idea: instead of updating a row in place (which would force readers to wait), the engine **appends a new version** of the row while keeping the old version visible to transactions that started before the update.\n\nIn PostgreSQL, every row version (tuple) has two hidden fields:\n- `xmin`: the transaction ID (XID) that created this version\n- `xmax`: the XID that deleted/updated this version (0 if still current)\n\nWhen a transaction reads a row, it applies **visibility rules**: a version is visible if `xmin` was committed before the transaction's snapshot timestamp, and `xmax` is either 0 or was not yet committed. This means a long-running `SELECT` sees a consistent snapshot of the database as it was when the query started, even if other transactions are inserting and updating rows concurrently.\n\nThe cost: **dead tuples**. When a row is updated, the old version remains on disk (with `xmax` set) until no transaction has a snapshot old enough to see it. `VACUUM` reclaims these dead tuples, restoring free space on pages. `AUTOVACUUM` runs this process automatically in the background.\n\nA related concern is **transaction ID wraparound**: PostgreSQL uses 32-bit XIDs. After 2^31 (~2.1 billion) transactions, XIDs would wrap around, making old rows appear to be in the future. PostgreSQL uses **FREEZE** (via VACUUM FREEZE) to mark very old rows as permanently visible, preventing wraparound. Monitoring `age(datfrozenxid)` in `pg_database` is important for high-transaction databases."
+    },
+    {
+      "type": "code_example",
       "language": "sql",
-      "label": "Concept",
-      "code": "-- B+ tree vs LSM tree trade-off summary\n-- Property          | B+ Tree (PostgreSQL)    | LSM Tree (Cassandra)\n-- ----------------  | ----------------------- | --------------------\n-- Read speed        | Fast (O log n, 1 path)  | Slower (multi-SSTable check)\n-- Write speed       | Slower (random page IO) | Fast (sequential append)\n-- Space overhead    | Low (in-place updates)  | Higher (dead keys until compact)\n-- Range scans       | Excellent (linked leaves)| Good (sorted SSTables)\n-- Use case          | OLTP mixed workloads    | Write-heavy, time-series\n\n-- WAL configuration in PostgreSQL (postgresql.conf)\n-- wal_level = replica       -- minimum needed for replication\n-- synchronous_commit = on   -- wait for WAL flush before COMMIT returns\n-- checkpoint_completion_target = 0.9  -- spread checkpoint writes over 90% of interval\n-- shared_buffers = 4GB      -- buffer pool size (25% of RAM is a starting point)\n\n-- Bloom filter: probabilistic structure that says \"definitely NOT here\" or \"maybe here\"\n-- False positive possible; false negative impossible.\n-- Used by LSM engines to skip SSTables that cannot contain the key."
+      "label": "Example",
+      "code": "-- Observe B+ tree index structure with the pageinspect extension\nCREATE EXTENSION IF NOT EXISTS pageinspect;\n\n-- Inspect a B+ tree index on orders(customer_id)\nCREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);\n\n-- View the index metadata (root block, levels, etc.)\nSELECT * FROM bt_metap('idx_orders_customer');\n-- magic, version, root, level, fastroot, fastlevel\n-- 'level' tells you the tree height\n\n-- View items on the root page of the index\nSELECT itemoffset, ctid, itemlen, nulls, vars, data\nFROM bt_page_items('idx_orders_customer', 1)\nLIMIT 20;\n-- ctid: for leaf pages, (page, slot) of the heap tuple\n--       for internal pages, child page number\n\n-- Estimate index bloat (fragmentation after many updates/deletes)\nSELECT\n  indexrelname,\n  idx_blks_read   AS index_disk_reads,\n  idx_blks_hit    AS index_cache_hits,\n  ROUND(\n    idx_blks_hit::numeric /\n    NULLIF(idx_blks_hit + idx_blks_read, 0) * 100, 2\n  ) AS index_hit_rate_pct\nFROM pg_statio_user_indexes\nWHERE relname = 'orders'\nORDER BY idx_blks_read DESC;\n\n-- EXPLAIN ANALYZE: see B+ tree traversal in action\nEXPLAIN (ANALYZE, BUFFERS) \nSELECT * FROM orders WHERE customer_id = 12345;\n-- Look for: \"Index Scan using idx_orders_customer\"\n-- Buffers: shared hit=X read=Y  (X=cache hits, Y=disk reads)",
+      "explanation": "The `bt_metap` result's `level` field tells you how deep the B+ tree is — typically 2-4 for most production tables. The `EXPLAIN (BUFFERS)` output's shared hit/read counts are the most direct way to see whether an index lookup is being served from the buffer pool or requiring disk reads. A high `read` count compared to `hit` after a warm-up period signals that the working index pages do not fit in `shared_buffers`."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"UPDATE orders SET status=shipped\\nWHERE id=42\"] --> B[\"Append WAL record\"]\n  B --> C[\"Create new tuple version\\n(xmin=current_txid, xmax=0)\"]\n  C --> D[\"Mark old tuple\\n(xmax=current_txid)\"]\n  D --> E[\"COMMIT\"]\n  E --> F[\"WAL fsync\"]\n  F --> G[\"Old tuple = dead tuple\\n(visible to snapshots before this txn)\"]\n  G -->|\"eventually\"| H[\"VACUUM reclaims space\"]",
+      "caption": "MVCC update path: a new tuple version is created rather than overwriting the old one. The old version becomes a dead tuple once no snapshot can see it, and VACUUM eventually reclaims its page space."
+    },
+    {
+      "type": "explanation",
+      "title": "Comparing B+ Trees and LSM Trees: The Full Picture",
+      "content": "Understanding both structures lets you reason about database choice and configuration with precision rather than intuition.\n\n**Write performance**: LSM trees win decisively for write-heavy workloads. All writes go to the MemTable (RAM) and the WAL (sequential disk append). B+ tree writes require finding the correct page, loading it into the buffer pool, modifying it, and eventually writing it back to a random location on disk. On spinning disks, random writes are 100-1000× slower than sequential writes; on NVMe SSDs the gap narrows to 5-20× but still exists.\n\n**Read performance**: B+ trees win for point lookups in typical OLTP workloads. A B+ tree traversal touches O(tree height) pages, and the top levels are almost always in the buffer pool. An LSM read in the worst case checks the MemTable plus one SSTable per level — mitigated by Bloom filters, but still more work than a B+ tree. However, for workloads where reads are dominated by range scans over recently written data (e.g., time-series reads of the last N minutes), LSM trees can be competitive because the most recent data is in the MemTable.\n\n**Space overhead**: B+ trees update in place (with some free space per page for future inserts), so space overhead is moderate — typically 30-70% page fullness after heavy insert/delete cycles. LSM trees accumulate dead versions until compaction runs, creating higher temporary space amplification. After compaction, space usage is roughly proportional to live data.\n\n**Operational complexity**: B+ trees have simpler operational models — backup a data file and WAL. LSM trees require managing compaction schedules, monitoring write stalls (when the compaction thread falls behind), and tuning compaction strategies per workload.\n\n**Real-world database alignment**:\n- **PostgreSQL** (B+ tree, MVCC heap): excellent for mixed OLTP workloads, complex queries, strong consistency\n- **MySQL InnoDB** (B+ tree, clustered primary key): OLTP, especially with narrow primary key lookups\n- **SQLite** (B+ tree): embedded, single-writer workloads\n- **RocksDB** (LSM, leveled compaction): key-value store embedded in MySQL (MyRocks), Kafka storage, TiKV\n- **Cassandra** (LSM, size-tiered or leveled): write-heavy, distributed, eventual consistency\n- **ClickHouse** (custom MergeTree, LSM-inspired): OLAP analytics, time-series"
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context**: The B-tree was invented by Rudolf Bayer and Edward McCreight at Boeing Research Labs in 1971 to optimize disk access for database indexes. The '+' variant (B+ tree) — separating routing keys from leaf data — became standard in databases through the 1970s-80s. The LSM tree was formalized by Patrick O'Neil et al. in a 1996 paper, directly motivated by the limitations of B+ trees for write-heavy log-like workloads. Google's Bigtable (2006) popularized LSM trees at scale, inspiring LevelDB (2011), RocksDB (2012 fork of LevelDB), and the modern wave of LSM-based distributed databases."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "For **read-heavy** workloads choose a B+ tree-based engine (PostgreSQL, MySQL InnoDB) and size `shared_buffers` generously — a warm buffer pool eliminates most disk reads. For **write-heavy** workloads (IoT telemetry, event streams) consider an LSM-based store like RocksDB, Cassandra, or ScyllaDB, and tune compaction aggressively to control read amplification."
+      "content": "**Common interview traps and performance misconceptions**: (1) 'Adding an index always speeds up queries' — indexes hurt write performance (every insert/update/delete must maintain the index) and can hurt reads if the query planner chooses a bad index. Use `EXPLAIN ANALYZE` before and after. (2) 'VACUUM is optional cleanup' — MVCC dead tuple accumulation is mandatory work; without VACUUM, tables bloat and eventually suffer transaction ID wraparound. (3) 'LSM reads are always slow' — with well-tuned Bloom filters and a large block cache, RocksDB point reads can rival B+ trees. (4) 'sequential_scan is always bad' — for queries returning > 5-10% of a table, a sequential scan beats an index scan because it avoids the per-row random seek. (5) `CHECKPOINT` flushes dirty pages — it does NOT rebuild indexes or compact dead tuples."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Pages** (8 KB blocks) are the unit of disk I/O; the buffer pool caches hot pages in RAM to avoid repeated disk reads.",
-        "**B+ trees** store all data in sorted leaf nodes linked for range scans; O(log n) reads with minimal disk seeks, but random writes are expensive.",
-        "**LSM trees** append writes to a MemTable, flush to immutable SSTables, and compact in the background; writes are sequential and fast, but reads may need multiple SSTable checks.",
-        "**Write-Ahead Logging (WAL)** records changes before touching data pages, enabling crash recovery by replaying the log from the last checkpoint.",
-        "**Compaction** in LSM trees merges SSTables to reclaim space and limit read amplification, but consumes I/O; leveled compaction controls the trade-off."
+        "**Pages** (typically 8 KB in PostgreSQL) are the atomic unit of disk I/O. Even a one-byte change reads and rewrites the entire page. The **buffer pool** caches hot pages in RAM — sizing `shared_buffers` to fit the working set is the single highest-leverage PostgreSQL tuning parameter.",
+        "**B+ trees** store all data in leaf nodes linked for range scans. Internal nodes hold only routing keys. O(log_B n) point lookups with typically 1-2 real disk reads; excellent range scans; expensive random writes due to page splitting.",
+        "**LSM trees** append all writes to a MemTable in RAM (and WAL on disk sequentially), flush as immutable SSTables, and compact in the background. Write amplification is low; read amplification is mitigated by Bloom filters; compaction is the key operational concern.",
+        "**Write-Ahead Logging (WAL)** guarantees durability: every page modification is recorded sequentially on disk before the commit returns. Crash recovery replays WAL from the last checkpoint, recovering all committed changes regardless of whether data pages were flushed.",
+        "**MVCC** enables readers and writers to proceed concurrently by keeping multiple row versions. Dead tuples accumulate and must be reclaimed by VACUUM. Monitoring dead tuple percentage and buffer pool hit rate are the two most important day-to-day storage health metrics.",
+        "**Compaction strategies** (leveled vs. size-tiered) trade write amplification for read amplification. Leveled compaction (RocksDB default) keeps read amplification bounded at O(levels); size-tiered compaction writes less but requires checking more SSTables on reads.",
+        "**Database choice** maps to storage engine choice: PostgreSQL/MySQL (B+ tree) for OLTP mixed workloads; Cassandra/RocksDB (LSM) for write-heavy, high-throughput workloads. The right choice depends on your write/read ratio, consistency requirements, and operational complexity tolerance."
       ]
     }
   ],
@@ -66,133 +130,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What is the typical size of a database page in PostgreSQL?",
+      "question": "What is the default page size in PostgreSQL, and why does changing one byte still require writing the entire page?",
       "type": "mcq",
       "options": [
-        "512 bytes",
-        "4 KB",
-        "8 KB",
-        "64 KB"
+        "4 KB; because the WAL records entire pages",
+        "8 KB; because the page is the atomic unit of disk I/O — the disk transfers full blocks",
+        "16 KB; because the buffer pool evicts in full-page units",
+        "64 KB; because B+ tree nodes must fit exactly one page"
       ],
-      "correct": 2,
-      "explanation": "PostgreSQL uses 8 KB pages by default. This is the atomic unit of I/O — even modifying one byte reads and rewrites the entire 8 KB page."
+      "correct": 1,
+      "explanation": "PostgreSQL defaults to 8 KB pages. Disks transfer data in fixed-size blocks, and the page is aligned to that block boundary. Changing any byte requires the engine to read the 8 KB page into the buffer pool, modify it there, and later write the whole 8 KB back — there is no mechanism to write a sub-page fragment."
     },
     {
       "id": "q2",
-      "question": "How does a B+ tree differ from a B-tree?",
+      "question": "In a B+ tree, how do leaf nodes differ from internal nodes?",
       "type": "mcq",
       "options": [
-        "B+ trees store data in internal nodes; B-trees only in leaves",
-        "B+ trees store all data in leaf nodes linked in a list; internal nodes hold only routing keys",
-        "B+ trees are unbalanced; B-trees are always balanced",
-        "B+ trees are used for writes; B-trees for reads"
+        "Leaf nodes hold routing keys only; internal nodes hold actual row data",
+        "Leaf nodes hold all actual (key, value) data and are linked in a list; internal nodes hold only routing keys and child pointers",
+        "Leaf nodes are kept in RAM; internal nodes are on disk",
+        "Leaf nodes are unsorted; internal nodes are sorted"
       ],
       "correct": 1,
-      "explanation": "In a B+ tree, leaf nodes hold all actual data and are linked together, enabling efficient range scans. Internal nodes contain only keys to guide traversal."
+      "explanation": "The defining property of a B+ tree (vs. a plain B-tree) is that all actual data lives in leaf nodes, which are linked together in a doubly-linked list for efficient range scans. Internal nodes hold only routing keys to guide traversal — they contain no actual row data."
     },
     {
       "id": "q3",
-      "question": "What does the Write-Ahead Log (WAL) protect against?",
+      "question": "What does the Write-Ahead Log (WAL) guarantee, and when is it fsynced to disk?",
       "type": "mcq",
       "options": [
-        "Dirty reads by other transactions",
-        "Data loss from crashes before buffer pages are flushed to disk",
-        "Full table scans on large tables",
-        "Deadlocks between concurrent transactions"
+        "It guarantees index integrity; it is fsynced during VACUUM",
+        "It guarantees crash recovery; the WAL record is fsynced before COMMIT returns to the client",
+        "It guarantees read isolation; it is fsynced at every SELECT",
+        "It guarantees buffer pool consistency; it is fsynced when a page is evicted"
       ],
       "correct": 1,
-      "explanation": "WAL records changes sequentially before modifying data pages. On crash, the database replays WAL records from the last checkpoint, recovering all committed changes that hadn't been written to data files yet."
+      "explanation": "WAL guarantees durability (the D in ACID). Before a COMMIT returns success to the client, the WAL record for that transaction is fsynced to disk. On crash, the database replays WAL from the last checkpoint to recover all committed changes, even if data pages were never written to disk."
     },
     {
       "id": "q4",
-      "question": "In an LSM tree, what is a MemTable?",
+      "question": "In an LSM tree, what happens when the MemTable fills up?",
       "type": "mcq",
       "options": [
-        "A lookup table of memory addresses for pages",
-        "An in-memory sorted structure that absorbs writes before flushing to disk",
-        "The in-memory buffer pool shared by all connections",
-        "A cache of recent read results"
+        "Old entries are evicted from the MemTable using an LRU policy",
+        "The MemTable is flushed to disk as an immutable SSTable (Sorted String Table)",
+        "The MemTable is compacted in place by removing duplicate keys",
+        "The MemTable is merged directly into the B+ tree index"
       ],
       "correct": 1,
-      "explanation": "The MemTable is the in-memory sorted data structure in an LSM tree. Writes land here first; when it fills, it is flushed as an immutable SSTable on disk."
+      "explanation": "When the MemTable reaches its configured size limit, it is frozen and flushed to disk as an immutable SSTable — a file of key-value pairs sorted by key, written sequentially. A new empty MemTable is created for subsequent writes. The flushed SSTable is immutable and never modified in place."
     },
     {
       "id": "q5",
-      "question": "What is compaction in an LSM tree engine?",
+      "question": "What is the purpose of a Bloom filter in an LSM tree read path?",
       "type": "mcq",
       "options": [
-        "Compressing row data to reduce page size",
-        "Merging and sorting multiple SSTables to reclaim space and reduce read amplification",
-        "Vacuuming dead MVCC row versions",
-        "Rebalancing the B+ tree after many inserts"
+        "To sort keys within the MemTable before flushing",
+        "To cache the most recently read key-value pairs",
+        "To probabilistically rule out SSTables that definitely do not contain a key, reducing unnecessary I/O",
+        "To guarantee that a key exists in an SSTable before reading it"
       ],
-      "correct": 1,
-      "explanation": "Compaction merges immutable SSTables from the same or adjacent levels, sorts their contents, discards deleted keys, and writes new, larger SSTables. It keeps read performance acceptable without growing indefinitely."
+      "correct": 2,
+      "explanation": "A Bloom filter is a space-efficient probabilistic data structure. It can say 'definitely NOT in this SSTable' (no false negatives) or 'possibly in this SSTable' (false positives allowed). On a read, the engine checks each SSTable's Bloom filter first and skips any that answer 'definitely not here', dramatically reducing the number of SSTables actually read from disk."
     },
     {
       "id": "q6",
-      "question": "A Bloom filter in an LSM read path is used to:",
+      "question": "How does MVCC (Multi-Version Concurrency Control) allow readers and writers to proceed without locking each other?",
       "type": "mcq",
       "options": [
-        "Guarantee a key exists in an SSTable before reading it",
-        "Probabilistically rule out SSTables that definitely do not contain a key",
-        "Cache the most recently read keys in memory",
-        "Sort keys within a MemTable before flushing"
+        "It uses optimistic locking and retries writes if a conflict is detected",
+        "It keeps multiple row versions on disk so readers see a consistent snapshot while writers append new versions",
+        "It routes reads and writes to separate replica nodes",
+        "It uses row-level locks that are held only during the write, not the read"
       ],
       "correct": 1,
-      "explanation": "A Bloom filter can say 'definitely not here' (no false negatives) or 'maybe here' (possible false positives). It lets the read path skip SSTables that cannot contain the key, reducing I/O."
+      "explanation": "MVCC avoids reader-writer conflicts by keeping multiple versions of each row. Each version has xmin (transaction that created it) and xmax (transaction that deleted it). A reader applies visibility rules to see only versions committed before its snapshot timestamp — so it can read without blocking writers, who append new versions rather than overwriting."
     },
     {
       "id": "q7",
-      "question": "Which workload type is an LSM tree-based database (e.g., Cassandra) most suited for?",
+      "question": "What is write amplification, and which storage engine typically has lower write amplification for insert-heavy workloads?",
       "type": "mcq",
       "options": [
-        "Complex multi-table joins with aggregations",
-        "Write-heavy workloads such as IoT telemetry or event streams",
-        "Ad-hoc SQL analytics across historical data",
-        "Transactional workloads requiring strong ACID guarantees"
+        "The ratio of logical to physical reads; B+ tree engines have lower write amplification",
+        "The number of times a value is rewritten per logical write; LSM trees (size-tiered compaction) typically have lower write amplification than B+ trees",
+        "The extra disk space consumed by indexes; both have identical write amplification",
+        "The CPU overhead of checksum computation; LSM trees reduce this by using Bloom filters"
       ],
       "correct": 1,
-      "explanation": "LSM trees excel at write-heavy workloads because writes are sequential appends to the MemTable and WAL. They are commonly used for time-series data, logs, and high-throughput event ingestion."
+      "explanation": "Write amplification measures how many physical bytes are written per logical write byte. For a B+ tree insert that causes a page split, the engine reads the leaf page, writes the modified page, and writes a new split page — amplification of ~5-10×. LSM trees with size-tiered compaction write data 3-10× on average (less frequent compaction). Leveled compaction has higher write amplification (10-30×) but better read amplification."
     },
     {
       "id": "q8",
-      "question": "What metric indicates whether the PostgreSQL buffer pool is large enough?",
+      "question": "What does a PostgreSQL checkpoint do, and why does it matter for crash recovery time?",
       "type": "mcq",
       "options": [
-        "n_dead_tup from pg_stat_user_tables",
-        "Cache hit rate from pg_statio_user_tables (should be > 95%)",
-        "WAL segment size from pg_wal directory",
-        "Autovacuum frequency from pg_stat_activity"
+        "It rebuilds all B+ tree indexes and removes dead tuples",
+        "It flushes all dirty buffer pool pages to disk and records the current WAL position, bounding how far back recovery must replay",
+        "It creates a consistent database snapshot for backup purposes",
+        "It compacts the WAL segments into a single archive file"
       ],
       "correct": 1,
-      "explanation": "The buffer pool hit rate (heap_blks_hit / (heap_blks_hit + heap_blks_read)) should be above 95%. A lower rate means frequent disk reads — increase shared_buffers."
+      "explanation": "A checkpoint writes all dirty pages from the buffer pool to their data files and records the WAL LSN at that point. On crash recovery, the database only needs to replay WAL from the last checkpoint forward — earlier WAL records are already reflected in the data files. Frequent checkpoints reduce recovery time but add I/O overhead during normal operation."
     },
     {
       "id": "q9",
-      "question": "Why are WAL writes much faster than random data page writes?",
+      "question": "Why is a height-3 B+ tree with 8 KB pages typically sufficient to index 100+ million rows?",
       "type": "mcq",
       "options": [
-        "WAL uses compression to reduce write size",
-        "WAL records are smaller than full pages",
-        "WAL writes are sequential, avoiding expensive disk head seeks",
-        "WAL writes go to SSD while data pages go to spinning disk"
+        "Because each leaf page holds 100 million rows compressed",
+        "Because B+ trees use hash-based routing that eliminates most levels",
+        "Because each internal node page can hold hundreds of routing keys, giving a branching factor of ~500, so three levels cover 500^3 leaf pointers",
+        "Because the buffer pool caches the entire tree in RAM making disk traversal unnecessary"
       ],
       "correct": 2,
-      "explanation": "WAL records are appended sequentially to the end of the log file, which is extremely fast on both spinning disks (no head seeks) and SSDs. Random page writes require finding the correct location on disk first."
+      "explanation": "A B+ tree internal node with 8 KB pages and 8-byte keys can hold approximately 500 child pointers. A height-3 tree (root + one internal level + leaves) covers 500 × 500 = 250,000 leaf pages. With ~400 rows per leaf page, that is 100 million rows — reachable in exactly 3 page reads from disk, with the root and top internal nodes almost always cached in the buffer pool."
     },
     {
       "id": "q10",
-      "question": "In PostgreSQL, what is the purpose of a checkpoint?",
+      "question": "A production table with 10 million rows shows `n_dead_tup = 8,000,000` in `pg_stat_user_tables`. What is the most likely cause and correct remediation?",
       "type": "mcq",
       "options": [
-        "To lock all tables so a consistent backup can be taken",
-        "To flush all dirty buffer pool pages to data files and record the WAL position",
-        "To rebuild all B+ tree indexes for optimal performance",
-        "To compact dead row versions left by MVCC"
+        "The index is corrupted; run REINDEX to rebuild it",
+        "MVCC dead tuples have accumulated because autovacuum is not keeping up; run VACUUM ANALYZE and tune autovacuum settings",
+        "The buffer pool is too small; increase shared_buffers and run CHECKPOINT",
+        "The WAL is full; increase max_wal_size to allow more dirty pages"
       ],
       "correct": 1,
-      "explanation": "A checkpoint writes all dirty pages from the buffer pool to disk and records the current WAL position (LSN). On crash recovery, the database only needs to replay WAL from the last checkpoint forward, bounding recovery time."
+      "explanation": "8 million dead tuples out of ~18 million total (44% dead) is severe MVCC bloat. Each UPDATE and DELETE leaves a dead row version until VACUUM reclaims it. The immediate fix is `VACUUM ANALYZE tablename`. Long-term, tune `autovacuum_vacuum_scale_factor` (default 20% — too high for large tables) to a lower value like 0.01-0.05, or set per-table storage parameters with `ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.01)`."
     }
   ]
 }

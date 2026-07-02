@@ -5,58 +5,116 @@
   "week": 47,
   "icon": "os",
   "tagline": "Concurrent systems without shared mutable state",
-  "readTime": "13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "The **Actor Model**, introduced by Carl Hewitt in 1973, is a mathematical model for concurrent computation. Its central insight: eliminate shared mutable state entirely. Instead of threads competing for locks on shared data, each **actor** is an independent unit that owns its state exclusively and communicates solely by **sending messages** to other actors' mailboxes.\n\nThis model powers Erlang (WhatsApp's legendary 2 million connections per server), Akka (JVM actors), and Elixir. It makes reasoning about concurrent systems dramatically simpler because race conditions and deadlocks — the two plagues of shared-memory concurrency — cannot arise when no memory is shared."
+      "content": "The history of concurrent programming is largely a history of pain. Threads, mutexes, semaphores, condition variables — generations of engineers have written correct concurrent code, only to watch it deadlock mysteriously in production, corrupt shared data in rare race conditions, or become impossible to reason about as the system grew. The fundamental problem is that **shared mutable state** and **concurrency** are deeply, structurally incompatible: whenever two threads can read and write the same memory location without coordination, correctness requires perfect protocol adherence from every thread, forever.\n\nIn 1973, computer scientist **Carl Hewitt** at MIT proposed a radically different model: the **Actor Model**. Rather than threads sharing memory, what if each computation unit owned its state exclusively and could only interact with others by sending **messages**? No shared memory means no locks, no deadlocks, no race conditions — not because the programmer was careful, but because the model structurally prevents them.\n\nThis is not just theoretical elegance. **Erlang**, the language built on the Actor Model by Ericsson in the 1980s, powered the telecom switches that achieved **nine nines of availability** (99.9999999% uptime — about 31 milliseconds of downtime per year). WhatsApp famously ran on Erlang with a team of **50 engineers serving 900 million users**, achieving 2 million simultaneous connections on a single server. Akka, an actor framework for the JVM, underpins systems at LinkedIn, Twitter, and PayPal. Elixir, a modern language built on the Erlang VM, has brought actor-based thinking to the broader web development community.\n\nThis chapter covers the Actor Model from first principles: what actors are, how message passing works mechanically, why the model eliminates whole classes of concurrency bugs, how supervision trees enable fault-tolerant self-healing systems, how actors are implemented in practice, and when to prefer this model over alternatives like shared-memory threading or event loops."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  A1[\"Actor A\"] -->|\"message\"| MB2[\"Mailbox B\"]\n  A2[\"Actor B\"] -->|\"reads\"| MB2\n  A2 -->|\"message\"| MB3[\"Mailbox C\"]\n  A3[\"Actor C\"] -->|\"reads\"| MB3\n  A3 -->|\"message\"| MB1[\"Mailbox A\"]\n  A1 -->|\"reads\"| MB1\n  style MB1 fill:#f0f4ff\n  style MB2 fill:#f0f4ff\n  style MB3 fill:#f0f4ff",
-      "caption": "Actors never share memory. Each actor owns a private mailbox. Communication happens exclusively through asynchronous message passing."
+      "mermaid": "flowchart TD\n  A1[\"Actor: User Session\"] -->|\"send msg\"| MB2[\"Mailbox: Order Processor\"]\n  A2[\"Actor: Order Processor\"] -->|\"reads one at a time\"| MB2\n  A2 -->|\"send msg\"| MB3[\"Mailbox: Payment Service\"]\n  A3[\"Actor: Payment Service\"] -->|\"reads one at a time\"| MB3\n  A3 -->|\"send reply\"| MB4[\"Mailbox: User Session\"]\n  A1 -->|\"reads reply\"| MB4\n  note1[\"No shared memory\\nacross any boundary\"]",
+      "caption": "A typical actor-based request flow. Each actor owns a private mailbox and processes messages one at a time. No actor can directly read or write another actor's state — all interaction is through asynchronous message passing."
     },
     {
       "type": "analogy",
-      "title": "The Office Department Analogy",
-      "content": "Imagine a company where each **department** (actor) has its own locked filing cabinet (private state) and an **in-tray** on the desk (mailbox). Departments never walk into each other's offices to rearrange files — that would cause chaos. Instead, they send **memos** (messages) to another department's in-tray.\n\nThe receiving department processes memos one at a time when it has capacity. It can:\n1. **Update its own files** (mutate local state).\n2. **Send memos to other departments** (send messages).\n3. **Create new departments** (spawn child actors).\n\nBecause each department only touches its own cabinet, there are no file conflicts — no locks needed. If a department catches fire (crashes), a supervisor department gets notified and can restart it. This is Erlang's **\"let it crash\"** philosophy: build supervision trees instead of defensive error handling."
+      "title": "The Office Departments Analogy",
+      "content": "Picture a large company where every **department** (actor) has its own locked filing cabinet (private state) and an **in-tray** sitting on the desk in the hallway (the mailbox). There is a strict company policy: no employee may walk into another department's room and rummage through their cabinets. If the Accounts department needs information from HR, they write a **memo** (message) and drop it in HR's in-tray.\n\nHR processes the memos in their in-tray one at a time — they do not try to read two memos simultaneously. When they are done with a memo, they can do exactly three things: (1) update their own filing cabinet based on what the memo said, (2) drop reply memos into other departments' in-trays, or (3) spin up a new internal team (spawn a child actor) to handle the work. They cannot step into Accounts and update the budget spreadsheet directly.\n\nBecause each department only ever touches its own cabinet, there are **no filing conflicts** — no need to negotiate who holds the key. Contrast this with an open-plan office (shared memory) where anyone can walk to any shelf at any time. In the open plan, you need elaborate sign-out systems (locks), and if two people grab the same folder simultaneously, you get garbled data (race condition). If two people are each waiting for the other to return a folder, nothing gets done forever (deadlock).\n\nNow: what happens when the Dispatch department has a breakdown — a manager quits, a fire alarm, a critical error? In a healthy company, the **supervisor** (a parent actor) notices through a formal notification system, and can hire a replacement (restart the actor) without the rest of the company knowing anything went wrong. This is the **supervision tree** — Erlang's core fault-tolerance mechanism, and the reason telecoms built on Erlang could promise five-nines uptime."
     },
     {
       "type": "explanation",
-      "title": "Actor Primitives and Supervision Trees",
-      "content": "Every actor can do exactly three things in response to a message:\n- **Send** messages to actors it has addresses (PIDs) for.\n- **Create** new child actors.\n- **Update** its own private state for processing the next message.\n\nActors process messages **sequentially** from their mailbox — one at a time, no concurrency within a single actor. This eliminates all intra-actor race conditions. Concurrency arises from having many actors processing their own mailboxes simultaneously across CPU cores.\n\n**Location transparency** is a key feature: an actor's address (PID) works the same whether the target actor is on the same process, same machine, or a remote server. This makes distribution trivial — you scale horizontally by running actors on more nodes without changing communication code.\n\n**Message passing vs shared memory:**\n- **Shared memory** requires locks, condition variables, and careful coordination. Correctness depends on every thread following the protocol perfectly — one mistake causes a race.\n- **Message passing** requires no locks. State is implicit in each actor's current behavior. The tradeoff is message serialization cost and higher latency for what would be a simple pointer dereference in shared memory.\n\nThe **supervision tree** in Erlang/OTP and Akka structures actors hierarchically. A supervisor monitors its children and applies a restart strategy (one-for-one, one-for-all, rest-for-one) when a child crashes. This isolates failure and enables self-healing systems — core to WhatsApp and Ericsson telecom switch uptime of 99.9999999%."
+      "title": "The Three Primitives: What an Actor Can Do",
+      "content": "The Actor Model is remarkably minimal in its formal definition. In response to a message, an actor may do **exactly three things** — no more:\n\n**1. Send messages** to actors whose addresses it knows. In Erlang these addresses are called PIDs (Process Identifiers). In Akka they are `ActorRef` objects. Critically, message passing is **asynchronous** — the sender does not block waiting for a reply. It fires the message into the receiver's mailbox and moves on. This is fundamentally different from a function call, which is synchronous.\n\n**2. Create new child actors**. An actor can spawn new actors, receiving their addresses. This is how systems grow dynamically — a web server actor might spawn a fresh connection-handler actor for each incoming connection, giving it a dedicated mailbox and lifecycle.\n\n**3. Designate new behaviour** (update private state) for the next message. Because actors process messages sequentially, the actor can update its internal state after handling a message, and that new state will be visible when the next message is processed. There is no other thread that could observe the state mid-update.\n\nNotice what is **not** on the list: shared variables, locks, global state, synchronous blocking calls. These constraints are the source of the model's correctness guarantees.\n\nAn important subtlety: **message order guarantees**. In the canonical Actor Model (and in Erlang), message order is guaranteed between a specific sender-receiver pair — if Actor A sends message M1 then M2 to Actor B, B receives them in that order. But if Actor C simultaneously sends M3 to B, M3 can interleave anywhere with M1/M2. This matches our intuitions about real communication: letters from the same sender arrive in order, but two different senders posting simultaneously can arrive in any relative order."
+    },
+    {
+      "type": "explanation",
+      "title": "How Messages Are Processed: Sequential Within, Concurrent Across",
+      "content": "A common confusion when first learning the Actor Model: 'if each actor processes messages one at a time, how is this concurrent at all?' The answer is elegant: **the unit of concurrency is the actor, not the message handler**.\n\nConsider a web server handling 10,000 simultaneous HTTP requests. In a thread-pool model, you would need up to 10,000 threads — each blocked waiting for I/O. In the Actor Model, you have 10,000 **connection actors**, each with their own mailbox. Each actor is independently scheduled by the runtime. When a network packet arrives for connection 7,423, the runtime delivers a message to that actor's mailbox and schedules it to run. While it runs, 7,422 other actors may also be running on other CPU cores. No shared state, no locks — just 10,000 independent state machines ticking forward as messages arrive.\n\nThis is why Erlang can support **millions of concurrent lightweight processes**: each process is just a mailbox, a call stack, and a small heap — around 2–4 KB initial footprint, compared to ~1 MB for an OS thread. The Erlang VM (BEAM) has its own preemptive scheduler across CPU cores and does not rely on OS threads for actor-level parallelism.\n\n**Backpressure and bounded mailboxes**: a subtlety the model forces you to address. If an actor's mailbox grows unboundedly because messages arrive faster than it processes them, you have a **hot spot** — potentially running out of memory. Akka addresses this with configurable mailbox sizes and flow-control patterns. Erlang process mailboxes are unbounded by default, which shifts the responsibility to the system designer. Real production systems monitor mailbox sizes as a key health metric."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  SUP[\"Supervisor Actor\"] -->|\"supervises\"| W1[\"Worker A\"]\n  SUP -->|\"supervises\"| W2[\"Worker B\"]\n  SUP -->|\"supervises\"| W3[\"Worker C\"]\n  W1 -->|\"message\"| W2\n  W2 -->|\"message\"| W3\n  W3 -.->|\"crash signal\"| SUP\n  SUP -.->|\"restart\"| W3",
-      "caption": "Supervision tree: when Worker C crashes, only the supervisor is notified. It restarts the failed child without affecting siblings."
+      "mermaid": "sequenceDiagram\n  participant S as \"Sender Actor\"\n  participant MB as \"Receiver Mailbox\"\n  participant R as \"Receiver Actor\"\n  S->>MB: send(msg1) — async, no block\n  S->>MB: send(msg2) — continues immediately\n  Note over R: processing earlier messages\n  R->>MB: dequeue msg1\n  Note over R: updates private state\n  R->>MB: dequeue msg2\n  Note over R: sends reply to Sender",
+      "caption": "Message passing is asynchronous: the sender enqueues and continues. The receiver dequeues and processes one message at a time. No shared memory crosses any boundary."
+    },
+    {
+      "type": "explanation",
+      "title": "Location Transparency and Distribution",
+      "content": "One of the most powerful properties of the Actor Model is **location transparency**: the address of an actor (its PID or ActorRef) works identically regardless of whether the target actor lives in the same process, the same machine, or a machine on the other side of the planet.\n\nFrom the sender's perspective, sending a message looks the same in all cases:\n\n```\nsend(actorRef, { type: 'PROCESS_ORDER', orderId: 42 })\n```\n\nThe runtime handles routing. If the actor is local, the message goes directly into its in-memory mailbox. If remote, the runtime serializes the message, ships it over the network, and deserializes it at the destination. The sender's code does not change.\n\nThis makes **horizontal scaling a first-class concern** rather than an afterthought. You can start a system running all actors on one machine, and as load grows, you move specific actor types to dedicated machines — without changing application logic. Erlang/OTP's distributed Erlang, Akka Cluster, and Microsoft's Orleans all exploit this property.\n\nThe tradeoff: you must design for **partial failure**. In a local function call, either it succeeds or the whole process crashes. In distributed message passing, the sender might send a message that never arrives (network partition), the receiver might crash after processing but before replying, or the reply might get lost. This forces you to think about **at-most-once vs at-least-once vs exactly-once** delivery semantics from the beginning — which is actually a feature, not a bug, because those problems exist in distributed systems regardless; the Actor Model just makes them visible early."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Actor A\\n(local)\"] -->|\"same process\"| B[\"Actor B\\n(local)\"]\n  A -->|\"same machine\"| C[\"Actor C\\n(local process)\"]\n  A -->|\"network + serialize\"| D[\"Actor D\\n(remote node)\"]\n  note1[\"API identical\\nfor all three\"]",
+      "caption": "Location transparency: the sender uses the same send API whether the target is in-process, cross-process, or on a remote machine. The runtime handles routing and serialization."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Actor model simulation in Node.js using worker_threads as actors\n// Each worker = one actor with private state + message-based communication\n\nconst { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n\nif (isMainThread) {\n  // Supervisor / orchestrator actor\n  function spawnActor(script, initialState) {\n    return new Promise((resolve) => {\n      const actor = new Worker(__filename, { workerData: initialState });\n      const mailbox = [];\n\n      // Send message to actor's mailbox\n      function send(msg) {\n        actor.postMessage(msg);\n      }\n\n      actor.on('message', (reply) => {\n        console.log(`[Actor ${initialState.id}] replied:`, reply);\n        resolve(reply);\n      });\n\n      actor.on('error', (err) => {\n        // Supervision: log crash and could restart\n        console.error(`[Supervisor] Actor ${initialState.id} crashed:`, err.message);\n        // In real Erlang/Akka: apply restart strategy here\n      });\n\n      return send;\n    });\n  }\n\n  // Spawn two actors with isolated private state\n  async function main() {\n    // Actor 1: counter actor\n    const actor1 = new Worker(__filename, { workerData: { id: 1, count: 0 } });\n    const actor2 = new Worker(__filename, { workerData: { id: 2, count: 100 } });\n\n    // Message passing — no shared memory\n    actor1.postMessage({ type: 'INCREMENT', amount: 5 });\n    actor1.postMessage({ type: 'INCREMENT', amount: 3 });\n    actor2.postMessage({ type: 'DECREMENT', amount: 20 });\n    actor2.postMessage({ type: 'GET' });\n\n    actor1.on('message', msg => console.log('[Main] Actor1:', msg));\n    actor2.on('message', msg => console.log('[Main] Actor2:', msg));\n\n    setTimeout(() => { actor1.terminate(); actor2.terminate(); }, 200);\n  }\n\n  main();\n} else {\n  // Each worker is an actor — owns private state exclusively\n  let state = { count: workerData.count }; // private, never shared\n\n  parentPort.on('message', (msg) => {\n    // Process one message at a time (sequential within actor)\n    switch (msg.type) {\n      case 'INCREMENT':\n        state.count += msg.amount;\n        break;\n      case 'DECREMENT':\n        state.count -= msg.amount;\n        break;\n      case 'GET':\n        // Send reply message (never expose state reference directly)\n        parentPort.postMessage({ id: workerData.id, count: state.count });\n        break;\n    }\n  });\n}",
-      "explanation": "Each `Worker` is an actor: it owns `state` privately (no other actor can read or write it), and communicates exclusively via `postMessage` (message passing). `actor1` and `actor2` operate independently — no locks, no shared variables. The main thread acts as a lightweight supervisor."
+      "label": "Example",
+      "code": "// Actor model simulation in Node.js using worker_threads\n// Each Worker = one actor with isolated private state\n// Communication is exclusively via postMessage (message passing)\n\nconst { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n\nif (isMainThread) {\n  // ---- SUPERVISOR / ORCHESTRATOR ----\n\n  // Spawn two counter actors with completely independent private state\n  const counterA = new Worker(__filename, { workerData: { id: 'A', count: 0 } });\n  const counterB = new Worker(__filename, { workerData: { id: 'B', count: 1000 } });\n\n  // Message passing: async fire-and-forget (no blocking)\n  counterA.postMessage({ type: 'INCREMENT', amount: 5 });\n  counterA.postMessage({ type: 'INCREMENT', amount: 3 });\n  counterA.postMessage({ type: 'GET' });   // request a reply\n\n  counterB.postMessage({ type: 'DECREMENT', amount: 200 });\n  counterB.postMessage({ type: 'GET' });\n\n  // Supervision: observe crash signals from child actors\n  counterA.on('message', msg => console.log(`[Supervisor] CounterA replied:`, msg));\n  counterB.on('message', msg => console.log(`[Supervisor] CounterB replied:`, msg));\n\n  counterA.on('error', err => {\n    console.error(`[Supervisor] CounterA CRASHED: ${err.message}`);\n    // In real OTP/Akka: apply restart strategy (one-for-one, one-for-all, etc.)\n    // Here: simple restart with initial state\n    const replacement = new Worker(__filename, { workerData: { id: 'A', count: 0 } });\n    console.log('[Supervisor] CounterA restarted with fresh state');\n  });\n\n  counterB.on('error', err => {\n    console.error(`[Supervisor] CounterB CRASHED: ${err.message}`);\n  });\n\n  // Demonstrate crash isolation: B crashing does not affect A\n  setTimeout(() => {\n    counterB.postMessage({ type: 'CRASH' }); // intentional crash\n    counterA.postMessage({ type: 'INCREMENT', amount: 1 }); // A still works\n    counterA.postMessage({ type: 'GET' });\n  }, 100);\n\n  setTimeout(() => { counterA.terminate(); }, 500);\n\n} else {\n  // ---- ACTOR BODY: runs inside Worker thread ----\n  // Private state — ONLY this actor can read or write it\n  let state = { count: workerData.count };\n\n  parentPort.on('message', (msg) => {\n    // Sequential processing: one message at a time, no concurrent access\n    switch (msg.type) {\n      case 'INCREMENT':\n        state.count += msg.amount;\n        // No reply needed — fire-and-forget mutation\n        break;\n\n      case 'DECREMENT':\n        state.count -= msg.amount;\n        break;\n\n      case 'GET':\n        // Return a COPY of state (never expose reference to private state)\n        parentPort.postMessage({ id: workerData.id, count: state.count });\n        break;\n\n      case 'CRASH':\n        // Simulate unexpected error — supervisor handles recovery\n        throw new Error(`Actor ${workerData.id} hit an unexpected condition`);\n    }\n  });\n}",
+      "explanation": "Each `Worker` is an actor: it owns `state` in complete isolation — no other worker can read or modify it. All interaction goes through `postMessage` (send) and the `message` event listener (receive). The main thread acts as a lightweight supervisor, catching `error` events and applying a restart strategy. Crucially, when `counterB` crashes, `counterA` is completely unaffected and continues processing its own mailbox — this is crash isolation."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Supervision Trees: Fault Tolerance by Design",
+      "content": "In traditional server code, an unhandled exception in a request handler either crashes the entire process or gets swallowed by a generic try-catch that leaves the system in an unknown state. Erlang's OTP (Open Telecom Platform) framework took a different approach: **structure failure handling into the architecture itself**.\n\nA **supervision tree** is a hierarchy of actors where parent actors are responsible for monitoring and restarting child actors. A **supervisor** actor's only job is to watch its children and apply a **restart strategy** when one crashes.\n\nErlang/OTP defines three canonical strategies:\n\n- **one-for-one**: Only the crashed child is restarted. All siblings continue running. Use when children are independent — a connection-handler pool, for example.\n\n- **one-for-all**: When any child crashes, the supervisor stops and restarts *all* children. Use when children are interdependent and a crash in one would leave siblings in an inconsistent state.\n\n- **rest-for-one**: Restarts the crashed child and all children started *after* it. Use when there is a startup dependency order — later actors depend on earlier ones.\n\nThe supervisor itself can have a supervisor (a **supervisor of supervisors**), all the way up to a root supervisor that the application framework starts. Errors propagate up the tree only if a child crashes faster than the `max_restarts` threshold — at that point the supervisor itself crashes, potentially triggering the grandparent supervisor's strategy.\n\nThis architecture externalizes error recovery. Instead of defensive try-catch sprinkled everywhere, you write **actors that assume inputs are valid and crash on unexpected state**. The supervisor policy file declares how the system should respond. This is the **'let it crash'** philosophy — a counterintuitive but enormously effective practice that Erlang/OTP has validated at scale for 40 years.\n\n**Akka** (JVM) and **Microsoft Orleans** (.NET) adopt similar supervision hierarchies. Even languages without native actor runtimes (Go, Rust with Tokio actors, JavaScript with worker_threads) can implement supervision patterns manually."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  ROOT[\"Root Supervisor\"] --> APP[\"Application Supervisor\"]\n  APP --> WEB[\"Web Supervisor\"]\n  APP --> DB[\"DB Supervisor\"]\n  WEB --> W1[\"Handler A\"]\n  WEB --> W2[\"Handler B\"]\n  WEB --> W3[\"Handler C\"]\n  DB --> D1[\"Pool Member 1\"]\n  DB --> D2[\"Pool Member 2\"]\n  W2 -.->|\"crash\"| WEB\n  WEB -.->|\"one-for-one restart\"| W2",
+      "caption": "Supervision tree: the Web Supervisor uses one-for-one strategy — only Handler B is restarted on crash. The DB Supervisor and its pool members are completely unaffected. Errors propagate upward only if restart rate exceeds the threshold."
+    },
+    {
+      "type": "explanation",
+      "title": "Message Passing vs Shared Memory: The Full Trade-off",
+      "content": "Both message passing and shared-memory concurrency are legitimate tools. Understanding their trade-offs lets you make informed architecture decisions.\n\n**Shared memory with locks** is the model used by POSIX threads, Java `synchronized`, Rust `Mutex<T>`, and C++ `std::mutex`. It is **low-latency** — reading a value from a shared struct is a single memory access. But correctness requires every thread to acquire the right locks in the right order. One forgotten lock acquisition, one lock acquired in a different order than usual, produces silent data corruption or deadlock. The `volatile` keyword, memory barriers, `compare-and-swap` — the complexity compounds. The bug surface is proportional to the number of shared variables times the number of threads that touch them.\n\n**Message passing** eliminates shared state entirely. There is nothing to lock. The correctness guarantee is structural: an actor's state can only be modified by that actor's own message handler. The costs:\n\n- **Serialization overhead**: messages must be copied (or serialized, for remote actors). On modern hardware with gigabit memory buses, copying a few hundred bytes is nanoseconds — negligible for most applications. For inner loops operating on large arrays (scientific computing, real-time audio), this can matter.\n- **Latency**: asynchronous request-reply patterns add a round-trip to what would be a synchronous function call. Patterns like **ask** (send + await reply with timeout) address usability but add latency.\n- **Back-pressure complexity**: if a fast sender overwhelms a slow receiver, mailboxes grow. Shared-memory code with a work queue faces the same problem, but it is more directly observable.\n\n**When to choose message passing**: whenever tasks are naturally independent (web request handlers, pipeline stages, microservices, game entity simulation), whenever you need fault isolation and restartability, whenever you need horizontal distribution, or whenever the domain maps naturally to independent agents with private state (financial accounts, game characters, IoT device state).\n\n**When to choose shared memory**: tight inner loops where serialization is genuinely unacceptable — real-time audio DSP, matrix operations in a GPU compute shader, zero-copy inter-thread ring buffers in a trading system's hot path. `SharedArrayBuffer` + `Atomics` in JavaScript, or lock-free data structures in C++/Rust, are appropriate here."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Message passing vs shared memory — conceptual comparison\n\n// ---- SHARED MEMORY approach (requires explicit locking) ----\n// const shared = new SharedArrayBuffer(4);\n// const view = new Int32Array(shared);\n// Thread A and Thread B both do: view[0]++\n// Without Atomics.add(), this is a DATA RACE:\n//   Thread A reads 0, Thread B reads 0,\n//   Thread A writes 1, Thread B writes 1 — result is 1, not 2!\n\n// ---- MESSAGE PASSING approach (no locking needed) ----\n// Actor owns its counter privately:\nfunction createCounterActor() {\n  let count = 0; // PRIVATE state — no other actor touches this\n\n  return function handleMessage(msg) {\n    // Sequential processing — no concurrent access possible\n    if (msg.type === 'increment') count += msg.by;\n    if (msg.type === 'decrement') count -= msg.by;\n    if (msg.type === 'get') return count;\n    // State is safe because only THIS function ever reads/writes `count`\n  };\n}\n\n// Location transparency: same API whether local or remote\nconst counter = createCounterActor();\ncounter({ type: 'increment', by: 5 });\ncounter({ type: 'increment', by: 3 });\nconsole.log(counter({ type: 'get' })); // always 8 — no race possible"
+      "label": "Example",
+      "code": "// Contrasting shared memory (unsafe) vs message passing (safe)\n// Run this in Node.js to see the difference\n\n// ---- SHARED MEMORY: data race without Atomics ----\n// Two workers incrementing the same SharedArrayBuffer counter concurrently\n// WITHOUT synchronization → result is wrong (race condition)\nconst sharedBuf = new SharedArrayBuffer(4);\nconst shared = new Int32Array(sharedBuf);\nshared[0] = 0;\n\n// Simulated race (conceptual — actual race needs two workers):\n// Thread A: reads shared[0] = 0\n// Thread B: reads shared[0] = 0 (before A writes)\n// Thread A: writes shared[0] = 1\n// Thread B: writes shared[0] = 1  ← LOST UPDATE\n// Final: 1, not 2\n\n// ---- SHARED MEMORY: safe with Atomics ----\nAtomics.add(shared, 0, 1); // atomic read-modify-write\nAtomics.add(shared, 0, 1);\nconsole.log('Shared counter (atomic):', Atomics.load(shared, 0)); // 2 ✓\n// Correct but: you must use Atomics EVERYWHERE that touches this memory\n// Forget once → silent corruption\n\n// ---- MESSAGE PASSING: structurally safe, no Atomics needed ----\nfunction createCounterActor() {\n  // Private state: ONLY this closure can read or write `count`\n  let count = 0;\n\n  // Message handler — processes one message at a time\n  return function handleMessage(msg) {\n    switch (msg.type) {\n      case 'increment': count += msg.amount; return null;\n      case 'decrement': count -= msg.amount; return null;\n      case 'get':       return { count }; // returns a COPY, not a reference\n      case 'reset':     count = 0; return null;\n    }\n  };\n}\n\nconst counter = createCounterActor();\ncounter({ type: 'increment', amount: 5 });\ncounter({ type: 'increment', amount: 3 });\nconst result = counter({ type: 'get' });\nconsole.log('Actor counter:', result.count); // always 8, no race possible\n\n// Even if two 'senders' call handleMessage: in real actor runtimes, the\n// mailbox serializes delivery — only one message runs at a time.\n// The sequential guarantee is enforced by the runtime, not the programmer.",
+      "explanation": "The shared-memory approach requires `Atomics` on every access — forget once and you have a silent race condition. The message-passing approach has no such requirement: the sequentiality guarantee is baked into the actor's processing loop, not into the programmer's discipline. The actor's `count` variable can never be concurrently accessed because only one `handleMessage` call runs at a time."
+    },
+    {
+      "type": "explanation",
+      "title": "Real-World Actor Systems: Erlang, Akka, Elixir, and Orleans",
+      "content": "Understanding how production actor systems implement the model deepens your intuition for the design choices.\n\n**Erlang/OTP (1986, Ericsson)**: The original production actor system. Erlang processes are extremely lightweight (~2-4 KB heap) — you routinely have millions of concurrent processes. The BEAM VM has per-core run queues and its own preemptive scheduler (actors are preempted after a fixed number of reductions, not on OS thread boundaries). Message copying is mandatory; there is no shared heap. OTP provides **gen_server** (a generic actor abstraction), **gen_statem** (state machine actors), and supervisor behaviours as standard library patterns. The 'let it crash' philosophy is institutionalised: Erlang code is famously sparse on error handling because the supervision tree handles recovery.\n\n**Elixir (2012, José Valim)**: A modern language that compiles to BEAM bytecode and runs the same VM as Erlang. Elixir adds syntactic sugar (the `|>` pipe operator, macros), a more conventional module system, and the Phoenix web framework which supports millions of concurrent WebSocket connections via **Phoenix Channels** — each channel being a lightweight Elixir process.\n\n**Akka (2009, Typesafe/Lightbend)**: An actor toolkit for the JVM (Scala and Java). Uses JVM threads under the hood (configurable number of thread pool threads to back millions of actors). Akka **does not copy messages** by default — actors share the JVM heap, and the programmer is responsible for not passing mutable references. This is a pragmatic performance trade-off that breaks strict actor-model isolation but is acceptable in practice on a single JVM. Akka Cluster adds location transparency across nodes.\n\n**Microsoft Orleans (2014, Microsoft Research)**: A 'virtual actor' system for .NET. Actors (called Grains) are automatically activated on demand and deactivated when idle, with the runtime managing placement across the cluster. This simplifies reasoning about actor lifecycle — you never explicitly create or destroy grains; they appear to always exist and are simply invoked. Orleans powers cloud-scale games (Halo multiplayer) and Xbox Live backend services.\n\n**Go's goroutines + channels**: Go does not implement the Actor Model strictly, but its motto 'do not communicate by sharing memory; share memory by communicating' reflects the same philosophy. Goroutines are cheap coroutines; channels are typed message queues. The pattern is similar but more manual — there is no built-in supervision, no location transparency, and you can still use shared memory with `sync.Mutex` when needed."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Erlang/OTP\\nLightweight processes\\nStrict isolation\"] --> VM[\"BEAM VM\"]\n  B[\"Elixir\\nModern syntax\\nPhoenix\"] --> VM\n  VM --> C[\"Distributed nodes\\nLocation transparent\"]\n  D[\"Akka JVM\\nScala/Java\\nShared heap\"] --> E[\"JVM Thread Pool\"]\n  E --> F[\"Akka Cluster\"]\n  G[\"Orleans .NET\\nVirtual actors\\nAuto lifecycle\"] --> H[\".NET CLR\"]",
+      "caption": "Major actor systems and their runtime substrates. Erlang/Elixir run on the BEAM VM with strict per-process isolation. Akka runs on a JVM thread pool with programmer-enforced isolation. Orleans uses virtual actors with automatic placement."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Patterns: Request-Reply, Publish-Subscribe, and Actor Pools",
+      "content": "The basic Actor Model gives you three primitives, but real systems combine them into recurring patterns:\n\n**Request-Reply (Ask Pattern)**: The most natural adaptation of synchronous RPC to actors. The sender creates a **reply-to** address (often a temporary one-shot actor or a Promise), includes it in the message, and awaits a response. In Akka this is the `?` operator; in Erlang it is done with `receive` pattern-matching on a tagged reply. The risk: if the receiver crashes or is slow, the sender must handle timeout — which forces explicit timeout and retry logic that might be hidden in a blocking call.\n\n**Publish-Subscribe**: A topic actor (or message broker) holds a list of subscriber actor addresses. When a publisher sends an event message to the topic actor, the topic actor fans it out to all subscribers. This decouples publishers and subscribers — neither knows the other's address directly. Erlang's `pg` (process groups) and Akka's `EventBus` implement this. It scales naturally: adding a new subscriber just means registering with the topic actor.\n\n**Actor Pool (Router Pattern)**: When a single actor becomes a bottleneck (CPU-bound work), you create a pool of identical worker actors and a **router** actor that distributes incoming messages among them using a strategy (round-robin, smallest-mailbox, consistent hash). The caller sends to the router address and is unaware of which pool member handles the message. Akka's built-in router actors implement this out of the box.\n\n**Saga / Long-Running Process**: A coordinator actor manages a multi-step workflow (e.g., an order: reserve inventory → charge payment → notify shipping). If any step fails, the saga actor sends compensating messages to roll back previous steps. This is the actor-model answer to distributed transactions, which are notoriously difficult with shared-memory approaches.\n\n**Circuit Breaker**: An actor that monitors failure rates from downstream service actors. When failures exceed a threshold, it 'trips' — returning errors immediately without forwarding messages to the failing downstream, giving it time to recover. Hystrix and Akka's circuit breaker pattern implement this."
+    },
+    {
+      "type": "explanation",
+      "title": "Edge Cases and Common Misconceptions",
+      "content": "**'Actors eliminate all concurrency bugs'**: Not quite. Actors eliminate data races and deadlocks *between* actors because there is no shared memory and no blocking waits. But logical bugs still exist: an actor can process messages in an unexpected order and reach a wrong state, or two actors can deadlock if they each send a synchronous ask to each other simultaneously (ask A waits for B, ask B waits for A). The model eliminates the low-level memory-corruption class of bugs, not all possible bugs.\n\n**'Message copying is always expensive'**: For small messages (structs, event records, a few hundred bytes), modern CPUs copy so fast that it is noise. For large payloads (video frames, large binary blobs), you want zero-copy strategies: pass an immutable reference to a shared-memory region (valid within a single process), use reference-counted buffers, or transfer ownership rather than copy. Erlang introduced **sub-binary** references and binaries on a shared binary heap (not per-process) precisely to avoid copying large binaries.\n\n**'Each actor should be an OS thread'**: The opposite — this is the performance trap. OS threads cost ~1 MB of stack memory and context-switch at OS scheduler granularity. Actor runtimes maintain millions of actors on a handful of OS threads by implementing their own cooperative or preemptive scheduler. In JavaScript, `worker_threads` is a reasonable actor analogy for teaching, but in production you would use a true actor framework that multiplexes many actors onto a thread pool.\n\n**'The mailbox is ordered globally'**: Mailboxes only guarantee ordering per sender. A given actor's mailbox may receive messages from many senders, and the relative order of those messages can vary. If you need a global ordering guarantee (e.g., event sourcing), you need an explicit sequencing mechanism (a sequence number on messages, or a dedicated sequencer actor).\n\n**'Location transparency means network issues disappear'**: Location transparency means the API looks the same, not that failures disappear. A remote message send can silently fail due to network partition. Production distributed actor systems use techniques like **heartbeat monitoring**, **cluster membership protocols**, and explicit **failure detectors** to surface network issues and trigger appropriate supervision responses."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context**: Carl Hewitt published 'A Universal Modular ACTOR Formalism for Artificial Intelligence' in 1973. The model influenced Robin Milner's **Pi-calculus** (a formal algebra of concurrent processes) and later **CSP** (Communicating Sequential Processes), which directly inspired Go's channels. Gul Agha's 1986 PhD thesis 'Actors: A Model of Concurrent Computation in Distributed Systems' established the formal semantics still used today. Erlang, designed by Joe Armstrong at Ericsson starting in 1986, was the first language to bring Actor-like semantics to industrial-scale production systems — powering switches carrying a third of all the world's telephone traffic by the mid-1990s."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**When to choose message passing over shared memory:** prefer message passing when tasks are naturally independent (request handlers, pipeline stages, microservices) or when you need fault isolation and restartability. Use shared memory (`SharedArrayBuffer` + `Atomics`) only for tight inner loops where message serialization latency is unacceptable — e.g., real-time audio processing or scientific simulation inner loops."
+      "content": "**Interview and design-review insights**: When asked to compare threads vs actors, anchor on **what is shared** — threads share memory by default and must add synchronization; actors share nothing by default and must explicitly pass messages. When designing an actor-based system, ask 'what is the unit of failure?' — each actor should represent one coherent piece of state that fails and restarts together. Common interview follow-up: 'what happens if two actors ask each other synchronously?' — deadlock; always design ask-pattern interactions with timeouts or use asynchronous tell-and-reply-later patterns. Also know that the 'let it crash' principle does **not** mean ignore errors — it means handle errors at the right architectural level (supervision), not inline with the happy path."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "An **actor** is an independent unit of computation with private state, a mailbox, and the ability to send messages, spawn children, and update its own state.",
-        "**No shared state** means no locks, no deadlocks, and no race conditions between actors — all safety comes from the exclusive ownership model.",
-        "Actors process their mailbox **sequentially**, so each actor is race-free internally; concurrency arises from many actors running simultaneously.",
-        "**Supervision trees** (Erlang/OTP, Akka) structure actors hierarchically — supervisors restart crashed children, enabling self-healing distributed systems.",
-        "**Location transparency** allows actor addresses to work identically whether the target is local or remote, making horizontal scaling a first-class concern."
+        "An **actor** is an independent unit of computation with three capabilities: send messages to known actors, spawn child actors, and update its own private state — it can never directly read or write another actor's state.",
+        "**Message passing is asynchronous**: the sender enqueues a message and continues immediately without blocking; the receiver processes messages from its mailbox one at a time, eliminating intra-actor race conditions.",
+        "**No shared mutable state** means no locks, no deadlocks between actors, and no data races — not because the programmer was careful, but because the model structurally prevents them.",
+        "**Supervision trees** (Erlang OTP, Akka) structure fault recovery into the architecture: parent actors monitor children, apply restart strategies (one-for-one, one-for-all, rest-for-one), and enable self-healing systems — the foundation of Erlang's legendary nine-nines availability.",
+        "**Location transparency** gives actors a uniform address regardless of physical location, making horizontal scaling and distribution a first-class design property rather than a retrofit.",
+        "**Concurrency scales** because lightweight actors (~2-4 KB each) can be created by the millions; the runtime schedules them across CPU cores, avoiding the OS-thread overhead (~1 MB each) that limits thread-per-connection architectures.",
+        "**Choose message passing** for independent tasks, fault isolation, and distributed systems; choose shared memory with `Atomics` only for tight inner loops where serialization latency is genuinely unacceptable."
       ]
     }
   ],
@@ -64,133 +122,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What are the three things an actor can do in response to a received message?",
+      "question": "What are the three and only three things an actor may do in response to a received message, according to the formal Actor Model?",
       "type": "mcq",
       "options": [
-        "Lock a mutex, read shared memory, and write shared memory",
-        "Send messages to known actors, create new actors, and update its own private state",
-        "Spawn a thread, block on I/O, and release a lock",
-        "Read shared state, modify it, and notify other threads"
+        "Acquire a lock, read shared memory, and release the lock",
+        "Send messages to known actors, spawn new child actors, and update its own private state",
+        "Fork a thread, write to a shared buffer, and signal a condition variable",
+        "Execute a system call, block on I/O, and return a value to the caller"
       ],
       "correct": 1,
-      "explanation": "The Actor Model defines exactly three response capabilities: send messages to actors whose addresses (PIDs) are known, create new child actors, and update private local state to influence how future messages are handled."
+      "explanation": "The Actor Model formally defines exactly three response capabilities: send messages to actors whose addresses (PIDs/ActorRefs) are known, create new child actors, and designate new behavior by updating private local state. Everything else — shared memory, locks, blocking calls — is outside the model."
     },
     {
       "id": "q2",
-      "question": "Why does the Actor Model eliminate race conditions between actors?",
+      "question": "Why does the Actor Model structurally eliminate data races between actors?",
       "type": "mcq",
       "options": [
-        "Actors use internal mutexes automatically",
-        "Actors share read-only memory and lock before writing",
-        "Each actor owns its state exclusively and no actor can access another's state directly",
-        "The runtime enforces a global lock on all state changes"
+        "Actors automatically acquire mutexes before reading shared variables",
+        "The runtime enforces a global lock over all state changes",
+        "Each actor's state is exclusively owned by that actor and is never shared — other actors can only request changes via messages",
+        "Actors run on a single CPU core so only one can execute at a time"
       ],
       "correct": 2,
-      "explanation": "Because actors never share memory, there is nothing to race on. An actor's state can only be modified by that actor itself as it processes messages sequentially. Other actors can only request changes by sending messages."
+      "explanation": "Data races require concurrent unsynchronized access to the same memory location. Because no actor can read or write another actor's state directly — all interaction is via message passing — there is nothing to race on. The exclusive ownership invariant is enforced by the model, not by programmer discipline."
     },
     {
       "id": "q3",
-      "question": "What is 'location transparency' in the Actor Model?",
+      "question": "How does the Actor Model achieve concurrency if each individual actor processes messages sequentially one at a time?",
       "type": "mcq",
       "options": [
-        "All actors must run on the same physical machine",
-        "An actor's address works the same whether the target is local or on a remote server",
-        "Messages are cached locally before being sent remotely",
-        "Actors are transparent to the OS scheduler"
+        "It cannot — sequential message processing means no true concurrency",
+        "Each actor uses async/await internally to interleave message handling within a single execution",
+        "Thousands or millions of actors each run their mailbox independently, allowing the runtime to schedule many actors concurrently across CPU cores",
+        "A global round-robin scheduler runs each actor's handler for a fixed time slice"
       ],
-      "correct": 1,
-      "explanation": "Location transparency means actor addresses (PIDs, references) are uniform regardless of physical location. Code sending a message to a local actor is identical to code sending to a remote actor — enabling distribution without changing application logic."
+      "correct": 2,
+      "explanation": "Concurrency in the Actor Model comes from the number of actors, not from within a single actor. Each actor is sequential internally, but with millions of actors, each processing their own mailbox independently, the runtime can schedule many actors in parallel across CPU cores — achieving massive parallelism without shared state."
     },
     {
       "id": "q4",
-      "question": "In Erlang's 'let it crash' philosophy, what should an actor do when it encounters an unexpected error?",
+      "question": "What does 'location transparency' mean in the context of the Actor Model?",
       "type": "mcq",
       "options": [
-        "Catch all exceptions and log them internally",
-        "Retry the failed operation up to 3 times",
-        "Crash immediately, letting the supervisor handle restart with a clean state",
-        "Notify all sibling actors before terminating"
+        "All actors must be collocated on the same physical machine for performance",
+        "An actor's address works identically whether the target is in the same process, same machine, or a remote server — the sender's code does not change",
+        "Messages are cached locally and sent remotely only when the network is idle",
+        "Actors are invisible to the operating system scheduler"
       ],
-      "correct": 2,
-      "explanation": "'Let it crash' means actors should not attempt complex defensive error recovery. An unexpected crash is reported up the supervision tree. The supervisor restarts the actor with a fresh state, which is often simpler and more reliable than trying to recover from unknown bad state."
+      "correct": 1,
+      "explanation": "Location transparency means the send API and actor address are uniform regardless of physical location. The runtime handles routing and serialization transparently. This makes horizontal scaling a first-class concern — you can move actors to different machines without changing application logic."
     },
     {
       "id": "q5",
-      "question": "How do actors achieve concurrency if each actor processes messages sequentially?",
+      "question": "In Erlang's 'let it crash' philosophy, what should a worker actor do when it receives a message that puts it in an unexpected or corrupted state?",
       "type": "mcq",
       "options": [
-        "They cannot — sequential processing means no concurrency",
-        "They use async/await internally to interleave message handling",
-        "Thousands of actors each process their own mailboxes simultaneously across cores",
-        "A global thread pool processes all actor mailboxes in round-robin order"
+        "Catch all exceptions, log them, and continue processing the next message",
+        "Retry the failed operation up to five times with exponential backoff",
+        "Crash immediately and let the supervision tree handle recovery with a clean restart",
+        "Notify all sibling actors and request they pause before the actor terminates"
       ],
       "correct": 2,
-      "explanation": "Concurrency in the Actor Model comes from having many actors, each running independently. While each actor is sequential internally (processing one message at a time), many actors run concurrently across CPU cores, achieving massive parallelism without any shared state."
+      "explanation": "'Let it crash' means worker actors should not attempt complex in-place recovery from unexpected state — that code is hard to write correctly and leaves the actor in an unknown state. Instead, crash cleanly. The supervisor detects the crash signal, applies the restart strategy (one-for-one, etc.), and relaunches the actor with a fresh initial state. This is more reliable than trying to recover from unknown bad state."
     },
     {
       "id": "q6",
-      "question": "What restart strategy does 'one-for-one' supervision apply when a child actor crashes?",
+      "question": "Which supervision restart strategy restarts ONLY the specific child actor that crashed, leaving all siblings running?",
       "type": "mcq",
       "options": [
-        "Restart all child actors regardless of which one crashed",
-        "Restart only the crashed child actor",
-        "Terminate all children and the supervisor itself",
-        "Restart all children that were started after the crashed one"
+        "one-for-all — restarts all children when any one crashes",
+        "rest-for-one — restarts the crashed child and all children started after it",
+        "one-for-one — restarts only the crashed child",
+        "all-for-one — stops the supervisor and all children then restarts from scratch"
       ],
-      "correct": 1,
-      "explanation": "'One-for-one' restarts only the specific child that crashed, leaving all siblings running. This is the least disruptive strategy and appropriate when actors are independent. 'One-for-all' restarts all siblings when any one crashes."
+      "correct": 2,
+      "explanation": "One-for-one restarts only the specific child that crashed. It is the least disruptive strategy and appropriate when children are independent — for example, a pool of connection-handler actors where each handles a different client. One-for-all restarts all siblings and is used when children are interdependent."
     },
     {
       "id": "q7",
-      "question": "What is the primary advantage of message passing over shared memory concurrency?",
+      "question": "What is the primary performance cost of message passing compared to direct shared-memory access?",
       "type": "mcq",
       "options": [
-        "Lower memory usage",
-        "No need for locks, eliminating deadlocks and race conditions",
-        "Faster execution due to less copying",
-        "Simpler CPU cache behavior"
+        "Message passing requires more CPU cores than shared memory",
+        "Messages must be copied (or serialized for remote actors), adding memory copy latency — negligible for small messages but significant for large payloads in tight loops",
+        "Message passing requires a global garbage collection pause before each send",
+        "The actor runtime consumes twice as much RAM as an equivalent thread-pool implementation"
       ],
       "correct": 1,
-      "explanation": "Message passing eliminates shared mutable state, so there is nothing to lock. With no locks, there can be no deadlocks (circular lock waiting) or data races (concurrent unsynchronized access). The tradeoff is serialization overhead for messages."
+      "explanation": "Message passing requires copying data so that the sender and receiver each have independent copies (no shared reference). For small messages this is nanoseconds on modern hardware. For large payloads in performance-critical inner loops (audio DSP, matrix math), this copying overhead can matter, which is why SharedArrayBuffer + Atomics is preferred in those specific scenarios."
     },
     {
       "id": "q8",
-      "question": "Which real-world system famously demonstrated the Actor Model's scalability at 2 million concurrent connections on a single server?",
+      "question": "What is a mailbox 'hot spot' in an actor system, and what does it indicate?",
       "type": "mcq",
       "options": [
-        "Redis using an event loop",
-        "WhatsApp using Erlang",
-        "Nginx using OS threads",
-        "Kafka using the Reactor pattern"
+        "An actor whose CPU usage exceeds 90% — indicating it needs to be split into smaller actors",
+        "A condition where an actor's mailbox grows unboundedly because messages arrive faster than the actor processes them — indicating a backpressure problem",
+        "A supervisor actor that is restarting children more than twice per second — indicating an instability loop",
+        "A remote actor node that has higher network latency than local actors"
       ],
       "correct": 1,
-      "explanation": "WhatsApp used Erlang's actor-based concurrency to achieve 2 million simultaneous connections on a single server at their peak. Erlang's lightweight actor processes (not OS threads) and supervision trees made this scale feasible."
+      "explanation": "A hot spot occurs when a sender (or many senders) produce messages faster than a receiver actor can consume them. The mailbox grows without bound, eventually exhausting memory. The solution is backpressure: slow down senders, add more actors in a pool (router pattern), or apply admission control. Monitoring mailbox depth is a key operational metric in actor-based systems."
     },
     {
       "id": "q9",
-      "question": "When is shared memory (`SharedArrayBuffer` + Atomics) preferred over message passing in JavaScript?",
+      "question": "Which real-world system famously demonstrated the Actor Model's scalability at 2 million simultaneous connections per server with a team of only 50 engineers?",
       "type": "mcq",
       "options": [
-        "For all inter-worker communication",
-        "When building supervision trees",
-        "For tight inner loops where serialization latency is unacceptable",
-        "When location transparency is required"
+        "Redis, using a single-threaded event loop with non-blocking I/O",
+        "WhatsApp, using Erlang actors on the BEAM virtual machine",
+        "Nginx, using an OS-thread-per-connection model with kernel splice",
+        "Apache Kafka, using the Reactor pattern with partitioned logs"
       ],
-      "correct": 2,
-      "explanation": "Message passing serializes data (structured clone algorithm) which adds latency and CPU cost. For performance-critical inner loops — real-time audio, scientific computation — sharing a `SharedArrayBuffer` between workers avoids serialization, at the cost of requiring explicit Atomic operations."
+      "correct": 1,
+      "explanation": "WhatsApp ran on Erlang, achieving 2 million simultaneous connections on a single server. Erlang's lightweight actor processes (each ~2-4 KB) and the BEAM VM's per-core scheduling made this possible. At acquisition by Facebook in 2014, WhatsApp served 450 million users with 50 engineers — a ratio only possible with the operational simplicity that actors and supervision trees provide."
     },
     {
       "id": "q10",
-      "question": "An actor receives a 'GET' request and responds with a copy of its internal counter value. Why is returning a copy important?",
+      "question": "A counter actor receives a 'GET' message and returns a reply. Why should it return a copy of its count value rather than a reference to its internal state object?",
       "type": "mcq",
       "options": [
-        "Copies are faster to transmit than references",
-        "Returning a reference would expose the actor's private state, allowing external mutation",
-        "The Actor Model requires all messages to be serialized to JSON",
-        "Copies prevent garbage collection issues"
+        "Copies serialize to JSON more efficiently than object references across the network",
+        "Returning an object reference would allow the recipient to mutate the actor's private state directly, violating the exclusive-ownership invariant that makes the Actor Model safe",
+        "The Actor Model requires all messages to use only primitive types — no objects allowed",
+        "Returning references causes the garbage collector to pin the actor's heap, increasing memory pressure"
       ],
       "correct": 1,
-      "explanation": "Returning a reference (pointer) to internal state would allow the recipient to modify that state directly, bypassing the actor's message-based access control. Returning a copy (or immutable value) preserves the invariant that only the actor itself can mutate its own state."
+      "explanation": "The Actor Model's safety guarantee rests on the invariant that only the actor itself can modify its own state. Returning a mutable reference to internal state allows the recipient to bypass this invariant and mutate the state directly — creating exactly the kind of shared mutable state the model is designed to eliminate. Always return copies or immutable values in reply messages."
     }
   ]
 }

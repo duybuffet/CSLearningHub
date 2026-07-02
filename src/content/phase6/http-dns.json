@@ -5,57 +5,121 @@
   "week": 22,
   "icon": "network",
   "tagline": "How browsers turn a URL into pixels — DNS resolution, HTTP request-response, TLS handshake, REST conventions, and WebSockets.",
-  "readTime": "~15 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "When you type `https://example.com/api/users` and press Enter, a remarkable chain of events unfolds: your OS asks DNS for the IP address, your browser establishes a TCP connection, TLS negotiates encryption, and an HTTP request travels to the server. The response — JSON, HTML, an image — comes back in milliseconds. Every web application is built on this stack.\n\n**HTTP** (HyperText Transfer Protocol) is a stateless request-response protocol at Layer 7. **HTTPS** adds TLS (Transport Layer Security) underneath HTTP, encrypting everything so eavesdroppers see only ciphertext. **DNS** (Domain Name System) is the internet's distributed phone book, translating human-readable hostnames into IP addresses. Understanding all three is foundational for building and debugging any web service."
+      "content": "Every time you type a URL and press Enter, an invisible symphony plays out in the background. Before a single byte of HTML or JSON lands in your browser, your operating system must translate a human-readable name like `api.example.com` into a numeric IP address. Then a TCP connection is opened, a cryptographic handshake negotiates a shared secret, and an HTTP request travels across the public internet — all before you see the first character of a response. This chain is so fast and so reliable that we take it for granted, yet it underpins every website, REST API, and mobile app backend you will ever build.\n\n**HTTP** (HyperText Transfer Protocol) is the application-layer protocol that defines how clients and servers exchange requests and responses. It is stateless by design — each request carries all the information needed to process it independently, which is what makes HTTP services easy to scale horizontally. **HTTPS** is HTTP layered on top of **TLS** (Transport Layer Security), which provides confidentiality, integrity, and authentication. Without TLS, anyone on the same network could read or tamper with your traffic. **DNS** (Domain Name System) is the distributed global directory that maps hostnames to IP addresses — a critical piece of infrastructure that most developers interact with daily yet rarely think about deeply.\n\nUnderstanding these three systems is not merely academic. You will use this knowledge to debug mysterious timeouts (often a DNS caching issue), explain why CORS preflight requests exist (a consequence of HTTP's security model), choose the right status codes for your API (affecting client retry logic and CDN caching), and configure TLS correctly so that browsers do not show scary security warnings to your users. This chapter builds each layer from first principles, then shows how they compose into the full stack you use every day."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant B as Browser\n    participant R as Recursive Resolver\n    participant Root as Root Nameserver\n    participant TLD as TLD Nameserver\n    participant Auth as Authoritative NS\n    B->>R: Who is example.com?\n    R->>Root: Who handles .com?\n    Root->>R: TLD NS for .com\n    R->>TLD: Who handles example.com?\n    TLD->>R: Authoritative NS for example.com\n    R->>Auth: What is the A record for example.com?\n    Auth->>R: 93.184.216.34 (TTL 3600)\n    R->>B: 93.184.216.34 (cached)\n    Note over B,R: Subsequent lookups hit cache until TTL expires",
-      "caption": "DNS iterative resolution: the resolver queries the hierarchy (root → TLD → authoritative) then caches the answer for TTL seconds."
+      "mermaid": "sequenceDiagram\n    participant U as User (Browser)\n    participant DNS as DNS Resolver\n    participant TCP as TCP Layer\n    participant TLS as TLS Layer\n    participant SRV as Server\n    U->>DNS: Resolve api.example.com\n    DNS-->>U: 93.184.216.34\n    U->>TCP: SYN (connect to :443)\n    TCP-->>U: SYN-ACK\n    U->>TLS: ClientHello\n    TLS-->>U: ServerHello + Cert + Finished\n    U->>SRV: GET /api/users HTTP/1.1\n    SRV-->>U: 200 OK + JSON body",
+      "caption": "The full journey from URL to response: DNS resolves the name, TCP opens the connection, TLS negotiates encryption, then HTTP carries the actual request and response."
     },
     {
       "type": "analogy",
-      "title": "DNS as a Hierarchical Phone Book",
-      "content": "Imagine wanting the phone number of 'Alice at Acme Corp'. You call the **Directory Assistance** operator (recursive resolver). They check their notes — not listed. They call the **Country Directory** (root nameserver) who says 'companies in this country use the Business Registry'. They call the **Business Registry** (TLD nameserver for `.com`) who says 'Acme Corp uses its own internal directory'. Finally they call **Acme's internal directory** (authoritative nameserver) and get Alice's number.\n\nThe operator writes the number on a sticky note with an expiry time (**TTL**). Next time someone asks for Alice's number, the operator uses the sticky note without repeating the whole chain. This **caching** is why DNS propagation after changing records takes time — old sticky notes haven't expired yet."
+      "title": "DNS as a Hierarchical Phone Book with Sticky Notes",
+      "content": "Imagine you want to call someone named Alice who works at Acme Corp, but you only know the company name. You call a **Directory Assistance** operator — this is your **recursive resolver**, the intermediary who does the legwork on your behalf.\n\nThe operator does not personally know every phone number in the world, so they start at the top. They call the **Country Headquarters** — the **root nameserver** — who says 'I do not have Acme Corp's number, but companies in this country register with the Business Directory.' The operator calls the **Business Directory** — the **TLD nameserver** for `.com` — who says 'Acme Corp has their own internal directory service, here is its number.' The operator calls **Acme Corp's internal directory** — the **authoritative nameserver** — who finally says 'Alice is at extension 34, and that number is valid for the next hour.'\n\nThe operator writes Alice's number on a **sticky note** with an expiry time — this is the **TTL (Time To Live)**. The next time someone asks for Alice's number within that hour, the operator reads from the sticky note without repeating the entire chain. This is DNS **caching**. When Alice changes offices (the server changes IP), the old sticky notes must expire before the new number propagates everywhere — this is why DNS changes can take time to 'propagate' globally, sometimes hours if TTL was set high."
     },
     {
       "type": "explanation",
-      "content": "**HTTP methods** encode the intended action on a resource. `GET` retrieves (idempotent, no body). `POST` creates or submits (not idempotent). `PUT` replaces a resource completely (idempotent). `PATCH` applies a partial update. `DELETE` removes a resource (idempotent). `HEAD` fetches headers only — useful to check Last-Modified without downloading the body. **Idempotent** means repeating the request has the same effect as one request — crucial for retry logic.\n\n**HTTP status codes** group into five classes: `1xx` informational, `2xx` success (`200 OK`, `201 Created`, `204 No Content`), `3xx` redirection (`301 Moved Permanently`, `302 Found`, `304 Not Modified`), `4xx` client errors (`400 Bad Request`, `401 Unauthorized`, `403 Forbidden`, `404 Not Found`, `429 Too Many Requests`), `5xx` server errors (`500 Internal Server Error`, `502 Bad Gateway`, `503 Service Unavailable`). Using correct codes is not ceremonial — clients and proxies make caching and retry decisions based on them.\n\n**HTTPS and TLS**: TLS (v1.3 is current) performs a **handshake** before HTTP data flows: the server sends its certificate (signed by a trusted CA), the client verifies it, they agree on a cipher suite and exchange key material, then all subsequent data is encrypted with symmetric keys. TLS 1.3 reduced the handshake from 2 round trips (TLS 1.2) to **1 round trip** (and 0-RTT resumption for repeat connections). **WebSockets** upgrade an HTTP connection to a persistent full-duplex channel — the client sends an `Upgrade: websocket` header and, after a handshake, both sides can push messages at any time without polling."
+      "title": "DNS: The Internet's Distributed Directory",
+      "content": "DNS is a **hierarchical, delegated, distributed** database. No single server knows all the answers; instead, authority is divided across millions of nameservers organized in a tree structure that mirrors the domain name hierarchy itself.\n\n**The hierarchy from top to bottom:**\n\nAt the apex are the **root nameservers** — there are exactly 13 logical root nameserver addresses (labeled A through M), each operated as a global **anycast** cluster of hundreds of physical machines. They know only one thing: which nameservers are responsible for each top-level domain (TLD) like `.com`, `.org`, `.io`, `.uk`.\n\n**TLD nameservers** are operated by registry organisations — Verisign runs `.com` and `.net`, for example. They store **NS records** (nameserver records) pointing to the authoritative nameservers for each registered domain under their TLD.\n\n**Authoritative nameservers** are the final authority for a specific domain. When you buy `example.com` and configure it with Cloudflare, AWS Route 53, or your registrar, those become the authoritative servers. They hold the actual records: `A` records mapping the domain to an IPv4 address, `AAAA` records for IPv6, `CNAME` aliases, `MX` records for mail, `TXT` records for verification and email security (SPF, DKIM), and more.\n\n**The recursive resolver** (also called a recursor or full-service resolver) is typically provided by your ISP, your corporate network, or a public service like `8.8.8.8` (Google) or `1.1.1.1` (Cloudflare). It handles the iterative queries up the hierarchy on your behalf and caches the results. Your OS's stub resolver simply sends a query to this resolver and waits for a complete answer.\n\n**TTL and propagation:** Every DNS record has a TTL in seconds. A TTL of 3600 means resolvers cache the answer for one hour. Lowering TTL to 60 seconds before changing an IP lets changes propagate within a minute globally; forgetting to lower it first means your old IP could be served from caches for hours after you update the authoritative record."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    Note over C,S: TLS 1.3 Handshake\n    C->>S: ClientHello (ciphers, key_share)\n    S->>C: ServerHello + Certificate + Finished\n    C->>S: Finished\n    Note over C,S: 1 RTT — symmetric keys derived\n    C->>S: GET /api/users HTTP/1.1\n    S->>C: 200 OK + JSON body\n    Note over C,S: All HTTP encrypted inside TLS record",
-      "caption": "TLS 1.3 handshake needs only 1 round trip before encrypted HTTP can flow, compared to TLS 1.2's 2 RTTs."
+      "mermaid": "sequenceDiagram\n    participant R as Recursive Resolver\n    participant Root as Root NS (13 clusters)\n    participant TLD as TLD NS (.com)\n    participant Auth as Auth NS (example.com)\n    R->>Root: Who handles .com?\n    Root-->>R: TLD NS IPs for .com\n    R->>TLD: Who handles example.com?\n    TLD-->>R: NS: ns1.cloudflare.com\n    R->>Auth: A record for api.example.com?\n    Auth-->>R: 93.184.216.34 TTL 300\n    Note over R: Cached 300 seconds",
+      "caption": "Iterative DNS resolution: the recursive resolver queries each level of the hierarchy in turn, caching the answer at each step."
+    },
+    {
+      "type": "explanation",
+      "title": "DNS Record Types in Practice",
+      "content": "**A record** — Maps a hostname to a single IPv4 address. You can have multiple A records for the same name (round-robin load balancing at the DNS level). Example: `api.example.com → 93.184.216.34`.\n\n**AAAA record** — Same as A, but for IPv6 addresses (`2606:2800:220:1:248:1893:25c8:1946`). Modern resolvers query both A and AAAA simultaneously (the 'Happy Eyeballs' algorithm).\n\n**CNAME record** — Canonical name alias. `www.example.com CNAME example.com` means 'resolve `www.example.com` by looking up `example.com`.' CNAMEs cannot coexist with other records at the same name — this is a common trap when trying to use a CNAME at the zone apex (root of the domain). Many DNS providers solve this with a proprietary 'ALIAS' or 'ANAME' flattening record.\n\n**MX record** — Mail exchanger. Specifies which server receives email for a domain, along with a **priority** (lower = preferred). `example.com MX 10 mail.example.com, 20 backup-mail.example.com`.\n\n**TXT record** — Arbitrary text. The Swiss Army knife of DNS: used for **SPF** (specifying which servers may send email as your domain), **DKIM** (public key for email signing), **DMARC** (email authentication policy), and domain ownership verification by services like Google Search Console.\n\n**NS record** — Delegates a zone (or subdomain) to specific nameservers. The NS records at the TLD level are what make the DNS hierarchy work — they tell resolvers 'for anything under `example.com`, ask these nameservers.'\n\n**SOA record** — Start of Authority. One per zone; contains zone metadata including the primary nameserver, admin email, serial number (incremented on every change to trigger zone transfers), and default TTL values.\n\n**SRV record** — Service location. `_http._tcp.example.com SRV 0 5 80 www.example.com` specifies the host and port for a service. Used by SIP, XMPP, and some service-discovery protocols, though most web services have moved to environment variables or service meshes instead."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP: The Request-Response Protocol",
+      "content": "HTTP was designed by Tim Berners-Lee in 1989 and first formalised as HTTP/1.0 in 1996. It is a **text-based, stateless, application-layer** protocol built on top of TCP. 'Stateless' is a deliberate design choice: each HTTP request stands alone, carrying all the context needed to process it. This makes HTTP services horizontally scalable — any server that handles `GET /users/42` can serve the same request, because no server-side session is required.\n\n**An HTTP request has three parts:**\n\n1. **Request line** — method, path, and HTTP version. Example: `GET /api/users/42 HTTP/1.1`\n2. **Headers** — key-value metadata. `Host: api.example.com`, `Authorization: Bearer eyJ...`, `Content-Type: application/json`, `Accept: application/json`, `Cache-Control: no-cache`.\n3. **Body** — optional payload, present for POST/PUT/PATCH. The `Content-Type` header tells the server how to parse it.\n\n**An HTTP response similarly has three parts:**\n\n1. **Status line** — HTTP version, numeric status code, reason phrase. Example: `HTTP/1.1 200 OK`\n2. **Headers** — `Content-Type: application/json`, `Cache-Control: max-age=3600`, `ETag: \"abc123\"`, `Set-Cookie: session=...`\n3. **Body** — the response payload (HTML, JSON, binary).\n\n**HTTP/2** (2015) kept the same semantics but overhauled the wire format: header compression (HPACK), binary framing, and **multiplexing** — multiple requests share a single TCP connection without head-of-line blocking. **HTTP/3** (2022) replaces TCP with **QUIC** (built on UDP), eliminating TCP's head-of-line blocking entirely and improving performance on lossy connections like mobile networks."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"HTTP Request\"] --> B[\"Request Line\\nGET /api/users HTTP/1.1\"]\n    A --> C[\"Headers\\nHost, Auth, Content-Type\"]\n    A --> D[\"Body\\nJSON / form data (optional)\"]\n    E[\"HTTP Response\"] --> F[\"Status Line\\nHTTP/1.1 200 OK\"]\n    E --> G[\"Headers\\nContent-Type, Cache-Control, ETag\"]\n    E --> H[\"Body\\nJSON / HTML / binary\"]",
+      "caption": "Structure of HTTP request and response — each message is a status line, headers, and an optional body."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP Methods: Semantics Matter",
+      "content": "HTTP defines a small set of **methods** (also called verbs) that encode the intended action. Using them correctly is not ceremony — caches, proxies, browsers, and REST clients all make decisions based on method semantics.\n\n**GET** — Retrieve a resource. **Safe** (no side effects on the server) and **idempotent** (repeating it gives the same result). Browsers cache GET responses; proxies may too. Never put sensitive data in a GET URL — it ends up in server logs, browser history, and referrer headers.\n\n**POST** — Submit data to create a resource or trigger an action. **Not safe**, **not idempotent** — submitting a form twice may create two records. POST bodies carry the payload; POST responses typically return `201 Created` with a `Location` header pointing to the new resource.\n\n**PUT** — Replace a resource in its entirety. **Idempotent** — putting the same document twice results in the same state as putting it once. If you want `PUT /users/42` to update only the name, you must send the full user object, not just the name field.\n\n**PATCH** — Partial update. Only send the fields you want to change. Not guaranteed idempotent by the spec (the patch document could describe relative changes like 'increment counter by 1'), but implementations that use it for simple field updates treat it as idempotent in practice.\n\n**DELETE** — Remove a resource. Idempotent — deleting a resource that is already gone is still a success (or a `404`, but not an error the client should not handle). Returns `204 No Content` on success typically.\n\n**HEAD** — Same as GET but without the response body. Useful to check `Content-Length`, `Last-Modified`, or `ETag` before deciding whether to download a large file. Efficient health checks and cache validation use HEAD.\n\n**OPTIONS** — Describe the allowed methods for a resource. Browsers send **CORS preflight** requests using OPTIONS when a cross-origin request includes custom headers or uses methods other than GET/POST — the browser first asks 'is this allowed?' before sending the actual request.\n\n**Idempotency is critical for retry logic.** If a GET, PUT, or DELETE times out, you can safely retry it — you know it will produce the same result as one successful call. If a POST times out, retrying may create duplicate resources — you need idempotency keys or deduplication on the server side."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP Status Codes: Load-Bearing Metadata",
+      "content": "Status codes are not cosmetic — they drive behaviour in clients, proxies, CDNs, and load balancers. Using the wrong code is a bug, not a stylistic choice.\n\n**2xx — Success:** `200 OK` is the standard success for GET and POST. `201 Created` should accompany POST responses that create a new resource, and should include a `Location` header with the URL of the new resource. `204 No Content` signals success with no body — appropriate for DELETE and some PATCH operations. `206 Partial Content` is used for byte-range requests (video streaming, resumable downloads).\n\n**3xx — Redirection:** `301 Moved Permanently` tells clients (and search engines) to update their bookmarks — the resource has a new permanent URL. `302 Found` (temporary redirect) is used for transient redirects, like after a POST-redirect-GET pattern. `304 Not Modified` is the cache validation response: 'you already have the current version, use your cached copy.' This saves bandwidth without the client needing to guess. `307 Temporary Redirect` and `308 Permanent Redirect` are modern equivalents of 302/301 that guarantee the method is preserved (a POST to a 307 target stays POST; a POST to a 302 target historically became GET).\n\n**4xx — Client errors:** The client did something wrong. `400 Bad Request` — malformed syntax or invalid parameters. `401 Unauthorized` — authentication required or credentials invalid (despite the name, it means 'unauthenticated'). `403 Forbidden` — authenticated but not permitted. `404 Not Found` — resource does not exist at this path. `405 Method Not Allowed` — the method is not supported on this endpoint. `409 Conflict` — state conflict (trying to create a duplicate, or optimistic locking failure). `422 Unprocessable Entity` — syntactically valid but semantically invalid (common in Rails and NestJS for validation failures). `429 Too Many Requests` — rate limit exceeded; should include `Retry-After` header.\n\n**5xx — Server errors:** The server failed. `500 Internal Server Error` — unhandled exception. `502 Bad Gateway` — the upstream server (behind your load balancer or reverse proxy) returned an invalid response. `503 Service Unavailable` — server is overloaded or down for maintenance; include `Retry-After` when possible. `504 Gateway Timeout` — upstream did not respond in time.\n\nA critical distinction: **4xx means do NOT retry without fixing the request** (retrying a 400 will always fail). **5xx often means retry with exponential backoff** — the server may recover. The exception is `501 Not Implemented` and `505 HTTP Version Not Supported` which are not transient."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// ── Fetch API: HTTP methods, headers, error handling ─────────\nasync function apiClient(baseUrl) {\n  async function request(method, path, body) {\n    const options = {\n      method,\n      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },\n    };\n    if (body !== undefined) options.body = JSON.stringify(body);\n\n    const res = await fetch(`${baseUrl}${path}`, options);\n\n    // fetch() does NOT throw on 4xx/5xx — check res.ok\n    if (!res.ok) {\n      const errorBody = await res.text().catch(() => '');\n      throw new Error(`HTTP ${res.status} ${res.statusText}: ${errorBody}`);\n    }\n    // 204 No Content has no body to parse\n    if (res.status === 204) return null;\n    return res.json();\n  }\n\n  return {\n    get:    (path)        => request('GET',    path),\n    post:   (path, body)  => request('POST',   path, body),\n    put:    (path, body)  => request('PUT',    path, body),\n    patch:  (path, body)  => request('PATCH',  path, body),\n    delete: (path)        => request('DELETE', path),\n  };\n}\n\n// ── WebSocket: bidirectional real-time channel ───────────────\nfunction createWebSocket(url) {\n  const ws = new WebSocket(url);\n\n  ws.addEventListener('open', () => {\n    console.log('WS connected');\n    ws.send(JSON.stringify({ type: 'subscribe', channel: 'prices' }));\n  });\n\n  ws.addEventListener('message', (event) => {\n    const data = JSON.parse(event.data);\n    console.log('Received:', data);\n  });\n\n  ws.addEventListener('close', ({ code, reason }) => {\n    console.log(`WS closed: ${code} ${reason}`);\n    // Implement exponential backoff reconnect here\n  });\n\n  ws.addEventListener('error', (err) => console.error('WS error', err));\n\n  return { send: (msg) => ws.send(JSON.stringify(msg)), close: () => ws.close() };\n}\n\n// Usage (browser/Deno environment):\n// const api = await apiClient('https://api.example.com');\n// const users = await api.get('/users');\n// const newUser = await api.post('/users', { name: 'Alice', email: 'a@example.com' });\n// await api.delete('/users/42');\n// const ws = createWebSocket('wss://stream.example.com/live');",
-      "explanation": "`fetch()` is the modern browser/Node.js (v18+) HTTP API. The critical gotcha: `fetch` only rejects on network failure, not on 4xx/5xx responses — you must check `res.ok` or `res.status`. The WebSocket API is event-driven; once upgraded from HTTP, both client and server can push messages at any time — no polling needed. Use `wss://` (WebSocket over TLS) in production."
+      "label": "Example",
+      "code": "// ── Production-grade fetch wrapper with retry, error handling ────\nasync function httpClient(baseUrl, defaultHeaders = {}) {\n  async function request(method, path, body, retries = 3) {\n    const options = {\n      method,\n      headers: {\n        'Content-Type': 'application/json',\n        'Accept': 'application/json',\n        ...defaultHeaders,\n      },\n    };\n    if (body !== undefined) options.body = JSON.stringify(body);\n\n    for (let attempt = 1; attempt <= retries; attempt++) {\n      let res;\n      try {\n        res = await fetch(`${baseUrl}${path}`, options);\n      } catch (networkErr) {\n        // Network-level failure (DNS error, connection refused)\n        if (attempt === retries) throw networkErr;\n        await sleep(2 ** attempt * 100); // exponential backoff\n        continue;\n      }\n\n      // 5xx: safe to retry (server-side transient failure)\n      if (res.status >= 500 && attempt < retries) {\n        const retryAfter = res.headers.get('Retry-After');\n        const delay = retryAfter ? Number(retryAfter) * 1000 : 2 ** attempt * 200;\n        await sleep(delay);\n        continue;\n      }\n\n      // 4xx: client error, never retry (fixing the request is needed)\n      if (!res.ok) {\n        const errorBody = await res.text().catch(() => '');\n        const err = new Error(`HTTP ${res.status}: ${errorBody}`);\n        err.status = res.status;\n        throw err;\n      }\n\n      // 204 No Content — success with empty body\n      if (res.status === 204) return null;\n      return res.json();\n    }\n  }\n\n  const sleep = ms => new Promise(r => setTimeout(r, ms));\n\n  return {\n    get:    (path)        => request('GET',    path),\n    post:   (path, body)  => request('POST',   path, body),\n    put:    (path, body)  => request('PUT',    path, body),\n    patch:  (path, body)  => request('PATCH',  path, body),\n    delete: (path)        => request('DELETE', path),\n  };\n}\n\n// Usage example:\n// const api = httpClient('https://api.example.com', {\n//   'Authorization': `Bearer ${token}`\n// });\n// const users = await api.get('/users');\n// const newUser = await api.post('/users', { name: 'Alice', email: 'a@b.com' });\n// await api.delete('/users/42'); // returns null (204)\n\n// ── REST URL conventions ──────────────────────────────────────\n// GET    /users           → list users (paginated)\n// POST   /users           → create user (returns 201 + Location)\n// GET    /users/:id       → get one user (404 if not found)\n// PUT    /users/:id       → replace user entirely\n// PATCH  /users/:id       → partial update\n// DELETE /users/:id       → delete user (returns 204)\n// GET    /users/:id/posts → nested resource: posts by user",
+      "explanation": "The key insight: `fetch()` only rejects on network-level failures. It resolves for any HTTP response, including 4xx and 5xx. Always check `res.ok` (true for 200–299) or `res.status`. The retry logic here correctly retries 5xx (server errors, safe to retry with backoff) but not 4xx (client errors — retrying without fixing the request wastes resources and is always futile)."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "TLS: How HTTPS Actually Secures Traffic",
+      "content": "TLS (Transport Layer Security, the successor to SSL) provides three guarantees when you connect to an HTTPS endpoint:\n\n1. **Confidentiality** — traffic is encrypted so eavesdroppers see only ciphertext.\n2. **Integrity** — messages are authenticated so tampering is detected.\n3. **Authentication** — the server proves its identity via a **certificate** signed by a trusted **Certificate Authority (CA)**.\n\n**How certificates work:** A TLS certificate is a document that binds a public key to a domain name (and other metadata like organisation and expiry date). It is digitally signed by a CA — a company like Let's Encrypt, DigiCert, or Comodo that browsers and operating systems have agreed to trust. When your browser connects to `https://bank.example.com`, it verifies that the certificate presented covers that domain, is not expired, and is signed by a trusted CA. If any check fails, you see a browser warning.\n\n**The TLS 1.3 handshake (1 round trip):**\n\n- **Client → Server: ClientHello** — 'I support these cipher suites, here is my DH key share.' The client sends its half of the key exchange in the very first message.\n- **Server → Client: ServerHello + Certificate + Finished** — 'Here is my DH key share, here is my certificate, and here is proof I hold the private key. Both sides now derive the same symmetric session keys from the DH exchange.'\n- **Client → Server: Finished** — 'I verified your certificate. Let's start talking.'\n\nAt this point, symmetric keys have been established in **one round trip** (one client-to-server message, one server-to-client reply). Symmetric encryption (AES-GCM) is then used for all subsequent HTTP data — it is far faster than asymmetric (RSA/ECDSA) cryptography.\n\n**TLS 1.2 vs 1.3:** TLS 1.2 required two round trips before data could flow. TLS 1.3 eliminated obsolete cipher suites, changed the handshake to one RTT, and added **0-RTT resumption** for previously-visited sites (the client sends data in the first message using a session ticket from the previous connection). However, 0-RTT data has replay attack risks, so it should only be used for idempotent requests.\n\n**Forward secrecy:** TLS 1.3 mandates ephemeral Diffie-Hellman key exchange, which means session keys are never stored persistently. Even if someone records all your encrypted traffic and later steals the server's private key, they cannot decrypt the old traffic. This property — called **forward secrecy** or **perfect forward secrecy (PFS)** — is a major improvement over older RSA key exchange in TLS 1.0/1.1."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    C->>S: ClientHello (DH key_share, cipher suites)\n    S->>C: ServerHello + Certificate + Finished\n    Note over C,S: Both derive symmetric keys from DH exchange\n    C->>S: Finished (certificate verified)\n    C->>S: GET /api/data (encrypted)\n    S->>C: 200 OK + body (encrypted)",
+      "caption": "TLS 1.3 handshake: one round trip before encrypted HTTP flows. The asymmetric DH exchange derives ephemeral symmetric keys; all data is then encrypted with AES-GCM."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTPS in Production: The Practical Checklist",
+      "content": "Understanding TLS conceptually is one thing; deploying it correctly is another. Here are the operational considerations every developer should know:\n\n**Certificate management:** Let's Encrypt provides free, automatically-renewing 90-day certificates via the ACME protocol. Tools like `certbot` or the `tls-alpn-01` ACME challenge built into Caddy make this nearly automatic. The 90-day lifetime encourages automation — relying on manual renewal is a common source of outages ('the certificate expired over the weekend').\n\n**TLS termination:** In production, TLS is usually terminated at a **load balancer** or **reverse proxy** (nginx, Caddy, AWS ALB, Cloudflare), not in your application server. The proxy handles TLS, and your app receives plain HTTP from a trusted internal network. This simplifies certificate management and lets you use your application framework without TLS configuration.\n\n**HSTS (HTTP Strict Transport Security):** The `Strict-Transport-Security` response header tells browsers 'for the next N seconds, always connect to this domain over HTTPS, even if the user types `http://`.' This prevents **SSL stripping attacks** where a man-in-the-middle downgrades an HTTP connection before HTTPS begins. Example: `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`.\n\n**Mixed content:** If an HTTPS page loads any resource (image, script, API request) over plain HTTP, the browser blocks or warns. Every resource must be served over HTTPS.\n\n**Certificate pinning:** Mobile apps sometimes pin specific certificates or public keys to prevent attacks using rogue but CA-signed certificates. This is powerful but brittle — if your cert changes, pinned apps break until updated.\n\n**Secure cookie flags:** Session cookies must have `Secure` (only sent over HTTPS), `HttpOnly` (not accessible to JavaScript, preventing XSS theft), and `SameSite=Strict` or `Lax` (prevents CSRF attacks). Forgetting any of these flags is a classic security vulnerability."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"Browser\"] -->|\"HTTPS TLS\"| B[\"Load Balancer / CDN\"]\n    B -->|\"Plain HTTP internal\"| C[\"App Server\"]\n    C -->|\"DB queries\"| D[\"Database\"]\n    B -.->|\"Certificate\\n(Let's Encrypt)\"| E[\"ACME CA\"]",
+      "caption": "Typical production HTTPS architecture: TLS terminates at the load balancer or CDN edge; app servers receive plain HTTP from the trusted internal network."
+    },
+    {
+      "type": "explanation",
+      "title": "WebSockets: Upgrading HTTP to Full-Duplex",
+      "content": "HTTP's request-response model means the server can only send data when the client asks. For real-time applications — chat, live dashboards, collaborative editing, stock tickers — polling (repeatedly asking 'any updates?') is wasteful and slow. **WebSockets** solve this by upgrading an HTTP connection to a persistent, **full-duplex** channel where either side can send messages at any time.\n\n**The WebSocket handshake** starts as a normal HTTP request:\n\n```\nGET /chat HTTP/1.1\nHost: ws.example.com\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\nSec-WebSocket-Version: 13\n```\n\nIf the server accepts, it responds with `101 Switching Protocols`:\n\n```\nHTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\n```\n\nAfter `101`, the HTTP protocol is discarded and the connection operates with WebSocket's lightweight binary **framing protocol**. Messages can be text (UTF-8) or binary, and can be split across multiple frames for large payloads.\n\n**WebSockets vs. alternatives:**\n\n- **Long polling** — client sends a request, server holds it open until there is data, then closes it and the client immediately sends another. Works everywhere but wasteful at scale.\n- **Server-Sent Events (SSE)** — server streams one-way events to the client over a persistent HTTP connection. Simpler than WebSockets for push-only use cases (news feeds, log tailing), supports automatic reconnection natively.\n- **WebSockets** — true bidirectional. Required when the client also needs to push events (multiplayer games, collaborative editing, real-time trading).\n\nIn production, WebSocket connections go through the same TLS (`wss://` instead of `ws://` — always use `wss://`). Load balancers must be configured for **sticky sessions** or session-aware routing, because WebSocket connections are long-lived and stateful. When scaling horizontally, you typically need a **pub/sub broker** (Redis, Kafka) to route messages between WebSocket servers."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// ── HTTP Method Semantics ────────────────────────────────────\n//\n// Method  │ Idempotent │ Safe │ Has Body │ Typical use\n// ────────┼────────────┼──────┼──────────┼──────────────────────\n// GET     │ Yes        │ Yes  │ No       │ Read resource\n// HEAD    │ Yes        │ Yes  │ No       │ Check headers only\n// POST    │ No         │ No   │ Yes      │ Create / trigger action\n// PUT     │ Yes        │ No   │ Yes      │ Replace entire resource\n// PATCH   │ No*        │ No   │ Yes      │ Partial update\n// DELETE  │ Yes        │ No   │ Rarely   │ Remove resource\n// OPTIONS │ Yes        │ Yes  │ No       │ CORS preflight\n//\n// *PATCH idempotency depends on implementation\n\n// ── Key DNS record types ─────────────────────────────────────\nconst DNS_RECORDS = {\n  A:     'Maps hostname → IPv4 address (e.g., example.com → 93.184.216.34)',\n  AAAA:  'Maps hostname → IPv6 address',\n  CNAME: 'Canonical name alias (e.g., www → example.com) — cannot coexist with other records at same name',\n  MX:    'Mail exchange server for the domain',\n  TXT:   'Arbitrary text — used for SPF, DKIM, domain verification',\n  NS:    'Nameservers authoritative for the domain',\n  SOA:   'Start of Authority — zone metadata (TTL defaults, serial number)',\n  SRV:   'Service location record (host, port, priority, weight)',\n};\n\n// ── HTTP Status Code Cheatsheet ──────────────────────────────\nconst STATUS = {\n  200: 'OK',             201: 'Created',          204: 'No Content',\n  301: 'Moved Perm.',    302: 'Found',             304: 'Not Modified',\n  400: 'Bad Request',    401: 'Unauthorized',       403: 'Forbidden',\n  404: 'Not Found',      409: 'Conflict',           422: 'Unprocessable Entity',\n  429: 'Too Many Reqs',  500: 'Internal Error',     502: 'Bad Gateway',\n  503: 'Unavailable',    504: 'Gateway Timeout',\n};\n\n// ── REST URL conventions ─────────────────────────────────────\n// GET    /users           → list all users\n// POST   /users           → create a user\n// GET    /users/:id       → get one user\n// PUT    /users/:id       → replace user\n// PATCH  /users/:id       → partial update\n// DELETE /users/:id       → delete user\n// GET    /users/:id/posts → list posts by user (nested resource)"
+      "label": "Example",
+      "code": "// ── WebSocket client with reconnection and heartbeat ────────────\nfunction createReconnectingWebSocket(url, handlers = {}) {\n  let ws = null;\n  let reconnectDelay = 1000;\n  let heartbeatTimer = null;\n  let isClosed = false;\n\n  function connect() {\n    if (isClosed) return;\n    ws = new WebSocket(url);\n\n    ws.addEventListener('open', () => {\n      console.log('WS connected');\n      reconnectDelay = 1000; // reset backoff on successful connection\n      handlers.onOpen?.();\n\n      // Send a ping every 30 seconds to keep connection alive\n      // (some load balancers close idle connections)\n      heartbeatTimer = setInterval(() => {\n        if (ws.readyState === WebSocket.OPEN) {\n          ws.send(JSON.stringify({ type: 'ping' }));\n        }\n      }, 30_000);\n    });\n\n    ws.addEventListener('message', (event) => {\n      const msg = JSON.parse(event.data);\n      if (msg.type === 'pong') return; // ignore heartbeat responses\n      handlers.onMessage?.(msg);\n    });\n\n    ws.addEventListener('close', ({ code, reason }) => {\n      clearInterval(heartbeatTimer);\n      console.log(`WS closed: ${code} ${reason}`);\n      handlers.onClose?.(code, reason);\n\n      // 1000 = normal closure, 1001 = going away: do not reconnect\n      if (!isClosed && code !== 1000 && code !== 1001) {\n        setTimeout(connect, reconnectDelay);\n        reconnectDelay = Math.min(reconnectDelay * 2, 30_000); // cap at 30s\n      }\n    });\n\n    ws.addEventListener('error', (err) => {\n      console.error('WS error', err);\n      handlers.onError?.(err);\n      // 'error' is always followed by 'close', so reconnect logic is there\n    });\n  }\n\n  connect();\n\n  return {\n    send(msg) {\n      if (ws?.readyState === WebSocket.OPEN) {\n        ws.send(JSON.stringify(msg));\n      } else {\n        console.warn('WS not open, message dropped:', msg);\n      }\n    },\n    close() {\n      isClosed = true;\n      clearInterval(heartbeatTimer);\n      ws?.close(1000, 'Client closed');\n    },\n  };\n}\n\n// Usage:\n// const socket = createReconnectingWebSocket('wss://ws.example.com/live', {\n//   onOpen: () => socket.send({ type: 'subscribe', channel: 'prices' }),\n//   onMessage: (msg) => console.log('Got message:', msg),\n//   onClose: (code) => console.log('Disconnected:', code),\n// });\n//\n// Later: socket.send({ type: 'trade', symbol: 'AAPL', qty: 10 });\n// Later: socket.close();",
+      "explanation": "Production WebSocket clients need three things: exponential backoff reconnection (do not hammer the server with immediate reconnects), heartbeat pings (load balancers with idle connection timeouts will silently drop the connection), and safe send guard (check `readyState === OPEN` before sending). Close codes 1000 (normal) and 1001 (going away) signal intentional closure — do not reconnect for these."
+    },
+    {
+      "type": "explanation",
+      "title": "REST Design: Conventions and Common Mistakes",
+      "content": "REST (Representational State Transfer) is an architectural style, not a protocol. A 'RESTful' API uses HTTP semantics correctly to expose resources. Here are the conventions that matter most:\n\n**URLs identify resources, not actions.** The URL `/users/42/activate` is not RESTful — it encodes an action verb. A RESTful equivalent is `PATCH /users/42` with `{ status: 'active' }` in the body, or `POST /users/42/activations` if activation is a separate resource.\n\n**Collections and singletons follow a pattern.** `GET /users` returns a collection. `POST /users` creates a member. `GET /users/42` returns the member. `PUT /users/42` replaces it. `PATCH /users/42` partially updates it. `DELETE /users/42` removes it. This pattern is predictable — any developer can guess how to interact with a new resource type.\n\n**Use query parameters for filtering and pagination, not path segments.** `GET /users?role=admin&page=2&limit=20` is correct. `GET /admin-users/page/2` is not RESTful.\n\n**Return appropriate status codes.** Returning `200 OK` for every response (including errors) forces clients to inspect the body to detect failures — breaking HTTP client libraries, CDN error detection, and observability tooling.\n\n**Common REST mistakes:**\n\n- Using `GET` for operations that change state ('please `GET /delete-user?id=42`') — this is catastrophically wrong because browsers, search engines, and prefetchers will trigger GET requests without user intent.\n- Using `POST` for everything — you lose caching, idempotency semantics, and REST client support.\n- Returning `200` with `{ error: true }` in the body — use `4xx/5xx` status codes.\n- Nesting resources more than two levels deep (`/users/42/posts/7/comments/3/votes/1`) — flatten the URL space instead (`/votes/1`).\n- Not versioning the API — once clients depend on your API shape, breaking changes require versioning (`/api/v2/users`) or content negotiation."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**CORS: Why Browsers Send OPTIONS First**\n\nThe **Same-Origin Policy** is a browser security rule: JavaScript on `app.example.com` cannot make requests to `api.otherdomain.com` without permission. **CORS (Cross-Origin Resource Sharing)** is the mechanism that grants exceptions. For 'simple' requests (GET/POST with certain headers), the browser makes the request and checks the response headers. For 'non-simple' requests — DELETE, PUT, or any custom header like `Authorization` — the browser first sends an **OPTIONS preflight** request to check permission. Your server must respond to OPTIONS with appropriate `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, and `Access-Control-Allow-Headers` headers. If you forget, the browser blocks the actual request — a confusing error since your server may have processed it on the server side. Misconfiguring CORS to `Access-Control-Allow-Origin: *` on authenticated endpoints is a security vulnerability — always be specific about allowed origins in production."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Never roll your own TLS** — always use well-maintained libraries (`https` in Node, your cloud load balancer's TLS termination, or a reverse proxy like nginx/Caddy). The practical HTTPS checklist: use TLS 1.2+ (disable 1.0/1.1), enable **HSTS** (`Strict-Transport-Security` header), set short **certificate TTLs** (Let's Encrypt auto-renews every 90 days), and use `Secure; HttpOnly; SameSite=Strict` flags on session cookies. These five steps eliminate the most common HTTPS deployment vulnerabilities."
+      "content": "**Common interview traps and debugging tips:**\n\n- `fetch()` does NOT throw on 4xx or 5xx — it only rejects on network failures. Always check `res.ok` or `res.status`. This trips up almost every developer coming from `axios` or `curl`.\n- `401 Unauthorized` means **unauthenticated** (bad/missing credentials); `403 Forbidden` means **unauthorized** (authenticated but not permitted). The naming is historical and counterintuitive.\n- DNS TTL lowers must happen BEFORE you change the IP, not after. If TTL is 86400 and you change it to 60 at the same time as the IP, the old TTL (86400) is what caches will respect for the transition window.\n- WebSocket connections fail silently through some proxies — if WS is being blocked, try `wss://` on port 443 (TLS), which looks identical to HTTPS traffic to most proxies.\n- CNAME records cannot be placed at the zone apex (root domain, e.g., `example.com` itself) — use an ALIAS/ANAME record or an A record instead. Only subdomains can be CNAMEs.\n- TLS 1.3's 0-RTT resumption should only be used for `GET` requests — it has replay attack risk for non-idempotent operations."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**DNS resolution** follows a hierarchy: recursive resolver → root → TLD nameserver → authoritative nameserver. Results are cached by TTL, which is why DNS changes take time to propagate.",
-        "**HTTP methods** encode semantics: GET/HEAD/PUT/DELETE are idempotent; POST creates/triggers and is not. Using correct methods enables correct caching, retry logic, and REST client behaviour.",
-        "**Status codes** are load-bearing: `2xx` = success, `3xx` = redirect, `4xx` = client fault (don't retry blindly), `5xx` = server fault (safe to retry with backoff). `fetch()` does not throw on 4xx/5xx — always check `res.ok`.",
-        "**TLS 1.3** negotiates encryption in 1 RTT (vs 2 for TLS 1.2) using asymmetric cryptography to agree on symmetric session keys — the certificate proves server identity; all subsequent HTTP is encrypted.",
-        "**WebSockets** upgrade an HTTP connection to a persistent full-duplex channel — ideal for live dashboards, chat, and collaborative tools where server-push is needed without polling overhead."
+        "**DNS resolution follows a hierarchy** — recursive resolver queries root → TLD → authoritative nameserver — caching results by TTL. Changing DNS records does not propagate until old cache entries expire; lower TTL to 60 seconds before planned changes.",
+        "**HTTP methods carry semantics** that clients, caches, and proxies rely on. GET/HEAD/PUT/DELETE are idempotent (safe to retry); POST is not. Using the wrong method breaks caching, retry logic, and REST client libraries.",
+        "**Status codes are load-bearing** — `2xx` success, `3xx` redirect, `4xx` client fault (do not retry), `5xx` server fault (retry with backoff). `fetch()` never throws on 4xx/5xx — always check `res.ok` or `res.status`.",
+        "**TLS 1.3** completes the handshake in one round trip using ephemeral Diffie-Hellman key exchange, derives symmetric session keys, and provides forward secrecy — even recording all traffic and stealing the server's private key later cannot decrypt past sessions.",
+        "**WebSockets** upgrade an HTTP connection to a persistent full-duplex channel via `Upgrade: websocket` and `101 Switching Protocols`. Use reconnection with exponential backoff, heartbeat pings for idle-connection timeouts, and always use `wss://` in production.",
+        "**CORS preflight (OPTIONS)** is the browser's permission check before a cross-origin non-simple request. Your server must handle OPTIONS with correct `Access-Control-Allow-*` headers; avoid wildcard `*` with authenticated endpoints.",
+        "**HTTPS in production** means TLS termination at the load balancer, automatic certificate renewal (Let's Encrypt), HSTS headers to prevent SSL stripping, and `Secure; HttpOnly; SameSite` flags on all session cookies."
       ]
     }
   ],
@@ -66,118 +130,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What does the DNS 'TTL' field control?",
+      "question": "What does the TTL field in a DNS record control?",
       "type": "mcq",
       "options": [
-        "How long the DNS server waits before timing out a query",
-        "How long resolvers cache a DNS record before re-querying",
-        "The maximum number of DNS servers a query can traverse",
-        "The time-to-live for the TLS certificate associated with a domain"
+        "The time a DNS server waits before timing out a query",
+        "How long resolvers and OS caches keep the answer before re-querying",
+        "The maximum number of nameservers a query may traverse",
+        "The validity period of the TLS certificate for the domain"
       ],
       "correct": 1,
-      "explanation": "TTL (Time To Live) in a DNS record specifies how many seconds resolvers and OS caches should keep the answer before re-querying. A TTL of 3600 means caches hold it for 1 hour. Lowering TTL before a planned IP change reduces propagation time."
+      "explanation": "TTL (Time To Live) specifies how many seconds downstream resolvers and OS caches should keep the DNS answer before discarding it and re-querying. A TTL of 3600 means caches hold the answer for one hour. To minimise propagation delay before changing an IP address, lower the TTL to 60 seconds at least one full TTL period before making the change."
     },
     {
       "id": "q2",
-      "question": "Which HTTP method is both safe AND idempotent?",
+      "question": "Which HTTP method is both SAFE and IDEMPOTENT?",
       "type": "mcq",
-      "options": ["POST", "PUT", "DELETE", "GET"],
+      "options": [
+        "POST",
+        "PUT",
+        "DELETE",
+        "GET"
+      ],
       "correct": 3,
-      "explanation": "GET is both safe (no side effects, does not modify state) and idempotent (repeating it gives the same result). PUT is idempotent but not safe (it modifies state). POST is neither safe nor idempotent. DELETE is idempotent but not safe."
+      "explanation": "GET is safe (no server-side side effects) and idempotent (repeating it produces the same result). PUT is idempotent but not safe — it modifies state. DELETE is idempotent but not safe. POST is neither safe nor idempotent — repeated POSTs may create duplicate resources."
     },
     {
       "id": "q3",
       "question": "A client receives HTTP 401. What does this indicate?",
       "type": "mcq",
       "options": [
-        "The resource was not found",
-        "The client is authenticated but lacks permission",
-        "Authentication is required (or credentials were invalid)",
-        "The server encountered an internal error"
+        "The resource was not found at this URL",
+        "The client is authenticated but lacks the required permission",
+        "Authentication is required or the provided credentials were invalid",
+        "The server encountered an unhandled internal error"
       ],
       "correct": 2,
-      "explanation": "401 Unauthorized means authentication is required or the provided credentials are invalid. 403 Forbidden means the client IS authenticated but does not have permission to access the resource. 404 is not found; 500 is a server error."
+      "explanation": "401 Unauthorized (confusingly named) means the request requires authentication — either no credentials were sent, or the credentials were invalid. 403 Forbidden means the client IS authenticated but does not have permission. 404 is not found; 500 is a server error."
     },
     {
       "id": "q4",
-      "question": "How many round trips does TLS 1.3 require before encrypted data can flow?",
+      "question": "How many round trips does TLS 1.3 require before encrypted HTTP data can flow?",
       "type": "mcq",
-      "options": ["0 (0-RTT resumption for new connections)", "1", "2", "3"],
+      "options": [
+        "0 (data flows in the very first client message for all connections)",
+        "1 (ClientHello → ServerHello+Cert+Finished → client Finished)",
+        "2 (same as TLS 1.2)",
+        "3 (key exchange, certificate verification, and session start)"
+      ],
       "correct": 1,
-      "explanation": "TLS 1.3 requires 1 round trip (ClientHello with key_share → ServerHello + Certificate + Finished → client Finished) before application data flows. TLS 1.2 needed 2 RTTs. 0-RTT is available for resumed sessions but has replay-attack risks."
+      "explanation": "TLS 1.3 completes the handshake in 1 round trip: the client sends ClientHello with a DH key share, the server responds with ServerHello, its certificate, and Finished — both sides can now derive the same symmetric session keys. 0-RTT resumption exists for previously-connected clients but has replay attack risks and is not used for all connections."
     },
     {
       "id": "q5",
-      "question": "What HTTP header does a client send to initiate a WebSocket upgrade?",
+      "question": "What HTTP header does a client include to initiate a WebSocket upgrade?",
       "type": "mcq",
       "options": [
         "Content-Type: websocket",
         "Upgrade: websocket",
         "Protocol-Switch: websocket",
-        "Connection: websocket"
+        "Transfer-Encoding: websocket"
       ],
       "correct": 1,
-      "explanation": "A WebSocket upgrade request includes 'Upgrade: websocket' and 'Connection: Upgrade' headers, plus a 'Sec-WebSocket-Key' nonce. The server responds with 101 Switching Protocols if it accepts the upgrade, then the connection switches to the WebSocket framing protocol."
+      "explanation": "A WebSocket upgrade request includes 'Upgrade: websocket', 'Connection: Upgrade', and 'Sec-WebSocket-Key' (a random nonce). The server responds with 101 Switching Protocols and 'Sec-WebSocket-Accept' (a derived hash). After 101, both sides communicate using the WebSocket framing protocol instead of HTTP."
     },
     {
       "id": "q6",
-      "question": "Which DNS record type is used to map a hostname to an IPv4 address?",
+      "question": "Which DNS record type maps a hostname to an IPv4 address?",
       "type": "mcq",
-      "options": ["CNAME", "MX", "A", "TXT"],
-      "correct": 2,
-      "explanation": "An A record maps a hostname to an IPv4 address (e.g., example.com → 93.184.216.34). AAAA maps to IPv6. CNAME is an alias pointing to another hostname. MX specifies mail servers. TXT holds arbitrary text (SPF, DKIM, etc.)."
+      "options": [
+        "CNAME",
+        "MX",
+        "TXT",
+        "A"
+      ],
+      "correct": 3,
+      "explanation": "An A record maps a hostname directly to an IPv4 address (e.g., example.com → 93.184.216.34). AAAA maps to IPv6. CNAME is an alias pointing to another hostname — the resolver follows the chain. MX specifies mail servers. TXT holds arbitrary text for SPF, DKIM, domain ownership proofs, etc."
     },
     {
       "id": "q7",
-      "question": "A REST API returns 204. What should the client expect?",
+      "question": "An HTTP DELETE request returns 204. What should the client do?",
       "type": "mcq",
       "options": [
-        "A JSON object with an empty array",
-        "A redirect to the created resource",
-        "No response body — the operation succeeded",
-        "An error indicating no content was found"
+        "Retry — 204 indicates partial completion",
+        "Parse the empty body for a result object",
+        "Treat the request as successful and expect no body",
+        "Redirect to the parent collection URL"
       ],
       "correct": 2,
-      "explanation": "HTTP 204 No Content means the request succeeded but there is no body to return. It is commonly used for DELETE and PATCH operations where returning the full resource is unnecessary. The client should not try to parse a body."
+      "explanation": "HTTP 204 No Content means the request succeeded and there is intentionally no response body. It is the conventional success code for DELETE and some PATCH operations where returning the resource is unnecessary. The client must not attempt to parse a body — there is none."
     },
     {
       "id": "q8",
-      "question": "Why does `fetch()` NOT automatically throw an error on a 404 response?",
+      "question": "Why does fetch() NOT automatically throw an error when the server returns 404?",
       "type": "mcq",
       "options": [
-        "404 is considered a successful response in the HTTP spec",
-        "fetch() only rejects on network-level failures, not HTTP error status codes",
-        "fetch() requires a custom error handler plugin to detect 4xx",
-        "The response body must be read before the status is available"
+        "404 is classified as a successful response in the HTTP specification",
+        "fetch() only rejects its Promise on network-level failures, not HTTP error status codes",
+        "A plugin or interceptor is required to enable HTTP error detection in fetch()",
+        "The response body must be fully read before the status code is available"
       ],
       "correct": 1,
-      "explanation": "fetch() resolves (not rejects) for any complete HTTP response, even 4xx/5xx. It only rejects on network failures (DNS error, connection refused). You must check res.ok (true for 200-299) or res.status to detect HTTP errors and throw manually."
+      "explanation": "fetch() resolves its Promise for any complete HTTP response, including 4xx and 5xx status codes. It only rejects on network-level failures such as DNS resolution failure or connection refused. To detect HTTP errors you must check res.ok (true for 200–299) or res.status and throw manually."
     },
     {
       "id": "q9",
-      "question": "What is the purpose of HSTS (HTTP Strict Transport Security)?",
+      "question": "What property does TLS 1.3's use of ephemeral Diffie-Hellman key exchange provide?",
       "type": "mcq",
       "options": [
-        "Encrypting DNS queries to prevent eavesdropping",
-        "Instructing browsers to only connect to the site over HTTPS for a specified duration",
-        "Requiring two-factor authentication for admin endpoints",
-        "Preventing cross-site request forgery attacks"
+        "Zero round-trip resumption for all connections",
+        "Forward secrecy — past sessions cannot be decrypted even if the server private key is later compromised",
+        "Certificate pinning — the certificate is baked into the client application",
+        "Symmetric key reuse across multiple sessions for performance"
       ],
       "correct": 1,
-      "explanation": "The Strict-Transport-Security header tells browsers to always use HTTPS for the domain (and optionally subdomains) for the specified max-age seconds, even if the user types 'http://'. This prevents SSL-stripping attacks where a MITM downgrades to plain HTTP."
+      "explanation": "Ephemeral DH key exchange means each session generates a fresh key pair that is discarded after use. Session keys are never stored. Even if an attacker records all encrypted traffic and later obtains the server's private key, they cannot derive the session keys and thus cannot decrypt past sessions. This is called forward secrecy (or perfect forward secrecy, PFS)."
     },
     {
       "id": "q10",
-      "question": "In a DNS iterative resolution, which nameserver does the recursive resolver query FIRST?",
+      "question": "In iterative DNS resolution, which server does the recursive resolver query FIRST?",
       "type": "mcq",
       "options": [
-        "The authoritative nameserver for the domain",
-        "The TLD nameserver (e.g., .com servers)",
+        "The authoritative nameserver for the specific domain",
+        "The TLD nameserver (e.g., Verisign's .com servers)",
         "One of the 13 root nameserver clusters",
-        "The ISP's local nameserver"
+        "The client's local ISP nameserver cache"
       ],
       "correct": 2,
-      "explanation": "Iterative resolution starts at the root nameservers (there are 13 root nameserver IP addresses, each operated as an anycast cluster). The root responds with the TLD nameservers (.com, .org, etc.), which in turn respond with the authoritative nameservers for the specific domain."
+      "explanation": "Iterative DNS resolution always starts at the root nameservers — there are 13 root nameserver logical addresses (A through M), each operated as a global anycast cluster of hundreds of physical machines. The root responds with the TLD nameserver addresses for the relevant TLD (.com, .org, etc.), and the resolver then queries the TLD, then the authoritative nameserver for the specific domain."
     }
   ]
 }

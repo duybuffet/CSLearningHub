@@ -5,57 +5,126 @@
   "week": 22,
   "icon": "network",
   "tagline": "TCP's reliable three-way handshake versus UDP's fire-and-forget — why both protocols exist and how to choose between them.",
-  "readTime": "~13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "The Transport layer (Layer 4) is where two programs on different machines actually **talk to each other** via ports. Two protocols dominate: **TCP** (Transmission Control Protocol) guarantees ordered, reliable delivery at the cost of overhead; **UDP** (User Datagram Protocol) fires packets without handshaking or retransmission, sacrificing reliability for speed.\n\nNeither is universally better. TCP powers HTTP, SSH, and databases — anywhere data integrity is non-negotiable. UDP powers DNS, video streaming, online gaming, and WebRTC — anywhere low latency trumps guaranteed delivery. Modern protocols like HTTP/3 (QUIC) even implement reliability *on top of* UDP to get the best of both worlds."
+      "content": "Every program that communicates over a network eventually reduces to one of two fundamental choices: **TCP** (Transmission Control Protocol) or **UDP** (User Datagram Protocol). Both live at the **Transport Layer** (Layer 4) of the OSI model, sitting above IP (which handles addressing and routing) and below HTTP, DNS, SSH, and every other application protocol you have ever used. Their job is to take raw IP packets — unordered, unreliable, best-effort datagrams — and turn them into something application code can actually work with.\n\nTCP makes a bold promise: every byte you send will arrive at the other end, in the exact order you sent it, or you will be told about the failure. It achieves this through a rich set of mechanisms — a connection handshake, sequence numbers, acknowledgements, retransmission, flow control, and congestion control — all transparent to the application. You write to a socket and read from a socket; the kernel handles everything else. This reliability has a cost: latency, overhead, and complexity inside the kernel.\n\nUDP makes no promises at all. It stamps your data with a source port and a destination port, computes a checksum, and sends it. No handshake. No state. No retransmission. If a packet is lost, UDP does not know and does not care. If packets arrive out of order, UDP passes them up out of order. This sounds like a step backward, but it is exactly what low-latency applications need: a video call cannot wait 200 milliseconds for a retransmitted frame that is already stale; a DNS query can simply re-send itself if no reply arrives.\n\nNeither protocol is universally better. Understanding *why* each mechanism in TCP exists, and *when* the overhead is worth paying, is a core competency for backend engineers, systems programmers, and anyone building or diagnosing networked software. This chapter goes through both protocols in depth: their headers, their mechanics, their failure modes, and the modern protocols — especially QUIC — that have learned from both."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    Note over C,S: TCP Three-Way Handshake\n    C->>S: SYN (seq=x)\n    S->>C: SYN-ACK (seq=y, ack=x+1)\n    C->>S: ACK (ack=y+1)\n    Note over C,S: Connection established\n    C->>S: Data segment (seq=x+1)\n    S->>C: ACK (ack=x+1+len)\n    Note over C,S: TCP Four-Way Teardown\n    C->>S: FIN\n    S->>C: ACK\n    S->>C: FIN\n    C->>S: ACK",
-      "caption": "TCP connection lifecycle: three messages to open (SYN, SYN-ACK, ACK), data exchange with acknowledgements, and four messages to close cleanly."
+      "mermaid": "flowchart TD\n    A[\"Application sends data\"] --> B{\"Which protocol?\"}\n    B -->|\"Reliability needed\"| C[\"TCP\\nConnection-oriented\"]\n    B -->|\"Speed needed\"| D[\"UDP\\nConnectionless\"]\n    C --> E[\"Three-way handshake\"]\n    E --> F[\"Ordered, reliable stream\"]\n    F --> G[\"Four-way teardown\"]\n    D --> H[\"Send datagram directly\"]\n    H --> I[\"No confirmation\"]",
+      "caption": "Decision tree: TCP adds connection setup and guarantees; UDP sends immediately with no state."
     },
     {
       "type": "analogy",
-      "title": "Registered Mail vs Dropping a Leaflet",
-      "content": "**TCP** is like sending a registered letter: you get a confirmation the recipient received it, the post office retransmits if delivery fails, letters arrive in order even if they took different routes, and there is a paper trail of acknowledgements. This overhead is worth it for a bank transfer — you absolutely need confirmation.\n\n**UDP** is like dropping leaflets from a plane: fast, cheap, no confirmation, some may miss their targets, order is not guaranteed. For a live radio broadcast or a video call this is fine — a missing frame is imperceptible, but a 200 ms retransmission delay would ruin the experience. The application can implement its own lightweight error-recovery if needed (as QUIC does)."
+      "title": "Registered Mail vs. Dropping Leaflets from a Plane",
+      "content": "**TCP** is like sending a registered letter through a postal service that guarantees delivery. Before your letter is accepted, both you and the post office exchange paperwork to establish the transaction (the handshake). Each letter gets a serial number; if the post office loses one, it re-sends it. Letters always arrive in serial-number order even if they took different routes. You receive a signed confirmation that the letter was delivered. This overhead — the paperwork, the tracking, the confirmation — is worth paying when the contents are irreplaceable: a legal contract, a bank transfer, a software update.\n\n**UDP** is like flying over a city and dropping leaflets. You load the plane, open the hatch, and drop. Some leaflets land on rooftops and are never read. Some blow into the next street. Order is unpredictable. You receive no confirmation whatsoever. But the operation is *fast* and *cheap* — you are broadcasting to thousands of people simultaneously, and if a few miss their leaflet, the message still got through to most of them. For a live radio broadcast, a video conference, or a real-time game update, the same logic applies: a missing frame is imperceptible, but stalling the stream for a retransmission would ruin the experience."
     },
     {
       "type": "explanation",
-      "content": "**TCP's reliability mechanisms** work together. The **three-way handshake** (SYN → SYN-ACK → ACK) establishes synchronised sequence numbers before any data flows, preventing stale packets from previous connections from corrupting new ones. **Sequence numbers** label every byte so the receiver can detect gaps and reorder out-of-sequence segments. **Acknowledgements** confirm receipt; the sender retransmits unacknowledged segments after a timeout. **Checksums** detect corruption at the segment level.\n\n**Flow control** prevents a fast sender from overwhelming a slow receiver. The receiver advertises a **receive window** — the number of bytes it can buffer — and the sender must not exceed it. This window shrinks as the buffer fills and grows as the application consumes data. **Congestion control** prevents a fast sender from overwhelming the *network*. Algorithms like **CUBIC** (Linux default) and **BBR** (Google) probe available bandwidth by watching for packet loss or rising RTT, then back off aggressively when congestion is detected. Slow start begins each connection conservatively, doubling the congestion window every RTT until the first loss.\n\n**UDP** has none of this: no handshake, no sequence numbers, no ACKs, no retransmission, no flow/congestion control. Each datagram is independent and may arrive out of order, duplicated, or not at all. The UDP header is just 8 bytes (source port, dest port, length, checksum) vs TCP's 20-byte minimum header. Applications that use UDP typically implement only the error-recovery they need — DNS just retries the query; a video codec skips the lost frame."
+      "title": "The TCP Segment: What Actually Travels on the Wire",
+      "content": "Before diving into mechanisms, it helps to understand what a TCP segment actually looks like. The **TCP header** is a minimum of **20 bytes** and carries all the metadata that makes reliability possible.\n\nThe most important fields are:\n\n- **Source port** (2 bytes) and **destination port** (2 bytes) — identify which application process on each host is communicating. Port 80 for HTTP, 443 for HTTPS, 22 for SSH, and so on.\n- **Sequence number** (4 bytes) — the byte-stream offset of the first byte in this segment's payload. If the sender has sent 1,000 bytes so far, the next segment's sequence number is 1,000. This is how the receiver detects gaps and reorders out-of-sequence arrivals.\n- **Acknowledgement number** (4 bytes) — the next byte the receiver expects. An ACK of 1,001 means 'I have received everything up to byte 1,000; send me byte 1,001 next.' This is a *cumulative* acknowledgement.\n- **Data offset** (4 bits) — how many 32-bit words are in the header (minimum 5 = 20 bytes; maximum 15 = 60 bytes with options).\n- **Flags** (6 or 9 bits) — SYN, ACK, FIN, RST, PSH, URG (and newer ECE, CWR). These control the connection lifecycle and data urgency.\n- **Window size** (2 bytes) — how many bytes the receiver can accept before needing an ACK. This is the core of flow control.\n- **Checksum** (2 bytes) — a one's-complement sum over the header, payload, and a pseudo-header including the IP addresses. Detects corruption in transit.\n- **Options** — variable-length field used by extensions like **MSS** (Maximum Segment Size negotiation), **SACK** (Selective Acknowledgement), **timestamps**, and **window scaling**.\n\nIn contrast, the **UDP header** is exactly **8 bytes**: source port, destination port, length, checksum. No sequence numbers, no flags, no window. Its simplicity is its feature."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n    subgraph TCP [\"TCP — Reliable\"]\n        T1[\"Handshake\"] --> T2[\"Sequence numbers\"]\n        T2 --> T3[\"ACK + Retransmit\"]\n        T3 --> T4[\"Flow control\"]\n        T4 --> T5[\"Congestion control\"]\n    end\n    subgraph UDP [\"UDP — Fast\"]\n        U1[\"No handshake\"]\n        U2[\"No ordering\"]\n        U3[\"No retransmit\"]\n        U4[\"No flow control\"]\n    end\n    TCP -->|\"Use for\"| AppTCP[\"HTTP, SSH, DB, email\"]\n    UDP -->|\"Use for\"| AppUDP[\"DNS, video, games, QUIC\"]",
-      "caption": "TCP vs UDP feature comparison and their canonical use-cases."
+      "mermaid": "flowchart LR\n    subgraph TCP_H [\"TCP Header (20+ bytes)\"]\n        T1[\"Source Port\\n2 bytes\"]\n        T2[\"Dest Port\\n2 bytes\"]\n        T3[\"Sequence Number\\n4 bytes\"]\n        T4[\"ACK Number\\n4 bytes\"]\n        T5[\"Flags + Window\\n4 bytes\"]\n        T6[\"Checksum + Urgent\\n4 bytes\"]\n    end\n    subgraph UDP_H [\"UDP Header (8 bytes)\"]\n        U1[\"Source Port\\n2 bytes\"]\n        U2[\"Dest Port\\n2 bytes\"]\n        U3[\"Length\\n2 bytes\"]\n        U4[\"Checksum\\n2 bytes\"]\n    end",
+      "caption": "TCP header is 2.5x larger than UDP's even at its minimum size — every extra field serves a specific reliability purpose."
+    },
+    {
+      "type": "explanation",
+      "title": "The Three-Way Handshake: Establishing a Connection",
+      "content": "Before TCP transfers any application data, both sides must agree on **initial sequence numbers** (ISNs). This prevents a stale packet from a previous connection on the same port pair from being mis-delivered into a new connection. The handshake takes exactly three messages:\n\n1. **SYN** — the client picks a random ISN (call it `x`) and sends a segment with the SYN flag set and `seq=x`. The 'random' ISN is security-critical: predictable ISNs enabled TCP session hijacking attacks in the 1990s. Modern kernels use a cryptographic function to generate unpredictable ISNs.\n\n2. **SYN-ACK** — the server picks its own ISN (`y`), acknowledges the client's SYN by setting `ack=x+1` (meaning 'I expect byte x+1 next'), and sets both SYN and ACK flags. The server has now allocated a **half-open connection** in its SYN queue.\n\n3. **ACK** — the client acknowledges the server's SYN with `ack=y+1`. At this point both sides have synchronised sequence numbers in both directions and the connection moves from SYN_RECEIVED to **ESTABLISHED**. Data can now flow.\n\nThe three-way design is the minimum possible. Two messages would leave the server unsure whether the client received the SYN-ACK. Four would be redundant. Three is provably necessary and sufficient to synchronise bidirectional state.\n\n**Half-open connections and the SYN backlog**: Between steps 2 and 3, the server holds state for potentially thousands of half-open connections in a kernel queue. A **SYN flood attack** exploits this: an attacker sends millions of SYN packets with spoofed source IPs so the completing ACK never arrives, exhausting the server's SYN backlog. The solution is **SYN cookies**: instead of storing state, the server encodes the connection parameters into the ISN (`y`) using a cryptographic hash. When the ACK arrives, the server re-derives the parameters from the ACK number without having stored anything."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant S as Server\n    Note over C,S: Three-Way Handshake\n    C->>S: SYN seq=1000\n    S->>C: SYN-ACK seq=5000 ack=1001\n    C->>S: ACK ack=5001\n    Note over C,S: Data Transfer\n    C->>S: Data seq=1001 len=500\n    S->>C: ACK ack=1501\n    Note over C,S: Four-Way Teardown\n    C->>S: FIN seq=1501\n    S->>C: ACK ack=1502\n    S->>C: FIN seq=5001\n    C->>S: ACK ack=5002",
+      "caption": "Full TCP connection lifecycle with concrete sequence numbers. Notice ACK = previous seq + 1, confirming receipt of all prior bytes."
+    },
+    {
+      "type": "explanation",
+      "title": "Reliability: Sequence Numbers, ACKs, and Retransmission",
+      "content": "Once established, TCP treats the data as a **continuous byte stream** rather than individual packets. The sequence number in each segment tells the receiver exactly where in the stream those bytes belong. The receiver's ACK tells the sender exactly how far the stream has been consumed.\n\n**Cumulative acknowledgement** means one ACK can acknowledge thousands of bytes: if the sender sends segments covering bytes 0-499, 500-999, and 1000-1499, a single ACK with `ack=1500` acknowledges all three. This is efficient under normal conditions.\n\n**Retransmission** is triggered in two ways. If the sender's **retransmission timer** expires before an ACK arrives, it assumes the segment was lost and re-sends it. The timeout starts at an estimate of round-trip time (RTT) and backs off exponentially on repeated failures (capped around 60-120 seconds). The RTT estimate uses an exponential moving average that adapts as network conditions change.\n\nA faster trigger is **duplicate ACKs**. If a segment is lost but later segments arrive, the receiver keeps ACKing the last contiguous byte it received. The sender sees the same ACK number three times in a row (**triple duplicate ACK**) and infers that the missing segment is lost without waiting for a timeout. This is **fast retransmit**, and it dramatically reduces latency in the common case of a single dropped packet in an otherwise healthy flow.\n\n**Selective Acknowledgement (SACK)** is a TCP option that extends this further: instead of only ACKing the last contiguous byte, the receiver can report *exactly which ranges* it has received. The sender then retransmits only the missing holes rather than everything after the gap. SACK is now supported by virtually all modern operating systems and is negotiated during the handshake."
+    },
+    {
+      "type": "explanation",
+      "title": "Flow Control: Don't Overwhelm the Receiver",
+      "content": "Reliability is not enough if the sender is faster than the receiver can process. A fast sender could fill the receiver's kernel socket buffer and cause it to drop packets — which TCP would then retransmit endlessly in a loop. **Flow control** prevents this by having the receiver dictate the pace.\n\nEvery TCP ACK carries a **receive window** (`rwnd`) — the number of bytes the receiver can accept into its kernel buffer right now. The sender must not have more than `rwnd` bytes of **unacknowledged data in flight** at any time. As the receiver's application reads data from the buffer (via `recv()` or similar), the kernel increases `rwnd` in subsequent ACKs, allowing the sender to inject more data.\n\nA classic problem is the **silly window syndrome**: if the receiver's application reads data in tiny increments (one byte at a time), it might advertise a window of 1 byte, causing the sender to send 1-byte segments each with a 40-byte TCP+IP header — catastrophically inefficient. **Nagle's algorithm** on the sender side and **Clark's solution** on the receiver side address this by coalescing small writes and delaying window advertisements until a meaningful amount of buffer space has opened up.\n\n**Zero-window probing**: if `rwnd` drops to 0, the sender must stop transmitting. But it still needs to know when the receiver recovers. TCP handles this with periodic **window probes** — the sender sends a 1-byte segment every few seconds until the receiver advertises a non-zero window again. Without probing, both sides would deadlock forever waiting for each other."
+    },
+    {
+      "type": "explanation",
+      "title": "Congestion Control: Don't Overwhelm the Network",
+      "content": "Flow control prevents overwhelming *the receiver*. A separate mechanism prevents overwhelming *the network itself*. Without congestion control, multiple TCP connections on a shared link would each try to send at maximum speed, causing routers to drop packets, triggering retransmissions, causing more drops — a **congestion collapse**. This famously happened on the early internet in 1986, reducing throughput by a factor of 1,000. Van Jacobson's 1988 paper introduced the algorithms that saved it.\n\nTCP maintains a **congestion window** (`cwnd`) alongside the flow-control window. The sender's effective window is `min(rwnd, cwnd)`. `cwnd` starts small and grows based on feedback from the network.\n\n**Slow Start**: `cwnd` begins at 1-10 segments (the Initial Window, IW). For each ACK received, `cwnd` increases by one segment — this is exponential growth (doubling every RTT) because each segment generates one ACK. Slow start continues until `cwnd` reaches the **slow-start threshold** (`ssthresh`) or until packet loss is detected.\n\n**Congestion Avoidance**: above `ssthresh`, `cwnd` grows by 1 segment per RTT rather than per ACK — linear growth. This is the steady-state probing phase.\n\n**On loss**: if a timeout occurs, `cwnd` drops to 1 and `ssthresh` is set to half the current `cwnd`. Slow start begins again. If triple duplicate ACKs occur (fast retransmit), `cwnd` is halved (in CUBIC/Reno) rather than dropped to 1 — a less aggressive response matching the less-severe signal.\n\n**Modern algorithms** go beyond this framework:\n- **CUBIC** (Linux default since 2006): uses a cubic function to probe bandwidth, reaching the previous maximum faster after a loss event.\n- **BBR** (Google, 2016): instead of inferring congestion from packet loss, BBR models the bottleneck bandwidth and RTT directly, filling the pipe without causing queue bloat. Used extensively at Google and increasingly in cloud providers.\n- **ECN** (Explicit Congestion Notification): routers can mark packets instead of dropping them, allowing TCP to react to congestion before packets are lost — requires both endpoints and all routers to support it."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    subgraph TCP [\"TCP Mechanisms\"]\n        T1[\"Handshake\"]\n        T2[\"Seq + ACK\"]\n        T3[\"Retransmit\"]\n        T4[\"Flow Control\"]\n        T5[\"Congestion Control\"]\n    end\n    subgraph UDP [\"UDP — Minimal\"]\n        U1[\"Port numbers\"]\n        U2[\"Checksum\"]\n    end\n    TCP -->|\"Powers\"| AppTCP[\"HTTP HTTPS SSH DB FTP\"]\n    UDP -->|\"Powers\"| AppUDP[\"DNS Games VoIP QUIC TFTP\"]",
+      "caption": "TCP layers five distinct mechanisms on top of IP; UDP adds only port multiplexing and an optional checksum."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Node.js: TCP server and client using the 'net' module\nconst net = require('net');\n\n// ── TCP Server ────────────────────────────────────────────────\nconst server = net.createServer((socket) => {\n  console.log('Client connected:', socket.remoteAddress);\n\n  socket.on('data', (data) => {\n    const msg = data.toString().trim();\n    console.log('Received:', msg);\n    // Echo back with transformation\n    socket.write(`Echo: ${msg.toUpperCase()}\\n`);\n  });\n\n  socket.on('end', () => console.log('Client disconnected'));\n  socket.on('error', (err) => console.error('Socket error:', err.message));\n});\n\nserver.listen(9000, '127.0.0.1', () => {\n  console.log('TCP server listening on port 9000');\n\n  // ── TCP Client (connects after server is ready) ───────────────\n  const client = net.createConnection({ port: 9000, host: '127.0.0.1' }, () => {\n    console.log('Connected to server');\n    client.write('hello tcp\\n');\n  });\n\n  client.on('data', (data) => {\n    console.log('Server replied:', data.toString().trim());\n    client.end();   // Send FIN — triggers four-way teardown\n    server.close(); // Stop accepting new connections\n  });\n\n  client.on('error', (err) => console.error('Client error:', err.message));\n});\n\n// Output:\n// TCP server listening on port 9000\n// Connected to server\n// Client connected: 127.0.0.1\n// Received: hello tcp\n// Server replied: Echo: HELLO TCP\n// Client disconnected",
-      "explanation": "The `net` module exposes raw TCP sockets. `createServer` accepts connections (post-handshake); the callback receives a `socket` object representing the established connection. `socket.write` sends data reliably — Node.js and the OS kernel handle sequencing, ACKs, and retransmission transparently. `client.end()` sends a FIN packet, initiating the four-way teardown."
+      "label": "Example",
+      "code": "// Node.js TCP server and client using the built-in 'net' module\n// Demonstrates: connection, data exchange, and four-way teardown\n\nconst net = require('net');\n\n// ── TCP Server ────────────────────────────────────────────────\nconst server = net.createServer((socket) => {\n  // This callback fires AFTER the three-way handshake completes.\n  // The kernel handled SYN, SYN-ACK, ACK transparently.\n  console.log(`Client connected: ${socket.remoteAddress}:${socket.remotePort}`);\n\n  // socket is a full-duplex stream — data arrives in order, reliably\n  socket.on('data', (chunk) => {\n    const message = chunk.toString().trim();\n    console.log(`Received: \"${message}\"`);\n\n    // TCP guarantees this reply reaches the client in order\n    socket.write(`Echo: ${message.toUpperCase()}\\n`);\n  });\n\n  // 'end' fires when the remote side sends a FIN (half-close)\n  socket.on('end', () => {\n    console.log('Client sent FIN — connection half-closed');\n  });\n\n  // 'close' fires after the full four-way teardown completes\n  socket.on('close', () => console.log('Connection fully closed'));\n\n  socket.on('error', (err) => {\n    // Common errors: ECONNRESET (peer sent RST), ETIMEDOUT (keepalive expired)\n    console.error(`Socket error: ${err.code} - ${err.message}`);\n  });\n});\n\nserver.listen(9000, '127.0.0.1', () => {\n  console.log('TCP server listening on 127.0.0.1:9000');\n\n  // ── TCP Client ────────────────────────────────────────────────\n  const client = net.createConnection(\n    { port: 9000, host: '127.0.0.1' },\n    () => {\n      // Callback fires after handshake — kernel allocated local ephemeral port\n      console.log(`Connected (local port: ${client.localPort})`);\n      client.write('hello tcp\\n');\n    }\n  );\n\n  client.on('data', (chunk) => {\n    console.log(`Server replied: \"${chunk.toString().trim()}\"`);\n    // client.end() sends a FIN — initiates four-way teardown from client side.\n    // The connection enters TIME_WAIT on this side for ~60s after close.\n    client.end();\n    server.close(); // stop accepting new connections\n  });\n\n  client.on('error', (err) => console.error(`Client error: ${err.code}`));\n});\n\n// Expected output:\n// TCP server listening on 127.0.0.1:9000\n// Connected (local port: 54321)     <- OS-assigned ephemeral port\n// Client connected: 127.0.0.1:54321\n// Received: \"hello tcp\"\n// Server replied: \"Echo: HELLO TCP\"\n// Client sent FIN — connection half-closed\n// Connection fully closed",
+      "explanation": "The `net` module exposes raw TCP. The connection callback fires only after the kernel completes the three-way handshake — your code never sees SYN or SYN-ACK. `socket.write()` pushes bytes into the kernel's send buffer; TCP handles segmentation, sequencing, ACKs, and retransmission invisibly. `client.end()` sends a FIN, triggering the four-way teardown. The local port will sit in TIME_WAIT for ~60 seconds, absorbing any delayed duplicate packets."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "The Four-Way Teardown and TIME_WAIT",
+      "content": "Closing a TCP connection requires four messages because each direction of the stream closes independently. This is the **half-close** design: either side can stop *sending* while still *receiving* (useful for protocols like HTTP/1.0 where the server signals end-of-response by closing its write side while still draining the request).\n\n1. **FIN** — the initiator has no more data to send. Sequence number is the next byte after all data.\n2. **ACK** — the remote side acknowledges the FIN. It may still have data to send, so the connection is now half-closed.\n3. **FIN** — once the remote side finishes sending, it too closes its write side.\n4. **ACK** — the original initiator acknowledges the second FIN.\n\nThe initiator of the close then enters **TIME_WAIT** for a duration of **2×MSL** (Maximum Segment Lifetime, typically 30-60 seconds, so TIME_WAIT lasts 60-120 seconds). TIME_WAIT has two purposes:\n\n- **Ensure the final ACK reaches the server**: if the server's FIN was not ACKed, it will re-send the FIN, and TIME_WAIT ensures the client can respond to it.\n- **Absorb delayed duplicates**: any old segments from this connection that were delayed in the network will arrive during TIME_WAIT and be discarded, preventing them from corrupting a new connection on the same 4-tuple (src IP, src port, dst IP, dst port).\n\n**TIME_WAIT at scale**: a busy server that closes thousands of connections per second can accumulate thousands of TIME_WAIT sockets. Each consumes a file descriptor and a slot in the kernel connection table. Practical mitigations include `SO_REUSEADDR` (allows binding a port even with a TIME_WAIT socket on it), `tcp_tw_reuse` (Linux sysctl that reuses TIME_WAIT sockets for new *outgoing* connections when the timestamp option proves they are safe), and designing protocols so the *client* initiates the close, pushing TIME_WAIT to the side with plentiful ephemeral ports."
+    },
+    {
+      "type": "explanation",
+      "title": "UDP in Depth: When Simplicity Is a Feature",
+      "content": "UDP's design philosophy is that the network is fast enough and applications know their reliability requirements better than the kernel does. The **8-byte header** covers only four fields: source port, destination port, length, and checksum. The checksum is optional in IPv4 (though all major OSes enable it) and mandatory in IPv6.\n\nWithout a handshake, a UDP sender can start transmitting immediately — no 1.5 RTT setup cost. Without sequence numbers, the kernel does not reorder packets or buffer out-of-order arrivals. Without ACKs, the sender never waits for confirmation. Without congestion control, UDP will send at whatever rate the application provides, regardless of network conditions. This last point is a double-edged sword: UDP-based applications that do not implement their own congestion control can be antisocial on shared networks, monopolising bandwidth and causing loss for TCP flows.\n\n**What UDP gives you:**\n\n- **Datagrams are message-oriented**, not stream-oriented. Each `sendto()` call produces exactly one datagram; each `recvfrom()` call returns exactly one datagram. There is no need to frame messages — the message boundary is preserved by the protocol itself (unlike TCP, where you must implement your own length-prefixed or delimiter-based framing).\n- **Broadcast and multicast**: TCP is strictly point-to-point (one sender, one receiver). UDP supports sending to a broadcast address (all hosts on a subnet) or a multicast group (subscribed hosts). This is essential for discovery protocols (mDNS, SSDP, DHCP), media distribution (IPTV), and some game lobby systems.\n- **No head-of-line blocking**: if one datagram is lost, later datagrams are not blocked waiting for it. Each is independent. This matters deeply for real-time applications.\n\n**What you must implement yourself when using UDP:**\n\nApplications that need some reliability on top of UDP must build their own, but only as much as they actually need. DNS simply retransmits the query after a timeout. DHCP does the same. A video codec might request retransmission of keyframes but skip retransmission of inter-frames. A game might implement forward error correction (FEC) — sending redundant data so that a single packet loss can be reconstructed without waiting for a retransmit. QUIC implements full reliability, ordering, and TLS, but does so without TCP's head-of-line blocking."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// ── TCP vs UDP Quick Reference ────────────────────────────────\n//\n// Feature            │ TCP                    │ UDP\n// ───────────────────┼────────────────────────┼──────────────────\n// Connection         │ Required (3-way HS)    │ None\n// Ordering           │ Guaranteed             │ Not guaranteed\n// Reliability        │ Retransmits lost segs  │ No retransmit\n// Flow control       │ Yes (receive window)   │ No\n// Congestion control │ Yes (CUBIC, BBR)       │ No\n// Header size        │ 20 bytes (min)         │ 8 bytes\n// Latency            │ Higher (handshake +ack)│ Lower\n// Use cases          │ HTTP, SSH, DB, FTP     │ DNS, video, games\n\n// ── Port number ranges ────────────────────────────────────────\nconst PORT_RANGES = {\n  wellKnown:   { range: '0-1023',       examples: 'HTTP=80, HTTPS=443, SSH=22, DNS=53' },\n  registered:  { range: '1024-49151',   examples: 'PostgreSQL=5432, Redis=6379, MySQL=3306' },\n  ephemeral:   { range: '49152-65535',  examples: 'OS-assigned source ports for clients' },\n};\n\n// ── When to choose UDP ────────────────────────────────────────\nconst useUDP = [\n  'Real-time audio/video (VoIP, WebRTC) — stale data worse than lost data',\n  'DNS queries — single small request/reply, retry at app layer',\n  'Online gaming — position updates; old frames are irrelevant',\n  'QUIC / HTTP3 — implements own reliability with less overhead than TCP',\n  'Broadcast / multicast — TCP is point-to-point only',\n];\n\n// ── TCP state machine (simplified) ───────────────────────────\n// CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED → FIN_WAIT_1\n//   → FIN_WAIT_2 → TIME_WAIT (2×MSL) → CLOSED\n// TIME_WAIT lasts ~60-120s to absorb delayed duplicate packets"
+      "label": "Example",
+      "code": "// Node.js UDP client and server using the 'dgram' module\n// Demonstrates: fire-and-forget, message boundaries, no connection\n\nconst dgram = require('dgram');\n\n// ── UDP Server ────────────────────────────────────────────────\nconst server = dgram.createSocket('udp4');\n\nserver.on('message', (msg, rinfo) => {\n  // Each call to this handler is ONE complete datagram — message\n  // boundaries are preserved. No framing needed.\n  console.log(`UDP server received \"${msg}\" from ${rinfo.address}:${rinfo.port}`);\n\n  // Send a reply — also fire-and-forget. No guarantee client receives it.\n  const reply = Buffer.from(`Pong: ${msg}`);\n  server.send(reply, rinfo.port, rinfo.address, (err) => {\n    if (err) console.error('Send error:', err);\n    // 'err' means the OS could not enqueue the send, NOT that it was\n    // dropped — UDP has no delivery confirmation\n  });\n});\n\nserver.on('listening', () => {\n  const addr = server.address();\n  console.log(`UDP server listening on ${addr.address}:${addr.port}`);\n});\n\nserver.on('error', (err) => {\n  console.error('Server error:', err);\n  server.close();\n});\n\nserver.bind(41234);\n\n// ── UDP Client ────────────────────────────────────────────────\n// No connect() needed — UDP is connectionless.\n// We create a socket, send directly, and listen for a response.\nconst client = dgram.createSocket('udp4');\n\nclient.on('message', (msg) => {\n  console.log(`UDP client received: \"${msg}\"`);\n  // No teardown — just stop listening\n  client.close();\n  server.close();\n});\n\n// Send after a brief delay to let server bind\nsetTimeout(() => {\n  const message = Buffer.from('Ping');\n  // There is NO handshake here. Datagram goes directly.\n  client.send(message, 41234, '127.0.0.1', (err) => {\n    if (err) console.error('Client send error:', err);\n    // If server is down, this succeeds (OS enqueued it) but no reply comes\n  });\n}, 50);\n\n// Expected output:\n// UDP server listening on 0.0.0.0:41234\n// UDP server received \"Ping\" from 127.0.0.1:XXXXX\n// UDP client received: \"Pong: Ping\"\n\n// If server was not running, client.send() would still succeed —\n// UDP has no way to know the destination is unreachable until\n// the OS returns an ICMP Port Unreachable, which may be suppressed.",
+      "explanation": "Unlike TCP's `net.createConnection`, there is no handshake, no `connect()` required, and no streaming — each `send()` produces exactly one datagram and each `message` event delivers exactly one. The callback to `send()` confirms OS enqueueing only, not delivery. Notice there is no teardown: UDP sockets are simply closed when finished. The comment about ICMP Port Unreachable illustrates UDP's best-effort nature."
+    },
+    {
+      "type": "explanation",
+      "title": "Port Numbers and Socket Pairs",
+      "content": "Both TCP and UDP use **port numbers** to multiplex multiple communication channels over the same IP address. A port is a 16-bit integer (0-65535). The combination of (protocol, local IP, local port, remote IP, remote port) forms a **5-tuple** that uniquely identifies a connection or flow in the kernel's socket table.\n\n**Port ranges by convention:**\n- **Well-known ports (0-1023)**: assigned by IANA, require root/admin privileges to bind. HTTP=80, HTTPS=443, SSH=22, DNS=53, SMTP=25, FTP=21.\n- **Registered ports (1024-49151)**: IANA-registered for specific applications, no special privilege required on most systems. PostgreSQL=5432, MySQL=3306, Redis=6379, MongoDB=27017, Kubernetes API=6443.\n- **Ephemeral ports (49152-65535)**: dynamically assigned by the OS to client sockets. The exact range varies: Linux defaults to 32768-60999 (configurable via `/proc/sys/net/ipv4/ip_local_port_range`); macOS uses 49152-65535.\n\n**How a server handles many clients on one port**: the server socket listens on, say, port 443. Each incoming TCP connection creates a *new socket* distinguished by the client's IP and ephemeral port. The listening socket never changes; the kernel dispatches each connection to a distinct connected socket. For UDP, the server reads from one socket and uses `recvfrom` to get the sender's address for each datagram.\n\n**NAT and port rewriting**: in home networks and many cloud environments, your machine's socket uses a private IP (like 192.168.1.5:54321). The NAT gateway rewrites packets to use the public IP with a different port (e.g., 203.0.113.1:38472) and maintains a mapping table. The remote server sees only the public address. When the reply arrives, the NAT reverses the translation. UDP works through NAT but with important limitations: UDP has no connection state, so the NAT mapping times out quickly (often 30-60 seconds), causing issues for long-lived UDP applications like VoIP unless keep-alive datagrams are sent regularly."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    subgraph Client\n        C1[\"App A\\nport 54321\"]\n        C2[\"App B\\nport 54322\"]\n    end\n    subgraph Server\n        S1[\"Listen\\nport 443\"]\n        S2[\"Connection 1\\nsocket fd=5\"]\n        S3[\"Connection 2\\nsocket fd=6\"]\n    end\n    C1 -->|\"TCP\"| S2\n    C2 -->|\"TCP\"| S3\n    S1 -->|\"accept()\"| S2\n    S1 -->|\"accept()\"| S3",
+      "caption": "One listening socket on port 443 spawns a new connected socket per client via accept(). The kernel dispatches by 5-tuple."
+    },
+    {
+      "type": "explanation",
+      "title": "QUIC and HTTP/3: Learning from Both Protocols",
+      "content": "HTTP/2 solved many of HTTP/1.1's inefficiencies — it multiplexed multiple requests over a single TCP connection using binary framing. But it introduced a new problem: **TCP head-of-line blocking**. All HTTP/2 streams share one TCP byte stream. If one TCP segment is lost, *every stream stalls* while TCP waits for the retransmission, even streams whose data arrived perfectly. The lost segment might belong to a low-priority background request, but it blocks a time-critical API call.\n\n**QUIC** (originally Google's QUIC, now IETF-standardised as RFC 9000) was designed from the ground up to avoid this. It runs over UDP and implements its own stream-level reliability:\n\n- **Stream-level ordering, not connection-level**: a lost packet only stalls the stream it belongs to. Other streams continue unaffected.\n- **Connection ID instead of 5-tuple**: a QUIC connection is identified by an opaque connection ID chosen by the server, not by (IP, port) pairs. This means a connection survives network changes — switching from Wi-Fi to LTE does not break the connection, a huge benefit for mobile devices.\n- **0-RTT and 1-RTT handshakes**: QUIC integrates TLS 1.3 into its handshake. A new connection requires 1 RTT (vs TCP's 1 RTT for handshake + 1 RTT for TLS 1.2 = 2 RTT total). A resumed connection can send application data with the very first packet (0-RTT) using session tickets.\n- **Congestion control per connection**: QUIC implements its own congestion control (often BBR by default), and because it runs in user space, it is easier to update than kernel-space TCP.\n\nHTTP/3 is simply HTTP semantics over QUIC. As of 2024, roughly 25-30% of web traffic globally uses HTTP/3. Major CDNs (Cloudflare, Fastly), cloud providers, and browsers (Chrome, Firefox, Safari) all support it. QUIC represents the direction the internet is heading: selective reliability built on top of UDP's flexibility."
+    },
+    {
+      "type": "explanation",
+      "title": "Choosing TCP vs UDP: A Decision Framework",
+      "content": "The choice between TCP and UDP is rarely arbitrary. Here is a structured way to think about it:\n\n**Use TCP when:**\n- Data integrity is non-negotiable and a missing or corrupted byte would break the application (databases, file transfer, SSH, email, financial transactions, API calls).\n- The protocol is request-response and the latency of a handshake is acceptable (virtually all web APIs).\n- You need connection multiplexing and backpressure without implementing them yourself.\n- You are communicating with unknown infrastructure where UDP may be blocked by firewalls (many enterprise and mobile networks block non-DNS/DHCP UDP).\n\n**Use UDP when:**\n- **Latency beats correctness**: a real-time game, voice call, or live video stream where a 200 ms retransmission delay would be worse than a skipped frame or a brief audio glitch.\n- **You will implement your own reliability**: QUIC does this. Some game engines implement their own reliable-UDP layer with custom ACK bitmasks and FEC.\n- **You need broadcast or multicast**: service discovery (mDNS, SSDP), DHCP, IPTV, routing protocols (RIP, OSPF Hello packets).\n- **The query fits in one datagram and retrying is trivial**: DNS, NTP, SNMP, TFTP.\n- **You are building on top of QUIC**: if your stack uses HTTP/3, you are already using UDP underneath without thinking about it.\n\n**Common real-world protocol choices:**\n| Protocol | Transport | Why |\n|---|---|---|\n| HTTP/1.1, HTTP/2 | TCP | Data integrity; browser ecosystem |\n| HTTP/3 | UDP (via QUIC) | Eliminate head-of-line blocking |\n| DNS | UDP (primary), TCP (zone transfers, >512 byte responses) | Single query/reply fits one datagram |\n| SSH | TCP | Command streams must be reliable and ordered |\n| VoIP / WebRTC | UDP | Real-time; latency critical; can tolerate packet loss |\n| Online gaming | UDP (often custom reliability layer) | Position updates; old data is worthless |\n| NTP | UDP | Single timestamp exchange |\n| DHCP | UDP + broadcast | No IP yet to establish TCP |\n| gRPC | TCP (HTTP/2) or UDP (HTTP/3 over QUIC) | Depends on transport configuration |"
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Brief history**: TCP and IP were originally a single protocol designed by Vint Cerf and Bob Kahn in 1974. The split into separate TCP and IP layers happened in 1978, specifically because researchers realised that real-time packet speech (early VoIP) needed a layer that did *not* do retransmission — hence the conceptual separation between routing (IP) and transport (TCP/UDP). UDP was formalised by Jon Postel in 1980 in RFC 768 — a remarkably short document (just 3 pages) that defines the entire protocol. The modern internet's reliability crisis of 1986, resolved by Van Jacobson's congestion control algorithms, demonstrated how badly uncontrolled senders could collapse a shared network and is why TCP's congestion control is considered one of the most important contributions to network engineering."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**TCP TIME_WAIT** (lasting 60-120 seconds after close) is a common source of confusion in high-throughput servers. If a server closes thousands of connections per second, it can exhaust ephemeral ports. Solutions: enable `SO_REUSEADDR`, tune `net.ipv4.tcp_tw_reuse` on Linux, or design the protocol so the *client* initiates the close (pushing TIME_WAIT to the client side). HTTP keep-alive (connection reuse) avoids the problem entirely for HTTP workloads."
+      "content": "**Common misconceptions and interview traps:**\n\n- **'UDP has no checksum'** — false. UDP has a 16-bit checksum (optional in IPv4, mandatory in IPv6). It is less comprehensive than TCP's but it exists.\n- **'UDP is always faster'** — not always. On modern hardware with a warm TCP connection, TCP's overhead is minimal. For bulk transfers, TCP's congestion control often saturates the link as efficiently as any alternative.\n- **'TCP guarantees delivery'** — more precisely, TCP guarantees that *if the connection stays up*, all data is delivered in order. If the network partitions long enough to exhaust retransmission attempts, TCP gives up and returns an error to the application. It does not guarantee delivery across all possible failure modes.\n- **TIME_WAIT is not a bug** — it is a deliberate protection against delayed duplicate packets corrupting new connections. Aggressively disabling it (e.g., `tcp_tw_recycle`, removed in Linux 4.12) has caused subtle production bugs in NAT environments.\n- **'Microservices should use UDP for performance'** — practically no gRPC or REST microservice bottlenecks on TCP handshake overhead. The dominant latencies are serialisation, database queries, and application logic — not the ~1 ms handshake."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "TCP's **three-way handshake** (SYN → SYN-ACK → ACK) synchronises sequence numbers before data flows, enabling reliable, ordered, connection-oriented delivery.",
-        "TCP's **flow control** (receive window) prevents overwhelming the receiver; **congestion control** (slow start, CUBIC/BBR) prevents overwhelming the network — both use the same sliding-window mechanism.",
-        "UDP has an **8-byte header**, no handshake, no ACKs, and no retransmission — ideal when latency matters more than guaranteed delivery (streaming, gaming, DNS).",
-        "**QUIC** (used by HTTP/3) implements reliability, multiplexing, and TLS on top of UDP — avoiding TCP head-of-line blocking while retaining enough guarantees for HTTP.",
-        "Choose **TCP** for correctness-critical transfers (databases, file downloads, APIs); choose **UDP** when the application can tolerate loss and latency is paramount (real-time media, DNS, telemetry)."
+        "**TCP's three-way handshake** (SYN → SYN-ACK → ACK) synchronises sequence numbers before data flows. Sequence numbers let the receiver detect gaps, reorder out-of-order segments, and confirm exactly which bytes have been received via cumulative ACKs.",
+        "**Reliability in TCP** is achieved through the combination of sequence numbers, cumulative ACKs, retransmission timers, fast retransmit on triple duplicate ACKs, and SACK for precise hole-filling — each mechanism addressing a different failure mode.",
+        "**Flow control** (receive window `rwnd`) prevents overwhelming the receiver's buffer. **Congestion control** (slow start, congestion avoidance, CUBIC, BBR) prevents overwhelming the network — both use the sender's effective window `min(rwnd, cwnd)` to rate-limit transmission.",
+        "**UDP's 8-byte header** (vs TCP's 20+ bytes) adds only port multiplexing and an optional checksum — no state, no handshake, no ordering, no retransmission. Applications get raw datagrams and implement only the reliability they need.",
+        "**QUIC (HTTP/3)** implements per-stream reliability, 0-RTT connection resumption, and connection migration over UDP — eliminating TCP's head-of-line blocking while retaining end-to-end reliability, and representing the trajectory of modern transport protocols.",
+        "**Port ranges** divide into well-known (0-1023, root required), registered (1024-49151), and ephemeral (49152-65535, OS-assigned). A TCP server on one port handles thousands of clients by distinguishing connections via the full 5-tuple (protocol, src IP, src port, dst IP, dst port).",
+        "**Choose TCP** for correctness-critical workloads (databases, APIs, file transfer, SSH). **Choose UDP** when latency trumps reliability (real-time media, gaming, DNS), when broadcast/multicast is needed, or when building a custom transport like QUIC that implements its own reliability more efficiently."
       ]
     }
   ],
@@ -66,108 +135,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "How many messages are exchanged during a TCP three-way handshake?",
+      "question": "How many messages are exchanged during a TCP three-way handshake, and what are they?",
       "type": "mcq",
-      "options": ["2", "3", "4", "6"],
+      "options": [
+        "2 messages: SYN then SYN-ACK",
+        "3 messages: SYN, SYN-ACK, ACK",
+        "4 messages: SYN, ACK, SYN, ACK",
+        "2 messages: CONNECT then ACCEPT"
+      ],
       "correct": 1,
-      "explanation": "The three-way handshake is: (1) Client sends SYN, (2) Server replies SYN-ACK, (3) Client sends ACK. Three messages in total establish the connection and synchronise sequence numbers."
+      "explanation": "The three-way handshake is: (1) Client sends SYN with its Initial Sequence Number, (2) Server replies SYN-ACK with its own ISN and acknowledges the client's ISN, (3) Client sends ACK acknowledging the server's ISN. Three messages are necessary and sufficient to synchronise bidirectional sequence numbers."
     },
     {
       "id": "q2",
-      "question": "What is the minimum header size of a UDP datagram?",
+      "question": "What is the minimum header size of a UDP datagram, and what four fields does it contain?",
       "type": "mcq",
-      "options": ["4 bytes", "8 bytes", "20 bytes", "40 bytes"],
+      "options": [
+        "4 bytes: source port, dest port, checksum, flags",
+        "8 bytes: source port, dest port, length, checksum",
+        "20 bytes: same fields as TCP",
+        "12 bytes: source port, dest port, sequence, checksum"
+      ],
       "correct": 1,
-      "explanation": "A UDP header is exactly 8 bytes: 2 bytes source port, 2 bytes destination port, 2 bytes length, 2 bytes checksum. TCP's minimum header is 20 bytes (5 bytes more when counting the data offset). This smaller header is part of why UDP has lower overhead."
+      "explanation": "A UDP header is exactly 8 bytes: 2 bytes source port, 2 bytes destination port, 2 bytes length (header + data), 2 bytes checksum. There are no sequence numbers, acknowledgement numbers, flags, or window fields. TCP's minimum header is 20 bytes."
     },
     {
       "id": "q3",
-      "question": "Which mechanism prevents a TCP sender from sending more data than the receiver can buffer?",
+      "question": "Which TCP mechanism prevents a fast sender from overwhelming the receiver's kernel buffer?",
       "type": "mcq",
       "options": [
-        "Congestion control (slow start)",
-        "Flow control (receive window)",
-        "Sequence numbering",
-        "The three-way handshake"
+        "Congestion control (slow start + CUBIC)",
+        "The three-way handshake",
+        "Flow control via the receive window (rwnd)",
+        "Selective Acknowledgement (SACK)"
       ],
-      "correct": 1,
-      "explanation": "Flow control uses the receive window (advertised in each ACK) to limit how much unacknowledged data the sender can have in flight. Congestion control (slow start, CUBIC) addresses network capacity, not receiver buffer capacity."
+      "correct": 2,
+      "explanation": "Flow control uses the receive window (rwnd) advertised in each ACK. The sender must not have more than rwnd bytes of unacknowledged data in flight. Congestion control (slow start, CUBIC) addresses network capacity, not receiver buffer capacity. Both use the sender's effective window min(rwnd, cwnd)."
     },
     {
       "id": "q4",
-      "question": "Why does UDP work better than TCP for a live video streaming application?",
+      "question": "What specific problem does QUIC (HTTP/3) solve that TCP-based HTTP/2 could not?",
       "type": "mcq",
       "options": [
-        "UDP compresses video data more efficiently",
-        "UDP supports multicast; TCP is point-to-point only",
-        "A lost video frame is better skipped than delayed by retransmission",
-        "UDP has built-in encryption"
+        "QUIC encrypts data; HTTP/2 over TCP does not",
+        "TCP head-of-line blocking where a lost segment stalls all multiplexed streams",
+        "TCP cannot multiplex multiple requests over one connection",
+        "QUIC has a smaller header than TCP reducing per-packet overhead"
       ],
-      "correct": 2,
-      "explanation": "In live video, a retransmitted frame arrives too late to be useful — the stream has moved on. It is better to skip the lost frame (imperceptible glitch) than stall the stream waiting for a retransmit. Additionally, UDP does support multicast (option B is also correct as a benefit), but the primary reason is latency tolerance."
+      "correct": 1,
+      "explanation": "HTTP/2 multiplexes streams over a single TCP connection. A single lost TCP segment stalls ALL streams because TCP must deliver bytes in order. QUIC implements per-stream reliability over UDP — a lost packet stalls only the stream it belongs to, leaving other streams unaffected. QUIC also integrates TLS and supports connection migration."
     },
     {
       "id": "q5",
-      "question": "What is 'slow start' in TCP congestion control?",
+      "question": "What is TCP's 'slow start' algorithm, and what triggers the end of the slow start phase?",
       "type": "mcq",
       "options": [
-        "The initial connection being throttled by the ISP",
-        "Beginning with a small congestion window that doubles each RTT until loss is detected",
-        "Gradually reducing window size to zero on connection close",
-        "Waiting for ACKs before sending the first segment"
+        "The sender waits for explicit permission from the receiver before sending each segment",
+        "cwnd begins at 1-10 segments and doubles each RTT; slow start ends when cwnd reaches ssthresh or loss is detected",
+        "The ISP throttles new connections until they prove they are not malicious",
+        "The receiver gradually increases its window from 0, limiting the sender's initial rate"
       ],
       "correct": 1,
-      "explanation": "Slow start begins with a congestion window (cwnd) of 1-10 segments and doubles it every round-trip time (RTT) — exponential growth. When packet loss is detected, cwnd is reduced and linear growth resumes. This probes bandwidth aggressively but backs off quickly on congestion."
+      "explanation": "Slow start begins with a congestion window (cwnd) of 1-10 segments. Each ACK increases cwnd by one segment, causing exponential (doubling per RTT) growth. Slow start ends when cwnd reaches the slow-start threshold (ssthresh), or immediately on packet loss, which resets cwnd and ssthresh. After ssthresh, linear growth (congestion avoidance) takes over."
     },
     {
       "id": "q6",
-      "question": "What happens during the TCP TIME_WAIT state?",
+      "question": "Why does the TCP connection enter TIME_WAIT after closing, and how long does it last?",
       "type": "mcq",
       "options": [
-        "The server waits for a new client to connect",
-        "The socket waits ~60-120s to absorb any delayed duplicate packets before fully closing",
-        "Both sides wait for the application to read buffered data",
-        "The connection is paused due to congestion"
+        "The kernel waits for any pending application data to be flushed to disk",
+        "The socket stays open for 2xMSL (~60-120s) to ensure the final ACK arrived and absorb delayed duplicates",
+        "TIME_WAIT signals to the OS that the port can be immediately reused for a new connection",
+        "The server holds state until the client confirms it received all data"
       ],
       "correct": 1,
-      "explanation": "TIME_WAIT lasts 2×MSL (Maximum Segment Lifetime, typically 30-60 seconds). This ensures delayed packets from the old connection are absorbed and cannot corrupt a new connection on the same port tuple. It is entered by the side that initiates the close."
+      "explanation": "TIME_WAIT lasts 2×MSL (Maximum Segment Lifetime, typically giving 60-120 seconds total). It serves two purposes: (1) if the server did not receive the final ACK it will re-send its FIN, and TIME_WAIT lets the client respond; (2) any delayed duplicate packets from this connection arriving during TIME_WAIT are discarded, preventing them from corrupting a new connection on the same 5-tuple."
     },
     {
       "id": "q7",
-      "question": "Which modern protocol implements reliability on top of UDP?",
+      "question": "A SYN flood attack exploits which specific TCP mechanism, and what is the standard mitigation?",
       "type": "mcq",
-      "options": ["HTTP/2", "QUIC (HTTP/3)", "WebSocket", "gRPC"],
+      "options": [
+        "It overflows the receive window by sending massive payloads; mitigated by flow control",
+        "It exhausts the SYN backlog by sending many SYNs with spoofed IPs; mitigated by SYN cookies",
+        "It triggers TIME_WAIT exhaustion by rapidly opening and closing connections",
+        "It hijacks sequence numbers to inject data; mitigated by random ISN generation"
+      ],
       "correct": 1,
-      "explanation": "QUIC (used by HTTP/3) builds its own reliability, multiplexing, and TLS on top of UDP. This avoids TCP's head-of-line blocking — a lost packet only stalls the stream it belongs to, not all streams — while retaining end-to-end reliability."
+      "explanation": "A SYN flood sends many SYN packets with spoofed source IPs. The server allocates a half-open connection for each and sends SYN-ACK, but the completing ACK never arrives. The SYN backlog fills and legitimate connections are rejected. SYN cookies solve this by encoding connection parameters into the server's ISN cryptographically — no state is stored until the ACK arrives and is verified."
     },
     {
       "id": "q8",
-      "question": "Which layer does TCP/UDP operate at?",
+      "question": "Which layer of the OSI model do both TCP and UDP operate at, and what does that layer's job encompass?",
       "type": "mcq",
-      "options": ["Layer 2 - Data Link", "Layer 3 - Network", "Layer 4 - Transport", "Layer 7 - Application"],
-      "correct": 2,
-      "explanation": "TCP and UDP are Layer 4 (Transport) protocols. They add port numbers to identify specific applications/processes on a host, multiplexing multiple connections over the same IP address."
+      "options": [
+        "Layer 3 (Network) — responsible for routing packets between different networks",
+        "Layer 4 (Transport) — responsible for process-to-process communication and port multiplexing",
+        "Layer 2 (Data Link) — responsible for MAC addressing and frame delivery on a single link",
+        "Layer 7 (Application) — responsible for application protocols like HTTP and DNS"
+      ],
+      "correct": 1,
+      "explanation": "TCP and UDP both operate at Layer 4 (Transport). The Transport layer sits above IP (Layer 3, which handles host-to-host routing) and adds port numbers to enable process-to-process communication — multiple applications on the same IP address can receive data independently. TCP adds reliability; UDP adds only ports and an optional checksum."
     },
     {
       "id": "q9",
-      "question": "A TCP SYN flood attack exploits which TCP mechanism?",
+      "question": "Why is UDP preferred over TCP for DNS queries, but TCP is used for DNS zone transfers?",
       "type": "mcq",
       "options": [
-        "The four-way teardown leaving sockets in TIME_WAIT",
-        "Sequence number prediction allowing data injection",
-        "Half-open connections from unanswered SYNs exhausting server connection tables",
-        "Receive window manipulation stalling data transfer"
+        "UDP is encrypted; TCP is not, so DNS queries need UDP's security",
+        "A DNS query and reply fit in one datagram and the client retries on timeout; zone transfers are large multi-record transfers that need TCP's reliability and flow control",
+        "TCP cannot handle the volume of DNS traffic; UDP scales better",
+        "DNS uses UDP because TCP would reveal the querier's IP address"
       ],
-      "correct": 2,
-      "explanation": "A SYN flood sends many SYN packets with spoofed source IPs. The server sends SYN-ACKs and allocates state for each half-open connection, but never receives the completing ACK. This exhausts the server's connection table (syn backlog). SYN cookies are the standard mitigation."
+      "correct": 1,
+      "explanation": "A typical DNS query and reply each fit in a single UDP datagram (under 512 bytes traditionally, up to 4096 with EDNS). If no reply comes, the DNS client simply re-sends the query — effectively implementing its own lightweight reliability. Zone transfers copy an entire DNS zone (potentially thousands of records) between name servers, which is a large reliable transfer requiring TCP's sequencing, flow control, and retransmission."
     },
     {
       "id": "q10",
-      "question": "How many messages are exchanged in a TCP connection teardown?",
+      "question": "What is a 'triple duplicate ACK' in TCP, and what action does it trigger?",
       "type": "mcq",
-      "options": ["2", "3", "4", "6"],
-      "correct": 2,
-      "explanation": "TCP uses a four-way teardown: (1) FIN from initiator, (2) ACK from responder, (3) FIN from responder (when its application finishes), (4) ACK from initiator. The half-close design allows each side to finish sending independently before closing."
+      "options": [
+        "Three identical connection requests from the same client; the server drops the duplicates",
+        "The receiver sending the same ACK number three consecutive times, indicating a gap; triggers fast retransmit without waiting for a timeout",
+        "Three ACKs sent simultaneously for one segment to improve reliability",
+        "An ACK with the SYN, ACK, and FIN flags all set simultaneously"
+      ],
+      "correct": 1,
+      "explanation": "If a segment is lost but later segments arrive, the receiver keeps ACKing the last contiguous byte (the gap boundary). The sender sees the same ACK number arrive three times in a row — a triple duplicate ACK. This is a strong signal that the missing segment was lost rather than merely delayed. Fast retransmit immediately retransmits the missing segment without waiting for the retransmission timer to expire, dramatically reducing latency in the common case of a single dropped packet."
     }
   ]
 }

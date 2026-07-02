@@ -5,57 +5,123 @@
   "week": 44,
   "icon": "network",
   "tagline": "Why we distribute computation across machines, what can go wrong, and why partial failure is the defining challenge of distributed systems.",
-  "readTime": "~13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "A **distributed system** is a collection of independent computers that appear to users as a single coherent system. We distribute for three reasons: **scale** (one machine's CPU/memory/disk is finite), **fault tolerance** (if one node fails, others continue), and **geography** (serve users with low latency globally). But distribution introduces a new class of problem that does not exist on a single machine: **partial failure**.\n\nOn a single machine, something either works or the whole machine crashes — there is no in-between. In a distributed system, some nodes can crash while others keep running, network links can drop messages silently, and a slow response is indistinguishable from a crashed node. These partial failures make distributed programs fundamentally harder to reason about than their single-node counterparts."
+      "content": "A **distributed system** is a collection of independent computers that appear to users as a single coherent system. You interact with dozens of them every day: when you search the web, stream a video, send a payment, or open a shared document. Yet most software engineers begin their careers building only single-machine programs — and when they first encounter distributed systems, they discover that the rules of the game have changed in a fundamental way.\n\nWe distribute computation for three primary reasons. **Scale**: a single machine's CPU, memory, and disk have hard physical limits. A social network with two billion users cannot possibly serve every request from one box. **Fault tolerance**: if that one machine crashes, the entire service dies. Spreading work across many machines means one failure leaves the rest unaffected. **Geography**: a server in Virginia cannot serve a user in Tokyo with low latency; placing servers globally brings data closer to users.\n\nBut distribution introduces a class of problem that simply does not exist on a single machine: **partial failure**. On a single machine, something either works or the machine crashes entirely. In a distributed system, some nodes can be up while others are down, some messages can arrive while others are silently dropped, and a slow node is indistinguishable from a crashed one. This partial failure is the defining challenge — every design decision in distributed systems is ultimately a strategy for making correct progress in the presence of it.\n\nThis chapter covers the conceptual foundations you need to reason about any distributed system: the fallacies engineers fall into, the taxonomy of failure modes, the ambiguity of timeouts, the concept of idempotency, the CAP theorem and its nuanced successor PACELC, consistency models, replication strategies, and the practical patterns that production systems use every day."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  Client[\"Client\"] --> LB[\"Load Balancer\"]\n  LB --> N1[\"Node A (healthy)\"]\n  LB --> N2[\"Node B (crashed)\"]\n  LB --> N3[\"Node C (slow)\"]\n  N1 --> DB1[\"DB Shard 1\"]\n  N3 --> DB2[\"DB Shard 2\"]\n  N2 -.->|\"no response\"| DB3[\"DB Shard 3 (partitioned)\"]",
-      "caption": "A distributed cluster where Node B has crashed and Node C is slow — from the client's perspective both look like failures. DB Shard 3 is unreachable due to a network partition."
+      "mermaid": "flowchart TD\n  Client[\"Client\"] --> LB[\"Load Balancer\"]\n  LB --> N1[\"Node A\\nhealthy\"]\n  LB --> N2[\"Node B\\ncrashed\"]\n  LB --> N3[\"Node C\\nslow / GC pause\"]\n  N1 --> DB1[\"DB Replica 1\"]\n  N3 --> DB2[\"DB Replica 2\"]\n  N2 -.->|\"no response\"| DB3[\"DB Replica 3\\npartitioned\"]",
+      "caption": "A three-node cluster where Node B has crashed and Node C is experiencing a GC pause. From the client's perspective both look identical — a timeout. DB Replica 3 is unreachable due to a network partition between data-center racks."
     },
     {
       "type": "analogy",
-      "title": "The Remote Team",
-      "content": "Imagine a team where some members work from different cities, communicating only by post. If you send a letter and hear nothing back, you don't know whether your colleague received it and is thinking (slow), the letter got lost in transit (packet drop), or your colleague is sick (node crash). You can send the letter again, but then they might process it twice (duplicate delivery). This is exactly the partial-failure problem: **you cannot distinguish a slow response from no response**. Every distributed protocol is ultimately a strategy for making decisions despite this uncertainty."
+      "title": "The Remote Team Communicating by Post",
+      "content": "Imagine a company whose team members work in different cities and can only communicate by postal mail. You send a letter asking a colleague to complete a task. Days pass and you hear nothing. Now you face a profound uncertainty: did the letter get lost in transit? Did your colleague receive it and is still working on it (just slow)? Did your colleague receive it, complete the task, and send a reply that got lost? Or is your colleague sick in hospital?\n\nYou cannot tell the difference. You can send the letter again — but then your colleague might do the task twice and charge the client double. You could send a messenger — but the messenger might also get lost. Every distributed protocol is ultimately a set of rules for making decisions despite this irreducible uncertainty.\n\nThis postal analogy captures the core problem precisely: **you cannot distinguish a slow response from no response**. The only tool you have is waiting a fixed amount of time (a timeout) and then deciding what to do. Every production system — from databases to payment processors to streaming platforms — is built on strategies for handling this ambiguity gracefully."
     },
     {
       "type": "explanation",
-      "content": "**The Eight Fallacies of Distributed Computing** (originally from Peter Deutsch at Sun Microsystems) capture assumptions programmers wrongly make:\n\n1. The network is reliable\n2. Latency is zero\n3. Bandwidth is infinite\n4. The network is secure\n5. Topology doesn't change\n6. There is one administrator\n7. Transport cost is zero\n8. The network is homogeneous\n\nEvery one of these is false in practice. Networks drop packets, add jitter, get partitioned, and change topology during rolling deploys. These fallacies explain why `distributed_sum = node1.sum() + node2.sum()` sometimes returns wrong results — a node might have responded with stale data before crashing mid-operation.\n\n**Failure modes** in distributed systems are richer than in single-node programs. A **crash-stop** failure (node halts permanently) is actually the easiest to handle — you just wait for a timeout. **Byzantine failures** (node sends arbitrary, possibly malicious responses) are the hardest and require quorum-based protocols. Real production systems mostly deal with **crash-recovery** (nodes crash and restart, possibly with stale state) and **omission failures** (messages are dropped).\n\n**Timeouts** are the only mechanism for detecting failure across a network — but they are ambiguous. A timeout means \"I haven't heard back within T seconds,\" not \"the operation failed.\" The operation may have completed successfully on the remote node without the response making it back. This is why **idempotent operations** are so important: safely retrying `PUT /orders/123 {amount: 50}` is fine; retrying `POST /orders {amount: 50}` may create a duplicate order."
+      "title": "The Eight Fallacies of Distributed Computing",
+      "content": "In the early 1990s, engineers at Sun Microsystems — notably Peter Deutsch and James Gosling — documented the dangerous assumptions that programmers routinely make when writing their first distributed code. These became known as the **Eight Fallacies of Distributed Computing**:\n\n1. **The network is reliable** — packets are dropped, routers reboot, cables are cut by construction crews.\n2. **Latency is zero** — even in the same data center, a round-trip is 0.1–1 ms; cross-continental, 100–300 ms.\n3. **Bandwidth is infinite** — saturating a 10 Gbps link with a poorly designed serialization format is entirely possible.\n4. **The network is secure** — man-in-the-middle attacks, IP spoofing, and DNS poisoning are real threats.\n5. **Topology doesn't change** — rolling deployments, auto-scaling, and data center migrations change topology constantly.\n6. **There is one administrator** — microservice architectures span multiple teams; no single person controls everything.\n7. **Transport cost is zero** — serialization, compression, and network egress all have dollar costs at scale.\n8. **The network is homogeneous** — your system will talk to services running on Linux, Windows, JVM, and bare metal, over IPv4 and IPv6, via HTTP/1.1, HTTP/2, and gRPC.\n\nEvery one of these fallacies has caused production outages. The engineer who assumes the network is reliable wraps a remote call in a simple `try/catch` and wonders why their service degrades mysteriously every Tuesday when the backbone router reboots for patching. The engineer who assumes latency is zero makes a database call inside a hot loop and discovers that 10,000 iterations × 1 ms round-trip = 10 seconds of wall-clock time."
+    },
+    {
+      "type": "explanation",
+      "title": "Failure Modes: A Taxonomy",
+      "content": "Distributed systems research has identified a hierarchy of failure modes, ordered from easiest to hardest to handle:\n\n**Crash-stop failures** are the simplest. A node halts permanently and never sends another message. Detection is straightforward: if you stop receiving heartbeats and all retries time out, the node is gone. Mitigation is replication — another replica takes over. Most production databases are designed assuming crash-stop failures, with crash-recovery as a more realistic variant.\n\n**Crash-recovery failures** are what actually happen. A node crashes but eventually restarts, possibly from durable disk state. The challenge is that in-flight operations sitting in memory at the time of the crash are lost. The node comes back online with state from its last durable write — which might be seconds or minutes behind what the rest of the cluster agreed on. **Write-ahead logs (WAL)** solve this: before executing any operation, you first write the intention to a durable log. On restart, replay the log to reconstruct the state. This is the foundation of PostgreSQL, MySQL, LevelDB, and virtually every durable storage system.\n\n**Omission failures** occur when messages are dropped by the network without either party knowing. The sender gets no error — the packet simply vanishes. TCP's reliability mechanism retransmits lost packets, so at the TCP level omission is largely hidden. But application-level messages (HTTP requests) can time out at any layer, and the request's fate is unknown.\n\n**Timing failures** happen when a node responds, but too slowly to be useful. A node experiencing a garbage collection pause, or a disk flush, might take seconds where milliseconds are expected. From the caller's perspective this looks like a failure. Timeouts convert timing failures into omission failures from the caller's view.\n\n**Byzantine failures** are the hardest. A node sends arbitrary, incorrect, or even maliciously crafted responses. Unlike a crashed node (which says nothing), a Byzantine node says wrong things. Handling Byzantine failures requires algorithms like **Practical Byzantine Fault Tolerance (PBFT)** or Tendermint, which need 3f+1 nodes to tolerate f Byzantine faults. This is prohibitively expensive for most internal systems. Blockchain networks use Byzantine fault tolerance because they assume participants are adversaries. Internal microservice networks typically do not — they design only for crash-recovery and omission."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  A[\"Sender\"] -->|\"1. request sent\"| Net[\"Network\"]\n  Net -->|\"2a. message lost\"| X1[\"(dropped)\"]\n  Net -->|\"2b. delivered\"| B[\"Receiver\"]\n  B -->|\"3. response sent\"| Net2[\"Network\"]\n  Net2 -->|\"4a. response lost\"| X2[\"(dropped)\"]\n  Net2 -->|\"4b. response received\"| A",
-      "caption": "A request can be lost before reaching the receiver, or the response can be lost after processing. Both look identical to the sender — hence the need for idempotent retries."
+      "mermaid": "flowchart LR\n  A[\"Crash-stop\\neasy\"] --> B[\"Crash-recovery\\ncommon\"]\n  B --> C[\"Omission\\nnetwork drops\"]\n  C --> D[\"Timing\\nGC pauses\"]\n  D --> E[\"Byzantine\\nhardest\"]",
+      "caption": "Failure mode spectrum from easiest (crash-stop) to hardest (Byzantine). Production systems design for crash-recovery and omission; Byzantine tolerance is reserved for adversarial environments like blockchains."
+    },
+    {
+      "type": "explanation",
+      "title": "Timeouts: The Only Failure Detector — and Why They Are Ambiguous",
+      "content": "A **timeout** is the only mechanism a distributed system has for inferring that something has gone wrong. There is no magical \"node is dead\" signal — the network simply becomes silent. So every caller sets a deadline: if no response arrives within T milliseconds, assume failure and take action.\n\nBut timeouts are **fundamentally ambiguous**. When your HTTP client times out after 5 seconds, you know that you have not received a response. You do **not** know:\n- Whether the request was received at all\n- Whether the server processed it and the response was lost\n- Whether the server is processing it and will finish in 5 more milliseconds\n- Whether the server crashed mid-execution\n\nThis ambiguity is deeply consequential. If you set timeouts too short, you treat healthy-but-slow nodes as dead and potentially overload healthy replicas with redirected traffic. If you set them too long, a single slow node stalls your entire request pipeline. There is no universally correct timeout — it depends on the SLA, the operation's expected latency distribution, and the cost of false positives.\n\nThe **hedged request** pattern addresses this: after waiting a fraction of the timeout, send the same request to a second node. Use whichever response arrives first. This trades extra load for lower tail latency. Google's internal RPC framework uses hedging extensively.\n\nThe **timeout cascade** is a notorious failure mode: Service A calls B with a 10-second timeout. B calls C with a 10-second timeout. C calls D with a 10-second timeout. A slow D triggers timeouts in C, which trigger timeouts in B, which trigger timeouts in A — all simultaneously. The solution is **deadline propagation**: A passes its remaining deadline to B, which passes its remaining deadline to C. When only 1 second remains, downstream calls are skipped rather than attempted. gRPC calls this concept \"deadline-aware\" RPCs."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant S as Sender\n  participant N as Network\n  participant R as Receiver\n  S->>N: request sent\n  Note over N: packet dropped\n  N--xR: never arrives\n  Note over S: timeout fires\n  S->>N: retry request\n  N->>R: delivered\n  R->>N: response sent\n  N--xS: response lost\n  Note over S: timeout fires again\n  Note over S: gave up — but op succeeded!",
+      "caption": "A request can be dropped before reaching the receiver, or the response can be dropped after the receiver processes it. Both scenarios look identical to the sender — hence the need for idempotent retries."
+    },
+    {
+      "type": "explanation",
+      "title": "Idempotency: The Key to Safe Retries",
+      "content": "Because timeouts are ambiguous, callers must retry failed-or-timed-out requests. But naive retries can cause disasters: retrying a payment operation might charge a customer twice. Retrying an account creation might create duplicates. This is why **idempotency** is one of the most important concepts in distributed systems design.\n\nAn operation is **idempotent** if applying it multiple times produces the same result as applying it once. Mathematically: f(f(x)) = f(x). Examples:\n\n- `PUT /users/42 {name: \"Alice\"}` — setting a value is idempotent. Doing it twice still results in name = \"Alice\".\n- `DELETE /orders/123` — deleting is idempotent. If the order is already gone, the second delete has no effect (return 204 or 404, both are fine).\n- `POST /orders {amount: 50}` — creating is **not** idempotent by default. Each call creates a new order.\n- `INCREMENT counter` — incrementing is **not** idempotent. Applying it twice gives a different result.\n\nThe standard solution for making non-idempotent operations safe under retry is the **idempotency key pattern**: the client generates a unique key for each *logical* operation and includes it with every attempt. The server records which keys it has processed and, on duplicate keys, returns the cached response without re-executing. This is precisely how Stripe, Braintree, Adyen, and every major payment API works.\n\nIdempotency keys must be **deterministically derived** from the operation's logical identity — not randomly generated on each retry. A random UUID per retry attempt defeats the purpose. The key should be computed from stable inputs: `SHA256(userId + orderId + amount + timestamp-of-first-attempt)`."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Idempotency key pattern — safe retries in distributed systems\nconst crypto = require('crypto');\n\n// Client generates a unique key per logical operation\nfunction createOrder(cartId, paymentToken) {\n  const idempotencyKey = crypto\n    .createHash('sha256')\n    .update(`order:${cartId}:${paymentToken}`)\n    .digest('hex');\n\n  return fetch('/api/orders', {\n    method: 'POST',\n    headers: {\n      'Content-Type': 'application/json',\n      'Idempotency-Key': idempotencyKey  // server deduplicates on this\n    },\n    body: JSON.stringify({ cartId, paymentToken })\n  });\n}\n\n// Server-side: idempotent handler\nconst processedRequests = new Map(); // in production: Redis or DB table\n\nasync function handleCreateOrder(req, res) {\n  const key = req.headers['idempotency-key'];\n\n  // Return cached response if already processed\n  if (processedRequests.has(key)) {\n    return res.json(processedRequests.get(key));\n  }\n\n  const order = await db.createOrder(req.body);\n  const response = { orderId: order.id, status: 'created' };\n\n  // Cache response before returning (TTL: 24h in production)\n  processedRequests.set(key, response);\n\n  res.status(201).json(response);\n}",
-      "explanation": "The idempotency key is derived deterministically from the operation's logical identity (cart + payment token). If the network drops the response, the client retries with the same key and receives the same response — the order is not duplicated. This pattern is used by Stripe, Braintree, and most payment APIs."
+      "label": "Example",
+      "code": "// Idempotency key pattern — safe retries in distributed systems\nconst crypto = require('crypto');\n\n// ── CLIENT SIDE ──────────────────────────────────────────────\n// Derive key deterministically from the logical operation.\n// The key is STABLE across retries — same inputs = same key.\nfunction deriveIdempotencyKey(userId, cartId, attemptTimestamp) {\n  return crypto\n    .createHash('sha256')\n    .update(`order:${userId}:${cartId}:${attemptTimestamp}`)\n    .digest('hex');\n}\n\nasync function createOrderWithRetry(userId, cartId, paymentToken) {\n  // Fix the timestamp at first attempt — retries use the SAME key\n  const firstAttemptTs = Date.now();\n  const idempotencyKey = deriveIdempotencyKey(userId, cartId, firstAttemptTs);\n\n  for (let attempt = 1; attempt <= 5; attempt++) {\n    try {\n      const res = await fetch('/api/orders', {\n        method: 'POST',\n        headers: {\n          'Content-Type': 'application/json',\n          'Idempotency-Key': idempotencyKey  // same on every retry\n        },\n        body: JSON.stringify({ userId, cartId, paymentToken }),\n        signal: AbortSignal.timeout(5000)\n      });\n      if (res.ok) return await res.json();\n      if (res.status >= 400 && res.status < 500) throw new Error('Client error, no retry');\n    } catch (err) {\n      if (attempt === 5) throw err;\n      // Exponential backoff with jitter\n      const base = Math.min(200 * 2 ** attempt, 10000);\n      const jitter = Math.random() * base * 0.3;\n      await new Promise(r => setTimeout(r, base + jitter));\n    }\n  }\n}\n\n// ── SERVER SIDE ──────────────────────────────────────────────\n// Use Redis or a DB table for production; Map here for clarity.\nconst idempotencyStore = new Map(); // key -> { response, expiresAt }\n\nasync function handleCreateOrder(req, res) {\n  const key = req.headers['idempotency-key'];\n  if (!key) return res.status(400).json({ error: 'Idempotency-Key required' });\n\n  // Return cached response if this key was already processed\n  const cached = idempotencyStore.get(key);\n  if (cached && cached.expiresAt > Date.now()) {\n    return res.status(cached.response.status).json(cached.response.body);\n  }\n\n  // Process the order\n  const order = await db.createOrder(req.body);\n  const responseBody = { orderId: order.id, status: 'created' };\n\n  // Cache for 24 hours — client can retry safely within that window\n  idempotencyStore.set(key, {\n    response: { status: 201, body: responseBody },\n    expiresAt: Date.now() + 24 * 60 * 60 * 1000\n  });\n\n  res.status(201).json(responseBody);\n}",
+      "explanation": "The idempotency key is derived from stable inputs and fixed at the time of the first attempt — retries reuse the exact same key. The server caches the response for 24 hours. If the network drops the response and the client retries, it receives the same response without a second order being created. This pattern is used by Stripe, Adyen, and most payment APIs in production."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "The CAP Theorem: Consistency, Availability, Partition Tolerance",
+      "content": "In 2000, computer scientist Eric Brewer conjectured — and Gilbert and Lynch later proved — the **CAP theorem**: a distributed data store can provide at most two of the following three guarantees simultaneously:\n\n- **Consistency (C)**: Every read returns the most recent write, or an error. All nodes see the same data at the same time.\n- **Availability (A)**: Every request receives a response (not necessarily the latest data) — the system never returns an error due to unavailability.\n- **Partition tolerance (P)**: The system continues operating even when arbitrary message loss or delay occurs between nodes.\n\nThe key insight is that **partition tolerance is not optional**. Networks partition — cables are cut, routers fail, data center links go down. A system that cannot tolerate partitions cannot run in production. So the real choice is between C and A *during a network partition*:\n\n**CP systems** (prefer Consistency): During a partition, some nodes refuse to answer rather than return stale data. HBase, Zookeeper, and etcd are CP — they provide strong consistency but may become unavailable during partitions. Correct when serving financial data, configuration, or anything where a stale answer is worse than no answer.\n\n**AP systems** (prefer Availability): During a partition, nodes continue answering with potentially stale data. Cassandra, DynamoDB, and CouchDB are AP — they prioritize availability but may return outdated reads. Correct when serving social media feeds, product catalogs, or anything where an approximate answer is better than no answer.\n\nImportant caveats: CAP is often misapplied. The theorem is about behavior during partitions only. When the network is healthy, CP systems are also highly available. And the choices are not binary — modern systems use tunable consistency (e.g., Cassandra's ONE, QUORUM, ALL read/write consistency levels) to operate at different points on the spectrum depending on the operation."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  CAP[\"CAP Theorem\"] --> CP[\"CP: Consistent + Partition-tolerant\\nZookeeper, etcd, HBase\\nRefuse stale reads during partition\"]\n  CAP --> AP[\"AP: Available + Partition-tolerant\\nCassandra, DynamoDB, CouchDB\\nReturn stale data during partition\"]\n  CAP --> CA[\"CA: Consistent + Available\\nSingle-node RDBMS\\nNot partition-tolerant — impractical at scale\"]",
+      "caption": "The CAP trilemma. CA systems cannot tolerate network partitions, making them impractical for multi-node deployments. Real distributed systems choose between CP and AP behavior during partition events."
+    },
+    {
+      "type": "explanation",
+      "title": "Consistency Models: A Spectrum from Strong to Eventual",
+      "content": "CAP's notion of consistency is binary — you either have linearizability or you don't. But real systems operate on a spectrum. Understanding the major consistency models helps you reason about what guarantees a database or API actually provides:\n\n**Linearizability** (strongest): Operations appear to execute atomically at some single point in time. Once a write completes, all subsequent reads on any node return that value. This is what most people mean when they say \"strong consistency.\" It is expensive: requires coordination across nodes on every write. Examples: Zookeeper, etcd, single-leader PostgreSQL with synchronous replication.\n\n**Sequential consistency**: All operations appear to happen in some total order consistent with the program order on each individual client. Writes may not be immediately visible to all nodes, but all nodes see the same order. Slightly weaker than linearizability, slightly cheaper.\n\n**Causal consistency**: If write A causally precedes write B (e.g., B is a response to A), all nodes see A before B. Concurrent, unrelated writes may be seen in different orders on different nodes. MongoDB's sessions provide causal consistency within a session.\n\n**Read-your-own-writes**: After you perform a write, you always see your own write in subsequent reads. This is weaker than linearizability but sufficient for many user-facing apps. After posting a comment, you should see your comment — even if other users momentarily don't. DynamoDB's \"strongly consistent reads\" on the session that wrote the item achieve this.\n\n**Eventual consistency** (weakest): Given no new writes, all replicas will eventually converge to the same value. In the meantime, reads may return stale data. DNS is the canonical example of eventual consistency. DynamoDB's default read mode, Cassandra, and S3 are eventually consistent by default."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Linearizable\\nstrongest\\nhigh cost\"] --> B[\"Sequential\\nweaker\"]\n  B --> C[\"Causal\\nweaker\"]\n  C --> D[\"Read-your-writes\\nweaker\"]\n  D --> E[\"Eventual\\nweakest\\nlow cost\"]",
+      "caption": "Consistency models on a spectrum. Stronger guarantees cost more in coordination overhead and latency. Most production systems choose a model based on the workload's correctness requirements."
+    },
+    {
+      "type": "explanation",
+      "title": "Replication: How Data Stays Alive Across Node Failures",
+      "content": "**Replication** is the practice of keeping copies of data on multiple nodes so that a single node failure does not cause data loss or unavailability. Every distributed database, message queue, and file system uses replication. The strategies differ in how they coordinate writes:\n\n**Single-leader (primary-replica) replication**: One node is the leader and accepts all writes. Changes are replicated to follower (replica) nodes. Reads can be served from any replica. This is the most common model — used by MySQL, PostgreSQL (with streaming replication), Kafka, and Redis Sentinel. The challenge is leader election when the leader fails: promoting a new leader must be done carefully to avoid **split-brain** (two nodes both believing they are the leader and accepting conflicting writes).\n\n**Multi-leader replication**: Multiple nodes accept writes. Changes are propagated to all other leaders. This is used across geographically distant data centers where you cannot afford the latency of sending every write to a single leader. The challenge is **write conflicts**: if two leaders simultaneously update the same record, which value wins? Resolution strategies include last-write-wins (LWW, simplest but loses data), application-specific merge functions, and CRDTs (conflict-free replicated data types).\n\n**Leaderless replication (quorum-based)**: Any node can accept reads and writes. Writes succeed when a **quorum** of nodes acknowledges them; reads succeed when a quorum responds. If you have N replicas and require W writes and R reads, the system provides strong consistency when W + R > N. Cassandra and DynamoDB use this model. Setting W=1, R=1 maximizes availability; setting W=N, R=N maximizes consistency but reduces availability.\n\n**Replication lag** is inevitable in asynchronous replication: a follower falls behind the leader and temporarily serves stale reads. The lag can be milliseconds in a healthy system or minutes during network congestion. Monitoring replication lag is a critical operational concern — undetected lag can cause silent data inconsistencies."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Distributed systems failure taxonomy\n\n// 1. Crash-stop: node halts, never recovers\n//    Detection: timeout + heartbeat absence\n//    Mitigation: replication, automatic failover\n\n// 2. Crash-recovery: node crashes, restarts with disk state\n//    Challenge: in-flight operations lost from memory\n//    Mitigation: write-ahead logs, idempotent replay\n\n// 3. Omission: messages dropped (network unreliable)\n//    Detection: timeout + sequence numbers\n//    Mitigation: retry with exponential backoff + jitter\n\n// 4. Byzantine: node sends arbitrary wrong responses\n//    Detection: requires quorum agreement (3f+1 nodes for f faults)\n//    Mitigation: PBFT, Tendermint (expensive — rarely used in internal systems)\n\n// Retry with exponential backoff + jitter\nasync function retryWithBackoff(fn, maxAttempts = 5) {\n  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt === maxAttempts) throw err;\n      const base = Math.min(1000 * 2 ** attempt, 30000);\n      const jitter = Math.random() * base * 0.3;\n      await new Promise(r => setTimeout(r, base + jitter));\n    }\n  }\n}"
+      "label": "Example",
+      "code": "// Simulating quorum reads and writes\n// N=3 replicas, W=2 (write quorum), R=2 (read quorum)\n// W + R > N (2+2=4 > 3) => strong consistency\n\nconst replicas = [\n  { id: 'node-a', data: new Map() },\n  { id: 'node-b', data: new Map() },\n  { id: 'node-c', data: new Map() }\n];\n\nasync function quorumWrite(key, value, W = 2) {\n  const timestamp = Date.now();\n  const writes = replicas.map(async (replica) => {\n    // Simulate network: node-c is slow (returns after delay)\n    if (replica.id === 'node-c') {\n      await new Promise(r => setTimeout(r, 300));\n    }\n    replica.data.set(key, { value, timestamp });\n    return { replicaId: replica.id, ok: true };\n  });\n\n  // Collect results as they arrive; stop once quorum is reached\n  let acknowledged = 0;\n  const results = [];\n  for (const write of writes) {\n    const result = await write;\n    results.push(result);\n    acknowledged++;\n    if (acknowledged >= W) {\n      console.log(`Write quorum (${W}/${replicas.length}) reached for key=${key}`);\n      return { ok: true, ackedBy: results.map(r => r.replicaId) };\n    }\n  }\n}\n\nasync function quorumRead(key, R = 2) {\n  // Read from R replicas and pick the value with the highest timestamp\n  const reads = await Promise.all(\n    replicas.slice(0, R).map(async (replica) => {\n      const entry = replica.data.get(key);\n      return { replicaId: replica.id, entry };\n    })\n  );\n\n  // Resolve: take the most recent write (highest timestamp)\n  const best = reads\n    .filter(r => r.entry)\n    .sort((a, b) => b.entry.timestamp - a.entry.timestamp)[0];\n\n  return best ? best.entry.value : null;\n}\n\n// Usage\n(async () => {\n  await quorumWrite('user:42:name', 'Alice');  // writes to node-a, node-b fast\n  const name = await quorumRead('user:42:name');  // reads from node-a, node-b\n  console.log('Read:', name); // 'Alice'\n})();",
+      "explanation": "With W=2 and R=2 on N=3 replicas, at least one replica in every read set overlaps with every write set (2+2>3), guaranteeing we always read the most recent write. Node-c being slow does not block the write — it still gets the data eventually, ensuring read-repair can reconcile stale replicas."
+    },
+    {
+      "type": "explanation",
+      "title": "Practical Patterns: Retries, Circuit Breakers, and Backpressure",
+      "content": "Understanding failure modes theoretically is necessary but not sufficient. Production distributed systems use concrete patterns to remain healthy under failure:\n\n**Exponential backoff with jitter**: When a request fails, wait before retrying — and wait longer with each successive failure. Doubling the wait time (exponential backoff) prevents overwhelming a recovering service. Adding randomness (jitter) prevents the **thundering herd**: if 10,000 clients all back off for exactly the same duration, they all retry simultaneously, potentially re-crashing the recovering server. Adding ±30% random variation staggers the retries across time.\n\n**Circuit breaker**: Named after the electrical component. A circuit breaker wraps outbound calls and tracks their failure rate. When the failure rate exceeds a threshold, the circuit \"trips\" and subsequent calls fail immediately without attempting the network call — allowing the downstream service to recover. After a configurable timeout, the circuit enters a half-open state and tests the downstream with a small fraction of traffic. If those succeed, the circuit closes. Netflix's Hystrix popularized this pattern; resilience4j (Java) and Polly (.NET) implement it today.\n\n**Backpressure**: Rather than failing loudly, a saturated service signals to callers that it is overloaded and they should slow down. TCP does this automatically at the transport layer via window size. Application-level backpressure uses response codes (HTTP 429 Too Many Requests, 503 Service Unavailable), queue depth signals, or streaming protocols with explicit credit-based flow control (gRPC, reactive streams).\n\n**Bulkhead isolation**: Inspired by ship compartments that prevent flooding from spreading. In software, isolate different request types into separate thread pools or process groups. A slow batch job should not be able to exhaust the thread pool that handles interactive user requests. If the batch pool fills up, only batch requests degrade; interactive requests remain healthy.\n\n**Saga pattern**: For multi-step distributed transactions (e.g., reserve hotel + book flight + charge card), use a sequence of local transactions with compensating transactions for rollback. If the flight booking fails, trigger a compensating transaction to release the hotel reservation. Sagas avoid distributed locks and two-phase commit, trading strict atomicity for availability and scalability."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Circuit breaker + exponential backoff with jitter\n\nclass CircuitBreaker {\n  constructor({ failureThreshold = 5, successThreshold = 2, timeout = 30000 } = {}) {\n    this.state = 'CLOSED';      // CLOSED | OPEN | HALF_OPEN\n    this.failures = 0;\n    this.successes = 0;\n    this.failureThreshold = failureThreshold;\n    this.successThreshold = successThreshold;\n    this.timeout = timeout;\n    this.nextAttempt = Date.now();\n  }\n\n  async call(fn) {\n    if (this.state === 'OPEN') {\n      if (Date.now() < this.nextAttempt) {\n        throw new Error('Circuit OPEN — fast-fail, protecting downstream');\n      }\n      this.state = 'HALF_OPEN';\n      console.log('Circuit HALF_OPEN — testing downstream...');\n    }\n\n    try {\n      const result = await fn();\n      this.onSuccess();\n      return result;\n    } catch (err) {\n      this.onFailure();\n      throw err;\n    }\n  }\n\n  onSuccess() {\n    this.failures = 0;\n    if (this.state === 'HALF_OPEN') {\n      this.successes++;\n      if (this.successes >= this.successThreshold) {\n        this.state = 'CLOSED';\n        this.successes = 0;\n        console.log('Circuit CLOSED — downstream healthy');\n      }\n    }\n  }\n\n  onFailure() {\n    this.failures++;\n    if (this.state === 'HALF_OPEN' || this.failures >= this.failureThreshold) {\n      this.state = 'OPEN';\n      this.nextAttempt = Date.now() + this.timeout;\n      console.log(`Circuit OPEN — will retry in ${this.timeout}ms`);\n    }\n  }\n}\n\n// Retry with exponential backoff + jitter\nasync function withRetry(fn, maxAttempts = 5) {\n  for (let attempt = 1; attempt <= maxAttempts; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt === maxAttempts) throw err;\n      const base = Math.min(100 * 2 ** attempt, 30000);  // cap at 30s\n      const jitter = Math.random() * base * 0.3;          // ±30% randomness\n      const delay = Math.round(base + jitter);\n      console.log(`Attempt ${attempt} failed. Retrying in ${delay}ms...`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n}\n\n// Compose circuit breaker with retry\nconst breaker = new CircuitBreaker({ failureThreshold: 3, timeout: 10000 });\n\nasync function callUserService(userId) {\n  return withRetry(() =>\n    breaker.call(() =>\n      fetch(`https://user-service/users/${userId}`).then(r => r.json())\n    )\n  );\n}",
+      "explanation": "The circuit breaker prevents retrying a known-bad downstream by fast-failing immediately when open. Retries only apply to transient failures when the circuit is closed. Composing both gives: resilience against transient failures (retry) and protection against cascading failures into a degraded service (circuit breaker)."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Why 'eventually consistent' DNS is the right choice for names**: DNS trades strong consistency for extreme availability and scalability. When you update a DNS record, the change propagates over hours (controlled by the TTL). During propagation, different resolvers return different IP addresses. This is acceptable because DNS resolution is not a financial transaction — a user briefly hitting an old IP is less harmful than DNS being unavailable. Choosing the right consistency model always depends on what kind of staleness is acceptable for your use case."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Always add **jitter** to retry backoff. If 10,000 clients all back off by exactly the same amount after a failure, they storm the server simultaneously at the retry moment — a thundering herd. Randomizing the delay by ±30% staggers retries and prevents re-overloading a recovering service."
+      "content": "**Common interview traps and senior-engineer insights:**\n- **CAP's C is linearizability**, not just 'data is correct'. Many systems advertise 'consistency' meaning something much weaker (like read-your-writes). Always ask: consistent in what sense?\n- **Idempotency keys must be stable across retries** — a UUID generated fresh on each retry defeats the purpose entirely.\n- **Two-phase commit (2PC) is not magic**: 2PC provides atomicity across nodes but is a **blocking protocol** — if the coordinator crashes after sending 'prepare' but before 'commit', participants are stuck indefinitely. This is why modern systems prefer sagas.\n- **Replication lag causes phantom reads**: A read-replica that is 5 seconds behind can return a row that was deleted 3 seconds ago. If your code reads from a replica after writing to the leader, you may not see your own write — always route post-write reads to the leader for a time window.\n- **Always add jitter to retries**: without jitter, a thundering herd of clients synchronized by a shared failure event will hammer the recovering server simultaneously."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Partial failure** — some nodes crash while others continue — is the defining challenge of distributed systems and does not exist on single machines.",
-        "**The Eight Fallacies** (network is reliable, latency is zero, etc.) are all false; good distributed design treats the network as unreliable by default.",
-        "**Timeouts are ambiguous**: a timeout means you haven't heard back, not that the operation failed — the remote node may have completed it successfully.",
-        "**Idempotent operations** enable safe retries: the same request applied twice produces the same result, so clients can retry without fear of duplication.",
-        "**Failure modes** range from crash-stop (simplest) to Byzantine (arbitrary wrong responses) — most production systems design for crash-recovery and omission failures."
+        "**Partial failure** — some nodes crash while others continue — is the defining challenge of distributed systems and does not exist on single machines. Every design decision is a strategy for making correct progress despite it.",
+        "**The Eight Fallacies** enumerate dangerous assumptions: the network is unreliable, latency is nonzero, bandwidth is finite, topology changes, and there is no single administrator. Internalise these before writing any distributed code.",
+        "**Timeouts are the only failure detector**, but they are ambiguous — a timeout tells you nothing about whether the remote operation completed. This is why retried operations must be idempotent.",
+        "**Idempotency** (f(f(x)) = f(x)) makes retries safe. Derive idempotency keys deterministically from the operation's logical identity and keep them stable across all retry attempts.",
+        "**CAP theorem** forces a choice during partitions: consistency (refuse stale answers) vs. availability (serve stale answers). Partition tolerance is non-negotiable in practice. Real systems use tunable consistency to operate on a spectrum.",
+        "**Consistency models** range from linearizability (strongest, highest cost) through causal consistency to eventual consistency (weakest, lowest cost). Choose based on what staleness is acceptable for each operation.",
+        "**Circuit breakers, backpressure, and bulkheads** are production-essential patterns: circuit breakers fast-fail to protect degraded downstreams; backpressure signals overload to callers; bulkheads isolate failure domains to prevent one misbehaving workload from starving another."
       ]
     }
   ],
@@ -69,130 +135,130 @@
       "question": "What is the defining characteristic that makes distributed systems fundamentally harder than single-node systems?",
       "type": "mcq",
       "options": [
-        "They require more complex programming languages",
-        "Partial failure — some components can fail while others continue operating",
-        "They always have higher latency than single-node systems",
-        "They require specialized hardware not available on commodity servers"
+        "They require more complex programming languages and runtimes",
+        "Partial failure — some components can fail while others continue operating normally",
+        "They always have higher latency than equivalent single-node systems",
+        "They require specialized hardware that is not available on commodity servers"
       ],
       "correct": 1,
-      "explanation": "On a single machine, failure is total — everything works or the machine crashes. In a distributed system, some nodes can crash while others run, some messages can be dropped while others arrive, creating partial failure states that are uniquely difficult to handle."
+      "explanation": "On a single machine, failure is total — everything works or the machine crashes. In a distributed system, some nodes can crash while others keep running, some messages can be dropped while others arrive, and a slow node is indistinguishable from a crashed one. This partial failure is the defining challenge that does not exist in single-machine programming."
     },
     {
       "id": "q2",
-      "question": "According to the Eight Fallacies of Distributed Computing, which assumption do developers most dangerously make?",
+      "question": "According to the Eight Fallacies of Distributed Computing, which of the following is a dangerous assumption developers commonly make?",
       "type": "mcq",
       "options": [
         "The network is reliable",
-        "CPU cycles are cheap",
-        "Memory is unlimited",
-        "Disk I/O is fast"
+        "CPU cycles are expensive",
+        "Memory allocation can fail",
+        "Disk writes are durable"
       ],
       "correct": 0,
-      "explanation": "The network is NOT reliable — packets are dropped, connections time out, links go down. The Eight Fallacies were formulated to enumerate every wrong assumption developers commonly make about distributed network environments."
+      "explanation": "The network is NOT reliable — packets are dropped, connections time out, links are cut by construction crews, and routers reboot. All eight fallacies (reliable network, zero latency, infinite bandwidth, secure network, static topology, one administrator, zero transport cost, homogeneous network) are false in practice."
     },
     {
       "id": "q3",
       "question": "Why are timeouts ambiguous in distributed systems?",
       "type": "mcq",
       "options": [
-        "Clocks on different machines run at different speeds",
-        "A timeout only means no response was received — the operation may have completed successfully on the remote node",
-        "Timeouts are not supported in TCP connections",
-        "Network latency makes timeouts impossible to configure correctly"
+        "Clocks on different machines run at different speeds, making time comparisons unreliable",
+        "A timeout only means no response was received within the deadline — the operation may have completed successfully on the remote node",
+        "TCP connections do not support configurable timeouts at the application layer",
+        "Network latency variance makes it impossible to configure a timeout that is correct in all cases"
       ],
       "correct": 1,
-      "explanation": "A timeout tells you nothing about what happened on the remote side. The operation may have completed successfully but the response was lost in the network. This ambiguity is why retries must be idempotent — you might be retrying a succeeded operation."
+      "explanation": "A timeout tells you nothing about what happened on the remote side. The operation may have completed successfully but the response was lost in the network, or the node may be processing and about to respond. This ambiguity is precisely why retries must be idempotent — you might be retrying an operation that already succeeded."
     },
     {
       "id": "q4",
-      "question": "What makes an operation idempotent?",
+      "question": "What makes an operation idempotent, and which of the following is an example?",
       "type": "mcq",
       "options": [
-        "It completes in constant time regardless of input size",
-        "Applying it multiple times produces the same result as applying it once",
-        "It never fails under any network condition",
-        "It uses atomic transactions to prevent partial updates"
+        "It completes in constant time regardless of input; example: binary search",
+        "Applying it multiple times produces the same result as applying it once; example: PUT /users/42 {name: 'Alice'}",
+        "It never raises an exception under any network condition; example: reading from a cache",
+        "It uses distributed locks to prevent concurrent execution; example: a database transaction"
       ],
       "correct": 1,
-      "explanation": "Idempotency means f(f(x)) = f(x). Setting a value to 50 is idempotent (setting it to 50 twice still gives 50). Incrementing by 1 is not (incrementing twice gives a different result). Idempotent operations can be safely retried without side effects."
+      "explanation": "Idempotency means f(f(x)) = f(x). Setting a user's name to 'Alice' twice still results in name = 'Alice' — idempotent. In contrast, POST /orders creates a new order on every call (not idempotent) and INCREMENT counter gives different results each time (not idempotent)."
     },
     {
       "id": "q5",
-      "question": "Which failure mode is the most difficult to handle in distributed systems?",
+      "question": "Which failure mode is the hardest to handle in distributed systems, and why?",
       "type": "mcq",
       "options": [
-        "Crash-stop failures",
-        "Network partitions",
-        "Byzantine failures",
-        "Crash-recovery failures"
+        "Crash-stop failures, because nodes permanently halt and cannot be restarted",
+        "Omission failures, because dropped packets are invisible to both sender and receiver",
+        "Byzantine failures, because nodes send arbitrary incorrect responses and cannot be detected by simple timeout",
+        "Timing failures, because GC pauses make it impossible to set correct timeouts"
       ],
       "correct": 2,
-      "explanation": "Byzantine failures occur when nodes send arbitrary, incorrect, or malicious responses. Unlike crash failures (where nodes simply stop), Byzantine nodes actively participate with wrong data. Handling them requires quorum protocols (3f+1 nodes for f faults) and is far more expensive."
+      "explanation": "Byzantine failures occur when nodes send arbitrary, incorrect, or even maliciously crafted responses. Unlike crashed nodes (which are simply silent), Byzantine nodes actively participate with wrong data. Handling them requires 3f+1 nodes for f Byzantine faults and expensive quorum protocols like PBFT — far more costly than handling crash-recovery or omission failures."
     },
     {
       "id": "q6",
-      "question": "The idempotency key pattern used by payment APIs like Stripe works by:",
+      "question": "The CAP theorem states that during a network partition, a distributed system must choose between:",
       "type": "mcq",
       "options": [
-        "Encrypting the request body so it can only be processed once",
-        "The client sending a unique key per logical operation; the server caches and returns the same response on duplicate requests",
-        "The server generating a token that the client must echo back",
-        "Using a distributed lock that prevents concurrent requests for the same resource"
+        "Consistency and Atomicity",
+        "Availability and Partition tolerance",
+        "Consistency and Availability",
+        "Durability and Isolation"
       ],
-      "correct": 1,
-      "explanation": "The client derives a deterministic key from the operation's logical identity (e.g., SHA256 of cart ID + payment token). If the client retries with the same key, the server returns the cached response instead of processing again — preventing duplicate orders or charges."
+      "correct": 2,
+      "explanation": "CAP theorem: during a partition, you must choose between Consistency (return only up-to-date data, or an error) and Availability (always return a response, possibly stale). Partition tolerance is non-negotiable for any real distributed system — networks do partition in production."
     },
     {
       "id": "q7",
-      "question": "Why should exponential backoff always include random jitter?",
+      "question": "In a quorum-based replication system with N=5 replicas, write quorum W=3, and read quorum R=3, why does W+R>N guarantee strong consistency?",
       "type": "mcq",
       "options": [
-        "Jitter prevents integer overflow in backoff calculations",
-        "Random delays stagger retries to prevent synchronized client storms overwhelming a recovering server",
-        "Jitter ensures retries use different network paths",
-        "It satisfies cryptographic requirements for secure retransmission"
+        "It ensures all 5 nodes must agree before any operation completes",
+        "Every read quorum (3) must overlap with every write quorum (3) by at least one node, guaranteeing the most recent write is included in every read",
+        "It prevents split-brain by requiring more than half the nodes to participate in every operation",
+        "It reduces replication lag to zero by requiring synchronous replication to a majority"
       ],
       "correct": 1,
-      "explanation": "Without jitter, all clients back off by the same amount and retry simultaneously — a thundering herd. Adding ±30% random jitter staggers retries across time, giving the recovering service a smooth ramp-up rather than another spike of load."
+      "explanation": "With W=3 and R=3 on N=5 nodes: any write quorum and any read quorum must share at least W+R-N = 1 node. That overlapping node has the most recent write, so every read sees at least one replica with current data. If W+R were equal to or less than N, a read set and a write set could be disjoint — entirely missing the latest write."
     },
     {
       "id": "q8",
-      "question": "Which of the following is NOT one of the primary reasons to build a distributed system?",
+      "question": "Why should exponential backoff always include random jitter?",
       "type": "mcq",
       "options": [
-        "Scale beyond a single machine's resource limits",
-        "Achieve fault tolerance so one node's failure doesn't stop the service",
-        "Eliminate the need for software testing",
-        "Serve users globally with low latency"
+        "Jitter prevents integer overflow in long-running retry loops",
+        "Random delays stagger retries across clients to prevent a synchronized thundering herd from re-crashing a recovering service",
+        "Jitter ensures each retry uses a different network path through the load balancer",
+        "It satisfies cryptographic requirements for secure retransmission protocols"
       ],
-      "correct": 2,
-      "explanation": "Distribution is motivated by scale, fault tolerance, and geography. It dramatically increases complexity and the surface area for bugs — distributed systems require more rigorous testing, not less."
+      "correct": 1,
+      "explanation": "Without jitter, all clients that failed at the same moment back off by the same fixed amount and retry simultaneously — a thundering herd. Adding ±30% random jitter staggers retries across time, giving the recovering service a gradual ramp-up rather than another instantaneous spike of load."
     },
     {
       "id": "q9",
-      "question": "In a crash-recovery failure model, what is the main challenge compared to crash-stop?",
+      "question": "What is the purpose of a circuit breaker in a distributed system?",
       "type": "mcq",
       "options": [
-        "Crashed nodes cannot be detected via heartbeats",
-        "Recovering nodes restart with potentially stale state from disk, causing inconsistencies",
-        "Recovery requires replacing hardware before the node can rejoin",
-        "Crash-recovery failures always result in data loss"
+        "To encrypt traffic between services to prevent man-in-the-middle attacks",
+        "To fast-fail calls to a known-degraded downstream service, preventing cascade failures and allowing recovery time",
+        "To load-balance requests across replicas by tracking each replica's response time",
+        "To deduplicate retried requests using idempotency keys stored in a distributed cache"
       ],
       "correct": 1,
-      "explanation": "A crash-recovery node restarts from persisted disk state, which may not include in-flight operations that were in memory when it crashed. Other nodes may have moved on. Write-ahead logs and idempotent replay protocols handle this by recording intended operations before executing them."
+      "explanation": "A circuit breaker monitors failure rate. When failures exceed a threshold, it 'trips' to OPEN state and immediately rejects calls without attempting the network request — protecting the downstream from additional load and protecting the upstream from latency buildup. After a timeout, it enters HALF_OPEN to test recovery before closing again."
     },
     {
       "id": "q10",
-      "question": "A POST /orders endpoint that creates a new order on every call is problematic under network retries because:",
+      "question": "A developer sets an idempotency key to a randomly generated UUID on each retry attempt. What is wrong with this approach?",
       "type": "mcq",
       "options": [
-        "POST requests cannot be retried by HTTP clients",
-        "Network retries can trigger the endpoint multiple times, creating duplicate orders",
-        "The server cannot distinguish authenticated from unauthenticated POST requests",
-        "POST requests bypass CDN caching, increasing origin load"
+        "UUIDs are too long to be used as idempotency keys efficiently",
+        "Each retry generates a unique key, so the server treats every retry as a new distinct operation — defeating deduplication entirely",
+        "Random UUIDs have collision probability that could cause unrelated requests to share the same key",
+        "UUIDs cannot be stored in Redis and therefore cannot be used for server-side deduplication"
       ],
       "correct": 1,
-      "explanation": "POST /orders is not idempotent — each call creates a new order. If the network drops the response after the order is created, the client retries and creates a duplicate. Idempotency keys solve this: the second request with the same key returns the first order's response."
+      "explanation": "The idempotency key must be stable across all retries of the same logical operation. If each retry generates a new UUID, the server sees each retry as a brand-new request with no previous record — and processes each one, potentially creating duplicate orders or charges. The key must be deterministically derived from stable operation inputs and fixed at the first attempt."
     }
   ]
 }

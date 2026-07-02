@@ -5,57 +5,126 @@
   "week": 44,
   "icon": "network",
   "tagline": "The spectrum from strong consistency to eventual consistency — what guarantees each model provides and what you give up to get them.",
-  "readTime": "~13 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "When the same data is stored on multiple nodes, those nodes can disagree — at least temporarily. A **consistency model** is a contract between the system and its users: it defines which values a read is allowed to return given a history of writes. Stronger models are easier to reason about but require more coordination (and are therefore slower). Weaker models allow higher availability and lower latency but shift the complexity of handling stale or conflicting data to the application.\n\nThe tension is not academic. Instagram's like count can be slightly stale — eventual consistency is fine. Your bank balance cannot show inconsistent totals across two ATMs — linearizability is required. Choosing the right model is a core distributed systems design decision."
+      "content": "When the same data is stored on multiple nodes, those nodes can disagree — at least temporarily. A **consistency model** is a formal contract between a distributed system and its users: it precisely defines which values a read operation is allowed to return, given a particular history of writes. This might sound dry, but it is one of the most consequential design decisions in any distributed system. Get it wrong in one direction and your system silently corrupts data. Get it wrong in the other direction and your system becomes so slow and brittle that it is essentially unusable at scale.\n\nThe core tension is not academic. Consider two very different applications: Instagram's like count can lag by several seconds — if you see 10,241 likes instead of 10,242, nothing bad happens. But your bank balance cannot show inconsistent totals across two ATMs simultaneously — if one ATM shows your account has $500 and another shows $200, one of them is about to cause a serious problem. These two scenarios call for radically different guarantees, and consistency models are the vocabulary engineers use to specify and reason about exactly those guarantees.\n\nWeak consistency models allow higher availability and lower latency because nodes can serve reads locally without coordinating with every other node on every operation. Strong consistency models require coordination — nodes must agree before confirming a write or serving a read — which adds latency and can make the system unavailable during network partitions. Every distributed database you will ever use has made a deliberate choice somewhere on this spectrum, and understanding that choice helps you predict its failure modes, design around its limitations, and make the right choice when you are building your own systems.\n\nThis chapter walks from the strongest model (linearizability) down to the weakest (eventual consistency), explaining the mechanics of each, the systems that implement them, and the trade-offs they impose. We will also cover the CAP theorem and its more nuanced successor PACELC, and finish with practical guidance on choosing the right model for real applications."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  L[\"Linearizability\\n(strongest)\"] --> SC[\"Sequential Consistency\"]\n  SC --> CC[\"Causal Consistency\"]\n  CC --> RYW[\"Read-Your-Writes\"]\n  RYW --> EC[\"Eventual Consistency\\n(weakest)\"]",
-      "caption": "The consistency hierarchy from strongest (linearizability) to weakest (eventual consistency). Stronger models require more coordination; weaker models offer higher availability."
+      "mermaid": "flowchart TD\n  L[\"Linearizability\\n(strongest — real-time global order)\"] --> SC[\"Sequential Consistency\\n(same order, no real-time constraint)\"]\n  SC --> CC[\"Causal Consistency\\n(cause precedes effect globally)\"]\n  CC --> RYW[\"Read-Your-Writes\\n(session guarantee for own writes)\"]\n  RYW --> MR[\"Monotonic Reads\\n(reads never go backward)\"]  \n  MR --> EC[\"Eventual Consistency\\n(weakest — convergence only)\"]",
+      "caption": "The consistency hierarchy from strongest (linearizability) to weakest (eventual consistency). Each step down allows higher availability and lower latency by relaxing a guarantee. Systems like DynamoDB and Cassandra sit near the bottom; etcd and Google Spanner sit at the top."
     },
     {
       "type": "analogy",
       "title": "The Scoreboard Problem",
-      "content": "Imagine a sports scoreboard updated by a central referee (**linearizability**) versus scoreboards at each stadium updated by local staff who sync periodically (**eventual consistency**). With a central referee, every fan everywhere sees the same score at the same moment — but if the referee is unreachable, no one gets an update. With local staff, fans at each stadium see the score immediately, but fans in different stadiums may briefly see different scores after a goal. **Read-your-writes** is like the player who just scored: they always see their own goal immediately on their local scoreboard, even if it hasn't propagated to other stadiums yet."
+      "content": "Imagine a global sports scoreboard system with several implementation strategies. Strategy one: a single **central referee** controls a single authoritative scoreboard visible to everyone (**linearizability**). Every fan anywhere on Earth sees the same score at the same instant — but if the referee's connection drops, nobody gets any updates. Strategy two: each stadium has its **own local scoreboard**, and staff update them independently, syncing with each other over time (**eventual consistency**). Updates are instant locally but stadiums can briefly show different scores after a goal; given no more goals, all boards eventually agree.\n\nNow consider a middle ground: the system ensures that if stadium B heard about a goal from stadium A, then stadium B's board shows that goal **before** showing any subsequent goals scored in response to it (**causal consistency**). Fans in B may still be moments behind fans in A, but they will never see stadium B celebrate a counter-goal before seeing the original goal that provoked it.\n\nFinally, **read-your-writes** is like a special rule for the player who just scored: they always see their own goal immediately on their local scoreboard, regardless of which stadium they are looking at. Other fans may lag, but the player's own view is always up-to-date with their own actions. This is the minimum guarantee most users need to not feel like the system is broken."
     },
     {
       "type": "explanation",
-      "content": "**Linearizability** (strong consistency) is the gold standard. Every operation appears to take effect atomically at a single point in time between its start and completion. All clients see the same, globally ordered sequence of operations — as if there were a single server. It requires coordination before every write (consensus) and is expensive. Examples: etcd, ZooKeeper, Google Spanner.\n\n**Sequential consistency** weakens the real-time constraint: all processes see operations in the same order, but that order need not match real-time wall-clock order. Writes from a single client are seen in order by all other clients. Used in CPU memory models.\n\n**Causal consistency** preserves causality: if operation A causally precedes B (A caused B), every node sees A before B. Concurrent operations (no causal relationship) may be seen in different orders by different nodes. This is achievable without global coordination, making it much cheaper than linearizability while still being intuitive for most applications.\n\n**Read-your-writes** (also called read-your-own-writes) guarantees that after a client writes a value, that same client will always read that value or a newer one on subsequent reads. Other clients may still see the old value. This is the minimum useful guarantee for user-facing systems — users are confused when they post a comment and immediately don't see it.\n\n**Eventual consistency** is the weakest model: if no new updates are made, all replicas will eventually converge to the same value. No timing guarantee is given — eventually could be milliseconds or minutes. This allows maximum availability and partition tolerance (see CAP theorem) but requires the application to handle stale reads gracefully. Examples: DynamoDB (default), Cassandra, DNS.\n\n**The CAP Theorem** (Brewer, 2000) states that in the presence of a network **P**artition, a system must choose between **C**onsistency and **A**vailability. Since partitions are inevitable in real networks, every distributed system makes this trade-off. Modern systems often frame this as the **PACELC** model: even without partitions, there is a latency vs. consistency trade-off."
+      "title": "Linearizability: The Gold Standard",
+      "content": "**Linearizability** — also called **atomic consistency** or **strong consistency** — is the strongest consistency model for individual operations. Its defining property is that every operation appears to take effect atomically at a single point in time, somewhere between the moment the client issued the request and the moment the client received a response. All clients share one globally agreed-upon sequence of events, as if the entire distributed system were a single machine with a single CPU.\n\nFormally: if operation A completes before operation B begins (real clock time), then every client must see A's effect before B's. There is no ambiguity. Once a write returns, any subsequent read by any client anywhere in the world must see that write or a later one.\n\nThis guarantee feels natural because it mirrors how we think about sequential code. When you call `x = 5` and it returns, you expect any subsequent `print(x)` anywhere to show 5. Linearizability gives distributed systems that same intuitive property.\n\nThe cost is significant. To linearize operations across multiple nodes, the system must run a **consensus protocol** — typically Paxos or Raft — that requires a quorum of nodes to acknowledge every write before it is considered committed. This introduces at least one round-trip network delay for every write, and the system becomes unavailable if fewer than a quorum of nodes can communicate. The latency floor is bounded by the speed of light across your cluster geography.\n\nReal-world systems that provide linearizability: **etcd** (the backing store for Kubernetes, uses Raft), **Apache ZooKeeper** (uses Zab protocol), **Google Spanner** (uses TrueTime to bound clock uncertainty and achieve external consistency — a variant of linearizability), and **CockroachDB**. Single-node relational databases like PostgreSQL trivially provide linearizability (there is only one node to coordinate)."
+    },
+    {
+      "type": "explanation",
+      "title": "Sequential Consistency: Removing the Real-Time Constraint",
+      "content": "**Sequential consistency**, defined by Leslie Lamport in 1979, relaxes one aspect of linearizability: the global operation order must still be consistent and agreed-upon by all nodes, but it no longer needs to respect real-world clock time. Operations from each individual process appear in program order, and all processes see the same interleaved sequence — but that sequence can lag reality.\n\nThe practical difference: with linearizability, if Alice writes at 10:00:00.000 and Bob reads at 10:00:00.001, Bob must see Alice's write. With sequential consistency, Bob might see an older value as long as all clients agree on the same total ordering of operations.\n\nThis model is relevant primarily in **CPU memory architectures**. Modern processors aggressively reorder memory accesses for performance. The x86 architecture provides a model stronger than sequential consistency (called Total Store Order), while ARM provides a weaker model. Language memory models — Java's Java Memory Model, C++11's `std::memory_order`, Rust's atomics — are formalizations of sequential consistency with various relaxations, because requiring full linearizability across every CPU instruction would be catastrophically slow.\n\nFor distributed databases, sequential consistency is rarely implemented explicitly — systems tend to jump from linearizability down to causal consistency, since the intermediate step of sequential consistency without real-time guarantees is hard to provide efficiently while offering limited practical benefit over causal consistency."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  Client[\"Client\"] -->|\"write x=5\"| Primary[\"Primary Replica\"]\n  Primary -->|\"async replicate\"| R1[\"Replica 1 (x=5)\"]\n  Primary -->|\"async replicate\"| R2[\"Replica 2 (x=3 stale)\"]\n  Client2[\"Another Client\"] -->|\"read x\"| R2\n  R2 -->|\"returns 3 (stale!)\"| Client2",
-      "caption": "Under eventual consistency with async replication, a client reading from a stale replica sees an old value. Eventually, Replica 2 will receive the update and return 5."
+      "mermaid": "sequenceDiagram\n  participant C1 as \"Client 1\"\n  participant P as \"Primary\"\n  participant R1 as \"Replica 1\"\n  participant C2 as \"Client 2\"\n  C1->>P: write x=5\n  P-->>C1: ok (quorum confirmed)\n  C2->>R1: read x\n  R1-->>C2: returns 5 (linearizable)\n  note over R1: Replica is up-to-date\n  note over C2: Strong read = always sees latest write",
+      "caption": "Under linearizability, after the write of x=5 completes (quorum confirmed), any subsequent read by any client on any replica must return 5 or a later value. This requires either reading from a consistent quorum or from the primary."
+    },
+    {
+      "type": "explanation",
+      "title": "Causal Consistency: Preserving Cause and Effect",
+      "content": "**Causal consistency** is the strongest model achievable without requiring global coordination on every operation, making it a very attractive middle ground. It preserves the intuitive notion of cause and effect: if operation A **causally precedes** operation B (A happened before B and B could have been influenced by A), then every node in the system must see A before B.\n\nTwo operations are causally related if: (1) they are from the same client and in program order, or (2) the second operation reads a value produced by the first, or (3) there is a chain of such relationships. Operations that are **concurrent** — neither causally precedes the other — may be seen in different orders by different nodes, and that is acceptable.\n\nThe classic example is a social media reply thread. If Alice posts a message and Bob replies to it, every user must see Alice's post before Bob's reply — seeing a reply without the original post is nonsensical and violates causality. But if Carol and Dave independently post at the same time with no causal relationship, it is fine for some users to see Carol first and others to see Dave first.\n\nCausal consistency is implemented using **vector clocks** or **version vectors**. Each node maintains a vector of logical timestamps, one per node in the system. When an event occurs, the local entry is incremented. When a message is sent, the current vector clock travels with it. A receiving node updates its vector by taking the component-wise maximum. This allows any node to determine whether two events are causally ordered (one vector dominates the other) or concurrent (neither dominates).\n\n**Causal+ consistency** (used by COPS, an academic distributed key-value store) extends causal consistency with a convergence property: concurrent writes must eventually converge to the same value at all replicas using a deterministic conflict resolution rule.\n\nSystems providing causal consistency: **MongoDB causally consistent sessions** (using operation time and cluster time), **Azure Cosmos DB** (one of its five offered consistency levels), and research systems like COPS and Bolt-on Causal Consistency."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Alice: post 'Hello'\"] -->|\"causes\"| B[\"Bob: reply 'Hi Alice'\"]\n  B -->|\"causally ordered\"| C[\"All nodes see post before reply\"]\n  D[\"Carol: post 'Good morning'\"] -->|\"concurrent\"| E[\"Dave: post 'Howdy'\"]\n  E --> F[\"Some nodes: Carol first\\nOther nodes: Dave first\\n(both OK)\"]",
+      "caption": "Causal consistency ensures replies always appear after their parent posts (causally ordered). But two independent concurrent posts may appear in different orders on different nodes — that is acceptable because neither caused the other."
+    },
+    {
+      "type": "explanation",
+      "title": "Session Guarantees: Read-Your-Writes, Monotonic Reads, and More",
+      "content": "**Session guarantees** are weaker consistency properties that apply within a single client session rather than globally. They were formalized by Terry et al. in 1994 and provide a practical set of guarantees for user-facing applications without requiring expensive global coordination.\n\n**Read-your-writes** (also called **read-your-own-writes**) guarantees that after a client writes a value, that same client — in the same session — will always read that value or a newer one on subsequent reads. Other clients may still see the old value. This is the minimum useful guarantee for interactive applications. If a user updates their display name and immediately visits their profile, they must see the new name. Seeing the old name violates the most basic user expectation.\n\nImplementation strategies for read-your-writes:\n- **Sticky sessions to primary**: route all reads and writes from a session to the same node, typically the primary. Simple but creates a hot spot.\n- **Read-after-write token**: the write returns a version token or timestamp. Subsequent reads pass this token and the replica refuses to serve the read until it has caught up to that version.\n- **Client-side caching**: cache recent writes locally; check the cache before the database. No server-side overhead, but the cache is lost if the client crashes.\n\n**Monotonic reads** guarantees that if a client reads a value at time T, any subsequent read will return a value that is at least as new — the client never observes time going backward. Without this, a client alternating between two stale replicas could see a value appear, then disappear, then reappear — extremely confusing.\n\n**Monotonic writes** guarantees that writes from a single client are applied in order. If you write A then write B, no replica will ever apply B before A.\n\n**Writes-follow-reads** (also called session causality) guarantees that if a client reads a value V and then writes W, W is applied after the write that produced V. This prevents a ghost-update problem where your write appears to reference a value the replica hasn't received yet.\n\nMost relational databases give you all four guarantees within a single connection automatically. The interesting engineering happens when you have a distributed system with connection pooling, load balancers, or read replicas where a client's requests may hit different nodes."
+    },
+    {
+      "type": "explanation",
+      "title": "Eventual Consistency: Maximum Availability at a Price",
+      "content": "**Eventual consistency** is the weakest useful consistency model. Its definition is deceptively simple: if no new updates are made to a data item, all replicas will eventually converge to the same value. No timing bound is specified — 'eventually' could mean milliseconds or hours depending on network conditions and replication lag. No ordering constraints are guaranteed on reads.\n\nThe strength of eventual consistency is that it allows replicas to serve reads and accept writes completely independently, without any cross-replica coordination. A replica that is completely isolated from the rest of the cluster during a network partition can still accept reads and writes — it simply may diverge from other replicas. When the partition heals, replicas exchange their divergent updates and apply a **conflict resolution** strategy to converge.\n\nConflict resolution strategies under eventual consistency include:\n- **Last-write-wins (LWW)**: each write has a timestamp; the write with the latest timestamp wins. Simple but lossy — concurrent writes are silently discarded. DynamoDB and Cassandra default to LWW.\n- **Multi-value convergence (vector clocks)**: store all concurrent values (siblings) and expose the conflict to the application to resolve. CouchDB and Riak (pre-2.0) use this.\n- **CRDTs (Conflict-free Replicated Data Types)**: data structures mathematically designed so that any merge order produces the same result. Counters (increment-only), sets (add-only or with tombstones), and registers are common CRDT types. Riak 2.0 and Redis CRDT mode use these.\n- **Operational Transformation (OT)**: used in collaborative editing (Google Docs), where operations are transformed against concurrent operations to produce consistent results.\n\nEventual consistency is appropriate when: the data is naturally idempotent or commutative (counts, likes, ratings), when slightly stale data causes no business harm (product catalog, CDN-cached assets, DNS records), or when availability and partition tolerance are non-negotiable (global social media, e-commerce reads).\n\nReal-world eventually consistent systems: **Amazon DynamoDB** (default mode), **Apache Cassandra**, **Amazon S3** (strong consistency added in 2020 but optional), **CouchDB**, **DNS** (the canonical example — record propagation takes minutes to hours worldwide)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Client1[\"Client 1\"] -->|\"write x=5\"| Primary[\"Primary Replica\\nx=5\"]\n  Primary -->|\"async replicate\"| R1[\"Replica 1\\nx=5 (synced)\"]\n  Primary -->|\"async replicate\"| R2[\"Replica 2\\nx=3 (lagging)\"]\n  Client2[\"Client 2\"] -->|\"read x\"| R2\n  R2 -->|\"returns 3 (stale)\"| Client2\n  note1[\"Later: R2 receives update\\nx=5 — converged\"]",
+      "caption": "Under eventual consistency with async replication, a client reading from a lagging replica sees a stale value. The system will converge — Replica 2 will eventually receive x=5 — but no timing guarantee is given. The write-to-read window of staleness depends on replication lag."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Demonstrating consistency model choices in a Node.js app\n// Scenario: user updates profile, then immediately views their profile\n\n// --- OPTION A: Eventual Consistency (stale read possible) ---\nconst dynamoDB = require('@aws-sdk/client-dynamodb');\n\nasync function updateProfileEventual(userId, name) {\n  // Write to primary\n  await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n\n  // Immediately read — might return old name from stale replica!\n  const user = await dynamoDB.get({\n    TableName: 'Users',\n    Key: { userId },\n    ConsistentRead: false  // eventual consistency (default, cheaper)\n  });\n  console.log(user.name); // may log OLD name — violates read-your-writes\n}\n\n// --- OPTION B: Strong Consistent Read ---\nasync function updateProfileStrong(userId, name) {\n  await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n\n  // ConsistentRead: true forces read from primary — slower, costs 2x RCUs\n  const user = await dynamoDB.get({\n    TableName: 'Users',\n    Key: { userId },\n    ConsistentRead: true  // linearizable read\n  });\n  console.log(user.name); // guaranteed to log NEW name\n}\n\n// --- OPTION C: Read-your-writes via client-side cache ---\nconst localCache = new Map();\n\nasync function updateProfileRYW(userId, name) {\n  await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n  localCache.set(userId, { name }); // cache write locally\n\n  const user = localCache.get(userId) || await dynamoDB.get({ ... });\n  console.log(user.name); // reads own write from cache\n}",
-      "explanation": "DynamoDB exposes consistency as a per-read choice. Option A (eventual) is cheapest but may return stale data. Option B (consistent read) is linearizable but costs double the read capacity units and adds latency. Option C implements read-your-writes via client-side caching — the write is cached locally so the next read by the same client always sees it, without paying for a consistent read."
+      "label": "Example",
+      "code": "// Consistency model choices in a real Node.js application\n// Scenario: user updates their display name, then immediately views their profile\n\n// ─── OPTION A: Eventual Consistency (default — stale read possible) ───────────\nasync function updateProfileEventual(userId, name) {\n  // Write lands on the primary\n  await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n\n  // Read immediately — might return old name from a lagging replica!\n  const user = await dynamoDB.get({\n    TableName: 'Users',\n    Key: { userId },\n    ConsistentRead: false  // default: eventually consistent, cheaper\n  });\n\n  // DANGER: user.name may still be the OLD name here\n  // This violates read-your-writes — a real user-facing bug\n  return user.name;\n}\n\n// ─── OPTION B: Linearizable Read ──────────────────────────────────────────────\nasync function updateProfileStrong(userId, name) {\n  await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n\n  // ConsistentRead: true forces the read to go to the primary partition\n  // Guarantees reading the most recent committed write — linearizable\n  // Cost: 2x read capacity units consumed, higher latency\n  const user = await dynamoDB.get({\n    TableName: 'Users',\n    Key: { userId },\n    ConsistentRead: true\n  });\n\n  return user.name; // guaranteed to be the new name\n}\n\n// ─── OPTION C: Read-Your-Writes via Client-Side Write Cache ───────────────────\nconst writeCache = new Map(); // { key => { value, expiresAt } }\nconst CACHE_TTL_MS = 5000;    // 5 seconds — long enough for replication lag\n\nasync function updateProfileRYW(userId, name) {\n  await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n\n  // Cache the write locally — this client session will always see it\n  writeCache.set(userId, { name, expiresAt: Date.now() + CACHE_TTL_MS });\n\n  const cached = writeCache.get(userId);\n  if (cached && cached.expiresAt > Date.now()) {\n    return cached.name; // serves own write from cache — no DB call needed\n  }\n\n  // Cache expired: replication should have caught up by now\n  const user = await dynamoDB.get({ TableName: 'Users', Key: { userId } });\n  return user.name;\n}\n\n// ─── OPTION D: Token-Based Read-After-Write (version propagation) ─────────────\nasync function updateProfileToken(userId, name) {\n  const response = await dynamoDB.put({ TableName: 'Users', Item: { userId, name } });\n  const writeVersion = response.ConsumedCapacity?.CapacityUnits; // or a logical clock\n\n  // Pass version token to read; replica refuses to serve until it catches up\n  // (Cosmos DB and some custom systems support this pattern natively)\n  const user = await dynamoDB.get({\n    TableName: 'Users',\n    Key: { userId },\n    // Hypothetical: some databases accept a min-version parameter\n    // MinVersion: writeVersion\n  });\n  return user.name;\n}",
+      "explanation": "Each option represents a different point on the consistency spectrum. Option A is fastest and cheapest but can violate read-your-writes, causing a real user-facing bug. Option B is correct and simple but pays 2x read capacity units and adds round-trip latency. Option C achieves read-your-writes without extra database cost, at the expense of local memory and a time-bounded assumption about replication lag. Option D is the cleanest design when supported natively — the database itself tracks versions and enforces read-after-write without client-side state. In practice, most applications use Option C for non-critical reads and Option B only for operations where correctness is non-negotiable."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "The CAP Theorem: Why You Cannot Have Everything",
+      "content": "The **CAP theorem**, stated by Eric Brewer in 2000 and formally proven by Gilbert and Lynch in 2002, says that a distributed system can provide at most two of three properties simultaneously:\n\n- **C**onsistency (in CAP's sense): every read receives the most recent write or an error (this is closer to linearizability than the broader sense of 'consistency')\n- **A**vailability: every request receives a non-error response (though it may be stale)\n- **P**artition tolerance: the system continues operating when network partitions occur (messages between nodes are lost or delayed)\n\nThe critical insight is that **network partitions are not optional** in real distributed systems — they happen due to hardware failures, BGP routing issues, data center connectivity problems, and rolling software deployments. Therefore, every production distributed system must tolerate partitions. The real trade-off is between C and A when a partition occurs.\n\nDuring a partition, a node that cannot communicate with others faces a choice: refuse to serve requests (maintaining consistency, sacrificing availability) or serve requests from local state (maintaining availability, risking inconsistency). There is no third option.\n\nThis produces the taxonomy:\n- **CP systems** (consistency + partition tolerance): choose to return an error or block rather than return potentially stale data. Examples: etcd, ZooKeeper, HBase, Google Spanner.\n- **AP systems** (availability + partition tolerance): choose to return potentially stale data rather than return an error. Examples: DynamoDB (default), Cassandra, CouchDB.\n- **CA systems**: only possible without partitions — i.e., single-node systems like a standalone PostgreSQL instance.\n\n**CAP's limitations**: The theorem is often over-simplified. It only talks about two extreme choices (fully consistent vs. fully available), ignoring the rich spectrum in between. It also says nothing about latency. This led to the **PACELC model** (Patterson, 2012), which extends CAP: Even without a **P**artition, distributed systems must trade off **L**atency versus **C**onsistency. Spanner sacrifices latency (uses expensive TrueTime wait periods) to achieve external consistency. Cassandra sacrifices consistency to minimize latency. PACELC captures this always-present trade-off that CAP ignores."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  P[\"Network Partition occurs\"] --> Choice{\"System must choose\"}\n  Choice -->|\"CP systems\"| CP[\"Refuse writes/reads\\nReturn error or block\\nEtcd, ZooKeeper, HBase\"]\n  Choice -->|\"AP systems\"| AP[\"Serve stale data\\nAccept writes that may conflict\\nCassandra, DynamoDB, CouchDB\"]\n  CP --> Heal[\"Partition heals:\\nall nodes consistent\"]\n  AP --> Heal2[\"Partition heals:\\nconflict resolution runs\"]",
+      "caption": "During a network partition, a system must choose between consistency (CP) and availability (AP). CP systems block or error until the partition heals; AP systems continue serving potentially stale or conflicting data. After healing, AP systems must reconcile divergent writes."
+    },
+    {
+      "type": "explanation",
+      "title": "CRDTs: Merging Without Conflict",
+      "content": "One of the most elegant solutions to the eventual consistency conflict problem is **Conflict-free Replicated Data Types (CRDTs)**, developed by Shapiro, Preguiça, Baquero, and Zawirski around 2011. CRDTs are data structures that are mathematically guaranteed to converge to the same value regardless of the order in which updates are merged — as long as all updates are eventually received.\n\nThe key insight is that not all operations commute (A+B = B+A) or are idempotent (applying twice = applying once). CRDTs are designed so their merge operations satisfy both properties:\n\n**G-Counter (grow-only counter)**: each node maintains its own integer counter. The counter value is the vector of all per-node counts. The global value is the sum. To increment, add 1 to your own slot. To merge, take the component-wise maximum. Because you never decrement and you take the max, any merge order produces the same result. This is exactly how distributed like-counters and view-counts work.\n\n**LWW-Register (last-write-wins register)**: each write includes a timestamp. Merge by taking the value with the highest timestamp. Simple and lossy — concurrent writes lose one value — but appropriate when the most recent value is the correct value (user preference settings, current location).\n\n**OR-Set (observed-remove set)**: allows adding and removing elements. Each element gets a unique tag on add. Remove is done by removing all observed tags. If an element is added and removed concurrently, the add wins — the remove only removes the tags it observed at the time of the remove operation. This is how shopping carts in Amazon's Dynamo paper are described.\n\n**Operational Transformation** is a related but different approach used in collaborative text editing. Instead of making operations commutative at the data structure level, OT transforms operations relative to concurrent operations to produce equivalent results. Google Docs historically used OT; many modern collaborative editors (Notion, Linear) have migrated to CRDTs because CRDTs are simpler to reason about in peer-to-peer and offline-first settings."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Consistency model decision guide\n\n// LINEARIZABILITY: use when correctness is non-negotiable\n//   Examples: bank transfers, leader election, configuration (etcd/ZooKeeper)\n//   Cost: every write requires quorum agreement; higher latency\n//   Systems: etcd, ZooKeeper, Google Spanner, CockroachDB\n\n// CAUSAL CONSISTENCY: use when preserving cause-effect is enough\n//   Examples: social feed (replies after posts), collaborative editing\n//   Cost: vector clocks or logical timestamps; moderate overhead\n//   Systems: MongoDB (causally consistent sessions), CockroachDB\n\n// READ-YOUR-WRITES: use for user-facing apps where self-consistency matters\n//   Implementation: sticky sessions to primary, or token-based epoch reads\n//   Example: user posts comment, immediately sees it in their own feed\n//   Systems: most RDBMS with connection stickiness, Redis (single node)\n\n// EVENTUAL CONSISTENCY: use when maximum availability > stale read risk\n//   Examples: product catalog, social likes/views, DNS, CDN cache\n//   Cost: application must tolerate stale reads; conflict resolution needed\n//   Systems: DynamoDB, Cassandra, CouchDB, S3\n\n// CAP theorem in practice:\n//   CP (consistency + partition tolerance): etcd, HBase, ZooKeeper\n//   AP (availability + partition tolerance): DynamoDB, Cassandra, CouchDB\n//   CA (consistency + availability): single-node RDBMS (no partition tolerance)"
+      "label": "Example",
+      "code": "// CRDTs illustrated: G-Counter and LWW-Register\n\n// ── G-Counter (grow-only, convergent counter) ─────────────────────────────────\nclass GCounter {\n  constructor(nodeId, totalNodes) {\n    this.nodeId = nodeId;\n    this.counts = new Array(totalNodes).fill(0); // one slot per node\n  }\n\n  increment() {\n    this.counts[this.nodeId]++;\n  }\n\n  value() {\n    // Global count = sum of all per-node counts\n    return this.counts.reduce((sum, c) => sum + c, 0);\n  }\n\n  // Merge: take component-wise maximum — always commutative and idempotent\n  merge(other) {\n    this.counts = this.counts.map((c, i) => Math.max(c, other.counts[i]));\n  }\n}\n\n// Simulate two nodes incrementing independently, then merging\nconst node0 = new GCounter(0, 2);\nconst node1 = new GCounter(1, 2);\n\nnode0.increment(); // node0 counts: [1, 0] → value = 1\nnode0.increment(); // node0 counts: [2, 0] → value = 2\nnode1.increment(); // node1 counts: [0, 1] → value = 1\n\n// Network partition heals — nodes exchange state\nnode0.merge(node1); // node0 counts: [2, 1] → value = 3\nnode1.merge(node0); // node1 counts: [2, 1] → value = 3\n\nconsole.log(node0.value()); // 3 — both nodes converge to same value\nconsole.log(node1.value()); // 3 — regardless of merge order\n\n// ── LWW-Register (last-write-wins — simple value CRDT) ───────────────────────\nclass LWWRegister {\n  constructor() {\n    this.value = null;\n    this.timestamp = 0;\n  }\n\n  write(value, timestamp) {\n    if (timestamp > this.timestamp) {\n      this.value = value;\n      this.timestamp = timestamp;\n    }\n  }\n\n  // Merge: keep the value with the higher timestamp\n  merge(other) {\n    if (other.timestamp > this.timestamp) {\n      this.value = other.value;\n      this.timestamp = other.timestamp;\n    }\n  }\n}\n\nconst regA = new LWWRegister();\nconst regB = new LWWRegister();\n\nregA.write('Alice', 100);\nregB.write('Bob', 105); // concurrent write with later timestamp\n\nregA.merge(regB);\nregB.merge(regA);\n\nconsole.log(regA.value); // 'Bob' — higher timestamp wins\nconsole.log(regB.value); // 'Bob' — both converge\n// NOTE: 'Alice' write is silently lost — this is the LWW trade-off",
+      "explanation": "The G-Counter illustrates the core CRDT property: merge is commutative (A.merge(B) = B.merge(A)), associative, and idempotent (merging the same state twice has no effect). As long as all increments eventually reach all nodes, the global count is always correct. The LWW-Register is simpler but lossy — concurrent writes cause one write to be silently discarded. The choice between CRDT types depends on whether you can afford data loss (LWW is fine for user preferences, dangerous for financial data)."
+    },
+    {
+      "type": "explanation",
+      "title": "Linearizability vs. Serializability: A Critical Distinction",
+      "content": "These two terms are frequently confused — including by senior engineers and in job interviews. They are both correctness properties, but they apply to different levels of abstraction.\n\n**Linearizability** is a property of **individual read/write operations**. It requires that operations appear to execute instantaneously at a single real-time moment. The world model is a simple key-value store where each operation reads or writes a single value.\n\n**Serializability** is a property of **transactions** (multi-operation sequences). It requires that the result of executing concurrent transactions be equivalent to executing them in some serial order — but that serial order need not correspond to real clock time. A database achieving serializability lets you run `BEGIN; read(x); read(y); write(z); COMMIT;` as an atomic unit, and guarantees the result is as if all transactions ran one at a time.\n\nA system can be one without the other:\n- **Serializable but not linearizable**: a single-node database with snapshot isolation is serializable (transactions are isolated from each other) but a replica lag means reads on a replica are not linearizable.\n- **Linearizable but not serializable**: etcd provides linearizable reads and writes on individual keys but has no concept of multi-key transactions — you cannot atomically read X and write Y conditioned on X's value within a single transaction.\n\n**Strict serializability** (also called **strong serializability**) combines both: transactions appear to execute serially in real-time order. This is the gold standard for transactional systems and is what PostgreSQL with `SERIALIZABLE` isolation + synchronous replication provides, and what Google Spanner achieves globally.\n\nFor interviews: when someone says 'consistent' in a distributed context, ask whether they mean linearizable reads or serializable transactions. They are different things solving different problems."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"Linearizability\\n(single ops, real-time order)\"] -->|\"+ multi-op transactions\"| B[\"Strict Serializability\\n(gold standard)\"]  \n  C[\"Serializability\\n(transactions, any serial order)\"] -->|\"+ real-time constraint\"| B\n  D[\"Snapshot Isolation\\n(transactions, not fully serial)\"] -->|\"stricter\"| C",
+      "caption": "Linearizability and serializability are orthogonal properties. Strict serializability combines both. Most single-node databases provide serializability; most distributed key-value stores provide linearizability; systems like Spanner achieve strict serializability globally."
+    },
+    {
+      "type": "explanation",
+      "title": "Choosing the Right Model: Practical Decision Framework",
+      "content": "The right consistency model depends on three factors: the **correctness requirements** of the data, the **access patterns** (read-heavy vs. write-heavy, local vs. global), and the **latency and availability budget**.\n\n**Use linearizability when**: correctness failures have serious consequences. Leader election (etcd: only one leader at a time), distributed locks, financial transactions (ATM withdrawals, bank transfers), configuration management (all nodes must see the same config), and inventory reservation where overselling is unacceptable. Budget: 2–10x latency overhead versus eventual consistency; availability sacrifice during partitions.\n\n**Use causal consistency when**: you need intuitive ordering without the full cost of linearizability. Comment threads and social feeds (replies after posts), collaborative document editing, multiplayer game state where players need to see each other's actions in causal order. Budget: modest overhead from vector clocks; higher availability than linearizability.\n\n**Use read-your-writes when**: users interact with their own data. Profile updates, settings pages, shopping cart contents, user-generated content. This is often the practical minimum for any user-facing system. Budget: can be achieved cheaply via sticky sessions or client-side caching.\n\n**Use eventual consistency when**: data is naturally convergent, reads vastly outnumber writes, or global low latency is mandatory. Product catalog prices (updated rarely, read billions of times), social like/view counts, DNS records, CDN-cached static assets, analytics counters, full-text search indexes. Budget: accept seconds or minutes of staleness; implement conflict resolution.\n\n**A useful heuristic**: ask 'what is the worst-case consequence of a stale read?' If the answer is 'a user sees slightly outdated information briefly' — eventual consistency is likely fine. If the answer is 'money moves incorrectly' or 'two processes acquire the same lock' — use linearizability.\n\nAlso remember that **within a single service** you may use different consistency levels for different data. DynamoDB lets you choose consistency per-read. Cassandra lets you set consistency level per-query with tunable parameters (ONE, QUORUM, ALL). You do not have to pick one model for your entire system."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**The PACELC Extension**: The CAP theorem only describes behavior during network partitions, but partitions are rare events. The **PACELC model** (Daniel Abadi, 2012) adds the observation that even without a Partition, distributed systems face a trade-off between **L**atency and **C**onsistency. Cassandra is classified as PA/EL (available during partitions, low latency normally). Spanner is classified as PC/EC (consistent during partitions, consistent normally at the cost of latency). DynamoDB is PA/EL by default, PC/EC with ConsistentRead. PACELC is a more complete model because it captures the always-present latency trade-off that CAP ignores, and it explains why real engineers care about consistency even when their networks are healthy."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Linearizability is not the same as serializability.** Serializability is a transaction isolation level (transactions appear to execute in some serial order) — it is a property of multi-operation transactions. Linearizability is a property of individual reads and writes. A system can be serializable but not linearizable, or linearizable but not serializable. **Strict serializability** combines both, and is what most people intuitively want from a database."
+      "content": "**Interview and architectural traps to know cold**: (1) 'Linearizability is not serializability' — one is about individual ops, the other about transactions; confusing them signals shallow understanding. (2) 'Eventual consistency does not mean fast' — a replica could lag by minutes under heavy write load; eventual is not a latency guarantee. (3) 'CAP assumes binary choices' — real systems tune consistency levels per-operation; DynamoDB, Cassandra, and MongoDB all support per-query tuning. (4) 'Read-your-writes is not free' — sticky sessions create hot spots; version tokens add complexity; client caches add TTL-expiry bugs. (5) 'Quorum reads do not always give linearizability' — in Dynamo-style systems (R+W > N), you still need conditional writes (compare-and-swap) to detect concurrent modifications; quorum alone is insufficient for linearizability. (6) Last-write-wins silently discards concurrent writes — never use LWW for financial data or any data where concurrent writes must both be preserved."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Linearizability** (strongest) makes a distributed system behave like a single server — every operation appears instantaneous and globally ordered — at the cost of coordination on every write.",
-        "**Causal consistency** preserves cause-and-effect ordering without global coordination, making it a practical middle ground for social and collaborative applications.",
-        "**Read-your-writes** guarantees a client always sees its own updates — the minimum useful consistency for user-facing systems where users see their own actions.",
-        "**Eventual consistency** (weakest) guarantees convergence given no new writes, offering maximum availability and partition tolerance — suitable for likes, views, DNS, CDN.",
-        "**CAP theorem**: in the presence of a network partition you must choose consistency or availability; this trade-off shapes every distributed database's design."
+        "**Linearizability** (strongest) makes a distributed system behave like a single server — every operation appears instantaneous and globally ordered in real time — at the cost of quorum-based coordination on every write and unavailability during partitions. Use for locks, leader election, and financial operations.",
+        "**Sequential consistency** preserves a single global operation order without a real-time constraint — relevant in CPU memory models and language concurrency primitives, rarely implemented explicitly in distributed databases.",
+        "**Causal consistency** preserves cause-and-effect ordering (replies after posts, responses after requests) without global coordination, using vector clocks to track causal dependencies. It is the strongest model achievable at high availability.",
+        "**Session guarantees** (read-your-writes, monotonic reads, monotonic writes, writes-follow-reads) apply within a single client session and provide the minimum useful consistency for interactive user-facing applications without expensive cross-node coordination.",
+        "**Eventual consistency** (weakest) guarantees only convergence given no new writes — no timing bound, no ordering guarantee. It maximizes availability and low latency, and is appropriate for likes, views, DNS, CDN assets, and analytics counters. Conflicts are resolved via LWW, CRDTs, or vector-clock siblings.",
+        "**CRDTs** are data structures where merge is commutative, associative, and idempotent — guaranteeing convergence regardless of merge order. They are the principled solution to the conflict problem in eventually consistent systems.",
+        "**CAP theorem** says that during a network partition you must choose consistency or availability — CP systems (etcd, ZooKeeper) block; AP systems (Cassandra, DynamoDB default) serve stale data. **PACELC** extends this: even without partitions, all distributed systems trade latency for consistency. **Linearizability is not serializability** — the former applies to individual operations, the latter to multi-operation transactions; strict serializability combines both."
       ]
     }
   ],
@@ -66,133 +135,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "Which consistency model guarantees that every operation appears to take effect atomically at a single point in real time, globally visible to all clients?",
+      "question": "Which consistency model guarantees that every operation appears to take effect at a single real-time point between its invocation and response, visible globally to all clients?",
       "type": "mcq",
       "options": [
         "Eventual consistency",
+        "Sequential consistency",
         "Causal consistency",
-        "Read-your-writes consistency",
         "Linearizability"
       ],
       "correct": 3,
-      "explanation": "Linearizability (also called atomic consistency or strong consistency) requires every operation to appear to execute instantaneously at a single point between its start and completion, visible globally. It is the strongest model and requires quorum-based coordination."
+      "explanation": "Linearizability (also called atomic consistency or strong consistency) requires every operation to appear to execute instantaneously at a single real-time point. It enforces a globally agreed total order that respects real-world clock ordering. Sequential consistency also has a global order but does not need to match real-time clock order, making it weaker."
     },
     {
       "id": "q2",
-      "question": "A social media platform shows a user's own posts immediately after they post them, but other users may see the posts slightly later. Which consistency model does this describe?",
+      "question": "A user posts a comment on a social media platform and immediately refreshes their own feed — they see their comment. However, their friend viewing the same feed one second later does not see it yet. Which consistency model does this scenario describe for the original user?",
       "type": "mcq",
       "options": [
         "Linearizability",
-        "Read-your-writes consistency",
-        "Sequential consistency",
-        "Eventual consistency"
+        "Monotonic reads",
+        "Read-your-writes",
+        "Causal consistency"
       ],
-      "correct": 1,
-      "explanation": "Read-your-writes guarantees that a client always reads its own most recent writes. Other clients may still see stale data. This is the intuitive minimum for user-facing systems where users expect to see the results of their own actions."
+      "correct": 2,
+      "explanation": "Read-your-writes (read-your-own-writes) guarantees that after a client makes a write, that same client will always see that write or a newer value in subsequent reads — even if other clients still see stale data. This is exactly the scenario described: the author sees their own post immediately while others lag."
     },
     {
       "id": "q3",
-      "question": "What does the CAP theorem state about distributed systems under network partitions?",
+      "question": "What property must a merge operation have for a data structure to qualify as a CRDT (Conflict-free Replicated Data Type)?",
       "type": "mcq",
       "options": [
-        "Systems can achieve consistency, availability, and partition tolerance simultaneously with enough hardware",
-        "When a partition occurs, a system must sacrifice either consistency or availability",
-        "Partitions make distributed systems completely unusable",
-        "Consistency and availability are only meaningful without partitions"
+        "The merge must always prefer the value from the node with the higher ID",
+        "The merge must be commutative, associative, and idempotent",
+        "The merge must require a quorum of nodes to agree",
+        "The merge must be performed by a central coordinator to avoid conflicts"
       ],
       "correct": 1,
-      "explanation": "CAP theorem: during a network partition, a distributed system must choose between remaining available (returning responses that may be stale) or remaining consistent (refusing to respond until partition heals). Since partitions are inevitable, every system makes this trade-off."
+      "explanation": "For a CRDT, the merge (join) operation must be commutative (A merge B = B merge A), associative ((A merge B) merge C = A merge (B merge C)), and idempotent (A merge A = A). These three properties mathematically guarantee that any order of merging any subset of updates will eventually produce the same result at all replicas, without coordination."
     },
     {
       "id": "q4",
-      "question": "DynamoDB's ConsistentRead: true option provides which consistency level?",
+      "question": "DynamoDB's `ConsistentRead: true` option provides which consistency level?",
       "type": "mcq",
       "options": [
         "Causal consistency",
-        "Read-your-writes consistency",
+        "Sequential consistency",
         "Eventual consistency",
         "Linearizable reads"
       ],
       "correct": 3,
-      "explanation": "DynamoDB's ConsistentRead: true forces the read to go to the primary partition, returning the most recent committed write — this is a linearizable read. It costs twice the read capacity units and adds latency compared to eventually consistent reads."
+      "explanation": "DynamoDB's ConsistentRead: true forces the read to be served by the primary (leader) partition holder, guaranteeing it reflects the most recent committed write — this is a linearizable read. It costs twice the read capacity units compared to the default eventually consistent read, which may be served by any replica including lagging ones."
     },
     {
       "id": "q5",
-      "question": "Causal consistency differs from linearizability in that:",
+      "question": "Alice posts 'I scored a goal!' and Bob replies 'Congrats Alice!'. Under causal consistency, which of the following is guaranteed?",
       "type": "mcq",
       "options": [
-        "Causal consistency only applies to write operations, not reads",
-        "Causal consistency preserves cause-effect order without requiring global coordination for concurrent operations",
-        "Causal consistency is strictly weaker than eventual consistency",
-        "Causal consistency requires all nodes to agree before any write completes"
+        "All nodes see both posts simultaneously",
+        "Every node sees Alice's post before Bob's reply",
+        "Alice's post and Bob's reply are processed in real-time order globally",
+        "Bob's reply is rejected until Alice's post is confirmed by a quorum"
       ],
       "correct": 1,
-      "explanation": "Causal consistency ensures that if A causally precedes B, all nodes see A before B. Concurrent operations (no causal relationship) may appear in different orders on different nodes. This avoids the global coordination cost of linearizability while still being intuitive for most applications."
+      "explanation": "Causal consistency guarantees that if operation A causally precedes operation B (Bob's reply causally depends on Alice's post, since Bob read the post before replying), then every node must see A before B. It does not require real-time ordering, simultaneous delivery, or quorum confirmation — it only enforces the causal dependency ordering."
     },
     {
       "id": "q6",
-      "question": "Which of the following systems is an example of a CP (consistency + partition-tolerant) system?",
+      "question": "What does the CAP theorem state a distributed system must sacrifice during a network partition?",
       "type": "mcq",
       "options": [
-        "DynamoDB with default settings",
-        "Apache Cassandra",
-        "etcd",
-        "Amazon S3"
+        "Either throughput or durability",
+        "Either consistency or availability",
+        "Either latency or partition tolerance",
+        "Either atomicity or isolation"
       ],
-      "correct": 2,
-      "explanation": "etcd (used in Kubernetes) is a CP system — it uses the Raft consensus protocol to provide strong consistency. During a partition, it will refuse writes rather than return potentially stale data. Cassandra and DynamoDB are AP systems that prioritize availability."
+      "correct": 1,
+      "explanation": "CAP theorem: during a network partition (P), a distributed system must choose between Consistency (C — returning the most recent write or an error) and Availability (A — returning a response, even if potentially stale). Since network partitions are inevitable in real systems, every distributed database implicitly chooses between being CP or AP during partitions."
     },
     {
       "id": "q7",
-      "question": "What is the key difference between linearizability and serializability?",
+      "question": "What is the critical difference between linearizability and serializability?",
       "type": "mcq",
       "options": [
         "Linearizability applies to multi-operation transactions; serializability applies to single reads and writes",
         "Linearizability applies to individual operations with real-time ordering; serializability applies to multi-operation transactions appearing in some serial order",
-        "They are equivalent terms for the same guarantee",
-        "Serializability is always stronger than linearizability"
+        "They are equivalent terms for the same guarantee and are interchangeable in database literature",
+        "Serializability is always a stronger guarantee than linearizability in all contexts"
       ],
       "correct": 1,
-      "explanation": "Linearizability is about individual reads/writes appearing atomic with real-time constraints. Serializability is a transaction isolation property — concurrent transactions appear to execute in some (not necessarily real-time) serial order. Strict serializability combines both guarantees."
+      "explanation": "Linearizability is about individual reads/writes appearing atomic with real-time constraints. Serializability is a transaction isolation property — concurrent transactions appear to execute in some (not necessarily real-time) serial order. Strict serializability combines both. A system can be serializable but not linearizable (replica lag), or linearizable but not serializable (no multi-key transactions)."
     },
     {
       "id": "q8",
-      "question": "For a product catalog displaying item prices, which consistency model is most appropriate?",
+      "question": "Which of the following best describes the PACELC model's contribution beyond the CAP theorem?",
       "type": "mcq",
       "options": [
-        "Linearizability — prices must be perfectly consistent across all regions",
-        "Eventual consistency — slightly stale prices are acceptable; availability and low latency are more important",
-        "Read-your-writes — only the person who updated the price needs to see it",
-        "Sequential consistency — all users must see price updates in the same order"
+        "PACELC proves that partition tolerance is optional in modern cloud environments",
+        "PACELC shows that even without partitions, distributed systems must trade off latency versus consistency",
+        "PACELC introduces a fourth CAP property: eventual convergence",
+        "PACELC replaces CAP by proving that both consistency and availability can always be achieved"
       ],
       "correct": 1,
-      "explanation": "Product catalog reads vastly outnumber price updates. A slightly stale price (seconds old) is acceptable business risk compared to the cost and latency of strong consistency. Eventual consistency with CDN caching maximizes global availability and read performance."
+      "explanation": "PACELC (Patterson, 2012) extends CAP by observing that even in the absence of a Partition (the normal operating case), distributed systems face a trade-off between Latency (L) and Consistency (C). CAP only describes behavior during rare partition events; PACELC captures the always-present engineering trade-off that explains why systems like Spanner accept higher latency for consistency and Cassandra accepts inconsistency for lower latency."
     },
     {
       "id": "q9",
-      "question": "What does 'eventual consistency' guarantee?",
+      "question": "A G-Counter CRDT has two nodes. Node A has per-node counts [5, 2] and Node B has per-node counts [3, 7]. After both nodes merge with each other, what is the final global count returned by value()?",
       "type": "mcq",
       "options": [
-        "All reads return the most recent write within 1 second",
-        "If no new updates are made, all replicas will eventually converge to the same value",
-        "Writes are eventually durable within a 24-hour window",
-        "Reads will eventually succeed after temporary network failures"
+        "17",
+        "12",
+        "10",
+        "7"
       ],
-      "correct": 1,
-      "explanation": "Eventual consistency's only guarantee is convergence: given no new updates, all replicas will eventually agree. No specific time bound is promised. This allows maximum availability and partition tolerance but requires applications to tolerate temporary divergence."
+      "correct": 0,
+      "explanation": "G-Counter merge takes the component-wise maximum: [max(5,3), max(2,7)] = [5, 7]. The global value() sums all slots: 5 + 7 = 12. This reflects 5 increments done on Node A and 7 increments done on Node B, with no double-counting. The merge is idempotent — merging again produces the same result."
     },
     {
       "id": "q10",
-      "question": "A client implementing read-your-writes without a consistent read can do so by:",
+      "question": "A client implementing read-your-writes for DynamoDB without paying for ConsistentRead can achieve this by:",
       "type": "mcq",
       "options": [
-        "Using distributed transactions for every read and write pair",
-        "Caching writes locally so subsequent reads by the same client check the cache before the database",
+        "Using distributed transactions for every read-write pair",
         "Always routing reads to a different replica than the one that received the write",
-        "Waiting 5 seconds after every write before issuing a read"
+        "Caching writes locally so subsequent reads by the same client check the cache before the database",
+        "Waiting a fixed 5-second delay after every write before issuing any reads"
       ],
-      "correct": 1,
-      "explanation": "Client-side caching of recent writes achieves read-your-writes without requiring expensive consistent reads. The client stores its own writes in memory; subsequent reads check the cache first. If the cache entry is missing or expired, the database is queried — which may now have the replicated value."
+      "correct": 2,
+      "explanation": "Client-side write caching achieves read-your-writes without paying for expensive consistent reads. After a write, the client stores the written value in a local in-memory cache with a TTL long enough to outlast typical replication lag. Subsequent reads check the cache first — if a cache hit exists, the client returns its own written value. This is session-scoped: other clients or processes won't share this cache, so they may still see stale data (which is acceptable for read-your-writes)."
     }
   ]
 }

@@ -5,191 +5,245 @@
   "week": 42,
   "icon": "code",
   "tagline": "How source code becomes execution — from pure interpretation to ahead-of-time compilation, bytecode VMs, and JIT.",
-  "readTime": "~16 min",
+  "readTime": "~22 min",
+  "visualizer": { "type": "none", "caption": "" },
   "sections": [
     {
       "type": "intro",
-      "content": "Once source code has been parsed into an AST, the runtime must *execute* it. There are two fundamental strategies: **interpretation** (walk the AST or a linear instruction list and execute each node/instruction on the fly) and **compilation** (transform the AST into a lower-level representation first, then execute that). Real-world runtimes blend both strategies in sophisticated ways.\n\n**Pure interpreters** (early versions of Ruby, Python's REPL mode) execute AST nodes directly. **Bytecode VMs** (Python's CPython, Java's JVM, Node.js's V8 before Ignition/TurboFan) compile to a compact intermediate instruction set and then interpret that. **JIT compilers** profile running bytecode and compile hot paths to native machine code at runtime. **AOT compilers** (Rust, C, Go) translate entirely to machine code before the program ever starts. JavaScript's V8 engine actually uses *all* of these strategies in sequence."
+      "content": "You write `let x = 6 * 7` and the computer executes it. But a CPU has no idea what `let`, `x`, `*`, or `7` mean. All it understands is a stream of tiny, primitive machine instructions like `MOV R1, 6`, `MUL R1, 7`, `STORE R1, [addr]`. Something in between must bridge your human-readable text and those raw instructions. That something is either an **interpreter** or a **compiler** — and the design decision made here has sweeping consequences for every program ever run on every device.\n\nThis is not a theoretical curiosity. The execution strategy your runtime chooses determines your program's startup latency, peak throughput, portability to other hardware, ability to use dynamic features like `eval()`, and even your security posture (JIT spray attacks exploit the JIT compiler). Understanding interpreters and compilers means understanding *why* Python feels slow for CPU-bound work, why Java's JVM was once mocked for startup time but now matches C performance in long-running servers, why Rust binaries start instantly, and why JavaScript in a browser can match compiled code speeds today.\n\nAt the highest level there are three pure strategies: **direct interpretation** (visit the source AST and execute it immediately), **compilation** (transform the program into a lower-level form before running it), and the critically important hybrid — **JIT compilation** (compile while running, guided by runtime profiling). Real runtimes combine all three in sophisticated pipelines. V8, Node.js's JavaScript engine, literally uses a tree-walk interpreter for tiny scripts, a bytecode VM for moderate code, and a fully optimising native-code compiler for hot functions — sometimes within the same execution of a single file.\n\nBy the end of this chapter you will understand how each strategy works mechanically, why each exists, the exact tradeoffs they make, and how to reason about which one a given language runtime uses and why."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n    A[\"Source Code\"] --> B[\"Parser → AST\"]\n    B --> C[\"Interpreter\"]\n    B --> D[\"Bytecode Compiler\"]\n    D --> E[\"Bytecode\"]\n    E --> F[\"VM / Bytecode Interpreter\"]\n    E --> G[\"JIT Compiler\"]\n    G --> H[\"Native Machine Code\"]\n    B --> I[\"AOT Compiler\"]\n    I --> H\n    C --> J[\"Direct Execution\"]\n    F --> J\n    H --> J",
-      "caption": "Execution strategies: pure interpretation, bytecode VM, JIT compilation, and AOT compilation — each trades startup time for peak throughput."
+      "mermaid": "flowchart TD\n    A[\"Source Code\"] --> B[\"Lexer + Parser\"]\n    B --> C[\"AST\"]\n    C --> D[\"Tree-walk Interpreter\"]\n    C --> E[\"Bytecode Compiler\"]\n    E --> F[\"Bytecode\"]\n    F --> G[\"VM / Bytecode Interpreter\"]\n    F --> H[\"JIT Compiler\"]\n    H --> I[\"Native Machine Code\"]\n    C --> J[\"AOT Compiler\"]\n    J --> I\n    D --> K[\"Result\"]\n    G --> K\n    I --> K",
+      "caption": "The four execution strategies all start from the same AST. They differ only in how many transformation steps happen before instructions actually execute."
     },
     {
       "type": "analogy",
-      "title": "Translating a Foreign Book",
-      "content": "Imagine a French book you want to understand. An **interpreter** is like hiring a translator who reads each sentence aloud in English as you go — you get meaning immediately, but every time you reread a page they must translate it again. A **bytecode VM** is like having the translator first produce a rough draft in a shorthand language (not English, not French, but easier to read than French) — future passes through the shorthand are faster. **JIT compilation** is like noticing you reread chapter 3 constantly, so you commission a full professional translation of *just* chapter 3 while skimming the rest as shorthand. **AOT compilation** is translating the entire book into English before you ever open it — maximum reading speed, but you wait for the full translation upfront."
+      "title": "Translating a Foreign Book — Four Different Strategies",
+      "content": "Imagine you have a French novel you want to understand. You hire four different translation teams.\n\n**Team 1 — Pure Interpreter**: A translator sits next to you, reads each French sentence aloud in English *on the spot*. You understand immediately, but every time you flip back to page 12, they translate it all over again from scratch. Perfect for a book you will read once, painful for one you consult constantly.\n\n**Team 2 — Bytecode VM**: The translator first produces a rough draft in a compact shorthand — not full English, not French, but a middle-ground notation that is much faster for the translator to read than French. From now on the translator works from the shorthand, not the original. Repeated reads are faster; you also get to store the shorthand on disk so you never re-translate from French again.\n\n**Team 3 — JIT Compiler**: You start with the shorthand (bytecode), and your assistant notices that you keep rereading Chapter 7. They disappear for an hour and return with a perfect, fully polished English version of Chapter 7. Now you read Chapter 7 at full English speed, while the rest of the book is still read from shorthand. The improvement is proportional to how often each chapter is accessed.\n\n**Team 4 — AOT Compiler**: Before you ever open the book, the publisher has produced a complete English edition. When you sit down to read, it is already fully translated — maximum reading speed from page one, but you waited for the full translation before you could start at all, and this English edition only works for English readers (not Portuguese ones)."
     },
     {
       "type": "explanation",
-      "content": "**Pure tree-walking interpreter**: The simplest approach. The interpreter visits each AST node and immediately performs the corresponding action — evaluating a `BinaryExpression` returns the sum of its children; executing a `FunctionCall` pushes a new environment frame. No separate compilation step. Startup is instant, but repeated execution (loops, hot functions) is slow because the tree is walked from scratch each time.\n\n**Bytecode and Virtual Machines**: Most modern runtimes compile the AST to **bytecode** — a compact, linear sequence of simple instructions (LOAD, ADD, STORE, CALL, JUMP) designed for a virtual stack machine or register machine. The VM then interprets bytecode. Bytecode is cheaper to dispatch than AST node traversal because it is a flat array indexed by an integer program counter. CPython's `.pyc` files are cached bytecode; the JVM's `.class` files are bytecode for the JVM.\n\n**JIT (Just-In-Time) compilation**: A JIT profiles bytecode as it runs, identifies **hot paths** (functions called frequently), and compiles those paths to native machine code at runtime. V8's TurboFan and Java's HotSpot JIT do this. JIT output runs at near-native speed but requires warmup time and memory for the compiled code.\n\n**AOT (Ahead-of-Time) compilation**: The compiler runs entirely before the program ships. Rust, C, Go, and Swift are AOT compiled. Advantages: maximum startup speed, no runtime compiler overhead, smaller runtime. Disadvantage: the program is tied to a specific CPU architecture; dynamic features (eval, reflection) are limited.\n\n**Tradeoffs in summary**:\n- *Startup latency*: AOT fastest → bytecode VM → interpreter slowest\n- *Peak throughput*: JIT ≈ AOT fastest → bytecode VM → interpreter slowest\n- *Portability*: bytecode VM highest (write once, run anywhere) → AOT lowest\n- *Dynamic flexibility*: interpreter highest → AOT lowest"
-    },
-    {
-      "type": "diagram",
-      "mermaid": "flowchart LR\n    A[\"V8 receives JS\"] --> B[\"Parser → AST\"]\n    B --> C[\"Ignition Bytecode Compiler\"]\n    C --> D[\"Bytecode\"]\n    D --> E[\"Ignition Interpreter\"]\n    E --> F{\"Hot path?\"}\n    F -- \"Yes\" --> G[\"TurboFan JIT\"]\n    F -- \"No\" --> E\n    G --> H[\"Native Machine Code\"]\n    H --> I[\"Execution\"]\n    E --> I",
-      "caption": "V8's two-tier pipeline: Ignition compiles JS to bytecode and interprets it; TurboFan JIT-compiles hot functions to native code. Deoptimisation can fall back to Ignition if type assumptions break."
+      "title": "Tree-Walking Interpretation: The Simplest Strategy",
+      "content": "A **tree-walking interpreter** is the most direct way to execute a program. After the source text is parsed into an Abstract Syntax Tree (AST), the interpreter visits each node and immediately performs the corresponding action. There is no intermediate compilation step.\n\nThe mechanism is a recursive `eval()` function. When `eval` visits a `Literal` node it returns the number. When it visits a `BinaryExpression` node it recursively evaluates the left and right children, then applies the operator. When it visits an `IfStatement` it evaluates the condition and then visits either the consequent or alternate branch. Variables are stored in an **environment** — a dictionary (or linked list of dictionaries for lexical scoping) mapping names to values.\n\nThe beauty of tree-walking is simplicity. You can build a working interpreter for a modest language in a few hundred lines. Lua 1.0 (1993), early versions of Ruby, the `esprima`-based JavaScript sandboxes, and many scripting engines for games start this way. The Python `ast.literal_eval` function is a tree-walker.\n\n**Why it is slow for hot code**: Consider a loop that iterates 10,000 times. Every single iteration the interpreter re-traverses the same AST nodes — checking the node type with a `switch`, following pointer chains through the tree, dispatching to the right case. This overhead is proportional to *both* the number of iterations and the structural complexity of the loop body. The tree never changes, but it is walked every time. Bytecode VMs fix exactly this problem."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// ── Tree-walking interpreter for a tiny expression language ───────\n// Supports: number literals, variables, +, -, *, function calls\n\nclass Interpreter {\n  constructor() {\n    this.env = {}; // variable store\n  }\n\n  eval(node) {\n    switch (node.type) {\n      case 'Literal':\n        return node.value;\n\n      case 'Identifier':\n        if (!(node.name in this.env))\n          throw new ReferenceError(`Undefined: ${node.name}`);\n        return this.env[node.name];\n\n      case 'BinaryExpression': {\n        const l = this.eval(node.left);\n        const r = this.eval(node.right);\n        switch (node.operator) {\n          case '+': return l + r;\n          case '-': return l - r;\n          case '*': return l * r;\n          case '/': if (r === 0) throw new Error('Division by zero'); return l / r;\n          default: throw new Error(`Unknown operator: ${node.operator}`);\n        }\n      }\n\n      case 'VariableDeclaration':\n        this.env[node.name] = this.eval(node.init);\n        return undefined;\n\n      case 'Program':\n        return node.body.reduce((_, stmt) => this.eval(stmt), undefined);\n\n      default:\n        throw new Error(`Unknown node type: ${node.type}`);\n    }\n  }\n}\n\n// AST for:  let area = 6 * 7\nconst program = {\n  type: 'Program',\n  body: [\n    { type: 'VariableDeclaration', name: 'area',\n      init: { type: 'BinaryExpression', operator: '*',\n               left:  { type: 'Literal', value: 6 },\n               right: { type: 'Literal', value: 7 } } },\n    { type: 'Identifier', name: 'area' }\n  ]\n};\n\nconst interp = new Interpreter();\nconst result = interp.eval(program);\nconsole.log('area =', result); // area = 42\nconsole.log('env:', interp.env); // env: { area: 42 }",
-      "explanation": "The Interpreter class walks the AST recursively in eval(). Each node type dispatches to a case. Variable declarations store values in the environment object (a simple JS plain object acting as a scope). This is exactly how early scripting language implementations worked — and how Node.js sandboxes like `vm.runInContext` work internally."
+      "label": "Example",
+      "code": "// Tree-walking interpreter for a tiny expression language\n// Supports: number literals, variables, binary operators (+,-,*,/)\n\nclass Interpreter {\n  constructor() {\n    this.env = {}; // variable store — maps name -> value\n  }\n\n  eval(node) {\n    switch (node.type) {\n      case 'Literal':\n        return node.value;\n\n      case 'Identifier':\n        if (!(node.name in this.env))\n          throw new ReferenceError(`Undefined variable: ${node.name}`);\n        return this.env[node.name];\n\n      case 'BinaryExpression': {\n        const left  = this.eval(node.left);   // recursive!\n        const right = this.eval(node.right);  // recursive!\n        switch (node.operator) {\n          case '+': return left + right;\n          case '-': return left - right;\n          case '*': return left * right;\n          case '/':\n            if (right === 0) throw new Error('Division by zero');\n            return left / right;\n          default:  throw new Error(`Unknown operator: ${node.operator}`);\n        }\n      }\n\n      case 'VariableDeclaration':\n        this.env[node.name] = this.eval(node.init);\n        return undefined;\n\n      case 'Program':\n        let result;\n        for (const stmt of node.body) result = this.eval(stmt);\n        return result;\n\n      default:\n        throw new Error(`Unknown node type: ${node.type}`);\n    }\n  }\n}\n\n// The AST for:  let area = 6 * 7\nconst program = {\n  type: 'Program',\n  body: [\n    {\n      type: 'VariableDeclaration',\n      name: 'area',\n      init: {\n        type: 'BinaryExpression',\n        operator: '*',\n        left:  { type: 'Literal', value: 6 },\n        right: { type: 'Literal', value: 7 }\n      }\n    },\n    { type: 'Identifier', name: 'area' }\n  ]\n};\n\nconst interp = new Interpreter();\nconsole.log(interp.eval(program)); // 42\nconsole.log(interp.env);           // { area: 42 }\n\n// If this were inside a loop that ran 100,000 times,\n// the interpreter would walk the BinaryExpression nodes\n// 100,000 times — the same pointer traversal every iteration.",
+      "explanation": "The `eval()` method is the entire interpreter. Each recursive call handles exactly one AST node. The environment object (`this.env`) is the variable scope — a real implementation would chain environments for nested scopes. Notice that even the loop `for (const stmt of node.body)` is a JavaScript loop, meaning the host language (JS) is doing the work for each iteration of the interpreted language — this is the fundamental overhead of tree-walking."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Bytecode and Virtual Machines: Flattening the Tree",
+      "content": "The key insight behind bytecode VMs: an AST is a **tree** (pointer-rich, heap-allocated, slow to traverse), but what we actually need to execute is a **sequence** of simple operations. If we can flatten the tree into a linear list of instructions once, we can then execute that list repeatedly much faster.\n\n**Bytecode** is that flat instruction list. Each instruction is a simple, fixed-size operation: `PUSH 6`, `PUSH 7`, `MUL`, `STORE area`. The virtual machine that executes bytecode is just a loop: read the next instruction (indexed by a program counter integer), dispatch on the opcode, update a stack or set of registers, advance the PC. No pointer chasing. No recursive dispatch. No repeated type-switching.\n\nThis is why the term **stack machine** appears so often. Most bytecode VMs use a stack as their primary data structure. The operands for an operation are pushed onto the stack; the operation pops them, computes the result, and pushes it back. Python's `dis` module lets you see CPython's bytecode; Java's `javap -c` shows JVM bytecode. These are not machine code — they are instructions for a *virtual* machine defined in software.\n\n**Bytecode caching** is a major practical benefit. Python compiles source to bytecode and stores it in `.pyc` files inside `__pycache__`. On the next run, if the source has not changed, Python loads the cached bytecode directly, skipping lexing, parsing, and AST construction. For large codebases this saves seconds on startup. Java's `.class` files are bytecode; once compiled by `javac`, the same `.class` file runs on Windows, Linux, macOS, and Android — different VMs, same bytecode. This is the famous **write once, run anywhere** portability.\n\n**Register-based VMs** are an alternative to stack machines. Instead of a stack, they use a fixed set of virtual registers (like `r0`, `r1`, `r2`). Lua 5.0 switched from a stack VM to a register VM specifically to reduce instruction count — fewer `PUSH`/`POP` instructions are needed when you can write `ADD r3, r1, r2` directly. Android's Dalvik VM (now replaced by ART) was also register-based. Register VMs tend to execute fewer instructions per operation but each instruction is larger (it must encode register names)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"AST: BinaryExpr *\"] --> B[\"Compile step\"]\n    B --> C[\"PUSH 6\"]\n    B --> D[\"PUSH 7\"]\n    B --> E[\"MUL\"]\n    C --> F[\"Stack VM loop\"]\n    D --> F\n    E --> F\n    F --> G[\"stack: push 6 -> push 7 -> pop both, push 42\"]\n    G --> H[\"Result: 42\"]",
+      "caption": "Compiling a BinaryExpression to bytecode produces a flat instruction list. The VM loop executes it without tree traversal — each instruction is just an array index increment."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// ── Bytecode concept: compile AST to a stack-machine instruction list ──\nfunction compileToBytecode(node) {\n  const instructions = [];\n  function emit(op, arg) { instructions.push(arg !== undefined ? [op, arg] : [op]); }\n\n  function compile(n) {\n    switch (n.type) {\n      case 'Literal':           emit('PUSH', n.value); break;\n      case 'Identifier':        emit('LOAD', n.name);  break;\n      case 'BinaryExpression':\n        compile(n.left);\n        compile(n.right);\n        emit(n.operator === '+' ? 'ADD' :\n             n.operator === '-' ? 'SUB' :\n             n.operator === '*' ? 'MUL' : 'DIV');\n        break;\n      default: throw new Error(`Cannot compile: ${n.type}`);\n    }\n  }\n\n  compile(node);\n  return instructions;\n}\n\n// Compile expression: 6 * 7\nconst exprNode = {\n  type: 'BinaryExpression', operator: '*',\n  left:  { type: 'Literal', value: 6 },\n  right: { type: 'Literal', value: 7 }\n};\nconst bytecode = compileToBytecode(exprNode);\nconsole.log(bytecode);\n// [ ['PUSH', 6], ['PUSH', 7], ['MUL'] ]\n\n// ── Stack VM to execute bytecode ─────────────────────────────────\nfunction runBytecode(instructions, env) {\n  const stack = [];\n  for (const [op, arg] of instructions) {\n    if (op === 'PUSH') stack.push(arg);\n    else if (op === 'LOAD') stack.push(env[arg]);\n    else if (op === 'ADD') { const b = stack.pop(), a = stack.pop(); stack.push(a + b); }\n    else if (op === 'SUB') { const b = stack.pop(), a = stack.pop(); stack.push(a - b); }\n    else if (op === 'MUL') { const b = stack.pop(), a = stack.pop(); stack.push(a * b); }\n  }\n  return stack[0];\n}\nconsole.log('bytecode result:', runBytecode(bytecode, {})); // 42\n\n// ── Tradeoff table ────────────────────────────────────────────────\n// Approach       | Startup | Peak Speed | Portability | Flexibility\n// -------------- | ------- | ---------- | ----------- | -----------\n// Tree-walk      | Fast    | Slow       | High        | High\n// Bytecode VM    | Medium  | Medium     | High        | High\n// JIT            | Medium  | Fast       | Medium      | Medium\n// AOT            | Fastest | Fastest    | Low         | Low"
+      "label": "Example",
+      "code": "// PART 1: Compile an AST expression to stack-machine bytecode\nfunction compileToBytecode(node) {\n  const instructions = [];\n\n  function emit(op, arg) {\n    instructions.push(arg !== undefined ? { op, arg } : { op });\n  }\n\n  function compile(n) {\n    switch (n.type) {\n      case 'Literal':\n        emit('PUSH', n.value);\n        break;\n      case 'Identifier':\n        emit('LOAD', n.name);\n        break;\n      case 'BinaryExpression':\n        compile(n.left);   // left value ends up on stack\n        compile(n.right);  // right value ends up on stack\n        // now MUL/ADD/SUB pops both and pushes result\n        emit(n.operator === '+' ? 'ADD' :\n             n.operator === '-' ? 'SUB' :\n             n.operator === '*' ? 'MUL' : 'DIV');\n        break;\n      case 'VariableDeclaration':\n        compile(n.init);\n        emit('STORE', n.name); // pop top of stack -> env[name]\n        break;\n      case 'Program':\n        for (const stmt of n.body) compile(stmt);\n        break;\n      default:\n        throw new Error(`Cannot compile node: ${n.type}`);\n    }\n  }\n\n  compile(node);\n  return instructions;\n}\n\n// PART 2: Stack VM — execute bytecode\nfunction runVM(instructions, env = {}) {\n  const stack = [];\n  for (const { op, arg } of instructions) {\n    switch (op) {\n      case 'PUSH':  stack.push(arg); break;\n      case 'LOAD':  stack.push(env[arg]); break;\n      case 'STORE': env[arg] = stack.pop(); break;\n      case 'ADD': { const b = stack.pop(), a = stack.pop(); stack.push(a + b); break; }\n      case 'SUB': { const b = stack.pop(), a = stack.pop(); stack.push(a - b); break; }\n      case 'MUL': { const b = stack.pop(), a = stack.pop(); stack.push(a * b); break; }\n      case 'DIV': { const b = stack.pop(), a = stack.pop(); stack.push(a / b); break; }\n      default: throw new Error(`Unknown opcode: ${op}`);\n    }\n  }\n  return { result: stack[0], env };\n}\n\n// Test: compile and run  let area = 6 * 7\nconst ast = {\n  type: 'Program',\n  body: [\n    { type: 'VariableDeclaration', name: 'area',\n      init: { type: 'BinaryExpression', operator: '*',\n              left:  { type: 'Literal', value: 6 },\n              right: { type: 'Literal', value: 7 } } },\n    { type: 'Identifier', name: 'area' }\n  ]\n};\n\nconst bytecode = compileToBytecode(ast);\nconsole.log('bytecode:', bytecode);\n// [\n//   { op: 'PUSH', arg: 6 },\n//   { op: 'PUSH', arg: 7 },\n//   { op: 'MUL' },\n//   { op: 'STORE', arg: 'area' },\n//   { op: 'LOAD', arg: 'area' }\n// ]\n\nconst { result, env } = runVM(bytecode);\nconsole.log('result:', result); // 42\nconsole.log('env:', env);       // { area: 42 }\n\n// Key insight: if this code ran 10,000 times,\n// we only compile ONCE, then run the flat array 10,000 times.\n// No pointer chasing, no recursive dispatch, no switch on node.type.",
+      "explanation": "The compile pass runs once and converts the pointer-rich AST into a plain array of instruction objects. The VM loop is trivially simple — it is just `for ... switch` over that array. A real bytecode VM would encode opcodes as integers (not strings) and arguments as packed bytes for cache efficiency, but the logic is identical. Notice that STORE pops the top of the stack into the environment and LOAD pushes an environment value onto the stack — this is how variables cross the boundary between the stack and persistent storage."
+    },
+    {
+      "type": "explanation",
+      "title": "JIT Compilation: Profiling and Specialising Hot Code",
+      "content": "Bytecode interpretation is faster than tree-walking, but there is still a fundamental overhead: for every bytecode instruction executed, the VM loop must check the opcode, branch to the right handler, and manipulate a software stack. A real CPU could execute the same operation in a single instruction if the code were compiled to native machine code.\n\n**Just-In-Time (JIT) compilation** solves this. A JIT compiler runs *inside the process, while the program is executing*. It monitors which functions or loops are called frequently — these are called **hot paths** — and when a path becomes hot (exceeds a threshold like 1,000 executions), the JIT compiles it to native machine code on the fly. From then on, every call to that function runs the native code directly, bypassing the VM loop entirely.\n\n**Type specialisation** is what makes JIT-compiled code genuinely fast — sometimes faster than statically compiled C code. When the JIT observes that a particular function has always been called with integer arguments, it generates machine code specialised for integers: direct CPU `ADD` and `MUL` instructions with no type-checking overhead. A static AOT compiler must generate code that handles *any* possible argument type; the JIT can generate code for the *observed* types. This is the key reason JIT-compiled JavaScript can rival C for number-crunching loops.\n\n**Deoptimisation** is the flip side. JIT-compiled code is built on assumptions derived from profiling data. If those assumptions are later violated — for example, a function that always received integers is suddenly called with a string — the JIT must **deoptimise**: discard the native code, patch in the slower bytecode interpreter for this function, and possibly collect new profiling data to re-JIT with a wider type assumption. V8 calls this falling back from TurboFan to Ignition. HotSpot JVM calls it an uncommon trap. Deoptimisation loops (where code oscillates between JIT and deopt) are a real source of JavaScript performance bugs.\n\n**Warmup time** is the period before the JIT kicks in. A fresh process starts in interpreter mode, which is slower. For long-running servers (Java application servers, Node.js APIs) this is fine — they warm up over the first few seconds of traffic. For short-lived scripts (CLI tools, serverless functions) the JIT may never fully kick in, and startup/warmup latency dominates performance. This is why the Go language chose AOT over JIT: Go targets servers and CLIs where startup speed matters more than peak throughput."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"JS Source\"] --> B[\"Parser\"]\n    B --> C[\"AST\"]\n    C --> D[\"Ignition: bytecode\"]\n    D --> E[\"Bytecode interpreter\"]\n    E --> F{\"Call count > threshold?\"}\n    F -- \"No\" --> E\n    F -- \"Yes\" --> G[\"TurboFan JIT\"]\n    G --> H[\"Native machine code\"]\n    H --> I{\"Type mismatch?\"}\n    I -- \"No\" --> H\n    I -- \"Yes\" --> E",
+      "caption": "V8's two-tier pipeline. Ignition handles all code initially. TurboFan promotes hot functions to native code. Type violations trigger deoptimisation back to Ignition."
+    },
+    {
+      "type": "explanation",
+      "title": "AOT Compilation: Translating Everything Before Execution",
+      "content": "**Ahead-of-Time (AOT) compilation** moves the entire translation burden before the program runs. The compiler reads source code, performs full semantic analysis, type-checking, and optimisation, and emits native machine code (an ELF binary on Linux, a Mach-O binary on macOS, a PE/COFF `.exe` on Windows). When you run the binary, the CPU executes the native instructions directly — no parser, no interpreter, no VM loop, no JIT warmup.\n\nLanguages that use AOT compilation include C, C++, Rust, Go, Swift, and Fortran. The compiler (GCC, Clang, rustc, the Go toolchain) is a separate tool that runs in the development environment, not at runtime. The shipped binary has no dependency on any runtime beyond the operating system's system libraries.\n\n**The optimisation advantage**: AOT compilers have unlimited time to optimise. LLVM's optimisation pipeline includes inlining, loop unrolling, dead code elimination, vectorisation (using SIMD instructions), and dozens of other passes. Rust's `rustc` with `--release` and `-C opt-level=3` runs hundreds of optimisation passes. A JIT compiler must finish within milliseconds to avoid user-visible stalls, so it can only afford a small subset of these passes.\n\n**The portability cost**: native machine code is CPU-architecture-specific. An x86-64 binary does not run on ARM64 (Apple Silicon) without emulation. An AOT-compiled C program must be cross-compiled for each target platform. This was considered an acceptable tradeoff in the systems programming world but a fatal limitation for widely distributed software — which is exactly why the JVM's bytecode portability was revolutionary for Java in 1995.\n\n**Ahead-of-time in JVM and .NET**: The JVM traditionally used JIT, but newer systems like GraalVM Native Image and .NET's NativeAOT compile to native code ahead of time for serverless and container use-cases where startup latency matters. Android's ART runtime AOT-compiles app bytecode during installation — so the app starts at native speed on first run, paying the compilation cost once at install time rather than on every cold start.\n\n**Link-Time Optimisation (LTO)**: A powerful AOT technique where the compiler sees the entire program (not just each translation unit in isolation) during the final link step. This allows inlining across module boundaries and whole-program dead code elimination. Rust enables this via `lto = true` in Cargo.toml."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"Source: main.rs\"] --> B[\"rustc front-end\"]\n    B --> C[\"MIR: Mid-level IR\"]\n    C --> D[\"LLVM IR\"]\n    D --> E[\"LLVM optimiser\\n(hundreds of passes)\"]\n    E --> F[\"x86-64 machine code\"]\n    F --> G[\"ELF binary: ./main\"]\n    G --> H[\"CPU executes directly\"]",
+      "caption": "Rust's AOT pipeline: source goes through multiple IR layers, LLVM performs deep optimisation, then emits a native binary that runs with no runtime overhead."
+    },
+    {
+      "type": "explanation",
+      "title": "The Tradeoffs in Detail: Choosing the Right Strategy",
+      "content": "No single strategy is universally best. Each is an engineering tradeoff along several dimensions.\n\n**Startup latency vs peak throughput**: Tree-walkers start instantly but are slow under load. AOT binaries also start almost instantly (no compilation at runtime) and peak fastest. JIT has the worst of both worlds *before* warmup — it must parse, compile to bytecode, and then JIT — but after warmup it matches or exceeds AOT. Bytecode VMs are in the middle on both dimensions.\n\n**Portability**: Bytecode VMs offer the highest portability because the VM itself is the architecture-specific component, not the bytecode. Java `.class` files, Python `.pyc` files, and JavaScript bundles are all portable across any platform that ships the VM. AOT binaries are architecture-locked. Tree-walkers are portable if the interpreter itself is portable.\n\n**Dynamic language features**: `eval()`, `exec()`, dynamic module loading, hot code reloading, live patching — all of these are easy for interpreters (you already have the parser and environment in memory) and painful for AOT compilers (the binary does not include a compiler). This is why Python can do `exec('x = 1 + 2')` trivially, but Rust cannot execute arbitrary Rust source at runtime without shipping a full Rust compiler. JIT runtimes can support `eval()` by passing the dynamically generated code through the normal bytecode + JIT pipeline.\n\n**Memory overhead**: JIT compilers allocate memory for compiled native code at runtime (the JIT code cache). JVMs can have multi-gigabyte code caches for large applications. AOT binaries are fixed-size; all code is in the binary, not in heap memory. For constrained embedded environments (IoT, microcontrollers), AOT is often the only viable option.\n\n**Debugging and instrumentation**: Interpreters make excellent debuggers because execution is driven by the host language — you can pause at any AST node, inspect the environment, and resume. AOT binaries require separate debug info (DWARF tables) to map machine code addresses back to source lines. JIT debuggability is the worst because the native code exists only in memory and may be invalidated by deoptimisation.\n\n**Security**: JIT compilation creates executable memory pages at runtime. This is a known attack surface — JIT spray attacks inject attacker-controlled values into JIT-compiled code to create useful instruction sequences. AOT binaries use `W^X` (write XOR execute) — a page is either writable or executable, never both — which is harder to exploit. Some high-security contexts (iOS prior to certain entitlements) prohibit JIT entirely."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Execution Strategy\"] --> B[\"Tree-walk Interpreter\"]\n    A --> C[\"Bytecode VM\"]\n    A --> D[\"JIT Compiler\"]\n    A --> E[\"AOT Compiler\"]\n    B --> F[\"Startup: Fast\\nPeak: Slow\\nPortable: Yes\\nDynamic: Yes\"]\n    C --> G[\"Startup: Medium\\nPeak: Medium\\nPortable: Yes\\nDynamic: Yes\"]\n    D --> H[\"Startup: Slow (warmup)\\nPeak: Near-Native\\nPortable: Medium\\nDynamic: Possible\"]\n    E --> I[\"Startup: Fastest\\nPeak: Fastest\\nPortable: No\\nDynamic: Hard\"]",
+      "caption": "Tradeoff summary across four execution strategies. In practice, production runtimes layer multiple strategies (e.g., bytecode + JIT) to capture the best of each."
+    },
+    {
+      "type": "explanation",
+      "title": "Real-World Runtimes: How They Actually Work",
+      "content": "Understanding abstract strategies is clarified enormously by mapping them to real systems you interact with daily.\n\n**CPython** (the standard Python implementation): When you run `python script.py`, CPython lexes, parses to an AST, compiles the AST to bytecode (CPython's own instruction set, viewable with `import dis; dis.dis(fn)`), and then interprets that bytecode in a C-implemented evaluation loop. CPython has no JIT (as of Python 3.12, though `--enable-experimental-jit` was added experimentally in 3.13). The `.pyc` file in `__pycache__` is the cached bytecode. CPython's speed for CPU-bound work is limited by this interpretation overhead — hence why NumPy, pandas, and PyTorch drop into C extensions for hot loops.\n\n**JVM / HotSpot** (Java, Kotlin, Scala, Clojure): `javac` compiles source to JVM bytecode (`.class` files). The JVM interprets this bytecode initially. HotSpot's tiered compilation then promotes hot methods through C1 (fast, low-quality JIT) and C2 (slow, high-quality JIT) compilers. GraalVM's JIT is written in Java itself. After warmup, JVM throughput routinely matches C programs.\n\n**V8** (Node.js, Chrome, Deno): V8's **Ignition** is a register-based bytecode compiler and interpreter. All JavaScript goes through Ignition first. **TurboFan** is a sea-of-nodes optimising JIT compiler that promotes functions Ignition identifies as hot. V8 has a third tier, **Maglev**, for medium-hot functions, sitting between Ignition and TurboFan. Deoptimisation paths return code to Ignition.\n\n**Rustc / GCC / Clang**: Pure AOT compilers. All analysis, type-checking, and optimisation happen before the binary ships. No runtime component beyond the OS. Programs start in microseconds.\n\n**Lua**: Lua 5.1 and earlier used a tree-walking interpreter. Lua 5.0 introduced a register-based bytecode VM that remains the core today. LuaJIT is a third-party JIT compiler for Lua that is among the fastest scripting language runtimes ever produced, demonstrating what a well-engineered JIT can achieve.\n\n**WebAssembly (WASM)**: A bytecode format designed as a compilation target for browsers. It ships pre-compiled from C, Rust, Go, etc. Browsers JIT-compile WASM to native code at load time. WASM is essentially an AOT-compiled portable bytecode — it combines AOT's pre-compilation with bytecode's portability, getting near-native speed in browsers without the portability cost of native binaries."
+    },
+    {
+      "type": "explanation",
+      "title": "Inside the JIT: Profiling, Type Feedback, and Inline Caches",
+      "content": "Modern JIT compilers are surprisingly sophisticated. Understanding three specific mechanisms explains why they can generate such fast code.\n\n**Call count profiling**: The simplest JIT trigger. A counter is associated with each function or loop header in the bytecode. The interpreter increments the counter on every entry. When the counter crosses a threshold (V8 uses ~1,000 for some tiers), the function is submitted to the JIT compiler.\n\n**Type feedback and speculation**: The interpreter tracks the types of values seen at each operation site. For a `+` instruction that has always seen two 32-bit integers, the JIT generates native `ADD` instructions with no type checks. It adds a guard at the function entry: `if (typeof arg !== 'number' or !isInt32(arg)) DEOPT`. This guard is a single branch prediction-friendly conditional that costs almost nothing when the assumption holds.\n\n**Inline caches (ICs)**: Property access in dynamic languages like JS is expensive — `obj.x` might require a hash table lookup. An inline cache replaces the generic lookup with a specialised one: it records the object's **hidden class** (V8's internal description of an object's shape — which properties it has, in what order) and generates direct memory offset access if the same shape is seen again. `obj.x` becomes `load memory[obj_ptr + offset_of_x]` — a single memory read. If the object's shape changes (a new property is added), the IC misses and falls back to the slow path.\n\nThese three mechanisms together explain V8's performance: for code that works with consistent types and object shapes, V8 effectively generates code indistinguishable from hand-written C. For code with wild polymorphism (different types every call), V8 stays in the slower interpreter or generates pessimistic native code with many type checks."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context worth knowing**: The first compiler was written by Grace Hopper in 1952 (A-0 system for UNIVAC I). The idea was controversial — programmers argued that no compiler could produce code as efficient as hand-written assembly. They were mostly right in 1952 and are mostly wrong today. Modern LLVM and GCC optimisers routinely produce code faster than expert hand-written assembly for non-trivial programs because they apply dozens of transformations in sequence that no human could maintain simultaneously. The first JIT compiler in wide use was Self's runtime in the late 1980s at Xerox PARC, directly inspiring the HotSpot JVM architecture."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Don't assume interpreted = slow.** Modern JIT-compiled languages (JavaScript, Java, C#) routinely match or exceed the throughput of AOT-compiled languages for long-running workloads because the JIT has runtime profile information that a static AOT compiler lacks. The real cost of interpretation is **startup latency**, not peak throughput — which is why V8 ships Ignition (fast cold start) alongside TurboFan (high peak speed)."
+      "content": "**Common misconceptions and interview traps**: (1) 'Interpreted languages are always slow' — modern JIT-compiled JS/Java/C# match C for many workloads. The real cost is startup and warmup, not peak throughput. (2) 'Python is interpreted' — CPython compiles to bytecode first; the 'interpreted' part is the bytecode VM, not direct AST traversal. (3) 'JIT is always better than AOT' — for short-lived scripts, serverless functions, and CLIs, JIT's warmup overhead makes AOT preferable (see: Go, Rust, Zig). (4) 'Deoptimisation is free' — each deopt flushes compiled code for a function, causes a mode switch, and requires re-profiling. Pathological deopt loops (monomorphic → polymorphic type change → compile → deopt → compile again) are a real performance hazard in JavaScript. (5) 'Bytecode is machine code' — bytecode is for a *virtual* machine; machine code is for a real CPU. They differ in portability, execution speed, and the need for a VM runtime."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Tree-walking interpreters** execute AST nodes directly — simple to build, slow for hot loops because the tree is re-traversed every iteration.",
-        "**Bytecode VMs** compile to a compact linear instruction set first, then interpret it; this is faster than tree-walking and enables bytecode caching (`.pyc`, `.class`).",
-        "**JIT compilers** profile running bytecode and compile only the hot paths to native code at runtime, achieving near-AOT speed after warmup.",
-        "**AOT compilers** translate entirely before execution — fastest startup and peak speed, but the binary is architecture-specific and dynamic features are limited.",
-        "**V8** uses all three tiers: Ignition (bytecode interpreter for fast startup) → TurboFan (JIT for hot functions) → deoptimisation back to bytecode when type assumptions break."
+        "**Tree-walking interpreters** execute AST nodes directly with a recursive `eval()` function — the simplest design, instant startup, but slow for hot loops because the tree is re-traversed on every iteration.",
+        "**Bytecode VMs** compile the AST to a flat, linear instruction list once, then execute that list in a tight VM loop. Bytecode caching (`.pyc`, `.class`) skips re-compilation on subsequent runs. Write-once-run-anywhere portability is the key benefit.",
+        "**JIT compilers** profile running bytecode to identify hot paths, then compile only those paths to native machine code using type specialisation and inline caches — achieving near-AOT speed after warmup, sometimes faster than static AOT due to runtime type information.",
+        "**AOT compilers** (Rust, C, Go) translate everything to native machine code before the program runs — fastest startup, highest peak throughput, access to deep optimisation passes, but binaries are architecture-specific and dynamic features like `eval()` are severely limited.",
+        "**Deoptimisation** is the JIT safety valve: when type assumptions break, the JIT discards its compiled code and falls back to the bytecode interpreter — essential for correctness in dynamic languages but a potential performance hazard if it loops.",
+        "**V8 uses three tiers**: Ignition (bytecode compiler + interpreter), Maglev (medium JIT), and TurboFan (fully optimising JIT) — each trading compilation time for execution speed, with deoptimisation paths between all tiers.",
+        "**Real-world choice**: use the runtime that matches your workload's constraints — AOT for CLIs and embedded (startup matters), JIT for long-running servers (peak throughput matters), bytecode VM for portability across architectures, and tree-walkers for sandboxed scripting or educational interpreters."
       ]
     }
   ],
-  "visualizer": { "type": "none", "caption": "" },
   "quiz": [
     {
       "id": "q1",
-      "question": "What is the defining characteristic of a pure tree-walking interpreter?",
+      "question": "What is the defining characteristic of a pure tree-walking interpreter compared to other execution strategies?",
       "type": "mcq",
       "options": [
-        "It compiles the AST to machine code before execution.",
-        "It converts source to bytecode, then interprets the bytecode.",
-        "It traverses the AST directly and performs operations as it visits each node.",
-        "It uses a JIT compiler to optimise hot paths at runtime."
+        "It compiles the AST to native machine code in a separate step before any code runs.",
+        "It visits AST nodes directly and executes corresponding operations immediately, with no intermediate compilation step.",
+        "It converts source code to bytecode and interprets that bytecode in a VM loop.",
+        "It profiles running code and emits native instructions only for frequently called functions."
       ],
-      "correct": 2,
-      "explanation": "A tree-walking interpreter visits each AST node and immediately performs the corresponding operation. There is no separate compilation step — execution is driven directly by the tree structure."
+      "correct": 1,
+      "explanation": "A tree-walking interpreter's defining trait is executing the AST directly via recursive node traversal. There is no compilation step whatsoever — the AST structure itself drives execution. This is simple to implement but slow for repeated execution because the same tree nodes are traversed on every iteration."
     },
     {
       "id": "q2",
-      "question": "What is bytecode?",
+      "question": "Why is bytecode interpretation generally faster than tree-walking interpretation for code inside a loop?",
       "type": "mcq",
       "options": [
-        "The raw binary of a compiled native executable.",
-        "A compact, intermediate instruction set designed for a virtual machine, produced from the AST before execution.",
-        "The token stream produced by the lexer.",
-        "A compressed representation of the AST stored on disk."
+        "Bytecode compiles directly to machine code so no interpreter is needed.",
+        "Bytecode uses hardware-accelerated virtual machine instructions.",
+        "Bytecode is a flat array of simple instructions with an integer program counter, eliminating recursive pointer traversal of the AST on each loop iteration.",
+        "Bytecode caches results from previous loop iterations to avoid re-computation."
       ],
-      "correct": 1,
-      "explanation": "Bytecode is an intermediate representation — lower-level than the AST, higher-level than machine code. It is designed for efficient interpretation by a VM. Python's .pyc files and Java's .class files are examples."
+      "correct": 2,
+      "explanation": "The tree-walker must re-traverse pointer-linked AST nodes on every loop iteration. Bytecode is a flat array indexed by a simple integer (the program counter). Dispatching on an opcode in an array is dramatically cheaper than following heap pointers and recursively dispatching on node types. The tree is walked once to produce bytecode; subsequent iterations just step through the flat array."
     },
     {
       "id": "q3",
-      "question": "What does 'JIT' stand for and what does a JIT compiler do?",
+      "question": "What does a JIT compiler use to decide which bytecode functions to compile to native machine code?",
       "type": "mcq",
       "options": [
-        "Just-In-Time; it compiles the entire program to native code before it starts running.",
-        "Just-In-Time; it profiles running code and compiles hot paths to native machine code at runtime.",
-        "Just-In-Time; it translates bytecode back to source code for debugging.",
-        "Java Integrated Transpiler; it converts Java to JavaScript."
+        "Static analysis of the source code performed at compile time.",
+        "A developer annotation in the source code such as @hot or @jit.",
+        "Runtime profiling — counting how many times each function or loop is executed and compiling those that exceed a threshold.",
+        "The file size of the bytecode: smaller files are compiled, larger files are interpreted."
       ],
-      "correct": 1,
-      "explanation": "JIT (Just-In-Time) compilation profiles running code, identifies frequently executed paths (hot paths), and compiles those to native machine code while the program is running. This achieves near-AOT speed after a warmup period."
+      "correct": 2,
+      "explanation": "JIT compilers identify 'hot paths' through runtime profiling — incrementing execution counters for functions and loop back-edges. When a counter exceeds a configured threshold, the JIT compiler is triggered for that code. This is why JIT-compiled programs have a warmup period: the JIT only kicks in after sufficient profiling data has been collected."
     },
     {
       "id": "q4",
-      "question": "Which execution strategy offers the highest startup speed (smallest startup latency)?",
+      "question": "V8's TurboFan JIT compiler can 'deoptimise' a function. What triggers deoptimisation?",
       "type": "mcq",
       "options": [
-        "Tree-walking interpretation",
-        "Bytecode VM",
-        "JIT compilation",
-        "AOT compilation"
+        "The function has been running in native code for more than one second.",
+        "A type assumption made during JIT compilation — such as 'this argument is always an integer' — is violated by a new call with a different type.",
+        "The JavaScript garbage collector needs to reclaim the memory used by native code.",
+        "The user explicitly calls the browser's DevTools memory profiler."
       ],
-      "correct": 3,
-      "explanation": "AOT-compiled binaries are fully translated to machine code before the program starts. There is no parsing, bytecode compilation, or JIT warmup at runtime, so startup is nearly instant compared to the other strategies."
+      "correct": 1,
+      "explanation": "TurboFan generates specialised native code based on observed type profiles (type speculation). Each compiled function contains guards checking that types match the speculated profile. If a call violates a guard (e.g., a function profiled as integer-only receives a string), V8 deoptimises: it discards the TurboFan code for that function and reverts to Ignition bytecode interpretation, possibly re-profiling for a less-specialised recompilation."
     },
     {
       "id": "q5",
-      "question": "Python's CPython runtime stores compiled bytecode in `.pyc` files. What is the primary benefit of this?",
+      "question": "Python's CPython runtime stores compiled bytecode in `.pyc` files. What specific benefit does this provide?",
       "type": "mcq",
       "options": [
-        "It encrypts the source code for distribution.",
-        "It skips the parse → AST → bytecode compilation on subsequent runs if the source hasn't changed.",
-        "It enables JIT compilation on subsequent runs.",
-        "It converts Python to JavaScript for browser execution."
+        "It enables JIT compilation on the next run without needing the source file.",
+        "It encrypts the source code so it cannot be read by end users.",
+        "It skips lexing, parsing, and AST-to-bytecode compilation on subsequent runs when the source file has not changed, improving startup time.",
+        "It converts Python bytecode to native machine code for the specific CPU architecture."
       ],
-      "correct": 1,
-      "explanation": "CPython caches bytecode in .pyc files. On the next run, if the source file is unchanged (same modification time / hash), CPython loads the cached bytecode directly, skipping lexing, parsing, and compilation."
+      "correct": 2,
+      "explanation": "CPython caches bytecode in `.pyc` files (inside `__pycache__`). On startup, CPython checks whether the source file has changed (by comparing modification timestamps or source hashes). If unchanged, it loads the cached bytecode directly, bypassing the expensive lexing + parsing + compilation pipeline. This is especially beneficial for large libraries like numpy or Django where import time would otherwise be significant."
     },
     {
       "id": "q6",
-      "question": "V8's TurboFan JIT compiler can 'deoptimise' back to the Ignition interpreter. When does this happen?",
+      "question": "Why does a JIT-compiled language sometimes achieve higher throughput than an equivalent AOT-compiled program for long-running server workloads?",
       "type": "mcq",
       "options": [
-        "When the user explicitly calls deoptimise() in JavaScript.",
-        "When TurboFan's type assumptions (e.g. 'this argument is always a number') are violated at runtime.",
-        "When the function has not been called enough times to be considered hot.",
-        "When the JavaScript file is reloaded by the browser."
+        "JIT compilers always apply more optimisation passes than AOT compilers.",
+        "AOT compilers cannot optimise loops, only individual instructions.",
+        "A JIT has access to runtime type and branch profile information unavailable to a static AOT compiler, enabling tighter specialisation for the actual workload.",
+        "JIT-compiled code runs in a privileged CPU mode unavailable to AOT binaries."
       ],
-      "correct": 1,
-      "explanation": "TurboFan generates optimised machine code based on observed type profiles (e.g. 'arg is always int32'). If a call later violates that assumption (e.g. a string is passed), V8 deoptimises — discards the machine code and falls back to Ignition bytecode interpretation."
+      "correct": 2,
+      "explanation": "A static AOT compiler must generate code that correctly handles all possible inputs and types — it produces correct-for-all-cases code. A JIT compiler observes the actual types and paths used during real execution and generates code optimised for those specific cases. For a loop that always processes 32-bit integers with a predictable branch pattern, JIT-generated code can beat conservative AOT-generated code because the JIT makes speculative bets validated by profiling."
     },
     {
       "id": "q7",
-      "question": "Which language runtime is an example of AOT compilation?",
+      "question": "What is the primary portability advantage of a bytecode VM over AOT compilation?",
       "type": "mcq",
       "options": [
-        "CPython (Python)",
-        "V8 (JavaScript)",
-        "JVM (Java)",
-        "Rust's rustc compiler"
+        "Bytecode executes faster than native machine code on modern CPUs.",
+        "The same bytecode file runs on any platform that ships the VM, because the VM itself is the architecture-specific component rather than the bytecode.",
+        "Bytecode is automatically converted to the optimal machine code for each CPU at download time.",
+        "Bytecode files are smaller than AOT binaries because they use compression."
       ],
-      "correct": 3,
-      "explanation": "Rust's rustc is a classic AOT compiler — it translates Rust source to native machine code (ELF/Mach-O/PE binaries) entirely before the program runs. CPython, V8, and JVM all use bytecode VMs with optional JIT, not pure AOT."
+      "correct": 1,
+      "explanation": "Bytecode is defined for an abstract (virtual) machine, not a real CPU. Any real CPU that has a VM implementation can execute the same bytecode without recompilation. Java's 'write once, run anywhere' promise works because `.class` files contain JVM bytecode — the JVM itself (a native binary) handles the architecture-specific execution. AOT binaries are compiled for a specific CPU ISA and cannot run natively on a different architecture."
     },
     {
       "id": "q8",
-      "question": "Why does a JIT-compiled language sometimes outperform an AOT-compiled one for long-running workloads?",
+      "question": "Which execution strategy is most appropriate for a short-lived command-line tool where instant startup is critical and peak throughput is secondary?",
       "type": "mcq",
       "options": [
-        "JIT always produces more optimised code than AOT.",
-        "JIT has access to runtime profile information (actual types and paths used) that a static AOT compiler cannot know at compile time.",
-        "AOT compilers cannot optimise loops.",
-        "JIT runs on faster hardware than AOT."
+        "JIT compilation, because it achieves the highest throughput",
+        "Bytecode VM, because it offers the best portability",
+        "AOT compilation, because native binaries start without any parse/compile/warmup overhead",
+        "Tree-walking interpretation, because it requires no compilation step at all"
       ],
-      "correct": 1,
-      "explanation": "A JIT compiler observes actual runtime behaviour (which branches are taken, what types are used) and generates code optimised for those specific conditions. An AOT compiler must conservatively handle all possible cases, sometimes producing less specialised code."
+      "correct": 2,
+      "explanation": "AOT-compiled binaries (Go, Rust, C) start in microseconds because all compilation happened at build time. For CLI tools, the program may complete its entire task before a JIT even reaches its warmup threshold. JIT's advantage only materialises after warmup, which is irrelevant for short-lived processes. This is explicitly one of Go's design goals: fast startup for CLI and server binaries."
     },
     {
       "id": "q9",
-      "question": "In a stack-based bytecode VM, what does the PUSH instruction do?",
+      "question": "In a stack-based bytecode VM, what is the purpose of the STORE instruction (as implemented in the code examples)?",
       "type": "mcq",
       "options": [
-        "Writes a value to a named variable in the environment.",
-        "Pops two values, adds them, and pushes the result.",
-        "Pushes a constant value onto the evaluation stack.",
-        "Jumps the program counter to a new instruction."
+        "It pushes a constant value onto the evaluation stack.",
+        "It pops the top value from the stack and saves it into the environment under a given variable name.",
+        "It copies the top of the stack without removing it.",
+        "It writes the entire stack contents to disk for the .pyc cache."
       ],
-      "correct": 2,
-      "explanation": "PUSH places a constant value onto the top of the evaluation stack. Subsequent instructions like ADD then pop operands from the stack, compute the result, and push it back."
+      "correct": 1,
+      "explanation": "STORE pops the top value from the evaluation stack and writes it to the environment (variable store) under the specified name. This is how variable assignment works in a stack VM: the right-hand side expression places its result on the stack via PUSH/LOAD/arithmetic instructions, and then STORE transfers that value from the stack into persistent variable storage. The reverse, LOAD, pushes a named variable's value back onto the stack."
     },
     {
       "id": "q10",
-      "question": "Which tradeoff does bytecode VM portability rely on?",
+      "question": "What is an 'inline cache' in the context of a JIT-compiled JavaScript engine like V8?",
       "type": "mcq",
       "options": [
-        "The bytecode is CPU-architecture-specific, so one binary works on one machine type.",
-        "The bytecode is an abstract instruction set; any platform that ships the VM can run the same bytecode without recompilation.",
-        "Bytecode is portable because it is stored as JSON.",
-        "Portability requires JIT compilation on every target platform."
+        "A CPU-level cache that stores recently accessed JavaScript strings.",
+        "A mechanism that replaces a generic property-access operation with a specialised fast path based on the observed object shape (hidden class), enabling property reads as direct memory offsets.",
+        "A disk cache that stores JIT-compiled native code between browser restarts.",
+        "A JavaScript developer tool for preloading frequently accessed modules."
       ],
       "correct": 1,
-      "explanation": "Bytecode is defined for a virtual (abstract) machine, not a real CPU. Any real CPU that has a VM implementation (JVM, CPython, V8) can execute the same bytecode file — this is 'write once, run anywhere'."
+      "explanation": "An inline cache (IC) optimises property access in dynamic languages. When V8 first accesses `obj.x`, it performs a slow hash-table lookup. If it observes that subsequent accesses involve objects with the same hidden class (shape), it patches the access site to use a direct memory-offset read — essentially `load memory[obj_ptr + known_offset]`. This turns a dynamic lookup into a near-zero-cost memory read for the common case where objects have consistent shapes."
     }
   ]
 }

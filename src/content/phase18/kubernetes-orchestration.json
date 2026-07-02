@@ -5,58 +5,131 @@
   "week": 55,
   "icon": "network",
   "tagline": "From single containers to self-healing fleets — Kubernetes automates deployment, scaling, and recovery for containerized workloads at any scale.",
-  "readTime": "~14 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Running one Docker container on one machine is easy. Running 50 containers across 10 machines — with automatic restarts when containers crash, traffic routing to healthy instances, rolling updates with zero downtime, and auto-scaling based on CPU load — is a coordination problem that humans cannot manage manually at scale.\n\nKubernetes (K8s) is the industry-standard container orchestrator. Originally built at Google and open-sourced in 2014, it runs the majority of large-scale containerized workloads today. Kubernetes treats your data center (or cloud VMs) as a pool of compute and intelligently **schedules** containers onto nodes, **heals** failures automatically, **scales** deployments on demand, and provides stable networking via **Services** regardless of where pods physically run."
+      "content": "Running one Docker container on one laptop is straightforward. Running three hundred containers spread across forty cloud VMs — with automatic restarts when containers crash, intelligent traffic routing to healthy replicas, zero-downtime rolling updates, and elastic scaling that spins up new instances when CPU climbs — is a coordination problem of an entirely different magnitude. Manually tracking which container lives on which machine, handling crashed nodes, routing requests, and managing config secrets would consume an entire operations team full-time. **Kubernetes exists to make that coordination automatic.**\n\nKubernetes (abbreviated K8s — there are 8 letters between K and s) is the industry-standard **container orchestrator**. Google originally built and used it internally under the name Borg for over a decade before open-sourcing it in 2014 under the Cloud Native Computing Foundation (CNCF). Today it powers the majority of large-scale containerized workloads — from Netflix and Spotify to government infrastructure. Every major cloud provider offers a managed Kubernetes service: Google GKE, Amazon EKS, and Azure AKS are the dominant three.\n\nAt its core, Kubernetes introduces a powerful idea: **declarative infrastructure**. Instead of scripting a sequence of imperative commands ('start container A on machine 3, then start container B on machine 5'), you declare the desired state of your system ('I want three replicas of container A and two replicas of container B running at all times') and Kubernetes continuously works to make reality match that declaration. If a container crashes, Kubernetes restarts it. If a node fails, Kubernetes reschedules its containers on healthy nodes. If traffic spikes, Kubernetes adds replicas. You describe *what* you want; Kubernetes figures out *how* to achieve and maintain it.\n\nThis chapter covers the full Kubernetes mental model: the control plane architecture, the Pod and Deployment abstraction hierarchy, Services and network routing, the scheduling algorithm, self-healing control loops, health probes, autoscaling, and the operational commands you will use daily. By the end you will be able to read and write production Kubernetes manifests and reason confidently about what happens inside a cluster."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  subgraph ControlPlane[\"Control Plane\"]\n    API[\"API Server\"]\n    ETCD[\"etcd\\n(cluster state)\"]\n    SCHED[\"Scheduler\"]\n    CM[\"Controller Manager\"]\n  end\n  subgraph Node1[\"Worker Node 1\"]\n    KL1[\"kubelet\"]\n    P1[\"Pod A\"]\n    P2[\"Pod B\"]\n  end\n  subgraph Node2[\"Worker Node 2\"]\n    KL2[\"kubelet\"]\n    P3[\"Pod C\"]\n  end\n  API --> ETCD\n  API --> SCHED\n  API --> CM\n  SCHED --> KL1\n  SCHED --> KL2\n  KL1 --> P1\n  KL1 --> P2\n  KL2 --> P3",
-      "caption": "Kubernetes architecture: the control plane (API server, etcd, scheduler, controller manager) manages the cluster state. Worker nodes run the actual Pods via the kubelet agent."
+      "mermaid": "flowchart TD\n  subgraph CP[\"Control Plane\"]\n    API[\"API Server\\n(gateway for all ops)\"]\n    ETCD[\"etcd\\n(cluster state store)\"]\n    SCHED[\"Scheduler\\n(Pod placement)\"]\n    CM[\"Controller Manager\\n(reconciliation loops)\"]\n  end\n  subgraph N1[\"Worker Node 1\"]\n    KL1[\"kubelet\"]\n    KP1[\"kube-proxy\"]\n    P1[\"Pod: api-7d9f\"]\n    P2[\"Pod: api-3b2c\"]\n  end\n  subgraph N2[\"Worker Node 2\"]\n    KL2[\"kubelet\"]\n    KP2[\"kube-proxy\"]\n    P3[\"Pod: api-9a1e\"]\n    P4[\"Pod: worker-f4d2\"]\n  end\n  API <--> ETCD\n  SCHED --> API\n  CM --> API\n  API --> KL1\n  API --> KL2\n  KL1 --> P1\n  KL1 --> P2\n  KL2 --> P3\n  KL2 --> P4",
+      "caption": "Kubernetes cluster architecture. The control plane is the 'brain' — it stores desired state in etcd, makes scheduling decisions, and runs reconciliation loops. Worker nodes are the 'muscle' — kubelet agents run Pods and kube-proxy manages network rules."
     },
     {
       "type": "analogy",
-      "title": "Air Traffic Control",
-      "content": "Think of Kubernetes as an **air traffic control system**. Each airplane is a **Pod** (a running container). The control tower (**API server**) knows the state of every plane in the sky. The **scheduler** decides which runway (worker node) each new plane lands on, based on available capacity and constraints. The **controller manager** is the rule-enforcement system: if a plane goes down (pod crashes), it immediately dispatches a replacement. The **etcd** database is the flight log — the authoritative record of every flight plan. Pilots (kubectl users) submit plans to the tower; the tower makes it happen. You declare the desired state ('5 planes in the air') and Kubernetes continuously works to match reality to that declaration."
+      "title": "Air Traffic Control at Scale",
+      "content": "Imagine a busy international airport managing hundreds of flights simultaneously. Each **airplane** is a **Pod** — a running workload. The **control tower** is the **API server** — every piece of information flows through it. The **flight plan database** is **etcd** — the authoritative, distributed record of every declared flight plan and current aircraft position. The **gate assignment system** is the **Scheduler** — when a new flight plan arrives (new Pod needs to be placed), it consults runway capacity, weather constraints, and special requirements to assign the best available gate (worker node). The **safety authority** that watches all flights and scrambles emergency replacements when a plane goes missing is the **Controller Manager** — the body of rules that continuously compares the plan ('six aircraft should be in the air') against reality ('only five are flying') and acts on the difference.\n\nPilots (your `kubectl` commands) never talk directly to the runway — everything goes through the control tower. The tower ensures all decisions are recorded in the flight log before being executed. If a runway closes (node failure), the safety authority immediately reroutes all affected aircraft to other runways. You declare the flight plan once; the airport authority maintains it indefinitely."
     },
     {
       "type": "explanation",
-      "content": "**Pods** are the smallest deployable unit. A Pod wraps one or more containers that share a network namespace (same IP) and storage volumes. Containers within a Pod communicate via `localhost`. Pods are ephemeral — Kubernetes creates and destroys them; never manage a Pod directly.\n\n**Deployments** declare the desired state: 'run 3 replicas of my-api:v2, always'. The Deployment controller reconciles reality to this spec — if a Pod crashes, it creates a replacement. Rolling updates change the image version by incrementally replacing Pods: new Pods start and pass health checks before old Pods are terminated, giving zero-downtime deploys. `maxSurge` and `maxUnavailable` control the rollout pace.\n\n**Services** give Pods a stable network identity. Pods are assigned random IPs that change on restart. A Service selects Pods via **label selectors** and provides a stable ClusterIP (internal) or LoadBalancer IP (external). `kube-proxy` on each node routes traffic to healthy Pod IPs. Three types matter: `ClusterIP` (internal only), `NodePort` (exposes on every node's port), `LoadBalancer` (provisions a cloud load balancer).\n\n**The Scheduler** watches for new Pods with no assigned node and selects the best node based on resource requests, node capacity, affinity rules, and taints. Pods declare resource `requests` (guaranteed minimum) and `limits` (maximum allowed). The scheduler only places a Pod on a node with sufficient free resources.\n\n**Self-healing**: The controller manager runs control loops that continuously compare desired state (stored in etcd) with actual state. Pod crash → loop detects mismatch → creates replacement Pod. Node failure → Pods on that node are rescheduled on healthy nodes. **Liveness probes** detect stuck processes and restart them; **readiness probes** gate traffic routing — a Pod only receives traffic after passing readiness checks.\n\n**Horizontal Pod Autoscaler (HPA)** scales the number of Pod replicas based on CPU/memory metrics or custom metrics. When CPU > 70%, HPA increases replicas; when load drops, it scales back down. Combined with **Cluster Autoscaler** (which adds/removes nodes), Kubernetes can handle traffic spikes fully automatically."
+      "title": "The Control Plane: The Brain of the Cluster",
+      "content": "The **control plane** is a set of processes that manage the cluster as a whole. In production clusters, it runs on dedicated nodes separate from application workloads. Understanding each component removes the mystery from why Kubernetes behaves the way it does.\n\n**The API Server** (`kube-apiserver`) is the single gateway for all cluster operations. `kubectl`, CI/CD pipelines, the scheduler, and controllers all communicate exclusively via the API server's REST interface. Every resource (Pod, Deployment, Service, ConfigMap) is a JSON/YAML object. The API server validates incoming requests, enforces authentication and authorization (RBAC), and persists accepted objects to etcd. Critically, the API server is the **only** component that reads and writes etcd — all other components go through the API server rather than touching etcd directly. This centralisation allows consistent state management, auditing, and access control.\n\n**etcd** is a distributed, strongly-consistent key-value store. It is the **source of truth** for everything Kubernetes knows: what Deployments exist, what Pods are running (or desired), which nodes are healthy, what Secrets and ConfigMaps hold. etcd uses the **Raft consensus algorithm** to guarantee that writes are durable even if some etcd nodes fail. In a high-availability cluster, you run an odd number of etcd members (typically 3 or 5) so a majority quorum can always form. Losing etcd means losing the cluster's brain — this is why etcd backup is the most critical operational practice in Kubernetes.\n\n**The Scheduler** (`kube-scheduler`) watches the API server for Pods that have been created but not yet assigned to a node (Pods in `Pending` state with no `nodeName`). For each such Pod, the scheduler runs a **two-phase algorithm**. First, **filtering**: eliminate nodes that cannot satisfy the Pod's requirements — insufficient CPU, memory, missing labels (node selectors), or node taints that the Pod does not tolerate. Second, **scoring**: rank the remaining feasible nodes using a weighted combination of criteria: least-requested resources (prefer nodes with slack capacity), inter-pod affinity and anti-affinity rules, pod topology spread, and others. The highest-scoring node wins. The scheduler then writes the node assignment back to the API server, which notifies the target node's kubelet to start the Pod.\n\n**The Controller Manager** (`kube-controller-manager`) is a single binary that runs dozens of **control loops** (also called controllers or reconcilers). Each loop watches a specific resource type and continuously reconciles actual state with desired state. The Deployment controller watches Deployments and ensures the correct number of ReplicaSets and Pods exist. The Node controller watches node heartbeats and marks nodes as `NotReady` when they stop responding — then evicts their Pods. The EndpointSlice controller updates the list of healthy Pod IPs that a Service should route to. Every 'thing that just happens automatically' in Kubernetes is a controller loop doing its job."
+    },
+    {
+      "type": "explanation",
+      "title": "Worker Nodes: Where Workloads Actually Run",
+      "content": "Worker nodes are the machines (VMs or bare metal) that run your application containers. Each worker node runs three key processes.\n\n**kubelet** is the primary node agent. It watches the API server for Pods assigned to its node, then instructs the **container runtime** (containerd, CRI-O) to pull the image and start the container. It continuously reports Pod status, resource usage, and node health back to the API server. The kubelet also runs **health probes** against containers — if a liveness probe fails, kubelet restarts the container immediately without waiting for the controller manager.\n\n**kube-proxy** manages network rules on each node. When a Service is created, kube-proxy translates it into iptables rules (or IPVS rules on high-traffic clusters) that route packets destined for the Service's virtual `ClusterIP` to one of the backing Pod IPs. This is what makes the Service abstraction work transparently — requests to `http://my-api-svc:80` are transparently forwarded to whichever Pod IPs match the Service's selector, load-balanced in round-robin by default.\n\nThe **container runtime** (typically containerd) is the component that actually pulls images from registries and creates and manages container processes. Kubernetes defines a standard interface (the **Container Runtime Interface, CRI**) so different runtimes can be plugged in — Docker, containerd, and CRI-O all implement it."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n  participant Dev as Developer\n  participant API as API Server\n  participant ETCD as etcd\n  participant SCHED as Scheduler\n  participant NODE as Worker Node\n  participant POD as New Pod\n  Dev->>API: kubectl apply deployment.yaml\n  API->>ETCD: store desired state\n  API-->>Dev: accepted\n  SCHED->>ETCD: watch for unscheduled Pods\n  SCHED->>API: bind Pod to Node 2\n  API->>NODE: kubelet — start Pod\n  NODE->>POD: pull image + start container\n  POD-->>NODE: readiness probe passes\n  NODE-->>API: Pod Running",
-      "caption": "Deployment flow: kubectl sends desired state to the API server, etcd stores it, the scheduler assigns the Pod to a node, and the kubelet starts it. Traffic only routes to the Pod after the readiness probe passes."
+      "mermaid": "sequenceDiagram\n  participant Dev as Developer\n  participant API as API Server\n  participant ETCD as etcd\n  participant SCHED as Scheduler\n  participant KL as kubelet\n  participant CT as Container Runtime\n  Dev->>API: kubectl apply -f deploy.yaml\n  API->>ETCD: persist Deployment + ReplicaSet + Pods\n  API-->>Dev: 202 Accepted\n  SCHED->>API: watch Pending Pods\n  SCHED->>API: bind Pod to Node 2\n  API->>ETCD: update Pod.spec.nodeName\n  API->>KL: notify: Pod assigned\n  KL->>CT: pull image + start container\n  CT-->>KL: container running\n  KL->>API: report Pod status = Running\n  KL->>API: readiness probe passes\n  API->>ETCD: mark Pod Ready\n  API-->>Dev: Endpoints updated",
+      "caption": "Full lifecycle of a kubectl apply: from your terminal to a running, traffic-receiving Pod. Each step is asynchronous — the API server accepts immediately, then the cluster converges to desired state over the following seconds."
+    },
+    {
+      "type": "explanation",
+      "title": "Pods: The Fundamental Unit of Kubernetes",
+      "content": "A **Pod** is the smallest deployable unit in Kubernetes. It is a thin wrapper around one or more containers that are always co-located on the same node and share certain resources. Understanding Pods deeply matters because every other Kubernetes abstraction ultimately manages Pods.\n\nContainers within a Pod share a **network namespace**: they have the same IP address and can communicate with each other via `localhost`. This is different from two independent containers — two separate Pods have separate IPs. The sidecar pattern exploits this: a logging agent or service mesh proxy runs as a second container in the same Pod, intercepting or augmenting the main container's traffic on `localhost` with zero network overhead.\n\nContainers in a Pod also share **storage volumes**. You define a volume at the Pod level (an `emptyDir`, a `PersistentVolumeClaim`, a `configMap` mount, etc.) and mount it into one or more containers. An `emptyDir` volume starts empty and is deleted when the Pod is removed — useful for scratch space shared between an init container and the main container. A `PersistentVolumeClaim` survives Pod restarts and mounts persistent storage (EBS, NFS, etc.) into the container's filesystem.\n\n**Pods are ephemeral by design.** The Kubernetes mental model is that any Pod can be killed at any time — node failures, rolling updates, autoscaling scale-downs, or simple eviction for resource pressure. Applications running on Kubernetes must therefore be **stateless in the Pod layer**, externalising state to databases, caches, or object stores. Never rely on a specific Pod's local filesystem for durable data.\n\n**You almost never create Pods directly.** Instead you create higher-level objects (Deployments, StatefulSets, Jobs) that create and manage Pods. If you create a bare Pod and it crashes, nobody recreates it. A Deployment's ReplicaSet will."
+    },
+    {
+      "type": "explanation",
+      "title": "Deployments, ReplicaSets, and Rolling Updates",
+      "content": "A **Deployment** is the standard way to run stateless applications. When you apply a Deployment manifest, Kubernetes creates a hierarchy: the Deployment creates a **ReplicaSet**, which creates and maintains a specified number of **Pods**. If a Pod crashes, the ReplicaSet controller immediately creates a replacement. The Deployment layer manages rollouts — when you update the container image, a new ReplicaSet is created and Pods migrate from old to new according to the update strategy.\n\n**Rolling updates** are the default strategy. The key parameters are `maxSurge` and `maxUnavailable`. With `maxUnavailable: 0` and `maxSurge: 1`, Kubernetes creates one extra Pod (bringing the total to replicas+1), waits for it to pass its readiness probe, then terminates one old Pod. This process repeats until all old Pods are replaced. The running replica count never drops below the declared value, giving true **zero-downtime updates**. With `maxSurge: 0` and `maxUnavailable: 1` (the rolling replace strategy), one old Pod is killed first, then a new one is started — uses less capacity but briefly runs below desired replica count.\n\n**Rollbacks** are first-class. Kubernetes stores a revision history of Deployments (controlled by `revisionHistoryLimit`). When a bad update is deployed — perhaps the new image has a crash-looping bug — you run `kubectl rollout undo deployment/my-api` and Kubernetes immediately rolls back to the previous ReplicaSet. This is one of the most operationally valuable features: your deploy pipeline can ship confidently knowing that reverting is a single command.\n\n**Deployment vs. StatefulSet**: Deployments treat Pods as interchangeable — any Pod can be scheduled on any node, and they all share the same PVC template without unique identities. **StatefulSets** give Pods stable network identities (e.g., `mysql-0`, `mysql-1`, `mysql-2`) and per-Pod PersistentVolumeClaims. Use StatefulSets for databases, Kafka brokers, and any workload where individual Pod identity and persistent storage per Pod matter. Deployments for everything stateless."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  D[\"Deployment\\nmy-api\"]\n  RS1[\"ReplicaSet v1\\n(old image)\"]\n  RS2[\"ReplicaSet v2\\n(new image)\"]\n  P1[\"Pod v1-a\"]\n  P2[\"Pod v1-b\"]\n  P3[\"Pod v2-a\\n(new)\"]\n  D --> RS1\n  D --> RS2\n  RS1 --> P1\n  RS1 --> P2\n  RS2 --> P3",
+      "caption": "During a rolling update, the Deployment manages two ReplicaSets simultaneously. New Pods start in the new RS; old Pods are terminated from the old RS one by one. Once complete, the old RS is scaled to 0 but kept for rollback history."
     },
     {
       "type": "code_example",
       "language": "yaml",
-      "label": "Runtime",
-      "code": "# kubernetes/deployment.yaml — production-ready Deployment + Service\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-api\n  namespace: production\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: my-api\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 1          # one extra Pod during update\n      maxUnavailable: 0    # never reduce below desired count\n  template:\n    metadata:\n      labels:\n        app: my-api\n    spec:\n      containers:\n        - name: api\n          image: my-registry/my-api:v2.1.0   # pinned tag, never :latest\n          ports:\n            - containerPort: 3000\n          resources:\n            requests:\n              cpu: \"250m\"\n              memory: \"256Mi\"\n            limits:\n              cpu: \"500m\"\n              memory: \"512Mi\"\n          readinessProbe:\n            httpGet:\n              path: /health\n              port: 3000\n            initialDelaySeconds: 5\n            periodSeconds: 10\n          livenessProbe:\n            httpGet:\n              path: /health\n              port: 3000\n            initialDelaySeconds: 15\n            periodSeconds: 20\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: my-api-svc\n  namespace: production\nspec:\n  selector:\n    app: my-api     # routes to all Pods with this label\n  ports:\n    - port: 80\n      targetPort: 3000\n  type: LoadBalancer  # provisions cloud load balancer",
-      "explanation": "The Deployment keeps 3 replicas running with a rolling update strategy. Resource requests let the scheduler make placement decisions; limits prevent one Pod from starving others. The readiness probe gates traffic — new Pods receive requests only after `/health` returns 200. The Service's label selector automatically includes newly created Pods."
+      "label": "Example",
+      "code": "# kubernetes/deployment.yaml — production-grade Deployment + Service\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: my-api\n  namespace: production\n  labels:\n    app: my-api\n    version: v2.1.0\nspec:\n  replicas: 3\n  revisionHistoryLimit: 5        # keep 5 old ReplicaSets for rollback\n  selector:\n    matchLabels:\n      app: my-api\n  strategy:\n    type: RollingUpdate\n    rollingUpdate:\n      maxSurge: 1          # allow 1 extra Pod during update\n      maxUnavailable: 0    # never drop below declared replica count\n  template:\n    metadata:\n      labels:\n        app: my-api\n        version: v2.1.0\n    spec:\n      terminationGracePeriodSeconds: 30   # seconds to drain before SIGKILL\n      containers:\n        - name: api\n          image: my-registry/my-api:v2.1.0  # NEVER use :latest in prod\n          ports:\n            - containerPort: 3000\n          env:\n            - name: DATABASE_URL\n              valueFrom:\n                secretKeyRef:\n                  name: db-credentials\n                  key: url\n          resources:\n            requests:\n              cpu: \"250m\"      # 0.25 CPU cores guaranteed\n              memory: \"256Mi\"  # 256 MiB guaranteed\n            limits:\n              cpu: \"500m\"      # 0.5 CPU cores maximum\n              memory: \"512Mi\"  # OOM-kill if exceeded\n          readinessProbe:\n            httpGet:\n              path: /health/ready\n              port: 3000\n            initialDelaySeconds: 5\n            periodSeconds: 10\n            failureThreshold: 3   # 3 consecutive failures before NotReady\n          livenessProbe:\n            httpGet:\n              path: /health/live\n              port: 3000\n            initialDelaySeconds: 15\n            periodSeconds: 20\n            failureThreshold: 3   # 3 consecutive failures before restart\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: my-api-svc\n  namespace: production\nspec:\n  selector:\n    app: my-api              # dynamically routes to all matching Pods\n  ports:\n    - name: http\n      port: 80\n      targetPort: 3000\n  type: LoadBalancer         # provisions cloud load balancer + external IP\n---\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: my-api-hpa\n  namespace: production\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: my-api\n  minReplicas: 3\n  maxReplicas: 20\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 70   # scale up when avg CPU > 70%",
+      "explanation": "This manifest declares three resources in one file (separated by `---`). The Deployment keeps 3 replicas with zero-downtime rolling updates. Secrets are injected via environment variables from a Kubernetes Secret object — never hardcode credentials in manifests. The HPA automatically scales between 3 and 20 replicas based on CPU utilization. The Service's label selector dynamically picks up new Pods as they start, without any reconfiguration."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Services: Stable Networking for Ephemeral Pods",
+      "content": "Pods have IP addresses, but those IPs change every time a Pod is created — and Pods are created and destroyed constantly. Hardcoding a Pod IP in your application config is a recipe for broken connections. **Services** solve this by providing a stable network identity that abstracts over the changing set of Pod IPs.\n\nA Service is assigned a **ClusterIP** — a virtual IP that persists for the life of the Service. When a container inside the cluster makes a request to `http://my-api-svc:80`, Kubernetes DNS resolves the service name to its ClusterIP. `kube-proxy`'s iptables rules on the target node transparently forward the packet to one of the currently-healthy Pod IPs. The caller never knows which Pod it hit, and never needs to be updated when Pods restart.\n\nThe mechanism that connects a Service to its Pods is the **label selector**. The Service spec declares `selector: { app: my-api }`. Kubernetes continuously watches for Pods with that label and maintains an **EndpointSlice** resource — a list of healthy Pod IPs. When a Pod starts and passes its readiness probe, its IP is added to the EndpointSlice. When a Pod is terminated or fails readiness, it is removed. Traffic only ever flows to healthy, ready Pods.\n\n**Three primary Service types:**\n\n`ClusterIP` (default) — accessible only within the cluster. Use for internal microservice-to-microservice communication. The Service gets a virtual IP like `10.96.0.123` that is reachable by any Pod in the cluster but not from outside.\n\n`NodePort` — exposes the Service on a static port (30000-32767 range) on every node's external IP. Any request to `<any-node-ip>:<node-port>` reaches a backing Pod. This is simple but not production-grade — you are exposing every node's IP, and if a node dies, requests to its IP fail. Mostly used for development or on-premise clusters without cloud load balancers.\n\n`LoadBalancer` — the standard for production cloud deployments. Kubernetes asks the cloud provider's API to provision a managed load balancer (AWS Application Load Balancer, GCP Cloud Load Balancing, Azure Load Balancer) with a stable external IP. Inbound traffic hits the LB, which distributes it across all nodes, which route it to Pods. This is the pattern for exposing web services to the internet.\n\n**Ingress** is a fourth concept worth knowing: a single entry point for HTTP(S) traffic that does path-based and host-based routing. An Ingress controller (nginx-ingress, AWS ALB Ingress Controller, Traefik) watches Ingress resources and configures routing accordingly. Instead of one LoadBalancer per Service (expensive), a single Ingress can route `example.com/api` to the api Service and `example.com/auth` to the auth Service."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  EXT[\"External Client\"]\n  LB[\"Cloud Load Balancer\\n(Service: LoadBalancer)\"]\n  ING[\"Ingress Controller\\n(path-based routing)\"]\n  SVC1[\"Service: api-svc\\n(ClusterIP)\"]\n  SVC2[\"Service: auth-svc\\n(ClusterIP)\"]\n  P1[\"Pod: api-1\"]\n  P2[\"Pod: api-2\"]\n  P3[\"Pod: auth-1\"]\n  EXT --> LB\n  LB --> ING\n  ING -->|/api| SVC1\n  ING -->|/auth| SVC2\n  SVC1 --> P1\n  SVC1 --> P2\n  SVC2 --> P3",
+      "caption": "Production traffic routing pattern: one LoadBalancer Service fronts an Ingress controller, which routes to ClusterIP Services, which route to Pods. This minimises cloud LB cost while enabling rich path-based routing."
+    },
+    {
+      "type": "explanation",
+      "title": "Self-Healing: Control Loops and Reconciliation",
+      "content": "Self-healing is not magic — it is the systematic result of Kubernetes' **reconciliation loop** architecture. Every controller in the controller manager follows the same pattern:\n\n1. **Observe**: Read the desired state from etcd (via the API server) and the current actual state of the world.\n2. **Diff**: Compare desired vs. actual.\n3. **Act**: Take the minimum action needed to move actual toward desired.\n4. **Repeat**: Do this continuously, typically every few seconds.\n\nThis pattern is sometimes called a **control loop** or a **level-triggered** system (as opposed to edge-triggered). The system responds to the *current state*, not to *events*. Even if an event is missed (network partition, leader election), the next reconciliation pass will catch and fix the discrepancy.\n\n**What this means operationally:**\n\n- **Pod crash**: The container runtime reports the exit. kubelet detects the container is not running. It restarts the container immediately using an exponential backoff (1s, 2s, 4s, 8s…) — the `CrashLoopBackOff` status you see in `kubectl get pods`. After many failures the backoff caps at 5 minutes.\n\n- **Node failure**: Nodes send heartbeats every 10 seconds. After `node-monitor-grace-period` (default 40s) with no heartbeat, the node is marked `Unknown`. After `pod-eviction-timeout` (default 5 minutes), Pods on that node are evicted and rescheduled on healthy nodes. This is why a node failure causes service disruption for a few minutes before full recovery — not milliseconds. **This is why you always run at least 2 replicas** — if one is on the failing node, the other keeps serving traffic while Kubernetes recovers.\n\n- **Desired replicas not met**: If you declare `replicas: 3` and a node maintenance operation removes a node that housed a Pod, the ReplicaSet controller immediately creates a replacement Pod, which the scheduler places on another available node.\n\nThe principle generalises: if you want K8s to manage something, declare it as a resource and it will be continuously reconciled. This is why Kubernetes is described as a **declarative system** — you stop thinking about commands and start thinking about desired state."
+    },
+    {
+      "type": "explanation",
+      "title": "Health Probes: Liveness, Readiness, and Startup",
+      "content": "Health probes are the mechanism by which Kubernetes knows whether a container is working correctly and whether it should receive traffic. There are three types, each serving a distinct purpose.\n\n**Liveness probes** answer the question: 'Is this container alive, or is it stuck in a bad state that will not recover without a restart?' If the liveness probe fails `failureThreshold` consecutive times, Kubernetes kills the container and restarts it. Classic use case: a web server that entered a deadlock — all goroutines are blocked, the process is running but accepting zero requests, and it will never recover on its own. Without a liveness probe, the process would sit there indefinitely. With one, Kubernetes detects the failure and restarts the container within minutes.\n\n**Readiness probes** answer the question: 'Is this container ready to serve traffic right now?' A container may be alive (liveness OK) but temporarily not ready — still loading a large ML model into memory, waiting for a database connection to be established, or performing a cleanup operation. If the readiness probe fails, the Pod is removed from the Service's endpoint list — it stops receiving new requests — but it is NOT restarted. Once the readiness probe passes again, the Pod is added back. This is also used for graceful shutdown: when a Pod receives SIGTERM, it can fail its readiness probe immediately to drain in-flight requests from the load balancer before the `terminationGracePeriodSeconds` deadline.\n\n**Startup probes** answer the question: 'Has this container finished its initial startup?' Some applications take a long time to start (JVM warmup, database migrations, loading large data files). If you configure liveness with a short period, it may fire and restart the container before it even finishes starting. The startup probe is checked first; only after it passes does Kubernetes begin checking liveness. This lets you configure aggressive liveness checks (fast recovery of stuck containers) without penalising slow-start applications.\n\n**Probe mechanisms**: All three probes support three check mechanisms. `httpGet` — sends an HTTP GET to a specified path and port; any 2xx/3xx response counts as success. `tcpSocket` — checks that a port is accepting TCP connections. `exec` — runs a command inside the container; exit code 0 is success.\n\nA subtle but important detail: readiness and liveness probes are run by the **kubelet on the same node** as the container, not by the API server or an external health checker. This means they work even if the cluster control plane is briefly unavailable."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n  [*] --> Pending\n  Pending --> Running: scheduled + image pulled\n  Running --> Ready: readiness probe passes\n  Ready --> NotReady: readiness probe fails\n  NotReady --> Ready: probe recovers\n  Running --> Restarting: liveness probe fails\n  Restarting --> Running: container restarted\n  Running --> Succeeded: container exits 0\n  Running --> Failed: container exits non-zero",
+      "caption": "Pod and container lifecycle states. Ready state gates Service traffic. Liveness failure triggers restart without changing Pod status. The NotReady state quietly drains traffic without killing the container."
+    },
+    {
+      "type": "explanation",
+      "title": "Resource Requests, Limits, and the Scheduler's Contract",
+      "content": "Every container should declare a **resource request** and a **resource limit** for both CPU and memory. These are not the same thing and mixing them up leads to real production problems.\n\n**Requests** are what the scheduler uses to make placement decisions. When a Pod declares `cpu: 250m` (250 millicores = 0.25 of one CPU core) and `memory: 256Mi`, the scheduler only assigns that Pod to a node with at least 250m free CPU and 256Mi free memory. Requests are **reserved** — that capacity is not offered to any other Pod on that node. Requests are also the basis for the **Quality of Service (QoS) class** assigned to a Pod.\n\n**Limits** are enforced at runtime by the Linux kernel's cgroup mechanisms. If a container tries to use more CPU than its limit, it is **throttled** — the kernel gives it fewer CPU cycles, slowing it down but not killing it. If a container allocates more memory than its limit, the kernel sends an **OOM (Out of Memory) kill** signal, terminating the container. The kubelet then restarts it. Memory limits are therefore critical safety valves that prevent one rogue container from consuming all node memory and crashing every other Pod on the node.\n\n**QoS classes** determine which Pods get evicted first when a node is under memory pressure:\n- **Guaranteed**: requests == limits for all containers. These Pods are evicted last.\n- **Burstable**: requests < limits, or only some resources specified. Middle priority.\n- **BestEffort**: no requests or limits specified. Evicted first. Never do this in production.\n\n**Practical guidance**: start with `requests = 50-70% of p50 steady-state usage` and `limits = 150-200% of requests`. Measure actual usage with `kubectl top pods` and a metrics stack (Prometheus + Grafana). Adjust limits to prevent OOMs without over-provisioning.\n\nThe `250m` CPU notation reads as 250 millicores. 1000m = 1 CPU core. `256Mi` is 256 mebibytes (1 MiB = 2²⁰ bytes). Kubernetes uses the IEC binary prefixes (Mi, Gi) unambiguously — no confusion with SI MB/GB."
+    },
+    {
+      "type": "code_example",
       "language": "bash",
-      "label": "Concept",
-      "code": "# Essential kubectl commands — operating a Kubernetes cluster\n\n# Apply declarative config (create or update resources)\nkubectl apply -f deployment.yaml\n\n# View Pods and their status across a namespace\nkubectl get pods -n production -o wide\n\n# Describe a Pod — events, probe results, resource usage\nkubectl describe pod my-api-7d9f6b-xk2j1 -n production\n\n# Stream logs from a running Pod (add -f for follow)\nkubectl logs my-api-7d9f6b-xk2j1 -n production\n\n# Scale a deployment manually\nkubectl scale deployment my-api --replicas=5 -n production\n\n# Rolling update — change image version\nkubectl set image deployment/my-api api=my-registry/my-api:v2.2.0 -n production\n\n# Rollback to previous version if update fails\nkubectl rollout undo deployment/my-api -n production\n\n# Watch rollout status in real time\nkubectl rollout status deployment/my-api -n production\n\n# Open a shell inside a running container (debug)\nkubectl exec -it my-api-7d9f6b-xk2j1 -n production -- /bin/sh"
+      "label": "Example",
+      "code": "# ── Essential kubectl operations for daily cluster management ──\n\n# Apply a manifest (idempotent: create or update the resource)\nkubectl apply -f deployment.yaml\n\n# List Pods in a namespace with node assignment and IP\nkubectl get pods -n production -o wide\n\n# Watch Pods updating in real time (Ctrl-C to stop)\nkubectl get pods -n production -w\n\n# Describe a Pod: full events, probe results, resource usage, errors\nkubectl describe pod my-api-7d9f6b-xk2j1 -n production\n\n# Stream logs from a running Pod container\nkubectl logs -f my-api-7d9f6b-xk2j1 -n production\n\n# Logs from a crashed container (previous instance)\nkubectl logs my-api-7d9f6b-xk2j1 -n production --previous\n\n# Open an interactive shell inside a running container\nkubectl exec -it my-api-7d9f6b-xk2j1 -n production -- /bin/sh\n\n# Manual scale (HPA will override this if enabled)\nkubectl scale deployment my-api --replicas=5 -n production\n\n# Trigger a rolling update by changing the image\nkubectl set image deployment/my-api api=my-registry/my-api:v2.2.0 -n production\n\n# Monitor rollout progress\nkubectl rollout status deployment/my-api -n production\n\n# Rollback to the previous Deployment revision\nkubectl rollout undo deployment/my-api -n production\n\n# View rollout history (revision numbers and change cause)\nkubectl rollout history deployment/my-api -n production\n\n# Real-time CPU and memory usage per Pod\nkubectl top pods -n production\n\n# Real-time CPU and memory usage per node\nkubectl top nodes\n\n# Port-forward a Pod's port to your local machine (for debugging)\nkubectl port-forward pod/my-api-7d9f6b-xk2j1 8080:3000 -n production",
+      "explanation": "`kubectl describe` is your first debugging tool — look at the Events section at the bottom for scheduling failures, image pull errors, and probe failures. `--previous` logs are critical when a container is CrashLoopBackOff — the current instance may have no logs if it crashes immediately. `kubectl exec` into a running container lets you inspect filesystem, network connections, and environment variables directly."
+    },
+    {
+      "type": "explanation",
+      "title": "Autoscaling: HPA, VPA, and Cluster Autoscaler",
+      "content": "Kubernetes has three complementary autoscaling mechanisms that can work in concert to handle variable load.\n\n**Horizontal Pod Autoscaler (HPA)** scales the number of Pod replicas in a Deployment (or StatefulSet, ReplicaSet). It queries the metrics API (served by the Metrics Server addon) for current average CPU utilisation across all Pods in the target Deployment. If average CPU exceeds the target utilisation threshold, HPA calculates the new desired replica count: `desiredReplicas = ceil(currentReplicas * currentAvgUtilization / targetUtilization)`. If current replicas = 3 and average CPU = 90% with a 70% target, desired replicas = ceil(3 * 90/70) = ceil(3.86) = 4. HPA has a stabilization window (default 5 minutes for scale-down, 15 seconds for scale-up) to prevent thrashing. Modern HPA (v2) also supports custom and external metrics — scale on request queue depth, Kafka consumer lag, or any Prometheus metric.\n\n**Vertical Pod Autoscaler (VPA)** adjusts the CPU and memory requests/limits on individual Pods rather than changing the count. It analyses historical resource usage and recommends or automatically applies better request/limit values. VPA and HPA should not both target CPU on the same Deployment — they can fight each other. VPA is most useful for batch jobs and Deployments where adding more replicas does not help (state is per-Pod).\n\n**Cluster Autoscaler** operates at the node level. When the scheduler cannot place a Pod because no node has sufficient resources (Pod stays Pending), Cluster Autoscaler detects this and asks the cloud provider to provision a new node and add it to the cluster. When nodes are underutilized for a sustained period, Cluster Autoscaler cordons and drains them (safely migrating Pods to other nodes) then terminates the underlying VM. Combined with HPA, this creates fully elastic infrastructure: HPA adds Pod replicas as load grows, Cluster Autoscaler adds nodes to accommodate those replicas, and both scale down when load drops."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  LOAD[\"Traffic Spike\"]\n  HPA[\"HPA detects\\nCPU > 70%\"]\n  SCALE[\"HPA scales\\n3 → 6 replicas\"]\n  SCHED[\"Scheduler tries\\nto place 3 new Pods\"]\n  PEND[\"2 Pods stay Pending\\n(no node capacity)\"]\n  CA[\"Cluster Autoscaler\\ndetects Pending Pods\"]\n  NODE[\"Cloud provider\\nadds 2 new nodes\"]\n  RUN[\"All 6 Pods\\nrunning\"]\n  LOAD --> HPA\n  HPA --> SCALE\n  SCALE --> SCHED\n  SCHED --> PEND\n  PEND --> CA\n  CA --> NODE\n  NODE --> RUN",
+      "caption": "HPA and Cluster Autoscaler work in tandem: HPA adds Pod replicas, Cluster Autoscaler adds nodes when existing nodes lack capacity. Together they enable fully automatic elastic scaling."
+    },
+    {
+      "type": "explanation",
+      "title": "ConfigMaps and Secrets: Externalising Configuration",
+      "content": "Containers should be immutable: the same image runs identically in dev, staging, and production. Configuration that differs per environment (database URLs, API keys, feature flags) must be injected at runtime, not baked into the image.\n\n**ConfigMaps** store non-sensitive configuration as key-value pairs or entire config files. You can mount a ConfigMap as a volume (the keys become filenames, values become file contents — useful for config files like `nginx.conf`) or inject values as environment variables. ConfigMaps are stored unencrypted in etcd and are appropriate for anything that is not sensitive.\n\n**Secrets** store sensitive data (passwords, API keys, TLS certificates). They are base64-encoded in etcd (not encrypted by default, but at-rest encryption can be enabled). In practice, most teams integrate an external secrets manager (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) with Kubernetes via operators like External Secrets Operator, which sync external secret values into Kubernetes Secrets automatically. Like ConfigMaps, Secrets can be mounted as volumes or injected as environment variables.\n\nA critical operational rule: **never hardcode sensitive values in your Deployment manifest** and never commit them to a git repository. Use Secret references, not inline values.\n\n**Namespaces** provide a mechanism for isolating resources within a cluster. A namespace is a virtual cluster partition — Pods, Services, Deployments, and Secrets in one namespace are invisible to (and cannot communicate with by default via DNS) those in another namespace. Common usage: one namespace per environment (`production`, `staging`, `development`), or one namespace per team. Resource quotas can be set per namespace to prevent one team's workloads from consuming all cluster resources."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Kubernetes was not invented from scratch.** Google ran an internal system called **Borg** for over 15 years before Kubernetes existed, managing hundreds of thousands of jobs across Google's global data centers. The lessons from Borg — declarative specification, reconciliation loops, separation of control plane from data plane — directly shaped Kubernetes' design. Three of Borg's original engineers (Joe Beda, Brendan Burns, Craig McLuckie) co-founded Kubernetes in 2014. The CNCF (Cloud Native Computing Foundation) now governs Kubernetes as a vendor-neutral open-source project, preventing any single company from controlling the direction of the ecosystem. This governance model is a large part of why Kubernetes achieved such broad industry adoption — AWS, Google, Microsoft, and Red Hat all compete commercially on top of the same shared open-source core."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Always set **resource requests AND limits** on every container. Without `requests`, the scheduler cannot make intelligent placement decisions and nodes become over-committed. Without `limits`, a memory leak in one Pod can OOM-kill other Pods on the same node. Start with `requests = 50% of expected usage`, `limits = 2x requests`, then tune with actual metrics."
+      "content": "**Common production mistakes and interview insights:**\n\n- **Never use `:latest` image tag** in production manifests. Kubernetes caches images — if a node already has `:latest` from last week, it may not pull the new version. Pin to an immutable digest like `my-image:v2.1.0` or `my-image@sha256:abc123`.\n- **Always set resource requests AND limits**. Without requests, the scheduler packs Pods onto already-loaded nodes. Without limits, a memory leak kills neighbouring Pods.\n- **`maxUnavailable: 0` is your zero-downtime lever**. If you see brief 502 errors during deploys, this is the first setting to check.\n- **Two replicas minimum** for anything in production — a node failure with a single replica causes complete downtime for that service while Kubernetes reschedules it.\n- **Readiness probe ≠ liveness probe**. A common mistake is using the same endpoint for both. If your app is live but momentarily overloaded, failing readiness removes it from the load balancer (good). Failing liveness restarts it (potentially making overload worse). Use separate, semantically correct endpoints.\n- **Interview question**: 'A Pod is in `CrashLoopBackOff` — how do you debug it?' Answer: `kubectl logs <pod> --previous` to see the previous crashed container's output, then `kubectl describe pod <pod>` for events and probe results, then `kubectl exec` into a healthy container of the same image to test environment assumptions."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Pods** are the smallest Kubernetes unit — one or more containers sharing a network and storage; they are ephemeral and managed by higher-level objects.",
-        "**Deployments** declare desired state (replicas, image version) and use rolling updates for zero-downtime releases with automatic rollback on failure.",
-        "**Services** give Pods a stable network identity via label selectors — ClusterIP for internal, LoadBalancer for external traffic.",
-        "**The scheduler** places Pods on nodes based on resource requests and node capacity; always declare CPU/memory requests and limits.",
-        "**Self-healing** is driven by control loops: the controller manager continuously reconciles desired state (etcd) with actual state, restarting failed Pods and rescheduling from failed nodes.",
-        "**Liveness probes** restart stuck containers; **readiness probes** gate traffic — a Pod is only included in Service routing after passing readiness checks."
+        "**Kubernetes is declarative**: you describe desired state in YAML manifests; control loops continuously reconcile actual state to match — crashed Pods restart, failed nodes trigger rescheduling, all automatically.",
+        "**The control plane** (API server, etcd, scheduler, controller manager) is the cluster brain. etcd is the source of truth — losing it means losing the cluster. The API server is the exclusive gateway; all other components interact only through it.",
+        "**Pods** are ephemeral wrappers around one or more co-located containers sharing a network namespace and volumes. Never manage bare Pods — use Deployments or StatefulSets.",
+        "**Deployments** drive rolling updates with configurable `maxSurge` and `maxUnavailable`; `maxUnavailable: 0` guarantees zero-downtime deploys. Rollbacks are a single `kubectl rollout undo` command.",
+        "**Services** provide stable ClusterIPs and DNS names that abstract over changing Pod IPs, using label selectors to dynamically route to healthy, ready Pods. `LoadBalancer` type provisions cloud LBs; `Ingress` adds path-based routing on top.",
+        "**Health probes** are fundamental: liveness probes restart stuck containers; readiness probes gate Service traffic; startup probes protect slow-starting applications from premature liveness kills.",
+        "**Always declare CPU and memory requests and limits**. Requests determine scheduling placement and QoS class; limits prevent one Pod from OOM-killing its neighbours. HPA scales replica count; Cluster Autoscaler scales the node pool."
       ]
     }
   ],
@@ -67,133 +140,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What is a Kubernetes Pod?",
+      "question": "What is the role of etcd in a Kubernetes cluster?",
       "type": "mcq",
       "options": [
-        "A single Docker image stored in a registry",
-        "A virtual machine running the Kubernetes control plane",
-        "The smallest deployable unit — one or more containers sharing a network namespace and storage",
-        "A load balancer configuration for routing external traffic"
+        "It schedules Pods onto worker nodes based on resource availability",
+        "It is the distributed key-value store that holds all cluster state — the single source of truth",
+        "It runs on every worker node and manages container lifecycle",
+        "It exposes the REST API that kubectl and controllers interact with"
       ],
-      "correct": 2,
-      "explanation": "A Pod wraps one or more tightly coupled containers. They share an IP address and can communicate via localhost. Pods are ephemeral — Kubernetes creates and destroys them to achieve the desired state."
+      "correct": 1,
+      "explanation": "etcd is the persistent, strongly-consistent store for all Kubernetes objects: Deployments, Pods, Services, Secrets, and more. If etcd is lost, the cluster state is lost. All other control plane components read and write state exclusively through the API server, which is the only component that accesses etcd directly."
     },
     {
       "id": "q2",
-      "question": "What component of the Kubernetes control plane stores the authoritative cluster state?",
+      "question": "A Deployment has `maxUnavailable: 0` and `maxSurge: 1` in its rolling update strategy. What does this guarantee during an image update?",
       "type": "mcq",
       "options": [
-        "The API server — it processes all requests",
-        "The scheduler — it tracks node and Pod placement",
-        "etcd — a distributed key-value store for all cluster objects",
-        "The controller manager — it runs the reconciliation loops"
+        "The update completes in the shortest possible time by replacing all Pods at once",
+        "The number of running ready Pods never drops below the declared replica count, giving zero-downtime updates",
+        "Old Pods are deleted before new Pods start, reducing node resource usage",
+        "The update is paused until a human approves each step"
       ],
-      "correct": 2,
-      "explanation": "etcd is the persistent, distributed store for all Kubernetes state: desired deployments, current Pod status, service definitions, ConfigMaps, Secrets. If etcd loses data, the cluster state is lost. All other components read from and write to etcd via the API server."
+      "correct": 1,
+      "explanation": "With maxUnavailable: 0, no old Pod is terminated until a new Pod has started and passed its readiness probe. maxSurge: 1 allows one extra Pod to exist during the transition. This ensures the declared replica count is always met with ready Pods, so users experience no downtime."
     },
     {
       "id": "q3",
-      "question": "A Deployment's rolling update strategy with `maxUnavailable: 0` ensures:",
-      "type": "mcq",
-      "options": [
-        "The update completes instantly with no delay",
-        "No Pod is terminated until a replacement passes its readiness probe — zero-downtime updates",
-        "All old Pods are deleted before any new Pods start",
-        "The update is blocked until manual approval"
-      ],
-      "correct": 1,
-      "explanation": "With maxUnavailable: 0, Kubernetes waits for each new Pod to pass readiness probes before terminating an old Pod. This ensures the desired replica count is always maintained and users experience no downtime during updates."
-    },
-    {
-      "id": "q4",
       "question": "How does a Kubernetes Service route traffic to the correct Pods?",
       "type": "mcq",
       "options": [
-        "By Pod IP address hardcoded at creation time",
-        "By Pod name prefix configured in the Service spec",
-        "By label selectors — the Service routes to all Pods matching the specified labels",
-        "By deployment name — each Deployment automatically gets a matching Service"
+        "By Pod IP addresses hardcoded in the Service spec at creation time",
+        "By pod name prefix — all Pods created by the same Deployment share a name prefix",
+        "By label selectors — the Service dynamically routes to all healthy Pods matching the specified labels",
+        "By Deployment name — each Deployment is automatically linked to a Service of the same name"
       ],
       "correct": 2,
-      "explanation": "Services use label selectors (e.g., `app: my-api`) to dynamically discover matching Pods. When new Pods start with that label, they are automatically added to the Service's endpoint list. This decouples service discovery from Pod IP addresses."
+      "explanation": "Services use label selectors (e.g., app: my-api) to discover matching Pods. An EndpointSlice is maintained automatically: Pod IPs are added when readiness probes pass and removed when Pods terminate or fail readiness. This decouples service discovery completely from ephemeral Pod IPs."
     },
     {
-      "id": "q5",
+      "id": "q4",
       "question": "What is the difference between a liveness probe and a readiness probe?",
       "type": "mcq",
       "options": [
-        "Liveness checks CPU; readiness checks memory",
-        "Liveness restarts the container if it fails; readiness removes the Pod from Service routing if it fails",
-        "Readiness runs once at startup; liveness runs continuously",
-        "They are identical — both restart the container on failure"
+        "Liveness checks CPU usage; readiness checks HTTP response codes",
+        "Liveness restarts the container if it fails; readiness removes the Pod from Service endpoints if it fails, without restarting",
+        "Readiness runs once at startup; liveness runs continuously on a schedule",
+        "Both probes restart the container on failure but readiness has a longer timeout"
       ],
       "correct": 1,
-      "explanation": "Liveness: if the probe fails, Kubernetes kills and restarts the container (detects deadlocks, hung processes). Readiness: if the probe fails, the Pod is removed from Service endpoints so it receives no traffic — used for graceful startup and temporary unavailability."
+      "explanation": "Liveness: failure = container is in an unrecoverable bad state, so Kubernetes kills and restarts it (handles deadlocks, infinite loops). Readiness: failure = container is temporarily not ready for traffic, so it is removed from Service endpoints but NOT restarted. This allows graceful startup and temporary overload handling."
+    },
+    {
+      "id": "q5",
+      "question": "What happens when a worker node stops sending heartbeats to the Kubernetes control plane?",
+      "type": "mcq",
+      "options": [
+        "The Pods on that node immediately restart on other nodes",
+        "The control plane shuts down the entire cluster for safety",
+        "After a grace period the node is marked NotReady, then after eviction timeout the Pods are rescheduled on healthy nodes",
+        "etcd automatically restores the node to its last known state"
+      ],
+      "correct": 2,
+      "explanation": "Node failure recovery is handled by the Node controller. After the node-monitor-grace-period (default 40s) with no heartbeat, the node is marked Unknown/NotReady. After the pod-eviction-timeout (default 5 minutes), Pods are evicted and rescheduled. This is why running at least 2 replicas is critical for availability."
     },
     {
       "id": "q6",
-      "question": "The Kubernetes scheduler selects a node for a new Pod primarily based on:",
+      "question": "What do resource `requests` in a Pod spec tell the Kubernetes scheduler?",
       "type": "mcq",
       "options": [
-        "The node with the highest CPU clock speed",
-        "Random selection for even distribution",
-        "Resource requests declared in the Pod spec versus available capacity on each node",
-        "The node that most recently had a Pod removed"
+        "The maximum resources the container is allowed to consume before being throttled or killed",
+        "The minimum resources the container requests from the cloud provider billing system",
+        "The guaranteed minimum allocation — the scheduler only places the Pod on a node with at least this much free capacity",
+        "The resources that will be charged against the namespace quota but not enforced at runtime"
       ],
       "correct": 2,
-      "explanation": "The scheduler evaluates each node's available CPU and memory against the Pod's resource requests. A Pod requesting 250m CPU is only scheduled on a node with at least 250m free CPU. Without requests, the scheduler cannot make informed decisions."
+      "explanation": "Requests are the scheduler's contract. A Pod requesting 250m CPU and 256Mi memory will only be placed on a node with at least that much unallocated capacity. Limits are the runtime enforcement ceiling — exceeding the memory limit causes an OOM kill; exceeding the CPU limit causes throttling."
     },
     {
       "id": "q7",
-      "question": "What happens when a worker node fails in a Kubernetes cluster?",
+      "question": "A Service of type `LoadBalancer` differs from `ClusterIP` in that it:",
       "type": "mcq",
       "options": [
-        "The Pods on that node continue running until manually migrated",
-        "The entire cluster shuts down for recovery",
-        "The controller manager detects the node is unreachable and reschedules its Pods on healthy nodes",
-        "etcd rolls back the cluster to the last known good state"
+        "Uses HTTP path-based routing to send traffic to different backends",
+        "Provisions a cloud load balancer with an external IP address accessible from the internet",
+        "Encrypts traffic between Pods using mutual TLS automatically",
+        "Allows Pods in different namespaces to communicate without network policies"
       ],
-      "correct": 2,
-      "explanation": "Self-healing is a core Kubernetes feature. The controller manager continuously monitors node health. When a node stops reporting, it is marked NotReady and its Pods are evicted and rescheduled on healthy nodes after a configurable timeout."
+      "correct": 1,
+      "explanation": "ClusterIP gives the Service a virtual IP accessible only inside the cluster. LoadBalancer type additionally calls the cloud provider API to provision a managed load balancer (AWS ELB, GCP LB, Azure LB) with a stable external IP. This is the standard way to expose production services to the internet."
     },
     {
       "id": "q8",
-      "question": "Which kubectl command rolls back a Deployment to its previous version?",
+      "question": "Which Kubernetes object should you use for a stateful database like PostgreSQL that requires stable Pod identities and per-Pod persistent volumes?",
       "type": "mcq",
       "options": [
-        "kubectl revert deployment my-api",
-        "kubectl rollout undo deployment/my-api",
-        "kubectl scale deployment my-api --replicas=0",
-        "kubectl delete deployment my-api --cascade=false"
+        "Deployment — it handles replicas and rolling updates",
+        "DaemonSet — it ensures one Pod runs on each node",
+        "StatefulSet — it provides stable network identities and per-Pod PersistentVolumeClaims",
+        "Job — it manages one-off database tasks"
       ],
-      "correct": 1,
-      "explanation": "`kubectl rollout undo deployment/my-api` reverts the Deployment to the previous recorded revision. Kubernetes stores rollout history (configurable depth) enabling rapid rollback when a bad release is detected."
+      "correct": 2,
+      "explanation": "StatefulSets assign stable, ordered names (e.g., postgres-0, postgres-1) that persist across restarts. Each Pod gets its own PersistentVolumeClaim that is not shared with other Pods. This is essential for databases where each replica has unique data and identity matters for leader election."
     },
     {
       "id": "q9",
-      "question": "A Service of type `LoadBalancer` does what that `ClusterIP` does not?",
+      "question": "The Horizontal Pod Autoscaler (HPA) has target CPU utilization of 70%. Current state: 3 replicas running at 90% average CPU. How many replicas will HPA scale to?",
       "type": "mcq",
       "options": [
-        "Routes traffic based on HTTP path",
-        "Provisions a cloud load balancer with an external IP accessible from the internet",
-        "Encrypts traffic between Pods using TLS",
-        "Allows Pods in different namespaces to communicate"
+        "3 replicas — already within the tolerated range",
+        "4 replicas — ceil(3 * 90/70) = ceil(3.86) = 4",
+        "5 replicas — HPA always adds 2 replicas to avoid oscillation",
+        "6 replicas — doubles the current count when CPU exceeds threshold"
       ],
       "correct": 1,
-      "explanation": "ClusterIP gives the Service a virtual IP only accessible within the cluster. LoadBalancer type additionally provisions a cloud provider load balancer (AWS ELB, GCP LB) with a public IP, routing external traffic into cluster Pods."
+      "explanation": "HPA uses the formula: desiredReplicas = ceil(currentReplicas * currentAvgUtilization / targetUtilization) = ceil(3 * 90/70) = ceil(3.857) = 4. After adding the fourth replica, average CPU should drop toward 70% as load is distributed across more Pods."
     },
     {
       "id": "q10",
-      "question": "Resource `requests` in a Pod spec differ from `limits` in that:",
+      "question": "A Pod is stuck in `CrashLoopBackOff`. Which kubectl command shows you the logs from the crashed (previous) container instance?",
       "type": "mcq",
       "options": [
-        "Requests are the minimum guaranteed allocation used for scheduling; limits are the maximum the container can consume",
-        "Limits are reserved at startup; requests are applied only when load increases",
-        "Requests apply to CPU only; limits apply to memory only",
-        "Both are identical — they set the fixed resource allocation"
+        "kubectl describe pod <pod-name> --crashed",
+        "kubectl logs <pod-name> --previous",
+        "kubectl exec <pod-name> -- cat /var/log/container.log",
+        "kubectl get events --field-selector reason=CrashLoop"
       ],
-      "correct": 0,
-      "explanation": "Requests are the guaranteed minimum — the scheduler uses them to place Pods on nodes with sufficient capacity. Limits cap maximum usage — if a container exceeds its memory limit, it is OOM-killed; exceeding CPU limit causes throttling."
+      "correct": 1,
+      "explanation": "`kubectl logs <pod-name> --previous` retrieves logs from the last terminated container instance. This is critical for CrashLoopBackOff debugging because the current container may crash too quickly to produce any logs. `kubectl describe pod` then shows the events section with exit codes and probe failure messages."
     }
   ]
 }

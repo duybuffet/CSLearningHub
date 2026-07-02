@@ -5,58 +5,133 @@
   "week": 18,
   "icon": "os",
   "tagline": "How your OS juggles millions of tasks at once",
-  "readTime": "14 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Every program you run becomes a **process** — an isolated unit with its own memory, file handles, and CPU registers. Processes are the OS's fundamental unit of isolation: if one crashes, the others survive. But spawning a new process is expensive, so modern programs use **threads** — lightweight execution units that share the same address space within a process.\n\nUnderstanding processes and threads unlocks how your code actually runs on hardware, why `setTimeout` behaves the way it does in Node.js, and why shared mutable state is so dangerous in concurrent systems."
+      "content": "Every program you run becomes a **process** — a living, breathing unit of execution with its own private memory, file handles, open network connections, and CPU state. When you double-click a browser icon, the OS doesn't just load code into RAM and start running it; it orchestrates a complex construction project: allocating virtual address space, mapping the executable into memory, creating a main thread, initialising the C runtime, and finally handing control to your `main()` function. The process is the OS's fundamental unit of **isolation and resource accounting**. If one process crashes and corrupts its own heap, the others survive untouched — because each process lives in its own walled garden.\n\nBut spawning a new process is expensive. Forking or exec-ing involves copying memory maps, duplicating file descriptors, and flushing CPU caches. For fine-grained concurrency within a single program, modern systems use **threads** — lightweight execution units that share the same address space. Threads let a web server handle thousands of simultaneous requests inside one process, or let a video game run physics, rendering, and audio on separate cores in parallel.\n\nProcesses and threads are not just OS theory — they directly explain why Node.js is structured the way it is, why React's Concurrent Mode exists, why Python's GIL is controversial, why your server has worker pools, and why race conditions are notoriously hard to debug. This chapter builds from first principles: what a process actually is in kernel terms, how the scheduler keeps hundreds of processes alive on a handful of cores, what happens during a context switch at the register level, and how threads and processes compare across the full spectrum of isolation, performance, and safety.\n\nWe will work through the complete lifecycle of both abstractions, examine real scheduling algorithms, look at the mechanics of inter-process communication, and understand why shared mutable state is the root cause of most concurrency bugs — and what data structures and patterns exist to tame it."
     },
     {
       "type": "diagram",
-      "mermaid": "stateDiagram-v2\n  [*] --> New : fork() / exec()\n  New --> Ready : admitted to run queue\n  Ready --> Running : scheduler dispatches\n  Running --> Ready : time slice expires\n  Running --> Waiting : I/O or event wait\n  Waiting --> Ready : I/O complete\n  Running --> Terminated : exit() called\n  Terminated --> [*]",
-      "caption": "Process lifecycle: a process moves through New → Ready → Running → Waiting and back, until it terminates."
+      "mermaid": "flowchart TD\n  A[\"User launches app\"] --> B[\"OS creates Process\"]\n  B --> C[\"Allocates virtual\\naddress space\"]\n  B --> D[\"Creates main Thread\"]\n  C --> E[\"Code segment\"]\n  C --> F[\"Heap\"]\n  C --> G[\"Stack (per thread)\"]\n  D --> H[\"Thread Ready Queue\"]\n  H --> I[\"CPU Scheduler\"]\n  I --> J[\"Running on Core\"]",
+      "caption": "When a process is created, the OS allocates a virtual address space, maps the executable, and creates a main thread — which then waits in the ready queue until the CPU scheduler dispatches it."
     },
     {
       "type": "analogy",
-      "title": "Restaurant Kitchen Analogy",
-      "content": "Think of a **process** as an entire restaurant: it has its own building (address space), kitchen equipment (resources), and staff (threads). Two restaurants don't share ovens — isolation is guaranteed.\n\nA **thread** is one cook inside that kitchen. Multiple cooks share the same ovens, refrigerators, and prep tables (heap memory, file handles). They can collaborate quickly, but if one cook knocks over the mise-en-place, every cook is affected. A **context switch** between threads is like one cook stepping back and another stepping up to the same station — fast, but requires saving where the first cook left off (register state)."
+      "title": "Restaurant Kitchen: The Perfect Analogy",
+      "content": "Picture a **process** as an entire restaurant franchise location. It has its own building (virtual address space), its own kitchen equipment (heap memory), its own pantry (file handles and open connections), and its own cash register (CPU registers saved at context switch time). Two restaurant locations don't share ovens — if the kitchen at one location catches fire, the other keeps serving customers. That is process isolation.\n\nA **thread** is one cook inside that kitchen. Multiple cooks share the same ovens, refrigerators, prep tables, and knife rack — that is the shared heap, code segment, and file descriptors. They can hand ingredients to each other instantly without going through the loading dock. That speed is why threads exist. But if one reckless cook knocks over the mise-en-place while another cook is mid-slice, chaos ensues — that is a **race condition**, and it is exactly why shared mutable state is dangerous.\n\nA **context switch** between threads is like one cook stepping back from the station and another stepping in. It is fast — only the new cook's personal checklist (register state and stack pointer) needs to be swapped in. A **process context switch** is like closing one restaurant location's kitchen entirely, locking the door, and opening a completely different location's kitchen — the entire memory map changes, CPU caches are invalidated, and the TLB must be flushed. Much more expensive.\n\nThe **OS scheduler** is the kitchen manager who decides which cook works the station right now. Sometimes they rotate cooks every 20 milliseconds (time-slice preemption). Sometimes a cook voluntarily steps back because they are waiting for the dishwasher to finish (blocking I/O). The manager keeps everyone productive and ensures no cook hogs the station all day."
     },
     {
       "type": "explanation",
-      "title": "Process vs Thread: What Actually Differs",
-      "content": "A process owns a complete **address space**: code segment, stack, heap, and BSS. When the OS forks a process, it copies (or copy-on-writes) all of that memory — expensive. A thread, by contrast, gets only its own **stack and register file**; everything else is shared with sibling threads in the same process.\n\n**Context switching** is the mechanism by which the CPU stops one task and resumes another. For processes, the OS must flush the TLB (translation lookaside buffer) and swap memory maps. For threads within the same process, the address space stays the same — only registers and the stack pointer change, making thread switches ~10× cheaper than process switches.\n\n**Concurrency** means multiple tasks *appear* to progress simultaneously (even on one core, via rapid switching). **Parallelism** means tasks *actually* run at the same instant on multiple CPU cores. JavaScript's event loop is concurrent but single-threaded — no true parallelism on the main thread. Worker threads in Node.js enable actual parallelism."
+      "title": "What Is a Process? The Kernel's View",
+      "content": "From the kernel's perspective, a process is a data structure called a **Process Control Block (PCB)** — also known as `task_struct` in Linux. This structure is the OS's entire knowledge of a running program. It contains:\n\n- **PID (Process ID)**: a unique integer assigned at creation, used in every OS call referencing this process.\n- **Process state**: New, Ready, Running, Waiting, or Terminated — the scheduler reads this to decide what to do with the process.\n- **Program counter (PC)**: the address of the next instruction to execute — saved here during a context switch.\n- **CPU registers**: the complete snapshot of all general-purpose registers, flags register, and floating-point unit state.\n- **Memory management info**: pointers to the page table (the mapping from virtual addresses to physical RAM pages), memory limits, and segment boundaries.\n- **I/O status**: list of open file descriptors, pending I/O operations, and which devices the process has open.\n- **Scheduling info**: priority, accumulated CPU time, and when the current time slice expires.\n- **Parent PID**: every process (except `init`, PID 1) has a parent — the process that called `fork()` to create it.\n\nWhen the OS creates a new process via `fork()`, it copies the parent's PCB, assigns a new PID, and sets up copy-on-write (CoW) memory pages. The child and parent initially share the same physical memory pages; a private copy is made only when either process writes to a page. This CoW optimization makes `fork()` fast — you are not actually copying gigabytes of RAM, just the page-table entries.\n\nThe typical follow-up to `fork()` is `exec()`, which replaces the process's memory image with a new executable. This `fork-exec` pattern is how Unix spawns new programs: `fork()` duplicates the current process, then `exec()` overwrites the child's memory with the target program. The shell does this every time you run a command."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  P[\"Process\"] --> CS[\"Code Segment (shared)\"] \n  P --> DS[\"Data / Heap (shared)\"]\n  P --> FH[\"File Handles (shared)\"]\n  P --> T1[\"Thread 1\"]\n  P --> T2[\"Thread 2\"]\n  P --> T3[\"Thread 3\"]\n  T1 --> S1[\"Stack 1 + Registers\"]\n  T2 --> S2[\"Stack 2 + Registers\"]\n  T3 --> S3[\"Stack 3 + Registers\"]",
-      "caption": "Threads share the process address space; each thread only owns its stack and CPU register snapshot."
+      "mermaid": "stateDiagram-v2\n  [*] --> New : fork() or exec()\n  New --> Ready : admitted to scheduler\n  Ready --> Running : scheduler dispatches\n  Running --> Ready : time slice expires\n  Running --> Waiting : blocks on I/O or event\n  Waiting --> Ready : I/O completes or event fires\n  Running --> Terminated : exit() called or signal\n  Terminated --> [*]",
+      "caption": "The complete process lifecycle. A process oscillates between Ready and Running until it blocks on I/O (enters Waiting) or its time slice expires (returns to Ready). Termination is the only exit."
+    },
+    {
+      "type": "explanation",
+      "title": "What Is a Thread? Stack, Registers, and Shared State",
+      "content": "A **thread** is the minimal schedulable unit of execution. Every process has at least one thread (the main thread), but can have many. Threads within the same process share:\n\n- The **code segment** (the compiled instructions)\n- The **heap** (dynamically allocated objects via `malloc` / `new`)\n- **Global and static variables**\n- **Open file descriptors** and network sockets\n- The **signal handler table**\n\nBut each thread owns exclusively:\n\n- Its own **call stack** — local variables, function parameters, and return addresses for every function currently on the call stack\n- Its own **program counter** — which instruction this thread is executing right now\n- Its own **register snapshot** — all CPU registers, saved when the thread is not running\n- Its own **thread-local storage (TLS)** — a small area of per-thread data that looks global within the thread\n\nThis split explains both the power and the danger of threads. Sharing the heap means threads can communicate by simply writing to a shared variable — zero copying, zero serialisation overhead. But it also means any thread can corrupt any other thread's data if synchronisation is wrong. In contrast, processes communicate via **inter-process communication (IPC)**: pipes, sockets, shared memory segments, or message queues — explicitly designed bridges that the OS controls.\n\n**User-space threads vs kernel threads**: Modern operating systems implement threads at the kernel level — the kernel schedules individual threads, not just processes. Older systems used **user-space thread libraries** (green threads, coroutines) that multiplexed many logical threads onto fewer kernel threads. Languages like Go use a hybrid: Go goroutines are user-space, but the Go runtime multiplexes them across a pool of kernel threads matching the number of CPU cores."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  P[\"Process\"] --> CS[\"Code Segment\\n(read-only, shared)\"]\n  P --> H[\"Heap\\n(shared mutable)\"]\n  P --> FD[\"File Descriptors\\n(shared)\"]\n  P --> T1[\"Thread 1\"]\n  P --> T2[\"Thread 2\"]\n  P --> T3[\"Thread 3\"]\n  T1 --> S1[\"Stack 1\\n+ Registers\"]\n  T2 --> S2[\"Stack 2\\n+ Registers\"]\n  T3 --> S3[\"Stack 3\\n+ Registers\"]",
+      "caption": "Threads share the process address space but each owns its own stack and CPU register snapshot. The heap is shared — and therefore the source of race conditions."
+    },
+    {
+      "type": "explanation",
+      "title": "Context Switching: What Happens in the CPU",
+      "content": "A **context switch** is the mechanism by which the OS pauses one task and resumes another. It is triggered either by a **timer interrupt** (the time slice expired) or by the running process voluntarily yielding (calling `sleep()`, `wait()`, or blocking on I/O). Here is the step-by-step:\n\n**Step 1 — Save the outgoing task's state**: The kernel saves all CPU registers — including the program counter (where we are in the code), the stack pointer (top of the call stack), and all general-purpose registers — into the outgoing PCB or thread control block.\n\n**Step 2 — Run the scheduler**: The OS scheduler algorithm selects the next task to run from the ready queue. This is a brief piece of kernel code that runs in privileged mode.\n\n**Step 3 — Restore the incoming task's state**: The saved registers are loaded from the incoming task's PCB. The program counter is set to where that task left off. Execution resumes as if it never stopped.\n\n**For process context switches**, two extra steps are required:\n- **Switch the memory map**: The CPU's Memory Management Unit (MMU) is pointed at the new process's page table, so virtual addresses now resolve to the new process's physical RAM.\n- **Flush the TLB** (Translation Lookaside Buffer): The TLB is a fast cache of recent virtual-to-physical address translations. After a process switch, those cached mappings belong to the old process and are wrong for the new one. Flushing it forces fresh lookups — expensive, because the first hundreds of memory accesses after the switch will be TLB misses.\n\n**For thread context switches within the same process**, steps 3 and 4 are skipped entirely. The address space is identical — the TLB entries are still valid. Only registers and the stack pointer change. This is why thread switches are roughly 5–10× faster than process switches on typical hardware.\n\n**Modern optimisation — PCID (Process-Context Identifiers)**: Recent x86 CPUs tag TLB entries with the process ID, so multiple processes' TLB entries coexist without conflicts. This eliminates most TLB flushes on context switches, dramatically narrowing the performance gap between process and thread switches on modern hardware."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n\nif (isMainThread) {\n  // Main thread: spawn two worker threads (true parallelism in Node.js)\n  const results = [];\n\n  function runWorker(data) {\n    return new Promise((resolve, reject) => {\n      const worker = new Worker(__filename, { workerData: data });\n      worker.on('message', resolve);\n      worker.on('error', reject);\n    });\n  }\n\n  Promise.all([\n    runWorker({ task: 'A', iterations: 5e6 }),\n    runWorker({ task: 'B', iterations: 5e6 })\n  ]).then(([a, b]) => {\n    console.log('Task A:', a); // Task A: done in ~Xms\n    console.log('Task B:', b); // Task B: done in ~Xms\n    // Both ran in PARALLEL — total time ≈ one task, not two\n  });\n} else {\n  // Worker thread: CPU-bound work without blocking main thread\n  let count = 0;\n  const start = Date.now();\n  for (let i = 0; i < workerData.iterations; i++) count += i;\n  parentPort.postMessage(`done in ${Date.now() - start}ms (sum=${count})`);\n}",
-      "explanation": "Node.js `worker_threads` creates OS-level threads sharing the same process. Each worker gets its own V8 isolate (stack + heap snapshot), but they can share `SharedArrayBuffer` memory — illustrating the thread model. CPU-bound tasks run truly in parallel without blocking the event loop."
+      "label": "Example",
+      "code": "// Demonstrating true thread parallelism in Node.js with worker_threads\n// Each worker runs in a separate OS thread with its own V8 isolate.\n\nconst { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n\nif (isMainThread) {\n  // ── Main thread: spawn two workers for CPU-bound tasks ──────\n  function runWorker(taskName, iterations) {\n    return new Promise((resolve, reject) => {\n      const worker = new Worker(__filename, {\n        workerData: { taskName, iterations }\n      });\n      worker.on('message', resolve);\n      worker.on('error', reject);\n    });\n  }\n\n  const start = Date.now();\n\n  // Both workers start simultaneously — true parallelism on separate cores\n  Promise.all([\n    runWorker('A', 100_000_000),\n    runWorker('B', 100_000_000)\n  ]).then(([resultA, resultB]) => {\n    const elapsed = Date.now() - start;\n    console.log(resultA);            // Task A: sum=4999999950000000 in ~320ms\n    console.log(resultB);            // Task B: sum=4999999950000000 in ~320ms\n    console.log(`Total: ${elapsed}ms`); // ~320ms — same as ONE task, not 640ms\n    // If these ran sequentially on one thread, total would be ~640ms\n  });\n\n} else {\n  // ── Worker thread: runs in a separate OS thread ──────────────\n  const { taskName, iterations } = workerData;\n  const start = Date.now();\n  let sum = 0;\n  for (let i = 0; i < iterations; i++) sum += i;\n  const elapsed = Date.now() - start;\n  parentPort.postMessage(`Task ${taskName}: sum=${sum} in ${elapsed}ms`);\n}",
+      "explanation": "This example shows true parallelism: both workers run simultaneously on separate CPU cores. The total wall-clock time is roughly equal to running one task, not two — because the OS schedules each thread on a different core. Compare this to `Promise.all([asyncA(), asyncB()])` on the main event loop, which is concurrent (interleaved) but single-threaded. For CPU-bound work, `worker_threads` is the right tool; for I/O-bound work, the event loop's concurrency is usually sufficient."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Concurrency vs Parallelism: A Critical Distinction",
+      "content": "These terms are frequently confused, even by experienced engineers. Getting them right matters for system design decisions.\n\n**Concurrency** is about *structure*: your program is designed to handle multiple tasks that can make progress, even if at any given instant only one is actually executing. Concurrency is a property of the program's design. A single-core CPU running a web server is concurrent — it interleaves handling many requests by quickly switching between them. No two requests actually execute at the same physical instant, but each makes eventual progress.\n\n**Parallelism** is about *execution*: tasks literally run at the same physical instant on different hardware units. A quad-core CPU crunching a matrix multiplication in parallel is executing four portions of the computation simultaneously.\n\nA system can be:\n- **Concurrent but not parallel**: Node.js event loop on one core — many async tasks in flight, one thread executing\n- **Parallel but not concurrent**: SIMD instructions — one instruction operating on multiple data simultaneously, no interleaving needed\n- **Both concurrent and parallel**: A multi-threaded web server on a multi-core machine — multiple threads running simultaneously, each handling concurrent connections\n- **Neither**: A single-threaded batch script executing sequentially with no async behaviour\n\nThe confusion often comes from JavaScript's `Promise.all()`. It *looks* parallel but is concurrent on the main thread. Two network requests made with `Promise.all` both go to the network at once (the OS handles the actual I/O asynchronously), but the JavaScript callbacks run one at a time on the event loop. True parallelism in Node.js requires `worker_threads` or child processes.\n\nIn Python, the **Global Interpreter Lock (GIL)** means Python threads are concurrent but not parallel for CPU-bound work — only one thread can execute Python bytecode at a time. For CPU-bound tasks, Python programmers use `multiprocessing` (separate OS processes, no GIL) instead of `threading`."
+    },
+    {
+      "type": "explanation",
+      "title": "CPU Scheduling Algorithms: How the OS Decides Who Runs Next",
+      "content": "The **scheduler** is the heart of multitasking. It answers one question — which ready process or thread gets the CPU next? — thousands of times per second. Different algorithms make different trade-offs between throughput, fairness, latency, and starvation prevention.\n\n**First-Come, First-Served (FCFS)**: The simplest algorithm. Processes run in the order they arrived. No preemption — once a process starts, it runs until it blocks or exits. The classic problem: a long-running CPU-bound process blocks all shorter processes behind it (the **convoy effect**).\n\n**Shortest Job First (SJF)**: Always run the process with the smallest estimated remaining CPU burst. Optimal for minimising average wait time, but requires predicting the future. Real systems use **Shortest Remaining Time First (SRTF)** with preemption — if a new process arrives with a shorter burst than the remaining time of the current process, preempt immediately.\n\n**Round Robin (RR)**: Each process gets a fixed **time quantum** (typically 10–100 milliseconds), then is preempted and moved to the back of the ready queue. Every process eventually gets CPU time — no starvation. The choice of quantum matters: too small and context-switch overhead dominates; too large and RR degenerates toward FCFS.\n\n**Priority Scheduling**: Each process has a priority number; the scheduler always picks the highest-priority ready process. Static priorities (set at creation) are simple but can cause **starvation** — low-priority processes never run if high-priority work never stops. **Aging** solves this by gradually increasing a process's priority the longer it waits.\n\n**Multilevel Feedback Queue (MLFQ)**: The algorithm used in most real systems. Multiple queues with different priorities and different time quanta. A new process starts in the highest-priority queue (short quantum). If it uses its full quantum without blocking, it is moved down to a lower-priority queue (longer quantum). I/O-bound processes that block frequently stay at the top; CPU-hungry processes migrate to the bottom. This automatically distinguishes interactive tasks (which need low latency) from batch tasks (which need high throughput) without needing to know in advance.\n\n**Linux's Completely Fair Scheduler (CFS)**: The default Linux scheduler since 2007. Instead of time slices, CFS tracks each task's **virtual runtime** (`vruntime`) — the actual CPU time it has consumed, weighted by its nice value (priority). The scheduler always picks the task with the smallest `vruntime` next. A red-black tree sorted by `vruntime` makes this O(log n) per decision. The result: every task gets a perfectly fair share of CPU proportional to its weight. Interactive tasks that block frequently accumulate low `vruntime` and always jump to the front when they wake up — naturally giving them low latency."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  A[\"New Process\"] --> Q1[\"Queue 1\\nPriority High\\nQuantum 8ms\"]\n  Q1 -- \"Uses full quantum\" --> Q2[\"Queue 2\\nPriority Medium\\nQuantum 16ms\"]\n  Q2 -- \"Uses full quantum\" --> Q3[\"Queue 3\\nPriority Low\\nQuantum 32ms\"]\n  Q1 -- \"Blocks on I/O\" --> RQ[\"Returns to\\nQueue 1\"]\n  Q2 -- \"Blocks on I/O\" --> RQ\n  Q3 -- \"CPU burst done\" --> Done[\"Exit\"]",
+      "caption": "Multilevel Feedback Queue: CPU-hungry processes migrate down to lower-priority queues with longer quanta. I/O-bound processes that block frequently stay in the top queue, getting low latency."
+    },
+    {
+      "type": "explanation",
+      "title": "Inter-Process Communication (IPC): How Isolated Processes Talk",
+      "content": "Process isolation is valuable, but processes often need to collaborate. The OS provides several **IPC mechanisms**, each with different trade-offs in performance, complexity, and safety.\n\n**Pipes**: The oldest and simplest IPC. A pipe is a unidirectional byte stream with a kernel buffer. The writer process writes bytes; the reader process reads them. Shell pipelines (`ls | grep .js | wc -l`) are pipes. Anonymous pipes work only between parent and child processes. **Named pipes** (FIFOs) have a filesystem path and can connect unrelated processes.\n\n**Signals**: One-way asynchronous notifications. `kill -9 PID` sends `SIGKILL`; `Ctrl+C` sends `SIGINT`. Signals are the OS's way of saying \"something happened\" — they interrupt the target process and invoke its signal handler. Limited to about 31 standard signals (on Linux); no data payload.\n\n**Shared Memory**: The fastest IPC. Two processes map the same physical memory page into both their virtual address spaces. One writes, the other reads — no kernel involvement, no copying. But shared memory has no synchronisation — processes must use semaphores or mutexes to coordinate access. This is how high-performance systems (databases, video encoders) share large data between processes.\n\n**Sockets**: Processes communicate via a network-like API, even on the same machine (Unix domain sockets for local IPC, TCP/IP sockets for network). Sockets are bidirectional, support both byte streams (TCP) and datagrams (UDP), and work across machines. Web servers, databases, and microservices typically use sockets.\n\n**Message Queues**: The kernel maintains a queue of messages. One process enqueues, another dequeues. Unlike pipes, messages are discrete (not a byte stream), have type fields for filtering, and persist in the queue even if the reader is not currently running. Useful for decoupled producer-consumer patterns.\n\n**Memory-mapped files**: A file is mapped into the process's virtual address space. Reads and writes to memory automatically sync with the file. Multiple processes can map the same file for shared memory with persistence. Databases like SQLite use this technique extensively."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Concurrency vs Parallelism in the event loop\n// Concurrency: two async tasks interleaved on ONE thread\nasync function fetchUser() { /* ...await network... */ }\nasync function fetchPosts() { /* ...await network... */ }\n\n// These appear parallel but share one thread — concurrency\n(async () => {\n  const [user, posts] = await Promise.all([fetchUser(), fetchPosts()]);\n})();\n\n// Scheduling metaphor: Round Robin (each task gets equal time slices)\n// FIFO (first scheduled, first run) — used in batch systems\n// Priority Scheduling — OS gives higher-priority processes more CPU\n// Completely Fair Scheduler (Linux CFS) — tracks virtual runtime,\n//   always picks the task with the smallest vruntime next"
+      "label": "Example",
+      "code": "// SharedArrayBuffer — shared memory between Node.js worker threads\n// This is the thread-level equivalent of IPC shared memory.\n\nconst { Worker, isMainThread, parentPort, workerData } = require('worker_threads');\n\nif (isMainThread) {\n  // Allocate a shared buffer — accessible from ALL threads simultaneously\n  const sharedBuffer = new SharedArrayBuffer(4); // 4 bytes = one Int32\n  const counter = new Int32Array(sharedBuffer);\n  counter[0] = 0;\n\n  console.log('Before:', counter[0]); // 0\n\n  // Launch two workers that both increment the counter\n  const w1 = new Worker(__filename, { workerData: { sharedBuffer, id: 1 } });\n  const w2 = new Worker(__filename, { workerData: { sharedBuffer, id: 2 } });\n\n  let done = 0;\n  const onDone = () => {\n    done++;\n    if (done === 2) {\n      // Expected: 200000, but without atomics you may get less due to race condition\n      console.log('After:', counter[0]);\n    }\n  };\n  w1.on('message', onDone);\n  w2.on('message', onDone);\n\n} else {\n  const counter = new Int32Array(workerData.sharedBuffer);\n  const ITERATIONS = 100_000;\n\n  // RACE CONDITION VERSION (comment this in to see the bug):\n  // for (let i = 0; i < ITERATIONS; i++) counter[0]++;  // Not atomic!\n\n  // CORRECT VERSION — Atomics.add is guaranteed to be indivisible:\n  for (let i = 0; i < ITERATIONS; i++) {\n    Atomics.add(counter, 0, 1); // atomic increment — no race condition\n  }\n  parentPort.postMessage('done');\n}",
+      "explanation": "Without `Atomics.add`, the increment `counter[0]++` is three steps: read, add 1, write. Two threads can read the same old value, both add 1, and both write the same new value — losing one increment. This is a **race condition**. `Atomics.add` makes the read-modify-write indivisible at the CPU level (using a `LOCK XADD` instruction on x86). With 2 workers each doing 100,000 increments, the correct result is 200,000. Without atomics, you will often see less."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context — the fork-exec model**: Unix's `fork()` system call, invented in the early 1970s at Bell Labs, is one of the most elegant and influential OS design decisions ever made. Rather than having a separate `create_process()` that requires specifying all parameters up front, Unix reuses the current process: `fork()` creates an identical copy, then `exec()` replaces its memory with a new program. This composability made the Unix shell pipelines possible. Plan 9 (Bell Labs' successor to Unix) and modern systems like Windows use the `CreateProcess` model instead — specifying the new program at creation time — which is more efficient but less composable."
+    },
+    {
+      "type": "explanation",
+      "title": "Race Conditions, Mutexes, and Deadlocks",
+      "content": "When multiple threads share mutable state, you enter the territory of **concurrent programming hazards**. The most fundamental is the **race condition**: the correctness of the program depends on the precise timing of thread execution — timing that the OS controls, not you.\n\nThe classic example is a bank account:\n\n```\nThread 1: reads balance = 100\nThread 2: reads balance = 100\nThread 1: writes balance = 100 + 50 = 150\nThread 2: writes balance = 100 + 30 = 130  ← overwrites Thread 1's write!\nFinal balance: 130 instead of 180 — money vanished\n```\n\nThe solution is **mutual exclusion** — ensuring only one thread executes the critical section (the read-modify-write) at a time. The OS provides several synchronisation primitives:\n\n**Mutex (Mutual Exclusion Lock)**: A thread acquires the mutex before entering the critical section and releases it after. If another thread tries to acquire a held mutex, it blocks (goes to Waiting state) until the mutex is released. Fast and simple, but only works for exclusive access.\n\n**Semaphore**: A counter-based synchronisation primitive. A binary semaphore is essentially a mutex. A counting semaphore with value N allows up to N threads to proceed concurrently — useful for throttling (e.g., a connection pool of 10 database connections). Invented by Dijkstra in 1965.\n\n**Read-Write Lock (RWLock)**: Allows multiple concurrent readers OR one exclusive writer. Ideal when reads greatly outnumber writes (most caches, configuration stores).\n\n**Monitor / Condition Variable**: A higher-level construct pairing a mutex with a wait queue. A thread can atomically release the mutex and sleep until another thread signals that a condition has changed (e.g., 'the queue is no longer empty'). Used inside `synchronized` in Java and `std::condition_variable` in C++.\n\n**Deadlock** occurs when two or more threads each hold a resource the other needs, and both wait forever. The classic example: Thread 1 holds Lock A and waits for Lock B; Thread 2 holds Lock B and waits for Lock A. Deadlock requires four conditions simultaneously (Coffman conditions): mutual exclusion, hold-and-wait, no preemption, and circular wait. Prevention strategies include always acquiring locks in the same global order, or using `try-lock` with timeout and backoff.\n\n**Livelock** is subtler: threads actively spin and retry without making progress — like two people in a hallway who keep stepping aside in the same direction. **Starvation** means a thread is perpetually denied a resource by higher-priority threads."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant T1 as \"Thread 1\"\n  participant M as \"Mutex\"\n  participant T2 as \"Thread 2\"\n  T1->>M: lock()\n  Note over M: Locked by T1\n  T2->>M: lock() — BLOCKS\n  T1->>M: unlock()\n  Note over M: Available\n  M->>T2: woken up\n  T2->>M: lock() acquired\n  T2->>M: unlock()",
+      "caption": "Mutex serialises access to the critical section. Thread 2 blocks until Thread 1 releases the lock — preventing the race condition."
+    },
+    {
+      "type": "explanation",
+      "title": "The Event Loop: Single-Threaded Concurrency",
+      "content": "Not all concurrent systems use multiple threads. **Event-driven concurrency** with a single-threaded event loop is the architecture behind Node.js, nginx, and browser JavaScript — and it sidesteps most concurrency hazards by simply never having shared mutable state across concurrent computations.\n\nThe event loop works as follows:\n\n1. **Call stack**: JavaScript code runs on a single call stack. Only one function executes at a time.\n2. **Web APIs / libuv**: Asynchronous operations (network I/O, disk I/O, timers) are handed off to the OS (via libuv in Node.js). These run outside JavaScript — the OS kernel handles the actual I/O using system calls like `epoll` (Linux) or `kqueue` (macOS).\n3. **Callback queue (task queue)**: When the async operation completes, its callback is pushed onto the callback queue.\n4. **Event loop tick**: When the call stack is empty, the event loop dequeues one callback from the queue and pushes it onto the call stack. The stack runs to completion before the next callback is dequeued.\n\nThis means JavaScript callbacks never truly run concurrently — they interleave. A long-running synchronous operation (like sorting a million-element array) blocks the event loop: no other callbacks can run until it finishes. This is why CPU-bound work should be moved to `worker_threads`.\n\nNode.js adds a **microtask queue** for Promise callbacks and `queueMicrotask()`. Microtasks run to completion after every task, before the next task from the callback queue. This is why a resolved Promise callback runs before the next `setTimeout` callback.\n\nThe event loop model scales extraordinarily well for I/O-bound workloads: a Node.js server handling 10,000 concurrent connections uses one thread and tiny per-connection overhead, while a thread-per-connection model would require 10,000 threads and their associated stack memory (typically 1–8 MB each)."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Visualising the event loop's execution order\n// Run this and predict the output before reading the explanation.\n\nconsole.log('1 — synchronous, runs immediately');\n\nsetTimeout(() => {\n  console.log('4 — macrotask: setTimeout callback (task queue)');\n}, 0); // Even with 0ms delay, waits for current call stack to clear\n\nPromise.resolve().then(() => {\n  console.log('3 — microtask: Promise.then (microtask queue)');\n  // Microtasks run before the next macrotask\n  return Promise.resolve();\n}).then(() => {\n  console.log('3b — microtask: chained .then');\n});\n\nqueueMicrotask(() => {\n  console.log('3c — microtask: queueMicrotask');\n});\n\nconsole.log('2 — synchronous, runs before any async callbacks');\n\n// Predicted output order:\n// 1 — synchronous, runs immediately\n// 2 — synchronous, runs before any async callbacks\n// 3 — microtask: Promise.then (microtask queue)\n// 3b — microtask: chained .then\n// 3c — microtask: queueMicrotask\n// 4 — macrotask: setTimeout callback (task queue)\n\n// KEY INSIGHT: ALL microtasks drain before ANY macrotask runs.\n// If a microtask schedules another microtask, it also runs before macrotasks.\n// This is why infinite Promise chains can starve setTimeout callbacks.",
+      "explanation": "The event loop processes the synchronous call stack first (1, 2), then drains the entire microtask queue (Promise callbacks via 3, 3b, 3c), and only then processes one macrotask from the task queue (setTimeout via 4). This ordering is specified in the HTML specification for browsers and implemented identically in Node.js. Understanding it is essential for reasoning about async code timing."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Rule of thumb for thread count:** CPU-bound tasks → threads ≈ number of CPU cores (`navigator.hardwareConcurrency` in browsers, `os.cpus().length` in Node.js). I/O-bound tasks → more threads are fine because they spend most time waiting, not computing."
+      "content": "**Common interview traps and misconceptions:**\n\n- **'Threads are always faster than processes'**: For CPU-bound parallel work, threads win (shared memory, cheaper context switch). But for fault isolation or when the GIL applies (Python), processes can be the right choice.\n- **'async/await means parallel'**: In JavaScript, `await` yields the current task back to the event loop — it is cooperative concurrency on one thread, not parallelism. `await Promise.all([a(), b()])` runs both concurrently (both are in flight simultaneously) but not in parallel (their callbacks run one at a time on the event loop).\n- **'More threads = faster for CPU work'**: Optimal thread count for CPU-bound tasks is the number of physical cores (`os.cpus().length`). Beyond that, context-switch overhead and cache thrashing reduce throughput.\n- **'Mutexes prevent all concurrency bugs'**: Mutexes prevent race conditions but introduce deadlock risk. Also, over-locking serialises too much, defeating parallelism. **Lock-free data structures** (using `Atomics`/CAS instructions) can outperform mutex-based ones at high concurrency.\n- **'fork() copies all memory instantly'**: It does not — copy-on-write defers copying until a page is written. But a heavily heap-allocated process that writes immediately after fork (like many Ruby on Rails apps) will incur the copy cost quickly."
+    },
+    {
+      "type": "explanation",
+      "title": "Real-World Patterns: Thread Pools, Worker Pools, and Goroutines",
+      "content": "Raw thread creation is expensive. Spawning a thread involves kernel calls, allocating a stack (typically 1–8 MB), and initialising runtime structures. For a server handling thousands of requests per second, creating and destroying a thread per request would be catastrophic.\n\n**Thread pools** solve this: a fixed number of worker threads are created at startup. Incoming work items are placed in a shared queue. Worker threads pull items from the queue, process them, and loop back for the next item. Thread pools amortise creation cost, bound the maximum number of OS-level threads, and prevent thread explosion under load. Java's `ExecutorService`, Node.js's libuv internal thread pool (used for disk I/O and DNS), and Python's `ThreadPoolExecutor` all follow this pattern.\n\n**Process pools** are the same idea at the process level. Python's `multiprocessing.Pool` creates N worker processes. Work items are serialised (pickled), sent via IPC to a worker, executed, and results are sent back. Heavier than thread pools, but bypasses the GIL and provides fault isolation (a crashing worker doesn't take down the pool).\n\n**Goroutines** (Go) take a different approach. Instead of mapping one goroutine to one OS thread, the Go runtime maintains a pool of OS threads (M threads) and multiplexes thousands or millions of goroutines (G goroutines) across them. When a goroutine blocks on I/O, the runtime parks it and runs another goroutine on the same OS thread — no kernel context switch needed. This is **M:N threading**. The result: goroutines are cheap enough (2–4 KB initial stack) to spawn one per incoming request at high scale.\n\n**Async/await** in Rust, Python, and C# implements a similar idea at the language level using **state machine compilation**: an `async` function is compiled into a state machine where each `await` point is a state transition. A single OS thread can drive thousands of these state machines cooperatively. This is the most memory-efficient concurrency model for I/O-bound workloads.\n\nChoosing the right model:\n- **CPU-bound, shared data** → threads with mutex/atomics\n- **CPU-bound, isolated** → processes (or goroutines with channels)\n- **I/O-bound, simple** → async/await / event loop\n- **I/O-bound, high scale** → goroutines or async runtimes (Tokio in Rust, asyncio in Python)"
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Brief history**: The concept of a process as an isolated unit emerged in the late 1960s with the Multics and Unix operating systems. IBM's OS/360 in 1964 introduced multiprogramming — keeping multiple jobs in memory simultaneously. True **preemptive multitasking** (the OS can interrupt any process at any time) appeared in 1960s mainframes and became mainstream in personal computing with Windows NT (1993) and Linux (1991). The thread model was popularised by POSIX Threads (pthreads) standardised in 1995. Node.js (2009) demonstrated that event-loop concurrency could outperform thread-per-connection servers for I/O workloads, reshaping web server architecture. Go (2009) introduced goroutines as a practical M:N threading model, and Rust's async/await (2019) brought zero-cost abstractions to the async world."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "A **process** is an isolated program instance with its own address space; a **thread** is a lightweight execution unit that shares the process's memory.",
-        "**Context switching** saves and restores CPU register state; thread switches are cheaper than process switches because the address space doesn't change.",
-        "**Concurrency** is about managing multiple tasks at once (even on one core); **parallelism** is about executing tasks simultaneously on multiple cores.",
-        "Process states follow the lifecycle: New → Ready → Running → Waiting → Terminated — driven by the OS scheduler.",
-        "Node.js is single-threaded by default (concurrent, not parallel); `worker_threads` enables true CPU parallelism within one process."
+        "A **process** is an isolated OS unit with its own virtual address space, file handles, and CPU state stored in a Process Control Block (PCB). Processes communicate via explicit IPC mechanisms (pipes, sockets, shared memory).",
+        "A **thread** is a lightweight execution unit sharing the process's code, heap, and file descriptors but owning its own stack and CPU register snapshot. Thread context switches are ~5–10× cheaper than process switches because the address space does not change.",
+        "The **process lifecycle** — New → Ready → Running → Waiting → Terminated — is driven by the OS scheduler. A process enters Waiting when it blocks on I/O and returns to Ready when the I/O completes.",
+        "**Scheduling algorithms** trade off different goals: FCFS is simple but susceptible to convoy effect; Round Robin is fair; MLFQ adapts to workload type; Linux CFS uses virtual runtime in a red-black tree for O(log n) fairness.",
+        "**Concurrency** (multiple tasks making progress, possibly on one core) is distinct from **parallelism** (tasks running simultaneously on multiple cores). Node.js is concurrent but single-threaded; `worker_threads` enables true parallelism.",
+        "**Race conditions** occur when correctness depends on thread timing. Mutexes, semaphores, and atomic operations (like `Atomics.add`) are the tools for safe shared-state concurrency. Deadlock requires four conditions and is prevented by consistent lock ordering.",
+        "**Thread pools** and **goroutines** amortise thread-creation cost. For I/O-bound work, event loops and async/await outperform thread-per-connection by eliminating per-connection stack memory and kernel context-switch overhead."
       ]
     }
   ],
@@ -64,133 +139,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What does a thread share with other threads in the same process?",
+      "question": "Which data structure does the OS kernel use to store all information about a running process?",
       "type": "mcq",
       "options": [
-        "Its own private stack and heap",
-        "The process's heap, code segment, and file handles",
-        "Nothing — threads are fully isolated",
-        "CPU registers only"
+        "Page Table",
+        "Process Control Block (PCB)",
+        "Thread Control Block (TCB)",
+        "Interrupt Descriptor Table"
       ],
       "correct": 1,
-      "explanation": "Threads within the same process share the heap, code segment, and open file handles. Each thread only owns its own stack and CPU register snapshot."
+      "explanation": "The Process Control Block (PCB) — called `task_struct` in Linux — stores everything the kernel knows about a process: PID, state, program counter, register snapshot, memory map pointers, open file descriptors, and scheduling info."
     },
     {
       "id": "q2",
-      "question": "Which process state comes immediately after a process is admitted to the run queue?",
+      "question": "Why is a thread context switch faster than a process context switch on typical hardware?",
       "type": "mcq",
       "options": [
-        "Running",
-        "Waiting",
-        "Ready",
-        "New"
-      ],
-      "correct": 2,
-      "explanation": "After being admitted from 'New', a process enters the 'Ready' state. It stays there until the scheduler dispatches it to the CPU, at which point it moves to 'Running'."
-    },
-    {
-      "id": "q3",
-      "question": "Why is a thread context switch faster than a process context switch?",
-      "type": "mcq",
-      "options": [
-        "Threads have smaller stacks",
-        "The OS doesn't need to flush the TLB or swap address spaces",
-        "Threads never need to save register state",
+        "Thread stacks are smaller so less memory is copied",
+        "The virtual address space is the same so no TLB flush or page-table swap is needed",
+        "Thread priorities are always higher than process priorities",
         "The CPU runs threads at a higher clock speed"
       ],
       "correct": 1,
-      "explanation": "When switching between threads in the same process, the virtual address space remains the same — no TLB flush or memory map swap is needed. Only registers and the stack pointer must be saved/restored."
+      "explanation": "When switching between threads in the same process, the virtual-to-physical memory mapping is unchanged — no TLB flush, no MMU update. Only CPU registers and the stack pointer must be saved and restored, making the switch roughly 5–10× cheaper than a process switch."
+    },
+    {
+      "id": "q3",
+      "question": "A process transitions from Running to Waiting. What most likely caused this?",
+      "type": "mcq",
+      "options": [
+        "Its time quantum expired and the scheduler preempted it",
+        "A higher-priority process became ready",
+        "It issued a blocking I/O request or waited on a synchronisation event",
+        "It called fork() to create a child process"
+      ],
+      "correct": 2,
+      "explanation": "A process enters the Waiting state when it voluntarily blocks — most commonly by requesting I/O (disk read, network call) or waiting on a mutex, semaphore, or condition variable. It returns to Ready once the I/O completes or the event fires."
     },
     {
       "id": "q4",
-      "question": "What is the difference between concurrency and parallelism?",
+      "question": "What is the key difference between concurrency and parallelism?",
       "type": "mcq",
       "options": [
         "Concurrency requires multiple CPU cores; parallelism does not",
-        "Parallelism means tasks appear to run simultaneously; concurrency means they actually do",
-        "Concurrency means multiple tasks make progress (possibly on one core); parallelism means tasks run at the same instant on multiple cores",
-        "They are synonyms"
+        "Parallelism is only possible with threads; concurrency works with processes too",
+        "Concurrency means multiple tasks make progress (possibly interleaved on one core); parallelism means tasks execute simultaneously on multiple cores",
+        "They are synonyms — both mean tasks run at the same time"
       ],
       "correct": 2,
-      "explanation": "Concurrency is about structure — multiple tasks can make progress, possibly interleaved on one core. Parallelism is about execution — tasks run at exactly the same time on different cores."
+      "explanation": "Concurrency is about structure: tasks can make progress without necessarily running at the same instant (interleaved on one core is fine). Parallelism is about simultaneous physical execution on multiple cores. Node.js's event loop is concurrent but single-threaded; worker_threads enable true parallelism."
     },
     {
       "id": "q5",
-      "question": "A Node.js program uses `Promise.all([fetchA(), fetchB()])`. This is an example of:",
+      "question": "Linux's Completely Fair Scheduler (CFS) decides which process runs next based on:",
       "type": "mcq",
       "options": [
-        "True parallelism",
-        "Concurrency on a single thread",
-        "Process-level isolation",
-        "Preemptive scheduling"
+        "Static priority assigned at process creation",
+        "The process with the shortest remaining CPU burst",
+        "The process with the smallest virtual runtime (vruntime)",
+        "First-in, first-out order in the ready queue"
       ],
-      "correct": 1,
-      "explanation": "Node.js has a single-threaded event loop. `Promise.all` interleaves async tasks concurrently — both can be 'in flight' at once — but they run on one thread, not in parallel."
+      "correct": 2,
+      "explanation": "CFS tracks each task's virtual runtime — accumulated CPU time weighted by priority (nice value). It always picks the task with the smallest vruntime from a red-black tree, ensuring every task gets a fair share of CPU proportional to its weight."
     },
     {
       "id": "q6",
-      "question": "A process moves from Running to Waiting. What most likely caused this?",
+      "question": "Which IPC mechanism is fastest for sharing large data between two processes on the same machine?",
       "type": "mcq",
       "options": [
-        "Its time slice expired",
-        "A higher-priority process preempted it",
-        "It requested I/O or is waiting for an event",
-        "It called fork()"
+        "Named pipes (FIFO)",
+        "Unix domain sockets",
+        "Shared memory (mmap)",
+        "Message queues"
       ],
       "correct": 2,
-      "explanation": "A process transitions to Waiting when it blocks on I/O (disk read, network call) or waits for a synchronization event. It returns to Ready once the I/O completes."
+      "explanation": "Shared memory maps the same physical pages into both processes' virtual address spaces. One writes, the other reads — no kernel involvement and no data copying. All other IPC mechanisms route data through the kernel, incurring at least one copy."
     },
     {
       "id": "q7",
-      "question": "Linux's Completely Fair Scheduler (CFS) picks the next process to run based on:",
+      "question": "What is a race condition and what is the standard fix?",
       "type": "mcq",
       "options": [
-        "Highest static priority",
-        "Shortest job remaining",
-        "Smallest virtual runtime (vruntime)",
-        "First-in, first-out queue order"
+        "A bug where a thread runs too fast; fixed by adding sleep() calls",
+        "Correctness depending on thread timing when accessing shared mutable state; fixed with mutual exclusion (mutex/atomics)",
+        "A deadlock where two threads wait for each other; fixed by killing one thread",
+        "An I/O error caused by simultaneous disk reads; fixed by serialising all disk access"
       ],
-      "correct": 2,
-      "explanation": "CFS tracks each task's virtual runtime — how long it has run weighted by priority. It always picks the task with the smallest vruntime next, ensuring fairness across all processes."
+      "correct": 1,
+      "explanation": "A race condition occurs when program correctness depends on the relative timing of thread execution when accessing shared mutable state. The fix is mutual exclusion — ensuring only one thread executes the critical section at a time via a mutex, or using atomic operations that are indivisible at the CPU level."
     },
     {
       "id": "q8",
-      "question": "How many worker threads is generally optimal for CPU-bound tasks?",
+      "question": "In Node.js, `await Promise.all([fetchA(), fetchB()])` is best described as:",
       "type": "mcq",
       "options": [
-        "1 — avoid overhead",
-        "Approximately equal to the number of CPU cores",
-        "As many as possible to maximize throughput",
-        "Exactly 2 regardless of hardware"
+        "True parallelism — both run simultaneously on different CPU cores",
+        "Concurrent but single-threaded — both I/O operations are in flight simultaneously, callbacks run one at a time on the event loop",
+        "Sequential — fetchB waits until fetchA completes",
+        "Multi-process — Node.js spawns a child process for each Promise"
       ],
       "correct": 1,
-      "explanation": "For CPU-bound work, having more threads than cores causes context-switch overhead with no throughput gain. Matching thread count to core count keeps all cores busy without unnecessary switching."
+      "explanation": "Promise.all initiates both async operations simultaneously (both network requests go out at once), but the JavaScript callbacks run on the single-threaded event loop — one at a time. This is concurrent I/O, not CPU parallelism. For true parallelism in Node.js, use worker_threads."
     },
     {
       "id": "q9",
-      "question": "What happens to a process's address space when the OS performs a fork()?",
+      "question": "What are the four conditions required for deadlock to occur (Coffman conditions)?",
       "type": "mcq",
       "options": [
-        "The child immediately gets a fully separate physical copy of all memory",
-        "The address space is shared using copy-on-write until either process writes",
-        "The child has no memory until it calls exec()",
-        "The parent's memory is destroyed and transferred to the child"
+        "Mutual exclusion, hold-and-wait, no preemption, circular wait",
+        "Starvation, livelock, priority inversion, race condition",
+        "Thread creation, mutex locking, semaphore signalling, context switching",
+        "Process isolation, IPC, scheduling, memory protection"
       ],
-      "correct": 1,
-      "explanation": "Modern OSes use copy-on-write (CoW): the parent and child initially share the same physical pages. A private copy is only made for a page when one of the processes writes to it, saving memory and time."
+      "correct": 0,
+      "explanation": "Deadlock requires all four Coffman conditions simultaneously: (1) mutual exclusion — resources cannot be shared, (2) hold-and-wait — a thread holds one resource while waiting for another, (3) no preemption — resources cannot be forcibly taken, and (4) circular wait — a cycle of threads each waiting for the next. Preventing any one condition prevents deadlock."
     },
     {
       "id": "q10",
-      "question": "Which resource does each thread exclusively own (not shared with sibling threads)?",
+      "question": "Why do goroutines in Go scale better than OS threads for high-concurrency servers?",
       "type": "mcq",
       "options": [
-        "Heap memory",
-        "Open file descriptors",
-        "Stack and CPU register state",
-        "The code segment"
+        "Goroutines run at a higher scheduling priority than OS threads",
+        "Goroutines use a fixed 8 MB stack like OS threads but are scheduled faster",
+        "The Go runtime multiplexes thousands of goroutines onto a small pool of OS threads, with tiny initial stacks (2-4 KB) and cooperative parking on I/O",
+        "Goroutines bypass the OS entirely and write directly to network hardware"
       ],
       "correct": 2,
-      "explanation": "Each thread owns its own call stack (local variables, return addresses) and a snapshot of CPU registers (program counter, stack pointer, general-purpose registers). All other resources are shared among threads in the same process."
+      "explanation": "Goroutines use M:N threading: the Go runtime schedules G goroutines across M OS threads. Initial goroutine stacks are 2–4 KB (vs 1–8 MB for OS thread stacks). When a goroutine blocks on I/O, the runtime parks it without a kernel context switch and runs another goroutine on the same OS thread. This allows millions of concurrent goroutines in a single process."
     }
   ]
 }
