@@ -3,15 +3,19 @@ import { persist } from 'zustand/middleware';
 import type { TopicProgress } from '@/types/content-schema-types';
 
 // ── Global progress + UI state, persisted to localStorage ─────
+export type ViewMode = 'deep' | 'compact';
+
 interface ProgressState {
   progress: Record<string, TopicProgress>;
   lastVisited: string | null; // topic id
   sidebarOpen: boolean; // mobile drawer
+  viewMode: ViewMode; // deep chapter vs compact cheat-sheet
 
   markRead: (topicId: string) => void;
   setQuizScore: (topicId: string, score: number) => void;
   setLastVisited: (topicId: string) => void;
   toggleSidebar: (open?: boolean) => void;
+  setViewMode: (mode: ViewMode) => void;
 }
 
 const emptyProgress = (): TopicProgress => ({ read: false, quizAttempts: 0 });
@@ -22,6 +26,7 @@ export const useProgressStore = create<ProgressState>()(
       progress: {},
       lastVisited: null,
       sidebarOpen: false,
+      viewMode: 'deep',
 
       markRead: (topicId) =>
         set((state) => {
@@ -61,6 +66,8 @@ export const useProgressStore = create<ProgressState>()(
 
       toggleSidebar: (open) =>
         set((state) => ({ sidebarOpen: open ?? !state.sidebarOpen })),
+
+      setViewMode: (mode) => set({ viewMode: mode }),
     }),
     { name: 'cs-hub-progress' },
   ),

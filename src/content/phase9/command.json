@@ -1,0 +1,196 @@
+{
+  "id": "phase9_command",
+  "title": "Command Pattern",
+  "phase": 9,
+  "week": 34,
+  "icon": "pattern",
+  "tagline": "Turn requests into first-class objects — enabling undo/redo, queuing, logging, and macro recording.",
+  "readTime": "~15 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "**Problem:** A text editor has a toolbar, a menu, and keyboard shortcuts — all of which trigger the same operations (bold, cut, paste). Hard-coding the logic in each UI element duplicates code and makes undo/redo nearly impossible. When the user presses Ctrl+Z, how does the app know what to reverse?\n\n**Core idea:** The **Command** pattern encapsulates a request as a self-contained **object** with an `execute()` method and (optionally) an `undo()` method. The object carries everything needed to perform — or reverse — the action. This lets you: **queue** commands for later execution, **log** them to disk for replay, **stack** them in a history for undo/redo, and **decouple** the invoker (button) from the receiver (document). Every action in a text editor, every transaction in a banking system, and every job in a task queue is a Command."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "classDiagram\n    class Command {\n        +execute() void\n        +undo() void\n    }\n    class BoldCommand {\n        -doc: Document\n        -prevState: string\n        +execute() void\n        +undo() void\n    }\n    class DeleteCommand {\n        -doc: Document\n        -deleted: string\n        +execute() void\n        +undo() void\n    }\n    class Invoker {\n        -history: Command[]\n        +run(cmd) void\n        +undoLast() void\n    }\n    class Receiver {\n        +applyBold() void\n        +deleteText(range) void\n    }\n    Command <|.. BoldCommand\n    Command <|.. DeleteCommand\n    Invoker --> Command : executes\n    BoldCommand --> Receiver : delegates to\n    DeleteCommand --> Receiver : delegates to",
+      "caption": "Invoker calls execute() and pushes commands onto a history stack. undo() reverses the last command — the Invoker never knows the details."
+    },
+    {
+      "type": "analogy",
+      "title": "A Restaurant Order Slip",
+      "content": "When a waiter takes your order, they write it on a **slip** and pass it to the kitchen. The slip is the **Command** — it contains everything needed: table number, items, special requests. The waiter (Invoker) doesn't cook; the chef (Receiver) doesn't talk to you. If the kitchen gets backed up, slips stack up in a **queue**. If an order is wrong, the slip tells the kitchen exactly what to reverse.\n\nThis separation is why a task queue (Bull, BullMQ, Sidekiq) works: the web server writes a job object (Command) to Redis, and a worker process reads and executes it — completely decoupled, retryable, and auditable."
+    },
+    {
+      "type": "explanation",
+      "content": "**Participants:**\n\n- **Command** — interface with `execute()` and optionally `undo()`. It stores all data needed to perform the action.\n- **ConcreteCommand** — implements the interface. Holds a reference to the **Receiver** and saves enough state to reverse the action (`prevState`, `deletedText`, etc.).\n- **Receiver** — the object that knows how to actually perform the work (a `Document`, a `Canvas`, a database connection). Commands delegate to it.\n- **Invoker** — triggers `command.execute()` and manages the history stack. It doesn't know what the command does — just that it can `execute()` and `undo()`.\n- **Client** — creates concrete commands and wires them to receivers; hands commands to the invoker.\n\n**Undo/Redo stack:** The Invoker maintains an `undoStack`. `run(cmd)` pushes to it. `undoLast()` pops and calls `cmd.undo()`. A `redoStack` enables Ctrl+Y.\n\n**Macros:** A `MacroCommand` holds a list of commands and calls `execute()` on each — record once, replay any number of times.\n\n**Task queues:** Libraries like BullMQ serialize Command objects to JSON, store them in Redis, and workers deserialize and call `execute()`. Retries, delays, and priority are all managed by the queue — the Command object stays simple.\n\n**Transactional integrity:** In database systems, a Command corresponds to a transaction. `execute()` applies changes; `undo()` rolls back. The Invoker is the transaction manager."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant User\n    participant Invoker\n    participant BoldCmd as BoldCommand\n    participant Doc as Document\n    User->>Invoker: run(BoldCommand)\n    Invoker->>BoldCmd: execute()\n    BoldCmd->>Doc: applyBold(selection)\n    Doc-->>BoldCmd: confirms\n    BoldCmd-->>Invoker: done (pushed to history)\n    User->>Invoker: undoLast()\n    Invoker->>BoldCmd: undo()\n    BoldCmd->>Doc: removeBold(prevState)\n    Doc-->>BoldCmd: restored\n    BoldCmd-->>Invoker: undone",
+      "caption": "execute() applies the action and pushes onto history. undoLast() pops and calls undo() — the document is restored to its previous state."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── Receiver ─────────────────────────────────────────────────────\nclass TextDocument {\n  constructor(content = '') { this.content = content; }\n  insert(text, pos)  { this.content = this.content.slice(0, pos) + text + this.content.slice(pos); }\n  delete(pos, len)   { this.content = this.content.slice(0, pos) + this.content.slice(pos + len); }\n  toString()         { return this.content; }\n}\n\n// ── Concrete Commands ────────────────────────────────────────────\nclass InsertCommand {\n  constructor(doc, text, pos) {\n    this._doc = doc; this._text = text; this._pos = pos;\n  }\n  execute() { this._doc.insert(this._text, this._pos); }\n  undo()    { this._doc.delete(this._pos, this._text.length); }\n}\n\nclass DeleteCommand {\n  constructor(doc, pos, len) {\n    this._doc = doc; this._pos = pos; this._len = len;\n    this._deleted = '';         // saved for undo\n  }\n  execute() {\n    this._deleted = this._doc.content.slice(this._pos, this._pos + this._len);\n    this._doc.delete(this._pos, this._len);\n  }\n  undo() { this._doc.insert(this._deleted, this._pos); }\n}\n\n// ── Invoker with undo/redo stacks ────────────────────────────────\nclass CommandHistory {\n  constructor() { this._undo = []; this._redo = []; }\n\n  run(cmd) {\n    cmd.execute();\n    this._undo.push(cmd);\n    this._redo = [];           // new action clears redo stack\n  }\n\n  undoLast() {\n    const cmd = this._undo.pop();\n    if (!cmd) return console.log('[History] Nothing to undo');\n    cmd.undo();\n    this._redo.push(cmd);\n  }\n\n  redoLast() {\n    const cmd = this._redo.pop();\n    if (!cmd) return console.log('[History] Nothing to redo');\n    cmd.execute();\n    this._undo.push(cmd);\n  }\n}\n\n// ── Usage ────────────────────────────────────────────────────────\nconst doc     = new TextDocument('Hello World');\nconst history = new CommandHistory();\n\nconsole.log(doc.toString()); // Hello World\n\nhistory.run(new InsertCommand(doc, ', JS', 5));\nconsole.log(doc.toString()); // Hello, JS World\n\nhistory.run(new DeleteCommand(doc, 0, 6));\nconsole.log(doc.toString()); // JS World\n\nhistory.undoLast();\nconsole.log(doc.toString()); // Hello, JS World\n\nhistory.undoLast();\nconsole.log(doc.toString()); // Hello World\n\nhistory.redoLast();\nconsole.log(doc.toString()); // Hello, JS World\n",
+      "explanation": "Each command stores the data needed for both execute() and undo(). CommandHistory is the Invoker — it manages both stacks without knowing what any command does."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── Command interface skeleton ───────────────────────────────────\nclass Command {\n  execute() { throw new Error('execute() not implemented'); }\n  undo()    { throw new Error('undo() not implemented'); }\n}\n\n// ── Task queue use-case (serializable Command) ───────────────────\nclass SendEmailCommand extends Command {\n  constructor({ to, subject, body }) {\n    super();\n    this._to = to; this._subject = subject; this._body = body;\n    this._sentId = null;\n  }\n\n  async execute() {\n    // In production: call an email SDK\n    this._sentId = `msg_${Date.now()}`;\n    console.log(`[Email] Sent \"${this._subject}\" to ${this._to} — id: ${this._sentId}`);\n  }\n\n  async undo() {\n    if (this._sentId) console.log(`[Email] Cancelling ${this._sentId} (if within window)`);\n  }\n\n  // Serializable for queuing\n  toJSON() {\n    return { type: 'SendEmail', to: this._to, subject: this._subject, body: this._body };\n  }\n}\n\n// ── Simple task queue ────────────────────────────────────────────\nclass TaskQueue {\n  constructor() { this._queue = []; }\n  enqueue(cmd) { this._queue.push(cmd); }\n  async flush() {\n    while (this._queue.length) {\n      const cmd = this._queue.shift();\n      await cmd.execute();\n    }\n  }\n}\n\nconst queue = new TaskQueue();\nqueue.enqueue(new SendEmailCommand({ to: 'a@b.com', subject: 'Welcome', body: 'Hi!' }));\nqueue.enqueue(new SendEmailCommand({ to: 'c@d.com', subject: 'Invoice', body: '$99' }));\nqueue.flush();\n",
+      "explanation": "The task queue pattern: commands are serializable value objects. A worker process dequeues and executes them. toJSON() enables persistence to Redis or a database."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**When to use:** You need undo/redo; you need to queue, schedule, or log operations; you want to decouple UI triggers from business logic; you need transactional rollback.\n\n**When NOT to use:** For simple function calls with no undo or queuing requirement — wrapping them in command objects adds ceremony without benefit. Don't implement Command 'just in case' undo is needed someday (YAGNI).\n\n**Trade-off:** Each operation requires a new class/object. In large apps this creates many small classes — mitigate with factory functions or command registries.\n\n**Real frameworks:** BullMQ/Bull job objects, event sourcing (every state change = a stored Command), Redux actions (pure command objects dispatched to reducers), database migrations (`up()`/`down()` = execute/undo)."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Encapsulation:** A Command object bundles the action, its parameters, and enough state to undo — making every operation self-contained and auditable.",
+        "**Undo/Redo:** The Invoker maintains a history stack; undo() reverses commands in LIFO order without the Invoker knowing any business logic.",
+        "**Queueing & async:** Commands are serializable value objects — ideal for task queues (BullMQ), event sourcing, and deferred execution.",
+        "**Decoupling:** The Invoker never imports the Receiver. A button, a keyboard shortcut, and an API endpoint can all dispatch the same Command — one implementation, many triggers.",
+        "**Redux = Command:** Redux actions dispatched to reducers are Commands. `dispatch(action)` = `invoker.run(command)`."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does the Command pattern encapsulate?",
+      "type": "mcq",
+      "options": [
+        "A set of related objects into a single interface.",
+        "A request as a self-contained object with execute() and undo().",
+        "An algorithm that can be swapped at runtime.",
+        "A one-to-many notification mechanism."
+      ],
+      "correct": 1,
+      "explanation": "Command turns requests into objects carrying all data needed to execute, undo, queue, or log the operation."
+    },
+    {
+      "id": "q2",
+      "question": "In the Command pattern, which participant manages the undo/redo history stack?",
+      "type": "mcq",
+      "options": [
+        "The Receiver.",
+        "The ConcreteCommand.",
+        "The Invoker.",
+        "The Client."
+      ],
+      "correct": 2,
+      "explanation": "The Invoker pushes executed commands onto a history stack and pops/calls undo() when the user requests an undo — it knows nothing about what the commands do."
+    },
+    {
+      "id": "q3",
+      "question": "Why must a DeleteCommand save the deleted text before executing?",
+      "type": "mcq",
+      "options": [
+        "To satisfy the Single Responsibility Principle.",
+        "To serialize itself to JSON for the task queue.",
+        "So that undo() can re-insert the text that was removed.",
+        "To prevent the Invoker from calling execute() twice."
+      ],
+      "correct": 2,
+      "explanation": "undo() must reverse the operation exactly. Without saving the deleted text, there is no way to restore the document to its previous state."
+    },
+    {
+      "id": "q4",
+      "question": "How does the Command pattern relate to Redux actions?",
+      "type": "mcq",
+      "options": [
+        "Redux actions are Receivers; reducers are Commands.",
+        "Redux actions are Command objects dispatched to reducers (Invoker-like); dispatch() = run(command).",
+        "Redux uses the Observer pattern, not Command.",
+        "Redux actions cannot be undone, so the analogy does not apply."
+      ],
+      "correct": 1,
+      "explanation": "Redux actions are plain objects (Commands) dispatched to the store. The store applies the reducer (Receiver logic) and maintains state history — a direct Command pattern application."
+    },
+    {
+      "id": "q5",
+      "question": "What is a MacroCommand?",
+      "type": "mcq",
+      "options": [
+        "A command that runs on a cron schedule.",
+        "A command that holds a list of commands and calls execute() on each in sequence.",
+        "A command that executes in a separate worker thread.",
+        "A command with a timeout for undo."
+      ],
+      "correct": 1,
+      "explanation": "MacroCommand composes multiple commands. execute() iterates and runs each; undo() reverses them in reverse order — enabling recorded macro playback."
+    },
+    {
+      "id": "q6",
+      "question": "Why do task queues like BullMQ benefit from the Command pattern?",
+      "type": "mcq",
+      "options": [
+        "Commands are stateless, so they require no serialization.",
+        "Commands are serializable value objects that can be stored in Redis and executed by any worker.",
+        "Commands auto-retry by implementing the Observer pattern.",
+        "The Invoker in BullMQ runs inside the browser."
+      ],
+      "correct": 1,
+      "explanation": "A job in BullMQ is a Command: its payload is stored in Redis, any worker can deserialize and execute it, and failures can be retried — decoupled producer/consumer."
+    },
+    {
+      "id": "q7",
+      "question": "What happens to the redo stack when a new command is executed?",
+      "type": "mcq",
+      "options": [
+        "The redo stack is merged with the undo stack.",
+        "The redo stack is cleared, because the new action forks the history.",
+        "The redo stack grows by one.",
+        "Nothing — redo is unaffected by new commands."
+      ],
+      "correct": 1,
+      "explanation": "Executing a new command after an undo forks history. The redo branch is discarded — like a text editor clearing Ctrl+Y options after you type new characters."
+    },
+    {
+      "id": "q8",
+      "question": "What is the role of the Receiver in the Command pattern?",
+      "type": "mcq",
+      "options": [
+        "To maintain the list of observers.",
+        "To provide the actual implementation of the business operation that ConcreteCommands delegate to.",
+        "To serialize commands to JSON.",
+        "To decide which strategy algorithm to apply."
+      ],
+      "correct": 1,
+      "explanation": "The Receiver knows how to perform the work (Document.insert(), Canvas.drawShape()). Commands call the Receiver — keeping the two concerns separate."
+    },
+    {
+      "id": "q9",
+      "question": "How does database migration (up/down) relate to the Command pattern?",
+      "type": "mcq",
+      "options": [
+        "Migrations are Observers that react to schema changes.",
+        "up() = execute(), down() = undo() — each migration is a Command applied or reversed by the migration runner (Invoker).",
+        "Migrations use the Singleton pattern to avoid duplicate schemas.",
+        "The database is the Strategy; migrations are Contexts."
+      ],
+      "correct": 1,
+      "explanation": "Each migration file is a Command. The migration runner (Invoker) calls up() to apply or down() to roll back — textbook Command with undo."
+    },
+    {
+      "id": "q10",
+      "question": "When should you NOT use the Command pattern?",
+      "type": "mcq",
+      "options": [
+        "When operations need to be logged for auditing.",
+        "When undo/redo functionality is required.",
+        "When a simple function call has no queuing, logging, or undo requirement.",
+        "When multiple UI elements trigger the same operation."
+      ],
+      "correct": 2,
+      "explanation": "YAGNI — wrapping a simple, fire-and-forget call in a Command object adds overhead and classes with no benefit. Introduce the pattern when a concrete need (undo, queue) arises."
+    }
+  ]
+}

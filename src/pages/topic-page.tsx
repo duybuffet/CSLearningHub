@@ -4,12 +4,14 @@ import { findTopicEntry, loadTopicByFile, topicIdFor } from '@/lib/content-loade
 import { useTopicProgress } from '@/hooks/use-topic-progress';
 import { TopicPageHeader } from '@/components/topic/topic-page-header';
 import { VisualizerPanel } from '@/components/topic/visualizer-panel';
-import { CodePanelWithTabs } from '@/components/topic/code-panel-with-tabs';
 import { DeepDiveContentRenderer } from '@/components/topic/deep-dive-content-renderer';
 import { QuizSection } from '@/components/topic/quiz-section';
+import { ViewModeToggle } from '@/components/topic/view-mode-toggle';
+import { useProgressStore } from '@/store/progress-store-with-persist';
 
 export function TopicPage() {
   const { phaseId, topicSlug } = useParams<{ phaseId: string; topicSlug: string }>();
+  const viewMode = useProgressStore((s) => s.viewMode);
 
   // Resolve topic content from curriculum + content loader
   const entry = phaseId && topicSlug ? findTopicEntry(phaseId, topicSlug) : null;
@@ -56,28 +58,20 @@ export function TopicPage() {
           readTime={topic.readTime}
         />
 
-        {/* Layout adapts to visualizer type:
-            - embed (VisuAlgo): full-width tall visualizer, then full-width code
-            - custom (compact): 2-col [visualizer | code]
-            - none: full-width code only */}
-        {topic.visualizer.type === 'embed' ? (
-          <div className="space-y-6 mb-8">
-            <VisualizerPanel visualizer={topic.visualizer} />
-            <CodePanelWithTabs sections={topic.sections} />
-          </div>
-        ) : topic.visualizer.type === 'custom' ? (
-          <div className="grid lg:grid-cols-2 gap-6 mb-8">
-            <VisualizerPanel visualizer={topic.visualizer} />
-            <CodePanelWithTabs sections={topic.sections} />
-          </div>
-        ) : (
+        {/* Deep chapter vs compact cheat-sheet toggle */}
+        <div className="flex justify-center mb-6">
+          <ViewModeToggle />
+        </div>
+
+        {/* Interactive visualizer (if any) sits at the top, full-width */}
+        {topic.visualizer.type !== 'none' && (
           <div className="mb-8">
-            <CodePanelWithTabs sections={topic.sections} />
+            <VisualizerPanel visualizer={topic.visualizer} />
           </div>
         )}
 
-        {/* Full-width deep-dive prose */}
-        <DeepDiveContentRenderer sections={topic.sections} />
+        {/* Single flowing article — prose, diagrams, and inline code in order */}
+        <DeepDiveContentRenderer sections={topic.sections} mode={viewMode} />
 
         {/* Scroll sentinel — triggers markRead when visible */}
         <div ref={sentinelRef} aria-hidden="true" className="h-1" />

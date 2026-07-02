@@ -1,12 +1,20 @@
 import type { ContentSection, CalloutVariant } from '@/types/content-schema-types';
 import { MermaidDiagramRenderer } from '@/components/ui/mermaid-diagram-renderer';
+import { SyntaxHighlightedCodeBlock } from '@/components/ui/syntax-highlighted-code-block';
 
 interface DeepDiveContentRendererProps {
   sections: ContentSection[];
+  mode?: 'deep' | 'compact';
 }
 
-// Sections handled in code panel — skip here to avoid duplication.
-const CODE_TYPES = new Set(['code_example', 'code_concept']);
+// Compact (interview cram) shows only the skimmable essentials.
+const COMPACT_TYPES = new Set<string>([
+  'intro',
+  'diagram',
+  'callout',
+  'code_concept',
+  'key_takeaways',
+]);
 
 const CALLOUT_STYLES: Record<CalloutVariant, { border: string; bg: string; text: string; icon: string }> = {
   tip: {
@@ -58,8 +66,12 @@ function InlineMarkdown({ text }: { text: string }) {
   );
 }
 
-export function DeepDiveContentRenderer({ sections }: DeepDiveContentRendererProps) {
-  const visible = sections.filter((s) => !CODE_TYPES.has(s.type));
+export function DeepDiveContentRenderer({
+  sections,
+  mode = 'deep',
+}: DeepDiveContentRendererProps) {
+  const visible =
+    mode === 'compact' ? sections.filter((s) => COMPACT_TYPES.has(s.type)) : sections;
 
   if (visible.length === 0) return null;
 
@@ -85,6 +97,10 @@ function SectionBlock({ section }: { section: ContentSection }) {
       return section.mermaid ? (
         <MermaidDiagramRenderer chart={section.mermaid} caption={section.caption} />
       ) : null;
+
+    case 'code_example':
+    case 'code_concept':
+      return <InlineCodeBlock section={section} />;
 
     case 'callout':
       return <CalloutBox section={section} />;
@@ -161,6 +177,32 @@ function CalloutBox({ section }: { section: ContentSection }) {
           </p>
         ))}
       </div>
+    </div>
+  );
+}
+
+function InlineCodeBlock({ section }: { section: ContentSection }) {
+  if (!section.code) return null;
+  return (
+    <div className="space-y-2">
+      {(section.title || section.label) && (
+        <div className="flex items-center gap-2">
+          {section.label && (
+            <span className="text-xs font-medium px-2 py-0.5 rounded-btn bg-accent-orange/15 text-accent-orange">
+              {section.label}
+            </span>
+          )}
+          {section.title && (
+            <h3 className="text-base font-semibold text-text-primary">{section.title}</h3>
+          )}
+        </div>
+      )}
+      <SyntaxHighlightedCodeBlock code={section.code} language={section.language} />
+      {section.explanation && (
+        <p className="text-text-secondary text-sm leading-relaxed">
+          <InlineMarkdown text={section.explanation} />
+        </p>
+      )}
     </div>
   );
 }

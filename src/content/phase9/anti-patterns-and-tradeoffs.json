@@ -1,0 +1,197 @@
+{
+  "id": "phase9_anti-patterns-and-tradeoffs",
+  "title": "Anti-Patterns & Tradeoffs",
+  "phase": 9,
+  "week": 35,
+  "icon": "pattern",
+  "tagline": "Senior engineers know when *not* to use a pattern. Over-engineering, pattern fever, and premature abstraction cost more than the complexity they promise to tame.",
+  "readTime": "~17 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Design patterns are solutions to recurring problems — but they are not free. Every pattern adds indirection, vocabulary, and surface area. Applied before the problem exists, a pattern is overhead. Applied to the wrong problem, it is a trap. Applied obsessively to every problem, it is *pattern fever* — a junior-to-senior failure mode that produces code harder to read than the naive version it replaced.\n\nThis lesson examines four common pattern-related anti-patterns: **Singleton as global state**, **over-engineered Factory**, **needless abstraction layers**, and **pattern fever**. For each one, we look at the warning signs, the real cost, and how to refactor *toward* a pattern only when concrete pain appears. The goal is calibrated judgment: know the patterns well enough to reach for them only when they genuinely help."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"New requirement\"] --> B{\"Does existing code handle it\\nwithout modification?\"}\n    B -->|\"Yes\"| C[\"Ship it — no pattern needed\"]\n    B -->|\"No\"| D{\"Is there a second concrete\\nuse case right now?\"}\n    D -->|\"No\"| E[\"Inline the solution\\n(YAGNI — defer abstraction)\"]\n    D -->|\"Yes\"| F{\"Is the duplication causing\\nreal maintenance pain?\"}\n    F -->|\"No\"| G[\"Wait — note the smell\"]\n    F -->|\"Yes\"| H{\"Identify the varying axis:\\nbehaviour? construction? notification?\"}\n    H -->|\"Behaviour varies\"| I[\"Strategy / Command\"]\n    H -->|\"Creation varies\"| J[\"Factory / Builder\"]\n    H -->|\"State notification varies\"| K[\"Observer / Event emitter\"]\n    H -->|\"Wrapping varies\"| L[\"Decorator / Adapter\"]",
+      "caption": "Decision flowchart: reach for a pattern only after two concrete use cases exist and the duplication causes measurable pain. Every earlier step should default to the simplest inline solution."
+    },
+    {
+      "type": "analogy",
+      "title": "The Swiss Army Knife Architect",
+      "content": "Imagine an architect hired to design a studio apartment who delivers blueprints for a 40-room mansion with a ballroom, wine cellar, and helipad — \"in case you need it later\". The client wanted a bedroom and a kitchen. The helipad costs ten times more to build, is impossible to maintain alone, and makes the apartment colder. That is **YAGNI** violated at scale.\n\n**Pattern fever** is the software version: the developer who, upon seeing two functions that both return data, immediately introduces an `AbstractDataProviderFactoryStrategyBridge`. The abstraction is real architecture in their head — but it is a mansion when the client needed a studio. **Singleton as global state** is the wine cellar: great in theory (one place for everything), catastrophic in practice (everyone who wants a bottle must come through the same bottleneck, and nobody knows who moved which bottle)."
+    },
+    {
+      "type": "explanation",
+      "content": "**Anti-Pattern 1: Singleton as Global State**\n\nSingleton's legitimate use is controlling access to a *shared resource with identity* — a database connection pool, a hardware device, a registry. The anti-pattern arises when Singleton becomes a dumping ground for any state that multiple modules need: `AppState.user`, `AppState.theme`, `AppState.featureFlags`, `AppState.cartItems`. The result is an implicit global variable with a class wrapper. Problems: (a) tests cannot reset it between runs without explicit teardown; (b) any module can mutate any field, making causality invisible; (c) adding a field requires no interface change, so the object grows without discipline. **Refactor signal:** when you find yourself mocking or resetting a Singleton in tests, or when two unrelated features both write to it, it is time to split the state into purpose-specific stores or inject it as a dependency.\n\n**Anti-Pattern 2: Pattern Fever — Observer Everywhere**\n\nEvent emitters and Observers are powerful, but wiring everything through events creates *spaghetti causality*: you dispatch `user:updated` and have no idea which of twelve listeners will fire, in what order, with what side effects. Debugging requires reading event registrations across a dozen files. The fix: use direct function calls for sequential, synchronous logic. Reserve events for genuine fan-out to *unknown, decoupled* subscribers. If you always know the subscriber, call it directly.\n\n**Anti-Pattern 3: Premature Factory**\n\nA Factory makes sense when the *type* of object to create is determined at runtime, or when creation logic is complex enough to justify isolation. The anti-pattern: a `UserFactory.create()` method that calls `new User(data)` and nothing else. It adds a file, a class name, and an import — for zero net benefit. **Rule of thumb:** introduce a Factory when you have (a) more than one concrete type to create, (b) complex initialisation that must not leak into call sites, or (c) a need to swap implementations in tests. One type + trivial construction = `new User(data)` is enough.\n\n**Anti-Pattern 4: Needless Abstraction Layers (Violation of KISS + YAGNI)**\n\nEvery interface, base class, and generic wrapper you add is a bet that the flexibility will be needed. Most bets lose. A `BaseController → AbstractCrudController → GenericResourceController → UserController` inheritance chain to serve four endpoints is four layers of indirection that a future developer must trace before understanding what `GET /users` does. Flat is better than nested. If the inheritance hierarchy cannot be described in one sentence without \"in order to support future...\" — it is probably premature."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "classDiagram\n    class GlobalAppState {\n        +user: User\n        +theme: string\n        +cartItems: Item[]\n        +featureFlags: object\n        +getInstance() GlobalAppState\n    }\n    class ModuleA {\n        +doWork() void\n    }\n    class ModuleB {\n        +doWork() void\n    }\n    class ModuleC {\n        +doWork() void\n    }\n    ModuleA --> GlobalAppState : \"reads + mutates\"\n    ModuleB --> GlobalAppState : \"reads + mutates\"\n    ModuleC --> GlobalAppState : \"reads + mutates\"\n    note for GlobalAppState \"Anti-pattern: unrelated\\nstate + hidden coupling\"",
+      "caption": "Singleton anti-pattern: three unrelated modules all read and mutate a single God object. Any change to GlobalAppState requires auditing all three modules — tight coupling disguised as convenience."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Runtime",
+      "code": "// ── ANTI-PATTERN: Singleton as global state dump ───────────────\nclass AppState {\n  static #instance = null;\n  constructor() {\n    this.user        = null;   // auth concern\n    this.cartItems   = [];     // shopping concern\n    this.theme       = 'light';// UI concern\n    this.featureFlags= {};     // ops concern\n  }\n  static getInstance() {\n    if (!AppState.#instance) AppState.#instance = new AppState();\n    return AppState.#instance;\n  }\n}\n// Problem: any module can mutate any field\n// Tests: AppState.#instance = null; // must hack private field to reset\nconst state = AppState.getInstance();\nstate.user = { id: 1, name: 'Alice' };  // who set this? when?\nstate.cartItems.push({ id: 'p1' });     // mutation invisible to other readers\n\n// ── REFACTOR: split by concern, inject as dependency ───────────\nclass AuthStore {\n  constructor() { this._user = null; }\n  login(user)  { this._user = user; }\n  getUser()    { return this._user; }\n}\nclass CartStore {\n  constructor() { this._items = []; }\n  add(item)    { this._items.push(item); }\n  getItems()   { return [...this._items]; }  // immutable copy\n}\n// Each store is injected — no hidden global references\nconst auth = new AuthStore();\nconst cart = new CartStore();\nauth.login({ id: 1, name: 'Alice' });\ncart.add({ id: 'p1' });\nconsole.log(auth.getUser().name);  // Alice\nconsole.log(cart.getItems());      // [ { id: 'p1' } ]\n// In tests: just pass new AuthStore() — no Singleton teardown needed\n\n// ── ANTI-PATTERN: Premature Factory ────────────────────────────\nclass UserFactory {                 // adds a file, zero benefit\n  static create(data) { return new User(data); }   // trivial delegation\n}\n// GOOD — until you have 2+ types or complex init, just:\nclass User {\n  constructor({ id, name, role = 'viewer' }) {\n    this.id = id; this.name = name; this.role = role;\n  }\n}\nconst u = new User({ id: 42, name: 'Bob' });\nconsole.log(u.role); // viewer\n\n// ── WHEN Factory IS justified: multiple types + runtime decision ─\nfunction createNotifier(channel, config) {\n  if (channel === 'email')  return new EmailNotifier(config);\n  if (channel === 'sms')    return new SmsNotifier(config);\n  if (channel === 'push')   return new PushNotifier(config);\n  throw new Error(`Unknown channel: ${channel}`);\n}\n// Rule: Factory earns its keep when there are 2+ concrete types.\n\nclass EmailNotifier { send(msg) { console.log(`Email: ${msg}`); } }\nclass SmsNotifier   { send(msg) { console.log(`SMS: ${msg}`); } }\nclass PushNotifier  { send(msg) { console.log(`Push: ${msg}`); } }\n\nconst notifier = createNotifier('sms', {});\nnotifier.send('Your order shipped!'); // SMS: Your order shipped!",
+      "explanation": "The Singleton refactor replaces one God object with two focused, injectable stores — no teardown ceremony in tests, no hidden cross-module coupling. The Factory comparison shows the premature version (trivial delegation) beside the justified version (runtime type dispatch over 3 concrete classes)."
+    },
+    {
+      "type": "code_concept",
+      "language": "javascript",
+      "label": "Concept",
+      "code": "// ── Pattern Fever: Event Emitter for simple sequential logic ───\nconst EventEmitter = require('events');\nconst bus = new EventEmitter();\n\n// ANTI-PATTERN: wiring sequential steps through events\nbus.on('step1:done', () => bus.emit('step2:start'));\nbus.on('step2:start', () => bus.emit('step2:done'));\nbus.on('step2:done', () => console.log('Pipeline complete'));\nbus.emit('step1:done');\n// Problem: control flow is invisible — you must trace event registrations\n// to understand execution order. Every new step requires two listeners.\n\n// GOOD: simple sequential logic stays sequential\nfunction runPipeline() {\n  step1();\n  step2();\n  console.log('Pipeline complete');\n}\nfunction step1() { /* ... */ }\nfunction step2() { /* ... */ }\nrunPipeline(); // readable, debuggable, no hidden indirection\n\n// Reserve EventEmitter for TRUE fan-out (unknown N subscribers):\nconst orderEvents = new EventEmitter();\norderEvents.on('order:placed', sendConfirmationEmail);   // subscriber 1\norderEvents.on('order:placed', updateInventory);         // subscriber 2\norderEvents.on('order:placed', notifyWarehouse);         // subscriber 3\n// Here the emitter is justified: the order module does NOT know who listens.\n\nfunction sendConfirmationEmail(order) { console.log('Email sent for', order.id); }\nfunction updateInventory(order)       { console.log('Inventory updated for', order.id); }\nfunction notifyWarehouse(order)       { console.log('Warehouse notified for', order.id); }\norderEvents.emit('order:placed', { id: 'ORD-99' });\n\n// ── Needless abstraction: over-engineered for one endpoint ─────\n// BAD — 4 layers to serve GET /users\nclass BaseController    { handle() {} }\nclass AbstractCrud      extends BaseController { list() {} }\nclass GenericResource   extends AbstractCrud  { paginate() {} }\nclass UserController    extends GenericResource {\n  list() { return [{ id: 1 }]; }  // the only real work\n}\n// GOOD — one file, no hierarchy\nfunction listUsers() { return [{ id: 1 }]; } // done. extend when a second endpoint proves the pattern\nconsole.log(listUsers());\n\n// ── YAGNI: add the abstraction at the second concrete use case ─\n// First endpoint: plain function\n// function listUsers() { ... }\n//\n// Second endpoint appears, duplication is real:\n// function listOrders() { ... } // same pagination logic duplicated\n//\n// NOW extract:\n// function buildListHandler(queryFn) { return () => paginate(queryFn()); }\n// const listUsers  = buildListHandler(fetchUsers);\n// const listOrders = buildListHandler(fetchOrders);\n// The abstraction is justified by the second, concrete use case.",
+      "explanation": "Two code smells side-by-side: event emitter used for simple sequential logic (replace with direct calls) vs. justified fan-out (three unknown subscribers). Then the four-layer class hierarchy reduced to a single function — and the YAGNI rule for when abstraction finally earns its keep: the *second* concrete duplicate."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**The Rule of Three for abstraction:** tolerate the first occurrence, note the second, extract on the third. Patterns are prescriptions for real pain — the pain must exist and be *felt* before the prescription is filled. If you cannot point to two concrete cases where the abstraction saves work today, defer it. Future requirements almost never match the abstraction you pre-built; they match abstractions you extract once you see the real shape of the duplication."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Singleton as global state** is an anti-pattern: it hides coupling, prevents easy testing, and grows without discipline. Prefer injected, purpose-specific stores.",
+        "**Pattern fever** (Observer everywhere, Factory for everything) trades clarity for indirection. Use events only for true fan-out to unknown subscribers; use direct calls for known sequential steps.",
+        "**Premature Factory** adds a file and a class for zero net benefit. A Factory earns its keep when there are two or more concrete types determined at runtime.",
+        "**Needless abstraction layers** violate KISS and YAGNI. Flat, readable code with explicit logic is easier to debug than a four-level inheritance hierarchy that hides one function call.",
+        "**Refactor toward a pattern at the second concrete use case**, not in anticipation of one. The Rule of Three (tolerate → note → extract) prevents over-engineering.",
+        "**Senior judgment** is knowing that a pattern adds cost as well as benefit — and choosing not to use one is a valid, often correct, architectural decision."
+      ]
+    }
+  ],
+  "visualizer": { "type": "none", "caption": "" },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "A `AppState.getInstance()` Singleton holds `user`, `cartItems`, `theme`, and `featureFlags`. What is the primary problem?",
+      "type": "mcq",
+      "options": [
+        "Singleton is always an anti-pattern and should never be used",
+        "Unrelated concerns are co-located, creating hidden coupling between modules that mutate it",
+        "The getInstance method is too slow for production use",
+        "It violates the Open/Closed Principle because new fields require editing the class"
+      ],
+      "correct": 1,
+      "explanation": "The anti-pattern is using Singleton as a global state dump. Unrelated modules (auth, cart, UI, ops) all read and mutate one object — any change requires auditing all consumers, and tests cannot reset individual concerns without hacking the private instance."
+    },
+    {
+      "id": "q2",
+      "question": "When is a Factory pattern *justified*?",
+      "type": "mcq",
+      "options": [
+        "Whenever you call `new ClassName()` more than once",
+        "When there are two or more concrete types determined at runtime, or complex initialisation that must not leak to call sites",
+        "Always — Factory is best practice for every object creation",
+        "When the class name is longer than 10 characters"
+      ],
+      "correct": 1,
+      "explanation": "Factory earns its keep with multiple concrete types (runtime dispatch) or complex creation logic. A Factory that only calls `new User(data)` adds indirection for zero benefit — the plain constructor is sufficient."
+    },
+    {
+      "id": "q3",
+      "question": "You are debugging a pipeline where step1 emits an event, step2 listens and emits another, step3 listens to that. What is the key problem?",
+      "type": "mcq",
+      "options": [
+        "EventEmitter is too slow for pipelines",
+        "Events cannot carry data between steps",
+        "Control flow is invisible — understanding order requires tracing registrations across files",
+        "The pattern violates DRY because each step is defined separately"
+      ],
+      "correct": 2,
+      "explanation": "Pattern fever applied to sequential logic: events hide control flow. A direct function call sequence `step1(); step2(); step3();` is readable, debuggable, and requires no event registration tracing. Reserve events for unknown subscribers."
+    },
+    {
+      "id": "q4",
+      "question": "What does YAGNI advise about building a plugin architecture before any plugin is requested?",
+      "type": "mcq",
+      "options": [
+        "Build it now to be safe — changing architecture later is expensive",
+        "Don't build it — only add abstraction when a second concrete use case requires it",
+        "Use the Facade pattern to hide the complexity",
+        "Build it in a separate module so it does not affect current code"
+      ],
+      "correct": 1,
+      "explanation": "YAGNI (You Aren't Gonna Need It): abstractions built in anticipation of requirements almost never match the real shape when requirements arrive. The cost is immediate; the benefit is speculative. Defer until the second concrete use case proves the abstraction."
+    },
+    {
+      "id": "q5",
+      "question": "A codebase has `BaseController → AbstractCrudController → GenericResourceController → UserController` to serve four endpoints. What is the most likely problem?",
+      "type": "mcq",
+      "options": [
+        "The hierarchy violates LSP because subtypes change parent behaviour",
+        "Needless abstraction: four layers of indirection hide trivial logic, violating KISS",
+        "The Singleton pattern is being misapplied",
+        "The chain violates DRY because each layer repeats the parent"
+      ],
+      "correct": 1,
+      "explanation": "KISS violation: each inheritance layer adds indirection without simplifying. A developer must trace four files to understand one endpoint. Flat structures (a plain function or simple class) are easier to read and debug when the complexity doesn't justify the hierarchy."
+    },
+    {
+      "id": "q6",
+      "question": "The 'Rule of Three' for abstraction says to extract on the third occurrence. What should you do on the second?",
+      "type": "mcq",
+      "options": [
+        "Extract immediately — two occurrences confirm a pattern",
+        "Delete one of the two duplicates to enforce DRY",
+        "Note the duplication but tolerate it — wait for the third to confirm the real shape",
+        "Raise a lint error and block the PR"
+      ],
+      "correct": 2,
+      "explanation": "Rule of Three: tolerate the first, note the second, extract on the third. Extracting too early locks you into an abstraction that may not fit the third case. The third occurrence reveals the real varying axis and justifies the extraction cost."
+    },
+    {
+      "id": "q7",
+      "question": "What is 'pattern fever'?",
+      "type": "mcq",
+      "options": [
+        "Applying patterns inconsistently across a codebase",
+        "Applying design patterns obsessively to every problem, adding indirection without solving real pain",
+        "Using deprecated patterns from the original GoF book",
+        "Mixing multiple patterns in a single class"
+      ],
+      "correct": 1,
+      "explanation": "Pattern fever: treating design patterns as goals rather than tools. The result is code with more abstraction layers than logic — harder to read than the naive solution it replaced. Patterns are prescriptions for real pain, not architectural aspirations."
+    },
+    {
+      "id": "q8",
+      "question": "When *is* the Observer / EventEmitter pattern justified?",
+      "type": "mcq",
+      "options": [
+        "When steps in a sequential pipeline need to communicate",
+        "When you want to avoid writing direct function calls",
+        "When there are multiple unknown subscribers who all need to react to an event",
+        "When the subscriber and publisher are in the same file"
+      ],
+      "correct": 2,
+      "explanation": "Observer is justified for genuine fan-out: the publisher does not know the subscribers, and the subscriber list may grow independently. If you always know the subscriber, a direct call is simpler and clearer."
+    },
+    {
+      "id": "q9",
+      "question": "To fix a Singleton global state anti-pattern, the best approach is to:",
+      "type": "mcq",
+      "options": [
+        "Add a `reset()` method to the Singleton for tests",
+        "Split state by concern into focused, injectable stores that are passed as dependencies",
+        "Convert the Singleton to a static class with only static methods",
+        "Use a second Singleton to hold the test state"
+      ],
+      "correct": 1,
+      "explanation": "Splitting by concern and injecting as dependencies eliminates hidden coupling. Tests can pass fresh store instances without Singleton teardown. Each store has a clear responsibility and a bounded surface area for mutations."
+    },
+    {
+      "id": "q10",
+      "question": "A senior engineer reviews a PR and says 'This abstraction is correct but premature — ship the inline solution.' What principle are they applying?",
+      "type": "mcq",
+      "options": [
+        "DRY — the inline code will be duplicated later",
+        "YAGNI — the abstraction's benefit is speculative; the inline cost is real and shipping now",
+        "LSP — the abstraction may not honour the parent contract",
+        "SRP — the abstraction mixes concerns"
+      ],
+      "correct": 1,
+      "explanation": "YAGNI applied with senior calibration: the abstraction may be correct in shape but adds maintenance overhead before a second use case proves it necessary. Inline code is simpler, ships faster, and can be extracted later when the real duplication shape is known."
+    }
+  ]
+}

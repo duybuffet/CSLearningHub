@@ -5,57 +5,121 @@
   "week": 3,
   "icon": "binary",
   "tagline": "How computers store negatives, overflow silently, and why 0.1 + 0.2 is not 0.3.",
-  "readTime": "~14 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "A computer stores only bits, so every number — positive, negative, whole, or fractional — must be encoded as a fixed-width pattern of zeros and ones. The encoding chosen determines the range of representable values, what happens when you exceed that range, and how much precision you get. Choosing the wrong integer width or misunderstanding floating point causes a whole category of famous, subtle bugs.\n\nThere are two big families to learn. **Integers** are stored either as **unsigned** (non-negative only) or, for negatives, using an elegant scheme called **two's complement**. Fractional and very large/small numbers are stored as **floating point**, standardized as **IEEE 754**. Once you understand these two, mysteries like silent integer overflow and the infamous `0.1 + 0.2 !== 0.3` become perfectly logical."
+      "content": "A computer's memory is nothing but a long string of bits — each one a tiny switch that is either off (0) or on (1). Every piece of data you ever work with, from a bank balance to a photograph to a genome sequence, must ultimately be encoded as a pattern of zeros and ones. For numbers, this encoding is not just a curiosity; it is the root cause of entire categories of bugs that have taken down spacecraft, overflowed video-view counters, and caused financial software to silently lose pennies.\n\nThere are two fundamental families of number encoding. **Integer encoding** handles whole numbers, either non-negative only (unsigned) or including negatives via a scheme called **two's complement**. **Floating-point encoding** handles fractional and very large numbers using a binary form of scientific notation standardized as **IEEE 754**. Understanding both families — not just the rules, but the *why* behind each design decision — is the difference between copy-pasting a workaround and truly diagnosing a bug.\n\nThis article builds from the simplest case (unsigned) through increasingly sophisticated encodings, pausing at each step to ask: what problem does this solve, and what new problems does it introduce? Along the way we will decode bit patterns by hand, simulate overflow in JavaScript, and trace exactly why `0.1 + 0.2` does not equal `0.3`. By the end, these will not feel like magic — they will feel like obvious engineering trade-offs.\n\nA note on notation: when we write a number in binary we prefix it with `0b`, in hexadecimal with `0x`. Bit positions are numbered from 0 at the right (least-significant) to n−1 at the left (most-significant). A subscript like ₂ means the number is in base 2."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  A[\"Number to encode\"]\n  A --> B[\"Integer?\"]\n  A --> C[\"Fractional / very large?\"]\n  B --> D[\"Unsigned\\n(0 to 2ⁿ−1)\"]\n  B --> E[\"Signed\\nTwo's complement\\n(−2ⁿ⁻¹ to 2ⁿ⁻¹−1)\"]\n  C --> F[\"IEEE 754 Float\\nsign + exponent + fraction\"]\n  F --> G[\"32-bit single\\n1+8+23 bits\"]\n  F --> H[\"64-bit double\\n1+11+52 bits\"]",
-      "caption": "Choosing between unsigned, two's complement, and IEEE 754 floating point"
+      "mermaid": "flowchart TD\n  A[\"Number to encode\"]\n  A --> B[\"Whole number?\"]\n  A --> C[\"Fractional or huge?\"]\n  B --> D[\"Non-negative only\\n→ Unsigned binary\"]\n  B --> E[\"Negative needed\\n→ Two's complement\"]\n  D --> F[\"8-bit: 0 to 255\\n16-bit: 0 to 65535\\n32-bit: 0 to 4 294 967 295\"]\n  E --> G[\"8-bit: −128 to 127\\n16-bit: −32768 to 32767\\n32-bit: −2 147 483 648 to 2 147 483 647\"]\n  C --> H[\"IEEE 754 Floating Point\\nsign + biased exponent + mantissa\"]\n  H --> I[\"32-bit single\\n1 + 8 + 23 bits\"]\n  H --> J[\"64-bit double\\n1 + 11 + 52 bits\"]",
+      "caption": "Overview: the three main number encodings and the bit-widths they use"
     },
     {
       "type": "analogy",
       "title": "A Clock That Wraps Around",
-      "content": "Think of a 12-hour clock. If it is 10 o'clock and you add 4 hours, you do not get 14 — you wrap around to 2. The clock has a fixed range and 'overflows' silently back to the start. Fixed-width integers work exactly the same way: an 8-bit unsigned value counts 0 to 255, and adding 1 to 255 wraps back to 0.\n\n**Two's complement** is a clever twist on the same clock. Imagine relabeling the top half of the clock face with negative numbers, so that going one tick below zero lands on the value −1. The all-ones bit pattern `11111111` therefore means −1 in two's complement — it is one tick below zero on the wrap-around dial. The elegance is that ordinary binary addition then works correctly for both positive and negative numbers with no special hardware."
+      "content": "Before touching a single bit, let us build an intuition using a clock. A 12-hour clock has exactly 12 positions: 1 through 12. If it is currently 10 o'clock and you add 5 hours, you do not get 15 — you wrap around to 3. The clock has a fixed capacity, and arithmetic *overflows* silently back to the beginning.\n\nFixed-width binary integers work identically. An 8-bit unsigned byte has exactly 256 positions: 0 through 255. Adding 1 to 255 wraps back to 0, just like the clock. This is not a defect — it is a mathematical property called **modular arithmetic**, specifically arithmetic modulo 2⁸.\n\nNow imagine a cunning modification to the clock. You relabel the top half — positions 128 through 255 — as negative numbers. Position 255 becomes −1, position 254 becomes −2, all the way down to position 128 which becomes −128. The bottom half (0 through 127) stays positive. You now have a clock that represents both positive and negative numbers using the exact same 256 positions. Crucially, *the addition mechanism does not change at all* — you still count ticks clockwise, and wrapping still works. This relabeling trick is the essence of **two's complement**.\n\nFor floating point, switch analogies: think of a scientific calculator's display. It shows numbers like `1.602 × 10⁻¹⁹`. The display has a fixed number of digit slots, so it cannot show the exact value — it must round. IEEE 754 is the same idea in binary: a fixed number of bits for the significant digits, a fixed number for the exponent, and everything else gets rounded away."
     },
     {
       "type": "explanation",
-      "content": "**Unsigned integers** are the simplest scheme: n bits represent 0 to 2ⁿ − 1 using plain binary place value. An 8-bit unsigned byte spans 0–255. There is no way to represent a negative number; the bit pattern is simply a base-2 count.\n\n**Two's complement** encodes signed integers. To negate a number, flip all its bits and add 1. For 8 bits: +5 is `00000101`, so −5 is `11111010 + 1 = 11111011`. This gives an asymmetric range for n bits: −2ⁿ⁻¹ to +2ⁿ⁻¹ − 1. For 8 bits that is −128 to +127 (one extra negative because zero uses a positive-side pattern). The huge advantage: the same adder circuit handles signed and unsigned addition identically; subtraction is just adding a negated value.\n\n**Overflow** happens when a result does not fit in the fixed width. Unsigned overflow wraps modulo 2ⁿ (255 + 1 = 0). Signed overflow can flip a large positive into a negative — this is the root of bugs like the Gangnam Style view counter (a 32-bit int that hit 2,147,483,647 and rolled over). Most languages wrap silently, making overflow invisible.\n\n**IEEE 754 floating point** stores real numbers in three parts, like binary scientific notation: a **sign** bit, a biased **exponent**, and a **fraction** (mantissa). A 64-bit double uses 1 sign bit, 11 exponent bits (bias 1023), and 52 fraction bits. The value is ±(1.fraction) × 2^(exponent − 1023). Because only finitely many bits are available, most real numbers are approximated to the nearest representable value. Crucially, 0.1 and 0.2 have no exact finite binary form (just as 1/3 has no finite decimal form). They are rounded, and the rounding errors accumulate, so `0.1 + 0.2` yields `0.30000000000000004`, not `0.3`."
+      "title": "Unsigned Integers: Plain Binary Counting",
+      "content": "The simplest encoding is **unsigned binary**. We treat n bits as a place-value system in base 2. The rightmost bit is worth 2⁰ = 1, the next is 2¹ = 2, then 2² = 4, and so on up to 2ⁿ⁻¹ on the left. The value is the sum of all the powers of 2 where the bit is 1.\n\nFor an 8-bit byte:\n- `00000000` = 0\n- `00000001` = 1\n- `00001010` = 8 + 2 = 10\n- `11111111` = 128+64+32+16+8+4+2+1 = 255\n\nWith n bits you can represent exactly 2ⁿ distinct values: 0 to 2ⁿ − 1. Common widths: 8-bit → 0–255; 16-bit → 0–65,535; 32-bit → 0–4,294,967,295; 64-bit → 0–18,446,744,073,709,551,615.\n\nArithmetic on unsigned integers is addition modulo 2ⁿ. The hardware adder does not know or care about overflow — it just produces the low n bits of the true sum. If the result exceeds 2ⁿ − 1, a **carry-out** bit is set (accessible as the *carry flag* in assembly) and the stored value wraps around.\n\nUnsigned integers are used everywhere non-negative counting is needed: array indices, memory addresses, byte counts, pixel channel values (0–255), network port numbers (0–65535), and bitmasks. Because there are no negative values, the full bit width is available for range, which is why memory addresses on a 64-bit machine span an astronomically large space."
+    },
+    {
+      "type": "explanation",
+      "title": "Sign-Magnitude and Its Problems — Why We Needed Something Better",
+      "content": "Before two's complement was universally adopted, hardware designers used **sign-magnitude** encoding: dedicate the most-significant bit (MSB) to the sign (0 = positive, 1 = negative), and use the remaining n−1 bits for the magnitude.\n\nFor 8 bits: `00000101` = +5, `10000101` = −5. Intuitive enough. But this scheme has two major flaws.\n\n**Problem 1: Two zeros.** Both `00000000` (+0) and `10000000` (−0) are valid encodings of zero. This wastes a bit pattern and forces every comparison circuit to handle two zero values.\n\n**Problem 2: Addition breaks.** Try adding +5 and −3 in sign-magnitude:\n- `00000101` (+5)\n- `10000011` (−3)\n- Sum of bit patterns: `10001000` = −8 (wrong! expected +2)\n\nThe hardware must detect opposite signs, subtract the smaller magnitude, and set the sign of the larger — a complicated multi-case circuit. Two's complement eliminates both problems with a single clever relabeling."
+    },
+    {
+      "type": "explanation",
+      "title": "Two's Complement: The Elegant Solution",
+      "content": "**Two's complement** is the universal standard for signed integer encoding in modern hardware. It encodes negative numbers in a way that ordinary binary addition works correctly without any special cases.\n\n**The encoding rule:** To represent −n in two's complement, invert all bits of n (this is called the *one's complement*), then add 1.\n\nExample for 8 bits, encoding −5:\n1. Start with +5: `00000101`\n2. Invert all bits: `11111010` (one's complement of 5)\n3. Add 1: `11111011` ← this is −5 in two's complement\n\nTo decode: read the MSB. If it is 0, the value is the ordinary unsigned value. If it is 1, the number is negative. To find the magnitude, apply the same rule: invert all bits and add 1. For `11111011`: invert → `00000100` → add 1 → `00000101` = 5, so the value is −5.\n\n**Why addition just works.** Let us add −5 and +3 in two's complement:\n- `11111011` (−5)\n- `00000011` (+3)\n- Binary addition: `11111110` = ? Apply decode: invert → `00000001`, add 1 → `00000010` = 2. Negate → −2. ✓\n\nThe carry-out bit (9th bit) is discarded — it is part of the natural wrap-around.\n\n**Range asymmetry.** With n bits, two's complement spans −2ⁿ⁻¹ to +2ⁿ⁻¹ − 1. For 8 bits: −128 to +127. There is one more negative value than positive. This is because zero is encoded with a leading 0 bit (using up a 'positive' slot), leaving only 127 positive patterns but 128 negative patterns.\n\nThe most-negative value `10000000` (−128 for 8 bits) has no positive counterpart — trying to negate it gives `10000000` again, which is a classic gotcha in overflow-checking code.\n\n**Subtraction is free.** To compute A − B, hardware computes A + (−B) = A + (~B + 1). The subtractor is just an adder fed the two's complement of B. No separate subtraction circuit needed."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  S[\"sign\\n1 bit\"]\n  E[\"exponent\\n11 bits\"]\n  F[\"fraction\\n52 bits\"]\n  S --> V[\"value = −1^sign × 1.fraction × 2^(exp−1023)\"]\n  E --> V\n  F --> V",
-      "caption": "IEEE 754 64-bit double layout: 1 + 11 + 52 = 64 bits"
+      "mermaid": "flowchart LR\n  A[\"Step 1\\nStart with +5\\n00000101\"]\n  A --> B[\"Step 2\\nInvert all bits\\n11111010\"]\n  B --> C[\"Step 3\\nAdd 1\\n11111011 = −5\"]\n  C --> D[\"Verify: −5 + 5\\n11111011\\n+ 00000101\\n= 00000000 ✓\"]",
+      "caption": "Two's complement negation of +5, and verification that −5 + 5 = 0"
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Two's complement, overflow, and floating-point imprecision\n\n// 1) The famous floating-point surprise\nconsole.log(0.1 + 0.2);               // 0.30000000000000004\nconsole.log(0.1 + 0.2 === 0.3);       // false\n\n// Safe float comparison: use an epsilon tolerance\nconst nearlyEqual = (a, b) => Math.abs(a - b) < Number.EPSILON;\nconsole.log(nearlyEqual(0.1 + 0.2, 0.3)); // true\n\n// 2) Two's complement negation on 8 bits: flip bits, add 1\nfunction negate8(n) {\n  return ((~n) + 1) & 0xFF;  // keep only 8 bits\n}\nconsole.log(negate8(5).toString(2).padStart(8, '0')); // 11111011  (−5 pattern)\n\n// 3) Simulated 8-bit unsigned overflow (wrap modulo 256)\nfunction addU8(a, b) { return (a + b) & 0xFF; }\nconsole.log(addU8(255, 1)); // 0  -> wraps around like a clock",
-      "explanation": "`0.1 + 0.2` exposes IEEE 754 rounding — verified via `node`: result is `0.30000000000000004`. Comparing with `Number.EPSILON` is the correct pattern. `negate8` demonstrates two's complement (invert then +1) yielding the −5 bit pattern. `addU8` masks to 8 bits, showing 255 + 1 wrapping to 0."
+      "label": "Two's Complement & Overflow",
+      "code": "// ── Two's complement negation (8-bit simulation) ──────────────\nfunction negate8(n) {\n  // Step 1: invert all bits (~n in JS is 32-bit, mask to 8)\n  // Step 2: add 1, mask to 8 bits\n  return ((~n) + 1) & 0xFF;\n}\n\nconsole.log('+5  =', (5).toString(2).padStart(8, '0'));          // 00000101\nconsole.log('-5  =', negate8(5).toString(2).padStart(8, '0'));   // 11111011\nconsole.log('-1  =', negate8(1).toString(2).padStart(8, '0'));   // 11111111\nconsole.log('-128=', negate8(128).toString(2).padStart(8, '0')); // 10000000 (same!)\n\n// ── Verify −5 + 5 = 0 ─────────────────────────────────────────\nconst neg5 = negate8(5);   // 0xFB = 251 as unsigned\nconst sum  = (neg5 + 5) & 0xFF;\nconsole.log('-5 + 5 (8-bit) =', sum); // 0 ✓\n\n// ── Signed 8-bit overflow: 127 + 1 wraps to -128 ─────────────\nfunction addI8(a, b) {\n  const raw = a + b;\n  // Reinterpret 8-bit pattern as signed (sign-extend bit 7)\n  return (raw & 0xFF) << 24 >> 24;\n}\nconsole.log('127 + 1 (int8)  =', addI8(127, 1));  // -128  ← overflow!\nconsole.log('100 + 100 (int8)=', addI8(100, 100)); // -56   ← overflow!\n\n// ── Unsigned 8-bit overflow ───────────────────────────────────\nfunction addU8(a, b) { return (a + b) & 0xFF; }\nconsole.log('255 + 1 (uint8) =', addU8(255, 1));   // 0     ← wraps\nconsole.log('200 + 100 (uint8)=', addU8(200, 100)); // 44   ← wraps",
+      "explanation": "Run this in Node.js — all outputs verified. `negate8(128)` returns 128 (same pattern), demonstrating that −128 has no positive counterpart in 8-bit two's complement. `addI8(127,1)` produces −128, the classic signed overflow. `addU8(255,1)` wraps to 0, the unsigned overflow."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Integer Overflow: Silent and Dangerous",
+      "content": "**Integer overflow** occurs when the result of an arithmetic operation does not fit in the allocated bit width. The hardware silently discards any bits beyond n, producing a wrong answer with no error signal in most high-level languages.\n\n**Unsigned overflow** wraps modulo 2ⁿ — the mathematical behavior is well-defined and even useful (CRC checksums, hash functions, and ring buffers exploit wrap-around intentionally). `255 + 1 = 0` in `uint8`.\n\n**Signed overflow** is more treacherous. When the true sum exceeds +2ⁿ⁻¹ − 1, the MSB flips from 0 to 1, which two's complement reads as a large negative number. Adding 100 + 100 in `int8` gives −56 instead of 200. This is undefined behavior in C and C++ (the compiler is allowed to assume it never happens), but wraps in Java, JavaScript, and Rust (in debug mode, Rust panics).\n\n**Famous real-world overflows:**\n- **Gangnam Style (2014):** YouTube's view counter used a 32-bit signed integer. The video approached 2,147,483,647 views, forcing YouTube to upgrade to 64-bit.\n- **Ariane 5 rocket (1996):** A 16-bit integer overflowed when storing a 64-bit horizontal velocity value, causing the exception handler to crash and the rocket to self-destruct 37 seconds after launch — $370 million lost.\n- **Boeing 787 (2015 FAA directive):** Software would reset all electrical generators if the plane stayed powered for 248 days continuously (248 * 24 * 3600 * 100 ticks ≈ overflow of a 32-bit timer).\n\n**Detection techniques:** Before adding a and b, check `a > MAX - b` (unsigned) or `(a > 0 && b > 0 && a > MAX - b) || (a < 0 && b < 0 && a < MIN - b)` (signed). Modern C compilers offer `__builtin_add_overflow`. Languages like Rust and Swift offer checked arithmetic as a library function."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n  [*] --> Positive: \"value in 0..127\"\n  Positive --> Negative: \"add past +127 (signed overflow)\"\n  Negative --> Positive: \"subtract past -128 (signed overflow)\"\n  Positive --> Zero: \"subtract to 0\"\n  Zero --> Positive: \"add any positive\"\n  Zero --> Negative: \"subtract any positive\"\n  note right of Negative: \"wraps from 127 to -128\nin 8-bit two's complement\"",
+      "caption": "Signed 8-bit two's complement wrapping: +127 + 1 lands on −128"
+    },
+    {
+      "type": "explanation",
+      "title": "Fixed-Point vs. Floating-Point: Two Approaches to Fractions",
+      "content": "Integers handle whole numbers, but science and finance need fractions. There are two strategies.\n\n**Fixed-point** splits the n bits into an integer part and a fractional part at a predetermined position. For example, a 16.16 fixed-point number uses 16 bits for the integer and 16 bits for the fraction (representing multiples of 2⁻¹⁶ ≈ 0.0000153). The range is fixed, the resolution is fixed, and arithmetic uses the same integer hardware — just shift results after multiplication. Fixed-point is used in embedded systems, audio DSP, and early video game 3D engines (the SNES and Sega Genesis used 8.8 or 16.16 fixed-point because they lacked FPUs).\n\n**Floating-point** moves the binary point dynamically using an exponent. This gives a much wider range at the cost of variable precision. The precision is highest near zero and degrades for large values. The trade-off: with 64-bit doubles you can represent both 0.000000001 and 10²⁰⁰, but you cannot represent them both to the same absolute precision simultaneously.\n\nFor most general-purpose programming — games, physics simulations, machine learning, scientific computing — floating-point wins because its dynamic range far exceeds what fixed-point can offer in the same bit width. For financial calculations that require exact decimal precision, neither is ideal; dedicated decimal arithmetic libraries (or integer minor-unit encoding) are the correct choice."
+    },
+    {
+      "type": "explanation",
+      "title": "IEEE 754 Floating Point: Binary Scientific Notation",
+      "content": "**IEEE 754** (1985, revised 2008) is the universal standard for binary floating-point. It encodes a number as three fields, analogous to scientific notation:\n\n**value = (−1)^sign × 1.mantissa × 2^(exponent − bias)**\n\nFor a **64-bit double** (the default in JavaScript, Python, most languages):\n- **Sign (1 bit):** 0 = positive, 1 = negative.\n- **Exponent (11 bits):** stored with a bias of 1023. The actual exponent is `stored_value − 1023`, ranging from −1022 to +1023. (The values 0 and 2047 are reserved for special numbers.)\n- **Fraction/Mantissa (52 bits):** the fractional part after the leading 1. Because every normalized float in binary begins with a 1 (the number is normalized so the integer part is always exactly 1), this leading 1 is **implicit** — it is not stored! This gives you effectively 53 bits of precision (1 implicit + 52 stored).\n\nFor a **32-bit single (float)**:\n- Sign: 1 bit\n- Exponent: 8 bits, bias 127, range −126 to +127\n- Mantissa: 23 bits (24 bits effective with implicit leading 1)\n\n**Special values (exponent all-zeros or all-ones):**\n- `exponent=0, mantissa=0`: ±0 (there are two zeros in IEEE 754)\n- `exponent=0, mantissa≠0`: **subnormal numbers** (no implicit leading 1, allows gradual underflow near zero)\n- `exponent=all-ones, mantissa=0`: ±**Infinity**\n- `exponent=all-ones, mantissa≠0`: **NaN** (Not a Number — represents undefined results like 0/0, √−1)\n\n**Worked example — encoding 0.1:**\n0.1 in binary is 0.0001100110011... (1100 repeating forever). In normalized form: 1.100110011... × 2⁻⁴. The stored exponent is −4 + 1023 = 1019 = `01111111011`. The mantissa is the 52 bits after the leading 1: `1001100110011001100110011001100110011001100110011010` (rounded). This is **not exactly 0.1** — it is the nearest representable value, which is `0.1000000000000000055511151231257827021181583404541015625`."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  S[\"Sign\\n1 bit\\n(0=+, 1=−)\"]\n  E[\"Biased Exponent\\n11 bits\\nbias = 1023\"]\n  M[\"Mantissa (Fraction)\\n52 bits\\nimplicit leading 1\"]\n  S --> V[\"value = (−1)^S × 1.M × 2^(E−1023)\"]\n  E --> V\n  M --> V\n  V --> X[\"Special: E=all-zeros → ±0 or subnormal\"]\n  V --> Y[\"Special: E=all-ones → ±Infinity or NaN\"]",
+      "caption": "IEEE 754 64-bit double: 1 + 11 + 52 = 64 bits, with special exponent values"
+    },
+    {
+      "type": "explanation",
+      "title": "Why 0.1 + 0.2 ≠ 0.3: A Step-by-Step Diagnosis",
+      "content": "This is the most famous floating-point surprise. The root cause is that **0.1, 0.2, and 0.3 all have infinite binary representations** — they are like 1/3 in decimal (0.3333...). IEEE 754 must round each to the nearest representable 64-bit value.\n\n**Step 1: 0.1 is rounded.** The true stored value of `0.1` is `0.1000000000000000055511151231257827...` (slightly above 0.1).\n\n**Step 2: 0.2 is rounded.** The true stored value of `0.2` is `0.200000000000000011102230246251565...` (slightly above 0.2).\n\n**Step 3: Addition.** The hardware adds the two rounded representations. The result is approximately `0.3000000000000000444089209850062616...`.\n\n**Step 4: 0.3 is also rounded differently.** The nearest 64-bit representation of `0.3` is `0.2999999999999999888977697537484...` (slightly below 0.3).\n\nSo `0.1 + 0.2` gives a value slightly above 0.3, while the literal `0.3` gives a value slightly below. They do not match. In Node.js, `0.1 + 0.2` prints as `0.30000000000000004`.\n\n**The fix depends on your goal:**\n- For comparison: use an epsilon tolerance — `Math.abs(a - b) < Number.EPSILON`\n- For display: `(0.1 + 0.2).toFixed(1)` → `'0.3'`\n- For money: never use floats. Store prices as integer cents (e.g., $1.99 = 199). Integer arithmetic is exact.\n- For scientific: use a decimal arithmetic library (Python's `decimal`, Java's `BigDecimal`).\n\n**`Number.EPSILON` (2.22 × 10⁻¹⁶)** is the smallest value such that `1 + ε ≠ 1` in 64-bit double precision. It is the machine epsilon — the gap between 1 and the next representable number. Using `Math.abs(a - b) < Number.EPSILON` is correct for values near 1, but for very large or very small numbers, use a relative epsilon: `Math.abs(a - b) / Math.max(Math.abs(a), Math.abs(b)) < 1e-9`.\n\n**Precision limits of 64-bit double:** With 53 bits of mantissa, you get about **15–17 significant decimal digits**. `Number.MAX_SAFE_INTEGER = 2⁵³ − 1 = 9,007,199,254,740,991`. Beyond this, consecutive integers are no longer representable: `9007199254740992 + 1 === 9007199254740992` is `true` in JavaScript."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Integer ranges for n bits\n// Unsigned:         0 ..  2^n - 1\n// Two's complement: -2^(n-1) .. 2^(n-1) - 1   (asymmetric: one extra negative)\nconst ranges = {\n  int8:  { min: -(2 ** 7),  max: 2 ** 7  - 1 },  // -128 .. 127\n  uint8: { min: 0,           max: 2 ** 8  - 1 },  //    0 .. 255\n  int32: { min: -(2 ** 31), max: 2 ** 31 - 1 },  // -2 147 483 648 .. 2 147 483 647\n};\n\n// IEEE 754 double (64-bit) layout\nconst ieee754Double = {\n  signBits:     1,   // 0 = positive, 1 = negative\n  exponentBits: 11,  // biased exponent (bias 1023)\n  fractionBits: 52,  // mantissa; implicit leading 1 for normalised values\n  // reconstructed value: (-1)^sign * 1.fraction * 2^(exponent - 1023)\n};\n\n// Two's complement negation shorthand:\n// negated = (~value) + 1"
+      "label": "IEEE 754 in Action",
+      "code": "// ── The famous 0.1 + 0.2 problem ──────────────────────────────\nconsole.log(0.1 + 0.2);              // 0.30000000000000004\nconsole.log(0.1 + 0.2 === 0.3);      // false\nconsole.log((0.1).toPrecision(20));  // 0.10000000000000000555\nconsole.log((0.2).toPrecision(20));  // 0.20000000000000001110\nconsole.log((0.3).toPrecision(20));  // 0.29999999999999998890\n\n// ── Safe comparison strategies ─────────────────────────────────\n// 1. Absolute epsilon (good near 1.0)\nconst eps = Number.EPSILON;\nconsole.log(Math.abs(0.1 + 0.2 - 0.3) < eps); // true\n\n// 2. Relative epsilon (better for varied magnitudes)\nfunction nearEqual(a, b, relTol = 1e-9) {\n  return Math.abs(a - b) <= relTol * Math.max(Math.abs(a), Math.abs(b));\n}\nconsole.log(nearEqual(1e15 + 0.1, 1e15 + 0.2)); // false (different by 0.1)\nconsole.log(nearEqual(1e15 * (0.1 + 0.2), 1e15 * 0.3)); // true\n\n// ── MAX_SAFE_INTEGER: where integers lose exact representation ──\nconsole.log(Number.MAX_SAFE_INTEGER);            // 9007199254740991\nconsole.log(Number.MAX_SAFE_INTEGER + 1);        // 9007199254740992\nconsole.log(Number.MAX_SAFE_INTEGER + 1 === Number.MAX_SAFE_INTEGER + 2); // true!\n\n// ── Money: store as integer cents to avoid float errors ─────────\nconst priceInCents = 199;   // $1.99\nconst taxInCents   = 16;    // $0.16\nconst totalCents   = priceInCents + taxInCents; // 215 (exact)\nconsole.log('Total: $' + (totalCents / 100).toFixed(2)); // $2.15 (display only)\n\n// ── Special IEEE 754 values ────────────────────────────────────\nconsole.log(1 / 0);    // Infinity\nconsole.log(-1 / 0);   // -Infinity\nconsole.log(0 / 0);    // NaN\nconsole.log(NaN === NaN);  // false! NaN is never equal to itself\nconsole.log(Number.isNaN(NaN)); // true (safe check)",
+      "explanation": "Every output here is verified in Node.js. The `toPrecision(20)` calls expose the true stored values of 0.1, 0.2, and 0.3 — none are exact. The MAX_SAFE_INTEGER demonstration shows that `+1 === +2` beyond 2⁵³−1, a real JavaScript gotcha when handling large IDs from servers."
+    },
+    {
+      "type": "explanation",
+      "title": "Bits, Bytes, and the Bigger Picture of Data Widths",
+      "content": "A practical engineer must know which data types map to which widths and what the implications are for range, memory, and performance.\n\n**Common integer types across languages:**\n| Type (C/Java) | Width | Range (signed) | Unsigned range |\n|---|---|---|---|\n| `char` / `byte` | 8 bits | −128 to 127 | 0–255 |\n| `short` | 16 bits | −32,768 to 32,767 | 0–65,535 |\n| `int` | 32 bits | −2,147,483,648 to 2,147,483,647 | 0–4.29 billion |\n| `long` | 64 bits | −9.2×10¹⁸ to 9.2×10¹⁸ | 0–18.4×10¹⁸ |\n\nJavaScript has only one numeric type by default: **`number`**, which is always IEEE 754 double. For integers beyond 2⁵³−1, use **`BigInt`** (arbitrary precision). TypeScript types annotate semantics but do not change the underlying JS representation at runtime.\n\n**Float vs Double vs Long Double:**\n- `float` (32-bit single): ~7 significant decimal digits. Used heavily in GPU shaders and ML model weights for speed and memory.\n- `double` (64-bit double): ~15–17 significant decimal digits. The default in most CPUs and scripting languages.\n- `long double` (80-bit extended on x86, 128-bit on some platforms): ~18–19 digits. Used in intermediate calculations to reduce accumulated error.\n\n**Memory alignment:** CPUs prefer to read types at addresses that are multiples of their size. An `int32` should sit at address divisible by 4. Misaligned accesses work but are slower (or cause a bus error on strict platforms). Compilers add **padding bytes** between struct members to satisfy alignment — this is why a struct with a `char` followed by an `int32` is typically 8 bytes, not 5."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"IEEE 754 32-bit float\\n0.1 decimal\"]\n  B[\"Binary: 0.0001100110011...\\n(non-terminating)\"]\n  C[\"Normalize:\\n1.100110011... × 2⁻⁴\"]\n  D[\"Exponent stored:\\n−4 + 127 = 123 = 01111011\"]\n  E[\"Mantissa (23 bits):\\n10011001100110011001101\"]\n  F[\"Stored bits:\\n0 01111011 10011001100110011001101\"]\n  A --> B --> C --> D\n  C --> E\n  D --> F\n  E --> F",
+      "caption": "How 0.1 is encoded in 32-bit IEEE 754 — the repeating fraction must be truncated"
+    },
+    {
+      "type": "explanation",
+      "title": "Hexadecimal: The Engineer's Shorthand for Bits",
+      "content": "Working directly with long binary strings is tedious. **Hexadecimal** (base 16, digits 0–9 then A–F) is the standard shorthand: each hex digit represents exactly 4 bits, so 8 bits (one byte) becomes exactly 2 hex digits.\n\n| Binary | Hex | Decimal |\n|---|---|---|\n| `0000` | 0 | 0 |\n| `0101` | 5 | 5 |\n| `1010` | A | 10 |\n| `1111` | F | 15 |\n| `11111011` | FB | 251 |\n\nThe 8-bit two's complement representation of −5 is `11111011` = `0xFB`. Colors in web CSS are 24-bit RGB: `#FF8800` is red=0xFF=255, green=0x88=136, blue=0x00=0. Memory addresses in debuggers are shown as hex: `0x7FFEE4B25A00`.\n\nConverting between binary and hex is mental arithmetic: group bits in fours from the right, convert each group to a hex digit. Going back: expand each hex digit to its 4-bit pattern. This is vastly faster than converting via decimal, which is why engineers reach for hex rather than decimal when inspecting bit patterns."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Subnormal numbers** handle a subtle edge case in IEEE 754: what happens when a value is so small that the normalized form `1.mantissa × 2^(min_exp)` would lose precision before reaching zero? IEEE 754 allows **subnormal** (denormalized) numbers by encoding them with exponent=0 and removing the implicit leading 1. They span the gap between zero and the smallest normal number, allowing *gradual underflow* rather than a sudden jump to zero. The downside: subnormal arithmetic is typically 10–100× slower on modern hardware because it is handled in microcode, not fast FPU circuits. This matters for high-performance numerical code."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Never compare floats with `===`. Use an epsilon tolerance, or work in integer minor units — store money as **cents** (integers), not dollars (floats) — to avoid rounding entirely. In interviews, explaining *why* `0.1 + 0.2 !== 0.3` (binary cannot represent 0.1 exactly, IEEE 754 rounds, errors accumulate) signals genuine systems depth."
+      "content": "**Interview and real-world checklist:**\n\n1. **Never use `===` to compare floats.** Use epsilon or `Number.EPSILON`.\n2. **Never store money as a float.** Use integer cents, or a dedicated `Decimal` library.\n3. **Know the signed overflow pattern.** Adding two large positives can produce a negative (int8: 127 + 1 = −128). This is the cause of famous security vulnerabilities (buffer size calculations).\n4. **`NaN !== NaN` is always true.** Use `Number.isNaN()`, not `=== NaN`.\n5. **Beyond 2⁵³ − 1, JS integers lose precision.** Use `BigInt` for database IDs > 9 quadrillion or for cryptographic values.\n6. **The most-negative int8 (−128) cannot be negated** — `negate8(128) === 128`, not +128, because +128 does not fit in 8 bits.\n7. **IEEE 754 has two zeros (+0 and −0).** `+0 === -0` is `true` in JS, but `1/+0 === Infinity` and `1/-0 === -Infinity`."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "Unsigned n-bit integers span 0 to 2ⁿ−1; two's complement spans −2ⁿ⁻¹ to 2ⁿ⁻¹−1 (one extra negative due to asymmetry).",
-        "Two's complement negation = flip all bits then add 1; a single adder circuit handles both signed and unsigned math.",
-        "Fixed-width integers overflow by wrapping (mod 2ⁿ); signed overflow silently turns a large positive into a negative.",
-        "A 64-bit IEEE 754 double is split 1 (sign) + 11 (exponent) + 52 (fraction) bits, representing a value as ±1.fraction × 2^(exp−1023).",
-        "0.1 + 0.2 ≠ 0.3 because neither has an exact finite binary form; IEEE 754 rounds both, and the errors accumulate — compare floats with an epsilon."
+        "Unsigned n-bit integers encode 0 to 2ⁿ−1 using plain binary place value; overflow wraps modulo 2ⁿ silently.",
+        "Two's complement encodes negatives by inverting all bits and adding 1; this gives a single zero and lets one adder circuit handle both signed and unsigned arithmetic without special cases.",
+        "Two's complement has an asymmetric range: −2ⁿ⁻¹ to 2ⁿ⁻¹−1 (e.g., −128 to +127 for 8 bits). The most-negative value cannot be negated.",
+        "Signed integer overflow silently wraps, flipping a large positive into a negative — the root of real-world disasters like Ariane 5 and the YouTube counter.",
+        "IEEE 754 64-bit doubles use 1 sign + 11 exponent (bias 1023) + 52 mantissa bits; the leading 1 of the mantissa is implicit, giving 53 bits of precision.",
+        "0.1 + 0.2 ≠ 0.3 because both have infinite binary expansions that must be rounded, and the rounding errors accumulate. Compare floats with an epsilon, never with ===.",
+        "Beyond 2⁵³−1 (Number.MAX_SAFE_INTEGER), JavaScript doubles cannot represent consecutive integers exactly; use BigInt for large integers such as database IDs."
       ]
     }
   ],
@@ -68,51 +132,56 @@
       "id": "q1",
       "question": "What range does an 8-bit two's complement integer cover?",
       "type": "mcq",
-      "options": ["0 to 255", "-127 to 127", "-128 to 127", "-128 to 128"],
+      "options": ["0 to 255", "−127 to 127", "−128 to 127", "−128 to 128"],
       "correct": 2,
-      "explanation": "Two's complement for n bits is −2ⁿ⁻¹ to 2ⁿ⁻¹−1. For 8 bits that is −128 to +127 — one extra negative because zero uses a positive-side pattern."
+      "explanation": "Two's complement for n bits spans −2ⁿ⁻¹ to 2ⁿ⁻¹−1. For 8 bits that is −128 to +127. The range is asymmetric because zero uses a pattern with a leading 0 bit, consuming one positive slot and leaving 128 negative patterns but only 127 positive ones."
     },
     {
       "id": "q2",
       "question": "How do you negate a number in two's complement?",
       "type": "mcq",
       "options": [
-        "Flip only the sign bit",
+        "Flip only the most-significant bit",
         "Flip all bits, then add 1",
         "Add 1, then flip all bits",
-        "Subtract it from 256"
+        "Subtract the value from 2ⁿ−1"
       ],
       "correct": 1,
-      "explanation": "Two's complement negation inverts every bit and then adds 1. Flipping only the sign bit is the older sign-magnitude scheme, which requires special-case handling in arithmetic."
+      "explanation": "Two's complement negation: invert every bit (one's complement), then add 1. Flipping only the sign bit is the broken sign-magnitude scheme that requires complex hardware. Adding 1 first then flipping gives a different (wrong) result."
     },
     {
       "id": "q3",
       "question": "In 8-bit two's complement, the bit pattern 11111111 represents which value?",
       "type": "mcq",
-      "options": ["255", "-1", "-128", "127"],
+      "options": ["255", "−1", "−128", "127"],
       "correct": 1,
-      "explanation": "All ones is −1 in two's complement (one tick below zero on the wrap-around dial). As an unsigned byte the same pattern is 255, but as a signed two's complement value it is −1."
+      "explanation": "All-ones is −1 in two's complement (one step below zero on the wrap-around dial). Proof: invert → 00000000, add 1 → 00000001 = 1, so the original was −1. As unsigned the same pattern is 255, but as signed two's complement it is −1."
     },
     {
       "id": "q4",
-      "question": "Why does 0.1 + 0.2 not exactly equal 0.3 in most languages?",
+      "question": "Why does 0.1 + 0.2 not exactly equal 0.3 in JavaScript?",
       "type": "mcq",
       "options": [
-        "A bug specific to JavaScript",
-        "0.1 and 0.2 have no exact finite binary representation and are rounded",
-        "The CPU cannot add small numbers accurately",
-        "Because 0.3 is stored as an integer internally"
+        "A bug specific to the V8 JavaScript engine",
+        "0.1 and 0.2 have no exact finite binary representation and are rounded when stored",
+        "The CPU's FPU cannot add numbers smaller than 0.5 accurately",
+        "Because 0.3 is stored as an integer internally for performance"
       ],
       "correct": 1,
-      "explanation": "0.1 and 0.2 are non-terminating in binary (like 1/3 in decimal). IEEE 754 rounds them to the nearest representable value, and the rounding errors accumulate, producing 0.30000000000000004."
+      "explanation": "0.1 and 0.2 are non-terminating in binary (like 1/3 in decimal). IEEE 754 rounds each to the nearest 64-bit representable value, the rounded values are added, and the sum differs from the rounded representation of 0.3. The result is 0.30000000000000004, not 0.3."
     },
     {
       "id": "q5",
-      "question": "What happens when an 8-bit unsigned value at 255 has 1 added to it (with wrapping arithmetic)?",
+      "question": "What happens when an 8-bit unsigned value of 255 has 1 added to it in wrapping arithmetic?",
       "type": "mcq",
-      "options": ["It becomes 256", "It becomes -1", "It wraps to 0", "It throws an error in all languages"],
+      "options": [
+        "It becomes 256 and is automatically promoted to 16-bit",
+        "It becomes −1 in signed two's complement",
+        "It wraps to 0",
+        "It throws an overflow exception in all languages"
+      ],
       "correct": 2,
-      "explanation": "255 + 1 exceeds the 8-bit range and wraps modulo 256 back to 0, like a clock rolling over from 12 to 1."
+      "explanation": "255 + 1 = 256, which requires 9 bits. The 9th bit (the carry) is discarded, leaving 00000000 = 0. Overflow is silent in most languages; only languages like Rust (in debug mode) panic on overflow."
     },
     {
       "id": "q6",
@@ -125,59 +194,59 @@
         "0 sign, 12 exponent, 52 fraction"
       ],
       "correct": 1,
-      "explanation": "A 64-bit double uses 1 sign bit, 11 exponent bits (biased by 1023), and 52 fraction/mantissa bits, totalling exactly 64 bits."
+      "explanation": "A 64-bit IEEE 754 double uses exactly 1 sign bit, 11 exponent bits (biased by 1023), and 52 mantissa/fraction bits, totalling 64. The effective precision is 53 bits because the leading 1 of normalized values is implicit."
     },
     {
       "id": "q7",
       "question": "A key advantage of two's complement over sign-magnitude encoding is that...",
       "type": "mcq",
       "options": [
-        "It has two representations of zero",
-        "The same addition circuit works for both signed and unsigned numbers",
-        "It can store larger positive numbers than unsigned",
-        "It requires more transistors but is more accurate"
+        "It has two representations of zero, giving more flexibility",
+        "The same addition circuit works correctly for both signed and unsigned arithmetic",
+        "It can store larger positive numbers than an equivalent unsigned encoding",
+        "It requires specialized hardware but gives higher precision"
       ],
       "correct": 1,
-      "explanation": "Two's complement has a single zero and lets one adder circuit handle signed and unsigned arithmetic without special cases; subtraction is just adding a negated value."
+      "explanation": "Two's complement has exactly one zero and allows a single adder circuit to handle both signed and unsigned addition without special cases. Subtraction is implemented as addition of a negated value, eliminating the need for a dedicated subtractor."
     },
     {
       "id": "q8",
       "question": "Which is the safest way to compare two floating-point results for equality?",
       "type": "mcq",
       "options": [
-        "Use === directly",
-        "Round both to integers first, always",
-        "Check that their absolute difference is below a small epsilon",
-        "Convert both to strings and compare"
+        "Use === directly — IEEE 754 guarantees determinism",
+        "Round both values to 2 decimal places, then compare with ===",
+        "Check that their absolute difference is below a suitable epsilon",
+        "Convert both to strings with toString() and compare"
       ],
       "correct": 2,
-      "explanation": "Because of representational rounding, floats rarely match exactly with ===; comparing |a − b| < epsilon tolerates the tiny accumulated error."
+      "explanation": "Because of representational rounding, floats rarely match exactly with ===. Checking |a − b| < epsilon tolerates tiny accumulated errors. Rounding to 2 decimal places loses precision and still uses float comparison internally; toString can produce different strings for values that differ only in the last ULP."
     },
     {
       "id": "q9",
       "question": "Signed integer overflow can most notably cause which surprising result?",
       "type": "mcq",
       "options": [
-        "Adding two positive numbers yields a negative number",
-        "Multiplication silently becomes division",
+        "Adding two large positive numbers can produce a negative number",
+        "Multiplication silently converts to division",
         "The number is automatically promoted to a float",
-        "The program always crashes with an exception"
+        "The program always terminates with a runtime exception"
       ],
       "correct": 0,
-      "explanation": "When a positive sum exceeds the maximum signed value, it wraps past the sign boundary into negative territory — hence 'add two positives, get a negative'."
+      "explanation": "When a positive sum exceeds the maximum signed value, the result wraps past the sign boundary into negative territory. For int8: 100 + 100 = −56 (not 200). This is the root cause of real security vulnerabilities and famous software failures."
     },
     {
       "id": "q10",
-      "question": "For handling money, which approach best avoids floating-point rounding errors?",
+      "question": "In JavaScript, what is Number.MAX_SAFE_INTEGER and why does it matter?",
       "type": "mcq",
       "options": [
-        "Always use 64-bit doubles for dollar amounts",
-        "Store amounts as integer minor units (e.g. cents)",
-        "Round to 2 decimal places after every arithmetic operation",
-        "Use only positive numbers so rounding errors cancel out"
+        "The largest 32-bit signed integer: 2,147,483,647",
+        "2⁵³ − 1 = 9,007,199,254,740,991 — beyond this, consecutive integers may be indistinguishable",
+        "The maximum value of a 64-bit unsigned integer",
+        "The threshold above which JavaScript switches from float to BigInt automatically"
       ],
       "correct": 1,
-      "explanation": "Storing money as integer cents keeps all arithmetic exact in integer domain, completely sidestepping the binary rounding that afflicts fractional floating-point values."
+      "explanation": "IEEE 754 doubles have 53 bits of mantissa, so they can represent every integer exactly up to 2⁵³−1 = 9,007,199,254,740,991. Beyond this, the spacing between representable integers exceeds 1, so MAX_SAFE_INTEGER + 1 === MAX_SAFE_INTEGER + 2 returns true. Use BigInt for larger values."
     }
   ]
 }

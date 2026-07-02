@@ -5,57 +5,111 @@
   "week": 1,
   "icon": "memory",
   "tagline": "Why computers use a pyramid of storage — and how the gap between speed and size shapes every performance decision.",
-  "readTime": "~10 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "No single memory technology is simultaneously fast, large, and cheap. Registers are lightning fast but hold only a handful of values. Hard drives store terabytes but are thousands of times slower than RAM. The solution is a **hierarchy** — fast-and-small at the top, slow-and-large at the bottom.\n\nEvery performance bottleneck you will ever debug traces back to where in this hierarchy your data lives. Understand the hierarchy and cache misses, database tuning, and I/O optimisation all start making sense."
-    },
-    {
-      "type": "diagram",
-      "mermaid": "flowchart TD\n  R[\"Registers\\n~0.3 ns / 1 KB\"] --> L1[\"L1 Cache\\n~1 ns / 32-64 KB\"]\n  L1 --> L2[\"L2 Cache\\n~4 ns / 256 KB\"]\n  L2 --> L3[\"L3 Cache\\n~12 ns / 8-32 MB\"]\n  L3 --> RAM[\"RAM\\n~80 ns / 8-64 GB\"]\n  RAM --> SSD[\"SSD\\n~0.1 ms / 1-4 TB\"]\n  SSD --> HDD[\"HDD\\n~10 ms / 2-20 TB\"]",
-      "caption": "The memory pyramid — each level is roughly 3-10x slower but orders of magnitude larger than the one above."
+      "content": "There is a fundamental tension at the heart of computer memory: the faster you want storage to be, the smaller and more expensive it must be. Registers are lightning-fast but can hold only a handful of values. Main memory (RAM) holds gigabytes but is hundreds of times slower. Disk storage holds terabytes but is thousands of times slower still.\n\nComputer architects solved this by building a **memory hierarchy** — a pyramid of storage layers, each level faster, smaller, and more expensive than the one below it. When a CPU needs data, it looks first in the fastest layer; only if the data is not there does it escalate to slower storage. Done well, this gives programs the illusion of having both fast *and* large memory — the combination that neither extreme could provide alone.\n\nUnderstanding the memory hierarchy is arguably the single most impactful thing you can learn for writing fast programs. A cache-friendly loop can be 10-100x faster than a cache-unfriendly one doing the same number of arithmetic operations. The difference is almost never the computation — it is whether data is in cache.\n\nThis chapter covers: the levels of the hierarchy from registers to disk, the latency and capacity numbers you should know by heart, the principle of locality (why caches work at all), cache lines and how data is actually transferred, cache hits and misses and their cost, and practical programming patterns that exploit the hierarchy. We will also touch on virtual memory, NUMA architectures, and what modern SSDs change about traditional assumptions."
     },
     {
       "type": "analogy",
-      "title": "Your Desk, Bookshelf, and Library",
-      "content": "Registers are papers on your desk — instantly in hand. L1/L2 cache is the shelf behind your chair — seconds away. RAM is the filing cabinet across the room — a short walk. SSD is the office library one floor up — a minute's trip. HDD is a warehouse — best retrieved overnight. You keep what you use most on the desk; everything else is retrieved on demand and placed there temporarily."
+      "title": "The Desk, the Filing Cabinet, the Warehouse",
+      "content": "Imagine you are a researcher working on a project. Your **desk** holds the papers you are working with right now — maybe five documents. You can grab any of them in one second. When you need a different document, you walk to your **filing cabinet** (three steps away) and retrieve it in ten seconds. If the document is not in the filing cabinet, it might be in the **office archive room** down the hallway — that takes two minutes. Worst case, it is in the **off-site warehouse** across the city — possibly overnight delivery.\n\nYour desk is the CPU's registers. The filing cabinet is L1 cache. The archive room is L2/L3 cache. The warehouse is RAM or disk. The key insight: documents you use frequently tend to stay on your desk. The filing cabinet holds recent documents. The warehouse holds everything ever written.\n\nThe researcher works efficiently not by making the warehouse faster (enormously expensive) but by keeping frequently needed documents on the desk and filing cabinet. Computers do the same thing automatically — this is what a cache does."
     },
     {
       "type": "explanation",
-      "content": "**Latency vs. capacity tradeoff**: Faster memory requires more complex circuits and more physical space per bit, making it expensive. The hierarchy exploits the fact that programs tend to reuse the same data repeatedly (**temporal locality**) and access nearby memory locations together (**spatial locality**). Caches are designed around these patterns.\n\n**How caches work**: When the CPU requests data, hardware checks L1 first. A **cache hit** returns data in ~1–4 cycles. A **cache miss** escalates to L2, L3, then RAM — each miss adds tens to hundreds of cycles of stall. Data is loaded in fixed-size **cache lines** (typically 64 bytes), so fetching one byte brings the neighbouring 63 bytes too — exploiting spatial locality.\n\n**Practical impact**: Iterating an array sequentially is fast because each cache-line fetch brings the next few elements for free. Jumping around a linked list randomly is slow because each node likely lives in a different cache line — each access is a potential cache miss. This is why flat arrays consistently outperform linked lists in real benchmarks even though big-O complexity is the same."
+      "title": "The Levels of the Hierarchy",
+      "content": "From fastest to slowest, smallest to largest:\n\n**Registers** — On-die, inside the CPU. Access in 0.3 ns (sub-nanosecond). Capacity: 32-64 × 64-bit values = roughly 2-4 KB total. The only storage the ALU can directly operate on. Zero cache miss possible — they are the cache.\n\n**L1 Cache (Level 1)** — On-die, split into instruction cache (L1-I) and data cache (L1-D). Access in ~4 cycles = ~1-2 ns. Size: 32-64 KB per core. Private to each CPU core.\n\n**L2 Cache (Level 2)** — On-die, unified (instructions + data). Access in ~12 cycles = ~3-5 ns. Size: 256 KB to 1 MB per core. Private to each core on most architectures.\n\n**L3 Cache (Level 3, 'Last Level Cache')** — On-die (on the same chip package as the cores, but further away). Access in ~40-50 cycles = ~10-15 ns. Size: 8-64 MB, **shared** across all cores. A miss in L3 means going to RAM.\n\n**Main Memory (RAM — DRAM)** — Off-chip, connected via memory bus. Access in ~200 cycles = ~60-100 ns. Size: 8-256 GB typical. Volatile (loses data on power off). Every miss from L3 cache goes here.\n\n**NVMe SSD** — On a PCIe bus. Access in ~100 microseconds = ~100,000 ns. Size: 500 GB to several TB. Non-volatile (persists without power). 1000x slower than RAM.\n\n**HDD (Spinning Disk)** — Mechanical. Access in ~5-10 milliseconds = ~5,000,000-10,000,000 ns. Size: 1-20 TB. The slowest tier and the most capacity-per-dollar.\n\nThe ratios are staggering: L1 cache is ~50x faster than RAM, which is ~1000x faster than SSD, which is ~100x faster than HDD. If L1 cache access were one second, RAM access would be 50 seconds, SSD access would be 14 hours, and HDD access would be two months."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n  participant CPU\n  participant L1\n  participant RAM\n  CPU->>L1: request address 0x1000\n  L1-->>CPU: HIT - data returned in 1 ns\n  CPU->>L1: request address 0x9000\n  L1-->>RAM: MISS - escalate\n  RAM-->>L1: load 64-byte cache line\n  L1-->>CPU: data returned after ~80 ns",
-      "caption": "Cache hit vs. miss: a hit costs ~1 ns; a miss that reaches RAM costs ~80 ns — 80x slower."
+      "mermaid": "flowchart TD\n  REG[\"Registers\\n~0.3 ns | ~2 KB\\nPer core\"]\n  L1[\"L1 Cache\\n~1-2 ns | 32-64 KB\\nPer core\"]\n  L2[\"L2 Cache\\n~3-5 ns | 256 KB-1 MB\\nPer core\"]\n  L3[\"L3 Cache\\n~10-15 ns | 8-64 MB\\nShared\"]\n  RAM[\"Main Memory DRAM\\n~60-100 ns | 8-256 GB\\nShared\"]\n  SSD[\"NVMe SSD\\n~100 us | 500 GB-4 TB\\nPersistent\"]\n  HDD[\"HDD\\n~5-10 ms | 1-20 TB\\nPersistent\"]\n  REG --> L1 --> L2 --> L3 --> RAM --> SSD --> HDD",
+      "caption": "The memory hierarchy pyramid: speed decreases and capacity increases at each level. The CPU always checks from the top down."
+    },
+    {
+      "type": "explanation",
+      "title": "Why the Hierarchy Works: The Principle of Locality",
+      "content": "A cache would be useless if programs accessed memory completely randomly — you would almost never find data in the cache. Caches work because real programs exhibit two powerful statistical regularities, collectively called the **principle of locality**:\n\n**Temporal locality**: If a memory location is accessed, it is likely to be accessed again soon. A loop variable like `i` in `for (let i = 0; i < n; i++)` is accessed on every iteration. An object's method is called multiple times. Cache benefit: keep recently accessed data in fast storage because it will probably be needed again.\n\n**Spatial locality**: If a memory location is accessed, nearby locations are likely to be accessed soon. An array traversal accesses `arr[0]`, `arr[1]`, `arr[2]` in sequence. A struct's fields are stored contiguously and accessed together. Instructions in a program execute sequentially (mostly). Cache benefit: when fetching one location from slow memory, fetch nearby locations too — load a whole **cache line**.\n\nThese regularities are not magic — they arise from how programs are written:\n- Loops create temporal locality (same code and variables accessed repeatedly)\n- Arrays and sequential traversal create spatial locality\n- Function code and local variables are spatially clustered\n\nWhen a program violates locality — for example, by accessing memory in a random, scattered pattern — caches cannot help, and performance collapses. This is why column-major vs. row-major matrix traversal matters so much."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache Lines: The Unit of Cache Transfer",
+      "content": "Caches do not transfer data one byte at a time. Every time data is fetched from a lower memory level, it is brought in units called **cache lines** (also called cache blocks). A typical cache line is **64 bytes** on all modern x86, ARM, and RISC-V processors.\n\nThis means: when the CPU accesses `array[0]` (a 4-byte integer), the cache brings in `array[0]` through `array[15]` (all 64 bytes = 16 integers) in one transfer. Then `array[1]` through `array[15]` are already in cache — future accesses are free.\n\nCache lines have consequences for data structure design:\n\n**Array of Structs (AoS) vs. Struct of Arrays (SoA)**: Consider a game engine with 1000 entities, each with position (x, y, z) and health. AoS: `[{x,y,z,health}, {x,y,z,health}, ...]`. SoA: `{xs:[...], ys:[...], zs:[...], healths:[...]}`. If a loop only updates positions, SoA is cache-friendly: `xs`, `ys`, `zs` are contiguous. AoS wastes cache space bringing in `health` values you do not need.\n\n**False sharing**: In a multi-threaded program, if two threads write to variables that happen to be on the same cache line (even if the variables are logically unrelated), the cache line bounces between cores, destroying performance. The fix is to pad structures to cache line boundaries.\n\n**Cache capacity**: An 8 MB L3 cache holds 8 MB / 64 bytes = 131,072 cache lines. If your working set (the data accessed in a tight loop) fits in L3, most accesses will be cache hits. If it does not fit, you get constant cache evictions and misses."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  CPU[\"CPU requests\\narray index 0\"]\n  L1[\"L1 Cache\\nMISS\"]\n  RAM[\"RAM\\nFetch 64-byte cache line\\narray[0..15]\"]\n  CPU --> L1\n  L1 -- \"not found\" --> RAM\n  RAM -- \"64 bytes\" --> L1\n  L1 -- \"4 bytes\" --> CPU\n  CPU2[\"CPU requests\\narray index 1\"]\n  L1b[\"L1 Cache\\nHIT! array[1] already here\"]\n  CPU2 --> L1b",
+      "caption": "A cache miss fetches a full 64-byte cache line. Subsequent accesses to nearby addresses hit the cache — this is spatial locality in action."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache Hits, Misses, and Their Cost",
+      "content": "A **cache hit** occurs when the requested address is found in the cache. The access is satisfied from the cache at cache speed, and execution continues. A **cache miss** occurs when the requested address is not found. The cache must fetch the data from the next level — a process that stalls the CPU pipeline (or at minimum delays the dependent computation).\n\n**Miss penalty** is the cost of a miss: the extra cycles spent fetching from a slower level. Typical miss penalties on a 3 GHz CPU:\n- L1 miss → L2 hit: ~12 cycles\n- L2 miss → L3 hit: ~40 cycles\n- L3 miss → RAM: ~200 cycles\n- RAM miss → SSD (page fault): ~300,000 cycles\n\n**Miss rate** is the fraction of memory accesses that miss the cache. Combine: **AMAT** (Average Memory Access Time) = hit_time + miss_rate × miss_penalty. Even a 1% L1 miss rate can dominate if the miss penalty is 200 cycles.\n\n**Cache replacement policies**: When a cache is full and a new line must be brought in, an old line must be evicted. Common policies:\n- **LRU (Least Recently Used)**: Evict the line that has not been accessed for the longest time. Exploits temporal locality well but requires tracking access order.\n- **Pseudo-LRU**: A cheaper approximation used in practice.\n- **Random replacement**: Evict a random line. Surprisingly competitive with LRU for large caches.\n\n**Write policies**:\n- **Write-through**: Every write goes directly to the next level. Simple but generates many writes.\n- **Write-back**: Writes go only to cache; the line is only written to the next level when it is evicted. More efficient but requires a **dirty bit** to track modified lines."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache Organisation: Sets, Ways, and Associativity",
+      "content": "A cache is not a simple key-value store — it has a fixed structure that determines which cache line slots a given memory address can occupy.\n\n**Direct-mapped cache**: Each memory address maps to exactly one cache slot. Simple and fast (no search needed) but causes **conflict misses**: if two frequently accessed addresses map to the same slot, they evict each other repeatedly even though other slots are empty.\n\n**Fully associative cache**: A cache line can go into any slot. Eliminates conflict misses but requires checking all slots on every access — expensive in hardware.\n\n**Set-associative cache (n-way)**: A compromise. The cache is divided into sets; each memory address maps to exactly one set, but within that set it can go into any of n ways (slots). A 4-way set-associative cache checks 4 slots per lookup — fast in hardware with small associativity, and avoids most conflict misses.\n\nModern CPU caches:\n- L1 data cache: typically 4-way or 8-way set associative\n- L2: 8-way or 16-way\n- L3: 16-way or higher\n\nThe address bits are divided into three fields: **tag** (identifies which memory block), **set index** (which set in the cache to look in), and **block offset** (which byte within the cache line). The cache hardware extracts these fields and does a parallel comparison of the tag against all tags in the addressed set."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Demonstrate cache-friendly (row-major) vs cache-unfriendly (column-major) access\nconst SIZE = 1000;\nconst matrix = Array.from({ length: SIZE }, () => new Int32Array(SIZE));\n\n// Fill matrix\nfor (let r = 0; r < SIZE; r++)\n  for (let c = 0; c < SIZE; c++)\n    matrix[r][c] = r * SIZE + c;\n\n// CACHE-FRIENDLY: row-major (sequential memory)\nconst t1 = performance.now();\nlet sum1 = 0;\nfor (let r = 0; r < SIZE; r++)\n  for (let c = 0; c < SIZE; c++)\n    sum1 += matrix[r][c];         // adjacent in memory\nconsole.log('Row-major ms:', performance.now() - t1);\n\n// CACHE-UNFRIENDLY: column-major (strided memory)\nconst t2 = performance.now();\nlet sum2 = 0;\nfor (let c = 0; c < SIZE; c++)\n  for (let r = 0; r < SIZE; r++)\n    sum2 += matrix[r][c];         // jumps 1000 elements each step\nconsole.log('Col-major ms:', performance.now() - t2);\n// Column-major is typically 2-5x slower due to cache misses",
-      "explanation": "Both loops do identical work (O(n²) additions) but row-major access is cache-friendly because each Int32Array row is contiguous. Column-major jumps between rows, causing a cache miss nearly every access — visually identical code, dramatically different real-world performance."
+      "label": "Cache Demo",
+      "code": "// ── Demonstrating cache effects through access patterns ─────────\n// (In a real environment you would use performance.now() or perf counters;\n//  this simulates the latency model conceptually)\n\nconst SIZE = 1024 * 1024; // 1M integers = 4 MB\nconst arr = new Int32Array(SIZE);\n\n// Fill array\nfor (let i = 0; i < SIZE; i++) arr[i] = i;\n\n// SEQUENTIAL (cache-friendly): accesses arr[0], arr[1], arr[2] ...\n// Each cache line (64 bytes = 16 ints) is fetched once, then 15 more hits\nfunction sumSequential() {\n  let sum = 0;\n  for (let i = 0; i < SIZE; i++) sum += arr[i];\n  return sum;\n}\n\n// STRIDE-16 (cache-unfriendly): accesses arr[0], arr[16], arr[32] ...\n// Every access is in a different cache line — 16x more cache misses!\nfunction sumStride16() {\n  let sum = 0;\n  for (let i = 0; i < SIZE; i += 16) sum += arr[i];\n  return sum;\n}\n\n// RANDOM (worst case): accesses arr[random] — cache hit rate near 0\nconst indices = Array.from({length: SIZE/16}, (_, i) => i).sort(() => Math.random()-0.5);\nfunction sumRandom() {\n  let sum = 0;\n  for (const idx of indices) sum += arr[idx * 16];\n  return sum;\n}\n\n// Measure\nconst t = (fn) => { const s = Date.now(); fn(); return Date.now() - s; };\nconsole.log('Sequential ms:', t(sumSequential));  // e.g.  5 ms\nconsole.log('Stride-16 ms:', t(sumStride16));     // similar — smaller n\nconsole.log('Random ms:', t(sumRandom));           // much slower\n\n// Cache line boundary example: false sharing risk\nconst sharedBuffer = new Int32Array(new SharedArrayBuffer(128));\n// Thread 1 writes sharedBuffer[0], Thread 2 writes sharedBuffer[1]\n// Both are in the SAME 64-byte cache line — false sharing!\n// Fix: separate them by 16 integers (64 bytes) = sharedBuffer[0] and sharedBuffer[16]",
+      "explanation": "The sequential sum is fast because each 64-byte cache line fetch provides 16 usable integers. Stride-16 access jumps to a new cache line every access, so every access can be a cache miss. Random access is worst: addresses are scattered across all of RAM, so the L3 cache (and even RAM) must be hit for nearly every element. In a real benchmark, sequential vs. random can differ by 10-50x for large arrays."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Practical Cache Optimisation Patterns",
+      "content": "Understanding the hierarchy gives you a concrete toolkit for writing faster code:\n\n**1. Traverse arrays sequentially, not randomly.** This is the most impactful rule. When you must access elements non-sequentially, consider sorting indices first to improve spatial locality (pre-sort trick).\n\n**2. Keep the working set small.** If the data accessed in a hot loop fits in L1 or L2 cache, performance is bounded by compute, not memory. Reduce struct size, use compact types (float32 not float64 if precision allows), and avoid carrying unused fields into the hot path.\n\n**3. Use cache-blocking (loop tiling) for matrix operations.** Naive matrix multiplication accesses column B in column-major order — terrible spatial locality. Tiling splits matrices into blocks that fit in cache, making both row and column accesses local.\n\n**4. Struct of Arrays (SoA) for data-parallel workloads.** If a loop only touches one field of a struct, pack that field into a contiguous array (SoA). This maximises data density per cache line for that field.\n\n**5. Prefetching.** Modern CPUs include **hardware prefetchers** that detect sequential access patterns and fetch cache lines before they are needed (hiding latency). Sequential traversal automatically benefits. For irregular patterns, you can issue explicit `__builtin_prefetch` hints in C, or use Node.js ArrayBuffers with sequential layout.\n\n**6. Avoid pointer chasing in hot loops.** Linked lists are famously cache-unfriendly: each node can be anywhere in memory, so traversal causes a cache miss per node. Arrays of values are almost always faster for iteration.\n\n**7. Align hot data structures to cache line boundaries.** Prevent false sharing in multi-threaded code by ensuring different threads' data land in different cache lines."
+    },
+    {
+      "type": "explanation",
+      "title": "Virtual Memory and the TLB",
+      "content": "Programs do not use physical RAM addresses directly. Each process sees a **virtual address space** — a uniform, private 64-bit address space that the operating system maps to physical RAM pages behind the scenes. The CPU's **Memory Management Unit (MMU)** translates virtual addresses to physical addresses using page tables.\n\nA **page** is the unit of virtual-to-physical mapping — typically 4 KB. The page table is a multi-level tree structure (4 levels on x86-64) stored in RAM itself. In the worst case, translating one virtual address requires four RAM accesses just to walk the page table — before even fetching the data.\n\nThe **TLB (Translation Lookaside Buffer)** is a small, fully-associative cache that stores recent virtual-to-physical mappings. With 64-1024 entries, it can cover only a few megabytes of pages. A TLB hit completes translation in 0.5-1 clock cycle. A TLB miss requires a page table walk — potentially hundreds of cycles.\n\nTLB performance matters for programs with large working sets or many small objects scattered across memory. High-performance databases and game engines often use **huge pages** (2 MB or 1 GB instead of 4 KB) to reduce TLB pressure — 512 normal pages replaced by one huge page means 512x fewer TLB entries needed for the same working set.\n\nA **page fault** occurs when a virtual address is not mapped to any physical page (either never allocated, or swapped out to disk). The OS handles the fault by allocating RAM and returning control to the program. Faults for swapped pages require disk access — potentially millions of cycles."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  VADDR[\"Virtual Address\\nfrom program\"]\n  TLB[\"TLB\\nCache of recent\\nVA to PA mappings\"]\n  HIT[\"Physical Address\\nTLB Hit: 1 cycle\"]\n  PT[\"Page Table Walk\\n4 RAM accesses\\n200-800 cycles\"]\n  DATA[\"Cache Lookup\\nL1 -> L2 -> L3 -> RAM\"]\n  VADDR --> TLB\n  TLB -- \"hit\" --> HIT\n  TLB -- \"miss\" --> PT\n  PT --> HIT\n  HIT --> DATA",
+      "caption": "Address translation pipeline. A TLB hit adds ~1 cycle overhead; a TLB miss adds hundreds. Virtual memory is nearly free if the TLB covers your working set."
+    },
+    {
+      "type": "explanation",
+      "title": "NUMA: When Memory Location Matters on Big Servers",
+      "content": "On single-socket machines, all RAM is equally fast to reach. On large multi-socket servers (think two 32-core CPUs on a single motherboard), each CPU has its own directly attached RAM — **local memory** — and must go over a high-speed interconnect (QPI on Intel, Infinity Fabric on AMD) to reach the other CPU's **remote memory**.\n\nThis is called **NUMA — Non-Uniform Memory Access**. Local memory latency might be 60 ns; remote memory latency 120-150 ns. For latency-sensitive workloads, this 2x difference matters enormously.\n\nHigh-performance systems software (databases, HPC kernels, OS schedulers) is NUMA-aware: they pin threads to the cores nearest to the data they process. Linux exposes NUMA topology via `numactl`. Languages like Go, Rust, and C++ all have libraries for NUMA-aware allocation.\n\nFor most application developers working on standard single-socket workstations or cloud VMs, NUMA is invisible. But if you are debugging unexplained latency spikes on a large server, NUMA topology is worth checking."
+    },
+    {
+      "type": "explanation",
+      "title": "SSDs and the Changing Bottom of the Hierarchy",
+      "content": "Traditional hard drives (HDDs) have a mechanical read head that must physically move to the right track — **seek time** of 5-10 ms is purely mechanical and cannot be reduced by clever electronics.\n\n**NVMe SSDs** (Non-Volatile Memory Express, typically using NAND flash) have no moving parts. Read latency drops to ~100 microseconds — 50-100x faster than HDDs. This fundamentally changed what is feasible to leave on disk vs. in RAM.\n\nTraditionally, databases were designed around the assumption that disk access is catastrophically slow — hence keeping hot data in a buffer pool in RAM. With NVMe SSDs, direct file access for modest-sized datasets is sometimes acceptable. Projects like LMDB (Lightning Memory-Mapped Database) and io_uring (Linux async I/O) are designed to exploit fast NVMe.\n\n**Persistent memory (Optane)**: Intel's 3D XPoint technology (sold as Optane) offered RAM-like access speed (hundreds of nanoseconds) with SSD-like persistence. Though Intel discontinued Optane in 2022, the concept of persistent memory sitting between DRAM and SSD in the hierarchy remains an active research area.\n\n**What this means for you**: In 2025, the practical hierarchy is: L1/L2/L3 cache (on-die, nanoseconds) → DRAM (microseconds) → NVMe SSD (100s of microseconds) → HDD (milliseconds). Storing 'cold' data on SSD and warming it into RAM on demand is a well-established pattern. Keeping frequently queried data entirely in RAM (Redis, Memcached) is still important for latency-sensitive services."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Representative latency and size numbers (approximate, vary by CPU)\nconst MEMORY_HIERARCHY = [\n  { level: 'Registers',  latencyNs: 0.3,   sizeMB: 0.000256 },\n  { level: 'L1 Cache',  latencyNs: 1,     sizeMB: 0.064    },\n  { level: 'L2 Cache',  latencyNs: 4,     sizeMB: 0.256    },\n  { level: 'L3 Cache',  latencyNs: 12,    sizeMB: 16       },\n  { level: 'RAM',       latencyNs: 80,    sizeMB: 16384    },\n  { level: 'SSD',       latencyNs: 100000,sizeMB: 1048576  },\n];\n\nconst CACHE_LINE_BYTES = 64; // typical hardware cache-line size\n// Spatial locality: one miss loads 64 bytes; sequential access = almost free\n// Temporal locality: data reused soon after first fetch stays in L1/L2"
+      "label": "Working Set",
+      "code": "// ── Measuring working set effects (Node.js, allocate large arrays) ──\n// Concept: loop over arrays of different sizes and observe timing\n\nconst { performance } = require('perf_hooks');\n\nfunction benchmarkWorkingSet(sizeInBytes) {\n  const ints = sizeInBytes / 4;\n  const arr = new Int32Array(ints);\n  for (let i = 0; i < ints; i++) arr[i] = i;\n\n  const ITERS = 100;\n  const start = performance.now();\n  let sum = 0;\n  for (let iter = 0; iter < ITERS; iter++) {\n    for (let i = 0; i < ints; i++) {\n      sum += arr[i]; // sequential access — spatial locality\n    }\n  }\n  const ms = performance.now() - start;\n  const gbPerSec = (sizeInBytes * ITERS) / (ms / 1000) / 1e9;\n  console.log(`${(sizeInBytes/1024).toFixed(0).padStart(8)} KB | ${ms.toFixed(1).padStart(8)} ms | ${gbPerSec.toFixed(2)} GB/s | ${sum > 0 ? 'ok' : ''}`);\n}\n\nconsole.log('Working set size | time | throughput');\nbenchmarkWorkingSet(32 * 1024);          //   32 KB  — fits in L1\nbenchmarkWorkingSet(256 * 1024);         //  256 KB  — fits in L2\nbenchmarkWorkingSet(8 * 1024 * 1024);    //    8 MB  — fits in L3\nbenchmarkWorkingSet(128 * 1024 * 1024);  //  128 MB  — RAM only\nbenchmarkWorkingSet(512 * 1024 * 1024);  //  512 MB  — RAM, larger\n\n// Expected output shows throughput DROPPING as working set GROWS past each cache level:\n// 32 KB   -> ~200 GB/s  (L1 bandwidth)\n// 256 KB  -> ~100 GB/s  (L2 bandwidth)\n// 8 MB    -> ~80 GB/s   (L3 bandwidth)\n// 128 MB  -> ~30 GB/s   (DRAM bandwidth)\n// The bandwidth drop at each level directly reflects the memory hierarchy",
+      "explanation": "This benchmark isolates memory bandwidth from compute by doing trivially simple arithmetic (addition) with sequential access. The only variable is the working set size. When the working set exceeds each cache level, the memory system becomes the bottleneck and throughput drops. This is the clearest empirical demonstration of the hierarchy — and it directly predicts where real programs will be slow."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Numbers every programmer should know (circa 2025, modern x86-64):**\n- L1 cache: ~32-64 KB per core, ~4 cycles / ~1 ns\n- L2 cache: ~256 KB - 1 MB per core, ~12 cycles / ~3 ns\n- L3 cache: ~8-64 MB shared, ~40 cycles / ~12 ns\n- RAM (DRAM): 8-256 GB, ~200 cycles / ~60 ns\n- NVMe SSD: 100+ us = ~300,000 cycles\n- HDD: ~10 ms = ~30,000,000 cycles\n- Cache line size: 64 bytes (universal on x86, ARM, RISC-V)\n- Page size: 4 KB (default), 2 MB (huge page), 1 GB (gigantic page)\nMemorise these ratios: L1 is ~50x faster than RAM; RAM is ~1000x faster than SSD."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Interview insight: 'Why is a linked list slower than an array for iteration?' — Array elements are contiguous; one cache-line fetch brings multiple elements. Linked-list nodes scatter across memory; each next-pointer dereference is a likely cache miss. Same O(n) complexity, but constant factors differ by 5-10x in practice. This is why cache-friendly data structures are a core systems design concern."
+      "content": "**Performance debugging with cache in mind:**\n- Profile with perf (Linux) or Instruments (macOS) looking at cache miss rates before optimising code logic — the bottleneck is often memory, not compute.\n- If a loop is unexpectedly slow and arithmetic is trivial, check: is the working set larger than L3? Are accesses sequential?\n- Column-major access on a row-major matrix (C, Java, JS) is a common source of cache thrashing — always traverse row by row.\n- Use `sizeof` / `object.byteLength` to estimate working set size and compare to cache sizes.\n- For multi-threaded code: if adding more threads does not scale performance linearly, suspect false sharing — check if hot variables from different threads share a 64-byte cache line."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "Memory hierarchy: Registers → L1 → L2 → L3 → RAM → SSD → HDD — faster = smaller and more expensive per bit.",
-        "A cache hit costs ~1 ns; a RAM access costs ~80 ns; an SSD access ~100,000 ns — the gap is enormous.",
-        "Cache lines are 64 bytes: one miss loads 64 contiguous bytes, rewarding sequential (spatial locality) access.",
-        "Temporal locality (reuse recent data) and spatial locality (access nearby data) are the two principles caches exploit.",
-        "Cache-friendly code (array iteration) can be 5-10x faster than cache-unfriendly code (random pointer chasing) at the same algorithmic complexity."
+        "The **memory hierarchy** (registers → L1 → L2 → L3 → RAM → SSD → HDD) trades speed for capacity: faster layers are smaller and more expensive; the CPU checks from the top down.",
+        "**Temporal locality** (recently used data will be used again) and **spatial locality** (nearby data will be used soon) explain why caches work — programs are not random in their memory access patterns.",
+        "Data is transferred between cache levels in **64-byte cache lines**. Accessing any byte in a line brings the entire line — accessing nearby bytes is then free, making sequential access far faster than random access.",
+        "A **cache miss** stalls the pipeline for the miss penalty: ~12 cycles for an L2 hit, ~40 for L3, ~200 for RAM, ~300,000 for SSD. Cache miss rates directly determine memory-bound program performance.",
+        "**Cache-friendly coding** means: sequential array traversal, small working sets, Struct of Arrays for data-parallel loops, cache-line-aligned structures, and avoiding pointer chasing.",
+        "The **TLB** caches virtual-to-physical address translations; a TLB miss triggers an expensive page table walk. Large working sets or many small scattered allocations increase TLB pressure.",
+        "**NUMA** architecture means remote memory (another CPU's RAM) is ~2x slower than local memory on multi-socket servers — NUMA-aware thread and data placement is essential for large-scale systems."
       ]
     }
   ],
@@ -66,118 +120,123 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "From fastest to slowest, which is the correct order?",
+      "question": "In the memory hierarchy, which storage level has the smallest capacity but fastest access time?",
       "type": "mcq",
-      "options": [
-        "RAM → L1 Cache → Registers → SSD",
-        "Registers → L1 Cache → RAM → SSD",
-        "L1 Cache → Registers → RAM → SSD",
-        "Registers → RAM → L1 Cache → SSD"
-      ],
-      "correct": 1,
-      "explanation": "Registers are fastest (~0.3 ns), then L1 Cache (~1 ns), RAM (~80 ns), and SSD (~0.1 ms). Each level is orders of magnitude slower."
+      "options": ["L1 Cache", "L2 Cache", "CPU Registers", "RAM"],
+      "correct": 2,
+      "explanation": "CPU registers are on-die, accessible in less than 1 ns, and hold only a few dozen 64-bit values total. L1 cache is next fastest but much larger (32-64 KB). Registers are the smallest and fastest level."
     },
     {
       "id": "q2",
-      "question": "What is a 'cache line'?",
+      "question": "What is temporal locality?",
       "type": "mcq",
       "options": [
-        "A pointer to the next cache entry",
-        "The fixed-size block of memory loaded on a cache miss (typically 64 bytes)",
-        "A single byte stored in L1 cache",
-        "The boundary between L1 and L2 cache"
+        "Nearby memory locations are accessed together",
+        "Recently accessed data is likely to be accessed again soon",
+        "Memory access patterns repeat on a fixed time interval",
+        "Memory is organised chronologically by when data was written"
       ],
       "correct": 1,
-      "explanation": "Cache lines are typically 64 bytes. When any byte in a line is accessed, the entire 64-byte block loads into cache — enabling spatial locality."
+      "explanation": "Temporal locality means: if you accessed a memory location recently, you are likely to access it again soon. Loop variables and frequently called functions are classic examples. This is why caches keep recently used data in fast storage."
     },
     {
       "id": "q3",
-      "question": "What is 'temporal locality'?",
+      "question": "What is a cache line?",
       "type": "mcq",
       "options": [
-        "Accessing memory addresses that are close together",
-        "Accessing the same data repeatedly in a short time window",
-        "Storing data in time-sorted order",
-        "Preloading future instructions"
+        "A single byte transferred between cache and CPU",
+        "The fixed-size block of memory (typically 64 bytes) transferred between cache levels",
+        "A row in the cache's set-associative structure",
+        "The boundary between the L1 and L2 cache"
       ],
       "correct": 1,
-      "explanation": "Temporal locality means recently used data will likely be used again soon — caches exploit this by keeping recently accessed data in fast storage."
+      "explanation": "A cache line (64 bytes on modern CPUs) is the minimum unit of transfer between memory levels. Accessing one byte in a line fetches all 64 bytes, making subsequent accesses to nearby addresses effectively free — this is spatial locality exploitation."
     },
     {
       "id": "q4",
-      "question": "Approximately how much slower is a RAM access compared to an L1 cache hit?",
+      "question": "Why is sequential array traversal much faster than random access on large arrays?",
       "type": "mcq",
-      "options": ["2x", "10x", "80x", "1000x"],
+      "options": [
+        "Sequential access uses fewer CPU instructions",
+        "Random accesses cause more overflow errors",
+        "Sequential access exploits spatial locality: one cache line fetch provides many usable elements",
+        "Arrays are physically faster to read in sequence on disk"
+      ],
       "correct": 2,
-      "explanation": "L1 hit ~1 ns, RAM ~80 ns — about 80x slower. This gap is why cache misses are a primary performance concern."
+      "explanation": "Sequential traversal exploits spatial locality. Each 64-byte cache line fetch provides 16 adjacent integers. Random access hits a different cache line for every element, causing ~16x more cache misses for the same number of elements."
     },
     {
       "id": "q5",
-      "question": "Why does iterating a 2D array row-by-row perform better than column-by-column?",
+      "question": "Approximately how much slower is a RAM access compared to an L1 cache hit on a modern CPU?",
       "type": "mcq",
-      "options": [
-        "Row-major has fewer total operations",
-        "Row-major access is sequential in memory, hitting the same cache lines repeatedly",
-        "Column-major requires more comparisons",
-        "Rows are stored in registers automatically"
-      ],
-      "correct": 1,
-      "explanation": "Arrays are stored row-by-row (row-major). Row iteration is sequential — cache-friendly. Column iteration jumps large strides, causing a cache miss on almost every access."
+      "options": ["2x", "10x", "50x", "1000x"],
+      "correct": 2,
+      "explanation": "L1 cache access is ~1-2 ns. RAM access is ~60-100 ns. The ratio is roughly 50x. This is why cache misses have such an outsized effect on performance — a single L3 miss can stall the pipeline for 200 cycles."
     },
     {
       "id": "q6",
-      "question": "What is 'spatial locality'?",
+      "question": "What is false sharing in a multi-threaded program?",
       "type": "mcq",
       "options": [
-        "Accessing the same address repeatedly",
-        "Accessing memory addresses near recently accessed addresses",
-        "Storing variables close to the CPU",
-        "Distributing data across multiple cache levels"
+        "Two threads sharing the same variable incorrectly",
+        "Two threads writing to logically unrelated variables that happen to be in the same cache line",
+        "The OS falsely reporting a cache miss to the program",
+        "A cache coherence bug where two caches disagree on a value"
       ],
       "correct": 1,
-      "explanation": "Spatial locality: if you access address X, you'll likely access X+1, X+2 … soon. Cache lines exploit this by fetching 64 bytes at once."
+      "explanation": "False sharing occurs when two threads write to different variables that reside on the same 64-byte cache line. Each write invalidates the cache line on the other core, causing the line to bounce between cores. The fix is to pad or align structures so each thread's hot data is in a separate cache line."
     },
     {
       "id": "q7",
-      "question": "Which storage level typically has the largest capacity?",
+      "question": "What does the TLB (Translation Lookaside Buffer) cache?",
       "type": "mcq",
-      "options": ["L3 Cache", "RAM", "L1 Cache", "HDD"],
-      "correct": 3,
-      "explanation": "HDD can store 2–20+ TB — by far the largest capacity in the hierarchy, but also the slowest (~10 ms access)."
+      "options": [
+        "Recently executed CPU instructions",
+        "Recently computed arithmetic results",
+        "Recent virtual-to-physical address translations",
+        "Recently opened file handles"
+      ],
+      "correct": 2,
+      "explanation": "The TLB caches entries from the page table — mappings from virtual page numbers to physical page frame numbers. A TLB hit completes address translation in ~1 cycle; a TLB miss triggers a page table walk requiring multiple RAM accesses."
     },
     {
       "id": "q8",
-      "question": "Why is random access through a linked list slower than array iteration, even at the same O(n) complexity?",
+      "question": "Which cache replacement policy evicts the cache line that has not been accessed for the longest time?",
       "type": "mcq",
       "options": [
-        "Linked lists use more total memory",
-        "Each node pointer dereference likely causes a cache miss due to scattered memory layout",
-        "Linked list traversal requires more CPU instructions",
-        "Arrays are stored in registers automatically"
+        "Random replacement",
+        "FIFO (First In First Out)",
+        "LRU (Least Recently Used)",
+        "MRU (Most Recently Used)"
       ],
-      "correct": 1,
-      "explanation": "Linked list nodes scatter in memory; each next-pointer dereference jumps to a likely-uncached location, causing repeated cache misses. Arrays are contiguous, so one cache line covers multiple elements."
+      "correct": 2,
+      "explanation": "LRU (Least Recently Used) evicts the line that was accessed furthest in the past. This is the most common cache replacement policy and naturally exploits temporal locality — lines accessed long ago are less likely to be needed again."
     },
     {
       "id": "q9",
-      "question": "How many bytes does a typical cache line hold?",
+      "question": "What is NUMA, and why does it matter for performance?",
       "type": "mcq",
-      "options": ["8", "32", "64", "256"],
-      "correct": 2,
-      "explanation": "Modern CPUs use 64-byte cache lines. Fetching one byte pulls in the neighbouring 63 bytes, benefiting sequential access patterns."
+      "options": [
+        "A new RAM standard that doubles memory bandwidth",
+        "Non-Uniform Memory Access — some RAM is slower to reach than other RAM depending on which CPU socket is accessing it",
+        "A cache coherence protocol for multi-core CPUs",
+        "A technique for pre-fetching cache lines in advance"
+      ],
+      "correct": 1,
+      "explanation": "In multi-socket servers, each CPU has local RAM (fast, ~60 ns) and must use an interconnect to reach remote RAM attached to another CPU socket (~120-150 ns). NUMA-aware code pins threads and data to the same socket to avoid this 2x latency penalty."
     },
     {
       "id": "q10",
-      "question": "What is the primary reason for the memory hierarchy (multiple levels of cache)?",
+      "question": "A program's hot loop accesses a 512 MB dataset in a random order. What is the most likely performance bottleneck?",
       "type": "mcq",
       "options": [
-        "Fast memory is physically large and cheap to manufacture",
-        "No single technology can be simultaneously fast, large, and inexpensive",
-        "CPUs cannot directly access RAM",
-        "Operating systems require separate memory levels for security"
+        "CPU arithmetic units are saturated",
+        "Cache misses to RAM dominate because the working set far exceeds all cache levels",
+        "The TLB is too large and slows address translation",
+        "The CPU clock speed is insufficient for the computation"
       ],
       "correct": 1,
-      "explanation": "There is a fundamental tradeoff: fast SRAM (used in caches) is expensive and physically dense; slow DRAM (RAM) is cheap and large. The hierarchy uses both, placing frequently accessed data in fast-but-small levels."
+      "explanation": "A 512 MB working set far exceeds any cache (L3 is typically 8-64 MB). Random access means almost every access is a cache miss, requiring ~200 cycles to fetch from RAM. The arithmetic in the loop is irrelevant — the program is memory-bound. The fix is to reduce the working set, improve spatial locality, or restructure data access to be more sequential."
     }
   ]
 }
