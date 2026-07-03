@@ -5,58 +5,113 @@
   "week": 33,
   "icon": "pattern",
   "tagline": "Hide a complex subsystem behind a single simple interface so callers need to understand almost nothing about what happens under the hood.",
-  "readTime": "~13 min",
+  "readTime": "~20 min",
   "sections": [
     {
       "type": "intro",
-      "content": "**The Problem:** Modern systems are composed of many subsystems — authentication libraries, email services, payment processors, database layers, notification queues. To place an order a client might need to: validate the cart, reserve inventory, charge a payment gateway, send a confirmation email, and publish an event to a queue. That's five subsystems, each with its own API to learn and sequence to respect. Coupling the client directly to all five makes it fragile: any API change ripples outward.\n\n**The Facade pattern** introduces a single class (`OrderFacade`) that exposes one clean method (`placeOrder(cartId, userId)`) and internally coordinates all five subsystems. The client calls one method; the facade handles the sequence, the error handling, and the wiring. When a subsystem changes, only the facade needs updating — not every caller.\n\nThe Facade is arguably the most *pragmatic* design pattern in everyday engineering: it is the 'public API of a module', the 'service layer in MVC', the 'BFF (Backend-for-Frontend)'. You are probably already writing facades without naming them."
+      "content": "**The Problem:** Modern software systems are assembled from many subsystems — authentication libraries, email services, payment processors, database layers, caching stores, notification queues, analytics trackers. Placing an order in an e-commerce app might require: validating the shopping cart, checking inventory availability, charging a payment gateway, sending a confirmation email, publishing an event to a message queue, and recording a metric for analytics. That is six subsystems, each with its own API surface, its own error model, and its own sequencing requirements.\n\nIf your checkout route handler reaches directly into all six subsystems, you have created deep coupling: every subsystem API change ripples out to every handler. Every new engineer who reads the handler must understand all six APIs at once. Every integration test must stub all six services. The cognitive load is brutal and the fragility is real.\n\n**The Facade pattern** solves this by introducing one class — `OrderFacade` — that exposes a single clean method `placeOrder(cartId, userId)` and internally coordinates all six subsystems. The client calls one method; the facade handles the sequence, the error recovery, and the wiring. When a subsystem changes, only the facade needs updating — not every caller. When a new engineer reads the checkout handler, they see `orderFacade.placeOrder(...)` and understand exactly what it does without reading six APIs.\n\nThe Facade is arguably the most **pragmatic** design pattern in everyday engineering. You encounter it constantly, often without recognising it by name: a REST controller that delegates to a service class, a service class that coordinates repositories and external clients, a Node module's `index.js` that exports only a clean public API while hiding its internal collaborators, a Backend-for-Frontend (BFF) that aggregates multiple microservice calls into one response. The Facade is not exotic — it is the pattern underlying every well-structured layer boundary in software.\n\nIn this chapter we will cover: the canonical GoF structure, the critical distinctions from Adapter and Mediator, a full worked JavaScript example with error compensation, how to inject subsystems for testability, the static module facade pattern, when Facades go wrong, and how real frameworks use this pattern every day."
     },
     {
       "type": "diagram",
-      "mermaid": "classDiagram\n    class OrderFacade {\n        +placeOrder(cartId, userId) void\n        +cancelOrder(orderId) void\n    }\n    class CartService {\n        +validate(cartId) boolean\n        +getItems(cartId) Item[]\n    }\n    class InventoryService {\n        +reserve(items) void\n        +release(items) void\n    }\n    class PaymentGateway {\n        +charge(userId, amount) Receipt\n    }\n    class EmailService {\n        +sendConfirmation(userId, receipt) void\n    }\n    class EventBus {\n        +publish(event) void\n    }\n    OrderFacade --> CartService\n    OrderFacade --> InventoryService\n    OrderFacade --> PaymentGateway\n    OrderFacade --> EmailService\n    OrderFacade --> EventBus",
-      "caption": "OrderFacade is the single entry point. The client calls placeOrder() — it never needs to know CartService, InventoryService, PaymentGateway, EmailService, or EventBus exist."
+      "mermaid": "classDiagram\n    class Client {\n        +checkout()\n    }\n    class OrderFacade {\n        +placeOrder(cartId, userId)\n        +cancelOrder(orderId, userId)\n    }\n    class CartService {\n        +validate(cartId) bool\n        +getItems(cartId) Item[]\n        +getTotal(items) number\n    }\n    class InventoryService {\n        +reserve(items) void\n        +release(items) void\n    }\n    class PaymentGateway {\n        +charge(userId, amount) Receipt\n        +refund(receiptId) void\n    }\n    class EmailService {\n        +sendConfirmation(userId, receipt) void\n        +sendCancellation(userId) void\n    }\n    Client --> OrderFacade\n    OrderFacade --> CartService\n    OrderFacade --> InventoryService\n    OrderFacade --> PaymentGateway\n    OrderFacade --> EmailService",
+      "caption": "The Client depends only on OrderFacade. All four subsystems are hidden behind its interface. The Client has no import of CartService, InventoryService, PaymentGateway, or EmailService — those details are the facade's private concern."
     },
     {
       "type": "analogy",
       "title": "The Hotel Concierge",
-      "content": "You walk into a hotel and ask the **concierge**: 'I need a taxi to the airport, a wake-up call at 6 AM, and room service at 7 AM.' The concierge says 'Certainly' and coordinates transport dispatch, the front desk wakeup system, and the kitchen — three separate departments with their own internal processes.\n\nYou don't call transport dispatch yourself, then the front desk, then the kitchen. The concierge is the **Facade**: one point of contact, hiding a complex internal organisation. If the hotel switches transport providers, you never know — you still just say 'I need a taxi.'"
+      "content": "You arrive at a hotel and approach the **concierge**. 'I need a taxi to the airport at 7 AM, a wake-up call at 6 AM, room service breakfast at 6:30 AM, and I need someone to handle my dry cleaning.' The concierge smiles: 'Certainly, sir.' You hand over your room key and walk away.\n\nBehind the scenes, the concierge calls transport dispatch, notifies the front-desk wake-up system, contacts the kitchen, and routes the dry-cleaning to the laundry service — four separate departments with their own internal processes, shift schedules, and quirks. You, the guest, never called any of them directly. You never learned their phone extensions. If the hotel switches taxi providers next month, you will not notice — you still say 'I need a taxi.'\n\nThe concierge is the **Facade**: a single human interface that hides the complexity of coordinating multiple internal subsystems. You see one desk, one person, one conversation. The subsystems see only their own domain — they have no idea a concierge exists.\n\nThis is the exact structural relationship in the pattern: one facade, many subsystems, one client interface, zero subsystem coupling for the client."
     },
     {
       "type": "explanation",
-      "content": "**Participants:**\n\n- **Facade** — the single simplified interface. It knows which subsystem classes to delegate to and in what order. It handles coordination, sequencing, and often error recovery. It does NOT implement subsystem logic itself.\n- **Subsystems** — the complex classes behind the facade. They have no knowledge of the facade; they provide their functionality independently. The facade uses them; they do not use the facade.\n- **Client** — calls the facade's simple API. It is decoupled from all subsystem details.\n\n**What the Facade does NOT do:**\n- It does not prevent advanced clients from bypassing it and talking to subsystems directly when needed.\n- It does not add new behaviour — it composes and sequences existing subsystem behaviour.\n- It is not a God object — if a facade grows to coordinate 15 subsystems with complex branching, it has become a service layer smell and should be split.\n\n**Facade vs. Adapter:** An Adapter makes one incompatible interface match another. A Facade simplifies multiple interfaces into one. They look similar structurally but have different intents — Adapter is about interface translation, Facade is about complexity hiding.\n\n**Facade vs. Mediator:** A Mediator coordinates communication *between* subsystems (they know about the mediator). A Facade is one-directional: clients call the facade; subsystems don't know it exists."
+      "title": "The Three Participants: Facade, Subsystems, Client",
+      "content": "The Gang of Four (GoF) definition identifies three participants:\n\n**1. Facade**\n\nThe facade is the single simplified interface. It knows which subsystem classes to use, in what order, and with what parameters. It handles coordination, sequencing, and often error recovery or compensation logic. Critically, the facade does **not** implement subsystem business logic itself — it delegates. A facade that starts reimplementing payment processing logic is no longer a facade; it has become an Application Service or, worse, a God object.\n\nThe facade is typically a class (in OOP) or a module (in functional/module-based code). In either case, its public API is intentionally narrow — just the operations a typical client needs, expressed at the right level of abstraction.\n\n**2. Subsystems**\n\nSubsystems are the complex classes and services behind the facade. Each subsystem is independent: `CartService`, `PaymentGateway`, `InventoryService`, and `EmailService` are each self-contained with their own domain logic. They do **not** know the facade exists. They have no import of `OrderFacade`. This is what makes the pattern powerful — subsystems remain reusable, testable, and understandable in isolation.\n\nAdvanced clients that genuinely need fine-grained control can still bypass the facade and use subsystems directly. The facade is a convenience, not a gate.\n\n**3. Client**\n\nThe client calls only the facade's simplified API. It has no direct dependency on any subsystem. This isolation means: the client's tests do not need to stub five services; the client's code does not break when a subsystem's internal API changes; and new engineers reading the client code understand its intent without knowing subsystem internals.\n\nThe key structural rule: **dependencies point inward**. Client → Facade → Subsystems. Never Subsystem → Facade."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant C as Client\n    participant F as OrderFacade\n    participant CS as CartService\n    participant IS as InventoryService\n    participant PG as PaymentGateway\n    participant ES as EmailService\n    C->>F: placeOrder(cartId, userId)\n    F->>CS: validate(cartId)\n    CS-->>F: true\n    F->>CS: getItems(cartId)\n    CS-->>F: [item1, item2]\n    F->>IS: reserve([item1, item2])\n    IS-->>F: ok\n    F->>PG: charge(userId, total)\n    PG-->>F: Receipt\n    F->>ES: sendConfirmation(userId, receipt)\n    F-->>C: Order confirmed",
-      "caption": "The client issues one call; the facade orchestrates five subsystem interactions. The sequence is hidden, managed, and testable in one place."
+      "mermaid": "flowchart LR\n    A[\"Client\\n(checkout route)\"] --> B[\"OrderFacade\\n(placeOrder)\"] --> C[\"CartService\"]\n    B --> D[\"InventoryService\"]\n    B --> E[\"PaymentGateway\"]\n    B --> F[\"EmailService\"]\n    style A fill:#e8f4f8\n    style B fill:#fff3cd\n    style C fill:#f8f8f8\n    style D fill:#f8f8f8\n    style E fill:#f8f8f8\n    style F fill:#f8f8f8",
+      "caption": "Dependency direction is always Client -> Facade -> Subsystems. Subsystems never reference the facade. This one-directional coupling is the source of all the pattern's benefits."
+    },
+    {
+      "type": "explanation",
+      "title": "Facade vs. Adapter vs. Mediator: The Critical Distinctions",
+      "content": "The Facade is frequently confused with two related patterns. The structural code can look similar, but the **intent** is different, and intent drives when you apply each one.\n\n**Facade vs. Adapter**\n\nAn Adapter makes one incompatible interface match another. It is a translation layer: you have a `LegacyPrinter` class with a method `printDocument(text)` but a new `Printer` interface that expects `print(content)`. The Adapter wraps `LegacyPrinter` and translates calls. There is typically one source and one target.\n\nA Facade simplifies **multiple** interfaces into one. There is no incompatibility to resolve — the subsystems work fine on their own. The Facade exists purely to reduce the number of touchpoints a client needs. You might have a Facade that internally uses an Adapter for one legacy subsystem — composition is not a conflict.\n\n**Facade vs. Mediator**\n\nThe Mediator coordinates communication **between** a set of components that know about the mediator. Think of an air-traffic control tower: all planes communicate through the tower, and they know the tower exists. The mediator handles bidirectional relationships between peers.\n\nA Facade is strictly **unidirectional**: clients call the facade; subsystems do not know it exists and do not communicate through it. The facade is not a hub for cross-subsystem communication — it is a simplified external entry point.\n\nThe test: does the facade coordinate subsystems that need to communicate with **each other**? If yes, you are building a Mediator, not a Facade.\n\n**Facade vs. God Object**\n\nA God object is a class that knows too much and does too much — it accumulates responsibilities until it is the single load-bearing pillar of the system. A Facade is deliberately thin: it contains only sequencing and delegation logic, no business logic of its own. When a facade starts accumulating domain rules, conditional flows, and direct data transformation, it is becoming a God object and should be refactored into a proper layered architecture (service → repository → entity)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant C as \"Client\"\n    participant F as \"OrderFacade\"\n    participant CS as \"CartService\"\n    participant IS as \"InventoryService\"\n    participant PG as \"PaymentGateway\"\n    participant ES as \"EmailService\"\n    C->>F: placeOrder(cartId, userId)\n    F->>CS: validate(cartId)\n    CS-->>F: true\n    F->>CS: getItems(cartId)\n    CS-->>F: items[]\n    F->>IS: reserve(items)\n    IS-->>F: ok\n    F->>PG: charge(userId, total)\n    PG-->>F: Receipt\n    F->>ES: sendConfirmation(userId, receipt)\n    F-->>C: receipt",
+      "caption": "The client issues one call and receives one response. The five intermediate interactions are entirely managed by the facade — the client never sees them."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// ── Subsystems (each has its own complex API) ─────────────────────\nclass CartService {\n  validate(cartId) {\n    console.log(`[Cart] Validating cart ${cartId}`);\n    return true; // assume valid\n  }\n  getItems(cartId) {\n    console.log(`[Cart] Fetching items for cart ${cartId}`);\n    return [{ name: 'Widget', price: 19.99 }, { name: 'Gadget', price: 34.99 }];\n  }\n  getTotal(items) {\n    return items.reduce((sum, i) => sum + i.price, 0);\n  }\n}\n\nclass InventoryService {\n  reserve(items) {\n    console.log(`[Inventory] Reserving ${items.length} item(s)`);\n  }\n  release(items) {\n    console.log(`[Inventory] Releasing ${items.length} item(s)`);\n  }\n}\n\nclass PaymentGateway {\n  charge(userId, amount) {\n    console.log(`[Payment] Charging user ${userId} $${amount.toFixed(2)}`);\n    return { receiptId: `REC-${Date.now()}`, amount };\n  }\n  refund(receiptId) {\n    console.log(`[Payment] Refunding receipt ${receiptId}`);\n  }\n}\n\nclass EmailService {\n  sendConfirmation(userId, receipt) {\n    console.log(`[Email] Sending confirmation to user ${userId}, receipt ${receipt.receiptId}`);\n  }\n  sendCancellation(userId) {\n    console.log(`[Email] Sending cancellation to user ${userId}`);\n  }\n}\n\n// ── Facade: one simple API for the client ─────────────────────────\nclass OrderFacade {\n  constructor() {\n    this._cart      = new CartService();\n    this._inventory = new InventoryService();\n    this._payment   = new PaymentGateway();\n    this._email     = new EmailService();\n  }\n\n  placeOrder(cartId, userId) {\n    console.log('--- Order Start ---');\n    if (!this._cart.validate(cartId)) throw new Error('Invalid cart');\n\n    const items   = this._cart.getItems(cartId);\n    const total   = this._cart.getTotal(items);\n\n    this._inventory.reserve(items);\n\n    let receipt;\n    try {\n      receipt = this._payment.charge(userId, total);\n    } catch (err) {\n      this._inventory.release(items); // compensate on failure\n      throw err;\n    }\n\n    this._email.sendConfirmation(userId, receipt);\n    console.log('--- Order Complete ---\\n');\n    return receipt;\n  }\n\n  cancelOrder(receiptId, userId, items) {\n    console.log('--- Cancel Start ---');\n    this._payment.refund(receiptId);\n    this._inventory.release(items);\n    this._email.sendCancellation(userId);\n    console.log('--- Cancel Complete ---\\n');\n  }\n}\n\n// ── Client: knows nothing about the five subsystems ───────────────\nconst orders = new OrderFacade();\nconst receipt = orders.placeOrder('cart-001', 'user-42');\n// --- Order Start ---\n// [Cart] Validating cart cart-001\n// [Cart] Fetching items for cart cart-001\n// [Inventory] Reserving 2 item(s)\n// [Payment] Charging user user-42 $54.98\n// [Email] Sending confirmation to user user-42, receipt REC-...\n// --- Order Complete ---",
-      "explanation": "The client calls two methods (`placeOrder`, `cancelOrder`) — that is its entire surface area. All five subsystems (cart, inventory, payment, email) are hidden. The compensation logic (releasing inventory on payment failure) lives in one place — the facade — not scattered across callers."
+      "label": "Example",
+      "code": "// ── Subsystem 1: Cart ─────────────────────────────────────────\nclass CartService {\n  validate(cartId) {\n    if (!cartId) throw new Error('cartId required');\n    console.log(`[Cart] Validating ${cartId}`);\n    return true;\n  }\n  getItems(cartId) {\n    console.log(`[Cart] Fetching items for ${cartId}`);\n    return [\n      { id: 'sku-1', name: 'Widget', price: 19.99 },\n      { id: 'sku-2', name: 'Gadget', price: 34.99 },\n    ];\n  }\n  getTotal(items) {\n    return items.reduce((sum, i) => sum + i.price, 0);\n  }\n}\n\n// ── Subsystem 2: Inventory ────────────────────────────────────\nclass InventoryService {\n  reserve(items) {\n    console.log(`[Inventory] Reserving ${items.length} item(s)`);\n    // May throw if out of stock\n  }\n  release(items) {\n    console.log(`[Inventory] Releasing ${items.length} item(s)`);\n  }\n}\n\n// ── Subsystem 3: Payment ──────────────────────────────────────\nclass PaymentGateway {\n  charge(userId, amount) {\n    console.log(`[Payment] Charging user ${userId} $${amount.toFixed(2)}`);\n    if (amount <= 0) throw new Error('Invalid amount');\n    return { receiptId: `REC-${Date.now()}`, amount, userId };\n  }\n  refund(receiptId) {\n    console.log(`[Payment] Refunding ${receiptId}`);\n  }\n}\n\n// ── Subsystem 4: Email ────────────────────────────────────────\nclass EmailService {\n  sendConfirmation(userId, receipt) {\n    console.log(`[Email] Confirmation → user ${userId}, receipt ${receipt.receiptId}`);\n  }\n  sendCancellation(userId) {\n    console.log(`[Email] Cancellation → user ${userId}`);\n  }\n}\n\n// ── Facade: inject subsystems for testability ─────────────────\nclass OrderFacade {\n  constructor({\n    cart      = new CartService(),\n    inventory = new InventoryService(),\n    payment   = new PaymentGateway(),\n    email     = new EmailService(),\n  } = {}) {\n    this._cart      = cart;\n    this._inventory = inventory;\n    this._payment   = payment;\n    this._email     = email;\n  }\n\n  // ── Main operation: coordinate four subsystems ────────────\n  async placeOrder(cartId, userId) {\n    if (!this._cart.validate(cartId)) {\n      throw new Error('Cart validation failed');\n    }\n\n    const items = this._cart.getItems(cartId);\n    const total = this._cart.getTotal(items);\n\n    // Reserve inventory first; if payment fails we must release\n    this._inventory.reserve(items);\n\n    let receipt;\n    try {\n      receipt = this._payment.charge(userId, total);\n    } catch (paymentError) {\n      // ── Compensation: undo the reservation ────────────────\n      this._inventory.release(items);\n      throw new Error(`Payment failed; inventory released. ${paymentError.message}`);\n    }\n\n    // Non-critical — do not roll back order if email fails\n    try {\n      this._email.sendConfirmation(userId, receipt);\n    } catch {\n      console.warn('[OrderFacade] Email failed but order succeeded');\n    }\n\n    return receipt;\n  }\n\n  // ── Cancellation: reverse the happy path ──────────────────\n  async cancelOrder({ receiptId, userId, items }) {\n    this._payment.refund(receiptId);\n    this._inventory.release(items);\n    try {\n      this._email.sendCancellation(userId);\n    } catch {\n      console.warn('[OrderFacade] Cancellation email failed');\n    }\n  }\n}\n\n// ── Client: two methods, zero subsystem knowledge ─────────────\nconst orders = new OrderFacade();\nconst receipt = await orders.placeOrder('cart-99', 'user-42');\nconsole.log('Order placed:', receipt.receiptId);\n\n// ── Unit test: inject fakes, no real network calls ─────────────\n// const facade = new OrderFacade({\n//   cart:      fakeCart,\n//   inventory: fakeInventory,\n//   payment:   fakePayment,\n//   email:     fakeEmail,\n// });\n// await facade.placeOrder('cart-1', 'user-1');",
+      "explanation": "Three design decisions worth noting: (1) Subsystems are **injected** through the constructor, enabling tests to pass fakes without mocking internals. (2) The compensation logic — releasing inventory on payment failure — is centralised in the facade. Without it, every caller would need to handle this rollback. (3) Email is treated as non-critical: a failure there does not roll back the order. These policies live in one place — the facade — rather than scattered across callers."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "The Static Module Facade: Everyday JavaScript",
+      "content": "The most common manifestation of the Facade pattern in JavaScript/TypeScript codebases is not a class at all — it is the module's `index.ts` barrel export. This is worth studying carefully because it is something you write and read daily.\n\nConsider an `auth` module with internal classes `TokenService`, `SessionStore`, `CryptoUtil`, and `UserRepository`. These are implementation details. The public contract of the `auth` module — the surface area external callers are allowed to depend on — might be just three functions: `login`, `logout`, and `refreshToken`.\n\nThe `auth/index.ts` acts as the facade:\n\n```ts\n// auth/index.ts  ← facade\nexport { login, logout, refreshToken } from './auth-facade';\n// TokenService, SessionStore, CryptoUtil are NOT exported\n```\n\nCallers write `import { login } from './auth'`. They depend on the facade's public contract. If you later refactor `TokenService` to use a different algorithm, no caller changes — only the facade's implementation changes.\n\nThis pattern is so common that TypeScript project structure guides explicitly recommend it: each module has one public `index.ts` that declares the module's API, and all other files are internal. The facade is the module boundary.\n\nKey distinction from a class-based facade: the module facade does not coordinate a sequence of operations at runtime — it is purely a **packaging and API-surface decision**. The class-based facade coordinates subsystems at runtime. Both are valid applications of the same principle: hide complexity, expose simplicity."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"External callers\"] --> B[\"auth/index.ts\\nlogin logout refreshToken\"]\n    B --> C[\"auth-facade.ts\\ncoordinates internals\"]\n    C --> D[\"TokenService\"]\n    C --> E[\"SessionStore\"]\n    C --> F[\"CryptoUtil\"]\n    C --> G[\"UserRepository\"]\n    style A fill:#e8f4f8\n    style B fill:#fff3cd\n    style C fill:#fff3cd",
+      "caption": "The index.ts is the module's facade: it exposes three public functions while keeping four internal classes private. External callers can only depend on what is exported."
+    },
+    {
+      "type": "explanation",
+      "title": "Testability: Why Dependency Injection Changes Everything",
+      "content": "A facade coordinating real subsystems is untestable if it news up its dependencies internally. Consider this anti-pattern:\n\n```js\nclass OrderFacade {\n  constructor() {\n    this._payment = new StripeGateway(); // hardwired — cannot substitute\n    this._email   = new SendGridClient(); // hardwired — network call in tests\n  }\n}\n```\n\nTo test `placeOrder`, you must either hit the real Stripe API (slow, costly, stateful) or monkey-patch the module (fragile). Neither is acceptable for a unit test.\n\nThe solution is **constructor injection**: accept subsystem instances as parameters with sensible defaults.\n\n```js\nclass OrderFacade {\n  constructor({ payment = new StripeGateway(), email = new SendGridClient() } = {}) {\n    this._payment = payment;\n    this._email   = email;\n  }\n}\n```\n\nNow a test can inject fakes: `new OrderFacade({ payment: fakePayment, email: fakeEmail })`. The facade's coordination logic — the sequencing, the error compensation, the conditional email — is tested without any real network calls.\n\nThis pattern has a name in the testing literature: **Humble Object**. The facade is a thin coordination shell (humble — easily testable) that delegates to real subsystems (which are tested independently). The complexity is in the subsystems; the sequence is in the facade; the test verifies the sequence without running the complexity.\n\nIn TypeScript, you would define interfaces for each subsystem and inject them:\n\n```ts\ninterface IPaymentGateway {\n  charge(userId: string, amount: number): Promise<Receipt>;\n  refund(receiptId: string): Promise<void>;\n}\n\nclass OrderFacade {\n  constructor(\n    private readonly payment: IPaymentGateway,\n    private readonly email: IEmailService,\n    private readonly inventory: IInventoryService,\n  ) {}\n}\n```\n\nNestJS's dependency injection container does exactly this: it resolves the concrete implementations at runtime while the facade's constructor declares only interface contracts."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// ── Structural skeleton ──────────────────────────────────────────\n\n// Subsystem classes (complex, independent)\nclass SubsystemA {\n  operationA() { return 'SubsystemA: ready'; }\n}\nclass SubsystemB {\n  operationB() { return 'SubsystemB: go!'; }\n}\nclass SubsystemC {\n  operationC() { return 'SubsystemC: done'; }\n}\n\n// Facade: simple interface over the three subsystems\nclass Facade {\n  constructor() {\n    this._a = new SubsystemA();\n    this._b = new SubsystemB();\n    this._c = new SubsystemC();\n  }\n  // One method replaces three calls the client would otherwise make\n  doWork() {\n    const results = [\n      this._a.operationA(),\n      this._b.operationB(),\n      this._c.operationC(),\n    ];\n    return results.join(' | ');\n  }\n}\n\n// Client\nconst facade = new Facade();\nconsole.log(facade.doWork());\n// SubsystemA: ready | SubsystemB: go! | SubsystemC: done\n\n// ── Module / export facade pattern ──────────────────────────────\n// In real codebases, the facade is often the module's public export:\n//\n// auth/index.js  ← facade\n//   export { login, logout, refreshToken }\n//   (internally uses TokenService, SessionStore, CryptoUtil)\n//\n// import { login } from './auth'; // caller sees only three functions",
-      "explanation": "The skeleton shows the minimal structure. The module export example shows how the Facade pattern naturally emerges as the `index.js` of any well-structured module — exporting only the public surface, hiding internal collaborators."
+      "label": "Example",
+      "code": "// ── Full testable facade with interface-like duck-typing ──────\n\n// 'Interface' contracts (JS duck-typed; TypeScript would use interface keyword)\nconst ICart      = { validate: null, getItems: null, getTotal: null };\nconst IInventory = { reserve: null, release: null };\nconst IPayment   = { charge: null, refund: null };\nconst IEmail     = { sendConfirmation: null, sendCancellation: null };\n\n// ── Test doubles (pure in-memory fakes) ───────────────────────\nconst fakeCart = {\n  validate: (cartId) => cartId === 'valid-cart',\n  getItems: (cartId) => [{ id: 'a', name: 'Widget', price: 10 }],\n  getTotal: (items)  => items.reduce((s, i) => s + i.price, 0),\n};\n\nconst fakeInventory = {\n  reserved: [],\n  reserve:  function(items) { this.reserved.push(...items); },\n  release:  function(items) { this.reserved = this.reserved.filter(r => !items.includes(r)); },\n};\n\nconst fakePayment = {\n  charged: [],\n  charge:  function(userId, amount) {\n    const r = { receiptId: 'FAKE-REC-1', amount, userId };\n    this.charged.push(r);\n    return r;\n  },\n  refund: function(id) { this.charged = this.charged.filter(c => c.receiptId !== id); },\n};\n\nconst fakeEmail = {\n  sent: [],\n  sendConfirmation:  (userId, receipt) => fakeEmail.sent.push({ type: 'confirm', userId }),\n  sendCancellation:  (userId)          => fakeEmail.sent.push({ type: 'cancel',  userId }),\n};\n\n// ── Test: placeOrder calls all four subsystems in sequence ────\nasync function testPlaceOrder() {\n  const facade = new OrderFacade({\n    cart:      fakeCart,\n    inventory: fakeInventory,\n    payment:   fakePayment,\n    email:     fakeEmail,\n  });\n\n  const receipt = await facade.placeOrder('valid-cart', 'u-1');\n\n  console.assert(receipt.receiptId === 'FAKE-REC-1',     'receipt returned');\n  console.assert(fakeInventory.reserved.length === 1,    'inventory reserved');\n  console.assert(fakePayment.charged.length === 1,       'payment charged');\n  console.assert(fakeEmail.sent[0].type === 'confirm',   'confirmation sent');\n  console.log('testPlaceOrder: PASS');\n}\n\n// ── Test: payment failure releases inventory ──────────────────\nasync function testPaymentFailureCompensates() {\n  const brokenPayment = {\n    charge: () => { throw new Error('Card declined'); },\n    refund: () => {},\n  };\n  const inv = { reserved: [], reserve(items) { this.reserved.push(...items); }, release(items) { this.reserved = []; } };\n\n  const facade = new OrderFacade({\n    cart:      fakeCart,\n    inventory: inv,\n    payment:   brokenPayment,\n    email:     fakeEmail,\n  });\n\n  try {\n    await facade.placeOrder('valid-cart', 'u-2');\n    console.assert(false, 'should have thrown');\n  } catch (e) {\n    console.assert(inv.reserved.length === 0, 'inventory released on payment failure');\n    console.log('testPaymentFailureCompensates: PASS');\n  }\n}\n\nawait testPlaceOrder();\nawait testPaymentFailureCompensates();",
+      "explanation": "These tests run entirely in memory — no network, no database, no timer. They verify only what the facade is responsible for: coordinating subsystems in the right sequence and compensating on failure. Each subsystem's own logic (e.g., Stripe's charge algorithm) is tested separately against the real Stripe API."
+    },
+    {
+      "type": "explanation",
+      "title": "When Facades Go Wrong: The God Facade Anti-Pattern",
+      "content": "The facade pattern has a well-known failure mode: the **God Facade**. It starts innocuously. A new requirement appears: when a user places an order with a coupon code, apply a discount. The discount logic is a few lines, so it ends up in `placeOrder`. Then: orders above $500 need a fraud check. Two more lines in the facade. Then: corporate orders need a different tax calculation. A branch in the facade. Six months later, `OrderFacade.placeOrder` is 400 lines long with a dozen conditionals, imports from twelve services, and no test is confident it covers all paths.\n\nThis is the facade becoming a God object. The signs to watch for:\n\n- **Business logic accumulation**: Tax rules, discount algorithms, fraud scoring — none of these are coordination; they are business logic and belong in dedicated services (`DiscountService`, `TaxEngine`, `FraudChecker`).\n- **Long conditionals based on entity type**: `if (order.type === 'corporate') { ... } else if (order.type === 'subscription') { ... }` — this should be polymorphism or strategy, not a facade branch.\n- **More than 5-7 subsystem dependencies**: A facade with 12 injected services is almost certainly doing too much.\n- **Tests that require elaborate setup**: If setting up the facade for a single test requires stubbing 8 services, the facade has absorbed too much responsibility.\n\nThe remedy is vertical decomposition: extract a `CorporateOrderFacade` and a `SubscriptionOrderFacade`. Extract `OrderCalculationService` for pricing. Let the facade remain a thin coordinator, and move domain logic into the appropriate domain service.\n\nA good facade should be readable in 5 minutes. If it takes an hour to understand `placeOrder`, it is no longer a facade."
+    },
+    {
+      "type": "explanation",
+      "title": "Real Frameworks and Real-World Facades",
+      "content": "The Facade pattern appears throughout production software at every scale. Recognising it in the wild deepens your understanding of both the pattern and the frameworks.\n\n**Express Router as Facade**\n\n`express()` is a facade. When you call `app.get('/orders', handler)`, you are calling a simplified interface that hides HTTP socket management, request parsing, routing table construction, middleware chain execution, and response serialisation. The Node.js `http` module is the subsystem; Express is the facade that makes building web servers tractable.\n\n**Sequelize / TypeORM Model as Facade**\n\n`User.findAll({ where: { active: true } })` is a facade call. Behind it: SQL generation, connection pool acquisition, query parameter binding, result-set mapping, and eager-load joins. The raw `pg` or `mysql2` driver is the subsystem; the ORM model is the facade.\n\n**AWS SDK High-Level Clients**\n\nAWS provides both low-level clients (HTTP requests against raw AWS APIs) and high-level wrappers like `S3.upload()` that handle multipart uploads, retry logic, and progress events. The high-level client is a facade over the low-level client.\n\n**NestJS Module + Service Layer**\n\nIn NestJS, the conventional service class is a facade. A `OrdersService` exposes `create`, `findOne`, `update`, `remove` — and internally coordinates `OrdersRepository`, `InventoryClient`, `NotificationsService`. The controller calls the service; the service is the facade; the repositories and clients are the subsystems. NestJS's DI container wires everything together.\n\n**BFF (Backend-for-Frontend)**\n\nAt the architecture level, a BFF service is a Facade at the network boundary. Mobile clients call one BFF endpoint; the BFF fans out to user-service, order-service, and product-service, assembles the response, and returns it. This reduces the number of round trips the mobile client must make and hides the internal service topology from the client application.\n\n**React Query / SWR**\n\n`useQuery('orders', fetchOrders)` is a facade over caching, deduplication, background refetching, loading state management, and error state management. Without it, each component would implement its own data fetching lifecycle."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Mobile App\"] --> B[\"BFF Facade\\n/api/dashboard\"]\n    B --> C[\"UserService\\n/users/me\"]\n    B --> D[\"OrderService\\n/orders/recent\"]\n    B --> E[\"ProductService\\n/products/featured\"]\n    style A fill:#e8f4f8\n    style B fill:#fff3cd",
+      "caption": "The Backend-for-Frontend is a Facade at the architecture level. The mobile app makes one request; the BFF fans out to three microservices and assembles a single JSON response. If the service topology changes, only the BFF updates."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// ── Static module facade (TypeScript-style in plain JS) ───────\n// File structure:\n//   auth/\n//     token-service.js    ← internal\n//     session-store.js    ← internal\n//     crypto-util.js      ← internal\n//     auth-facade.js      ← coordinates internals\n//     index.js            ← public API (module facade)\n\n// auth/token-service.js\nclass TokenService {\n  generate(userId) { return `tok_${userId}_${Date.now()}`; }\n  verify(token)    { return token.startsWith('tok_'); }\n  invalidate(token){ /* blacklist logic */ }\n}\n\n// auth/session-store.js\nclass SessionStore {\n  constructor() { this._sessions = new Map(); }\n  save(token, userId)  { this._sessions.set(token, userId); }\n  load(token)          { return this._sessions.get(token); }\n  delete(token)        { this._sessions.delete(token); }\n}\n\n// auth/auth-facade.js\nclass AuthFacade {\n  constructor() {\n    this._tokens   = new TokenService();\n    this._sessions = new SessionStore();\n  }\n\n  login(userId) {\n    const token = this._tokens.generate(userId);\n    this._sessions.save(token, userId);\n    return { token };\n  }\n\n  logout(token) {\n    this._tokens.invalidate(token);\n    this._sessions.delete(token);\n  }\n\n  authenticate(token) {\n    if (!this._tokens.verify(token)) throw new Error('Invalid token');\n    const userId = this._sessions.load(token);\n    if (!userId) throw new Error('Session not found');\n    return { userId };\n  }\n}\n\n// auth/index.js  ← module facade: expose only the public contract\nconst _facade = new AuthFacade();\n\nexport const login        = (userId) => _facade.login(userId);\nexport const logout       = (token)  => _facade.logout(token);\nexport const authenticate = (token)  => _facade.authenticate(token);\n// TokenService and SessionStore are NOT exported — they are private\n\n// ── Caller: depends only on the public module API ─────────────\nimport { login, logout, authenticate } from './auth/index.js';\n\nconst { token } = login('user-42');\nconsole.log('Logged in:', token);\n\nconst { userId } = authenticate(token);\nconsole.log('Authenticated as:', userId);\n\nlogout(token);\nconsole.log('Logged out');",
+      "explanation": "The `index.js` is the module facade. It instantiates `AuthFacade` once (a singleton scope) and re-exports only three functions. `TokenService` and `SessionStore` are completely invisible to callers. If you later replace `SessionStore` with a Redis-backed implementation, no caller changes — only `auth-facade.js` changes."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Historical context:** The Facade pattern was codified by the Gang of Four (Gamma, Helm, Johnson, Vlissides) in *Design Patterns: Elements of Reusable Object-Oriented Software* (1994), classified as a **Structural** pattern. The term 'facade' (from French, meaning the front face of a building) is deliberate: like a building's facade, it presents a clean public face while hiding all the pipes, wires, and structural complexity behind it. The pattern predates the book — service layers, shell scripts, and API wrappers are all centuries-old ideas in computing terms. The GoF gave it a name and a precise vocabulary."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**When to use:** When a client interacts with multiple subsystems in a fixed sequence; when you want to define a 'public API' for a module or layer; when third-party library APIs are complex and only a subset of features are needed.\n\n**When NOT to use:** When clients legitimately need fine-grained control over each subsystem — the facade becomes a limitation. If business logic keeps growing inside the facade, split into a proper service layer. Do not mistake a Facade for a God object — keep it thin and focused on coordination.\n\n**In the wild:** Express Router (hides HTTP parsing), Sequelize model (hides raw SQL), AWS SDK high-level clients, BFF (Backend-for-Frontend) API gateway, NestJS module barrel exports."
+      "content": "**When to use the Facade pattern:**\n- A client must interact with many subsystems in a fixed sequence — the facade owns the sequence.\n- You want to define a stable public API for a module or layer that may change internally.\n- A third-party library's API is complex but you need only a small subset of it.\n- You are building a BFF, API gateway, or service layer that aggregates multiple downstream calls.\n\n**When NOT to use it:**\n- Clients legitimately need fine-grained, case-by-case control over each subsystem — the facade becomes a limitation, not a simplification.\n- The 'facade' would need to support so many different combinations that it turns into a God object with endless configuration options.\n- The subsystems genuinely need to communicate with each other bidirectionally — you need a Mediator instead.\n\n**Red flags that your facade needs refactoring:**\n- It has more than 7-8 injected dependencies.\n- Its methods contain branching business logic (tax rules, discount algorithms).\n- You need to read its full implementation to understand any single caller's behaviour.\n- Tests for the facade require stubbing a dozen services."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "The **Facade** pattern provides a single simplified interface to a complex set of subsystems, reducing coupling between clients and internals.",
-        "The facade **coordinates and sequences** subsystem calls — it does not re-implement their logic.",
-        "Subsystems remain **independent** and fully usable without the facade — advanced clients can still bypass it when needed.",
-        "A natural use of the pattern is a **module's public export** (`index.js`) that exposes only the safe, supported surface of a package.",
-        "Keep facades **thin**: if a facade accumulates branching business logic, it is becoming a service layer and should be decomposed."
+        "The **Facade** pattern provides a single simplified interface to a complex set of subsystems, reducing the coupling between clients and internal implementation details.",
+        "The facade **coordinates and sequences** subsystem calls — it does not reimplement their logic. Business logic stays in the subsystems; sequencing and error compensation stay in the facade.",
+        "Subsystems remain **independent and unaware** of the facade. They are fully usable without it; the facade is a convenience, not a gate.",
+        "**Constructor injection** of subsystem dependencies makes the facade testable with in-memory fakes — no real network calls needed to verify the coordination sequence.",
+        "A module's `index.ts` barrel export is the most common daily manifestation of the Facade pattern — it defines the module's public API while keeping internal collaborators private.",
+        "The facade's failure mode is becoming a **God object**: avoid accumulating business logic, deep conditionals, or more than ~7 dependencies. Keep the facade thin and focused on coordination.",
+        "Real-world facades appear everywhere: Express Router, ORM models (Sequelize/TypeORM), AWS SDK high-level clients, NestJS service layers, BFF/API gateways, and React Query all apply this pattern at different scales."
       ]
     }
   ],
@@ -64,133 +119,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What is the primary purpose of the Facade pattern?",
+      "question": "What is the primary intent of the Facade pattern?",
       "type": "mcq",
       "options": [
-        "To translate one interface into another",
-        "To add behaviour to an object at runtime",
+        "To translate one incompatible interface into another",
         "To provide a simplified interface to a complex set of subsystems",
-        "To ensure a class has only one instance"
+        "To ensure a class has only one instance",
+        "To add behaviour to objects at runtime without modifying their class"
       ],
-      "correct": 2,
-      "explanation": "The Facade pattern hides subsystem complexity behind a single, easy-to-use interface so clients do not need to know about or coordinate the individual subsystem classes."
+      "correct": 1,
+      "explanation": "The Facade pattern hides subsystem complexity behind a single, easy-to-use interface so clients do not need to know about or coordinate the individual subsystem classes. Adapter translates interfaces; Singleton ensures one instance; Decorator adds behaviour at runtime."
     },
     {
       "id": "q2",
-      "question": "Do subsystem classes know about the facade that wraps them?",
+      "question": "Do subsystem classes need to know that a facade wraps them?",
       "type": "mcq",
       "options": [
-        "Yes — they must call the facade for coordination",
-        "No — they are independent and have no reference to the facade",
-        "Only if they implement the facade interface",
-        "Only the outermost subsystem knows about the facade"
+        "Yes — they must call the facade for all cross-subsystem communication",
+        "No — subsystems are independent and have no reference to the facade",
+        "Only the outermost subsystem in the call chain knows about the facade",
+        "Yes — the facade registers itself with each subsystem during construction"
       ],
       "correct": 1,
-      "explanation": "Subsystems are independent. The facade knows about them; they do not know about the facade. This one-directional dependency is what keeps the system decoupled."
+      "explanation": "Subsystems are independent. The facade knows about them; they do not know about the facade. This one-directional dependency is what keeps the system decoupled and subsystems reusable in isolation."
     },
     {
       "id": "q3",
       "question": "How does a Facade differ from an Adapter?",
       "type": "mcq",
       "options": [
-        "A Facade translates one interface into another; an Adapter simplifies multiple interfaces",
+        "A Facade translates one incompatible interface; an Adapter simplifies many interfaces",
         "A Facade simplifies multiple interfaces into one; an Adapter translates one incompatible interface into another",
-        "They are structurally and intentionally identical",
-        "An Adapter hides complexity; a Facade translates types"
+        "They are structurally and intentionally identical — only the naming convention differs",
+        "An Adapter hides complexity; a Facade performs interface translation"
       ],
       "correct": 1,
-      "explanation": "Intent is the key difference: Adapter = interface translation (one → one), Facade = complexity reduction (many → one simplified). Their structures look similar but the problems they solve are different."
+      "explanation": "Intent is the decisive difference: Adapter = interface translation (one incompatible → one compatible). Facade = complexity reduction (many interfaces → one simplified entry point). The structural code can look similar but the problems they solve are different."
     },
     {
       "id": "q4",
-      "question": "In the OrderFacade example, what happens when the payment charge throws an error?",
+      "question": "In the OrderFacade example, what should happen when the PaymentGateway throws an error after inventory has already been reserved?",
       "type": "mcq",
       "options": [
-        "The order is silently dropped",
-        "The email service sends a failure notice automatically",
-        "The facade releases the reserved inventory as compensation before rethrowing",
-        "The cart is cleared to prevent duplicate orders"
+        "The error should be silently swallowed to preserve order state",
+        "The email service should automatically notify the customer of the failure",
+        "The facade should release the reserved inventory as compensation before rethrowing",
+        "The cart should be cleared to prevent a duplicate order attempt"
       ],
       "correct": 2,
-      "explanation": "The facade encapsulates the compensation logic (releasing inventory on payment failure) in one place. Without the facade, every caller would need to implement this rollback sequence themselves."
+      "explanation": "The facade owns the compensation logic. When payment fails after inventory was reserved, the facade must release inventory before rethrowing — this is the 'Saga compensating transaction' pattern. Without the facade, every caller would need to implement this rollback sequence themselves."
     },
     {
       "id": "q5",
-      "question": "What is the relationship between a module's `index.js` public exports and the Facade pattern?",
+      "question": "A module's index.ts exports only `login`, `logout`, and `refreshToken` while keeping `TokenService`, `SessionStore`, and `CryptoUtil` internal. What pattern does this apply?",
       "type": "mcq",
       "options": [
-        "No relationship — module exports are a language feature unrelated to patterns",
-        "The public exports ARE a facade: they expose a simple surface while hiding internal collaborators",
-        "index.js is always an anti-pattern",
-        "Public exports correspond to the Singleton pattern"
+        "No pattern — module exports are a language feature unrelated to design patterns",
+        "Singleton — the module ensures only one instance of each service exists",
+        "Facade — the public exports are a simplified API hiding internal collaborators",
+        "Proxy — the exported functions intercept calls to the real implementations"
       ],
-      "correct": 1,
-      "explanation": "When `auth/index.js` exports only `login`, `logout`, `refreshToken` while hiding `TokenService`, `SessionStore`, and `CryptoUtil`, it is acting as a facade — providing a clean public API over a complex internal module."
+      "correct": 2,
+      "explanation": "When an index.ts re-exports only the public contract while hiding internal classes, it is acting as a module Facade — providing a clean public API over complex internals. The Singleton pattern concerns instance count; Proxy intercepts individual object access."
     },
     {
       "id": "q6",
-      "question": "A Facade grows to 400 lines with complex branching business logic. What problem does this indicate?",
-      "type": "mcq",
-      "options": [
-        "The subsystems are too simple and should be merged",
-        "The facade has become a God object and should be split into a proper service layer",
-        "The facade is working correctly — more logic means better coordination",
-        "The client should be merged into the facade"
-      ],
-      "correct": 1,
-      "explanation": "A facade should be thin — coordination and sequencing only. Business logic accumulation means it has crossed from facade into service layer territory and needs decomposition."
-    },
-    {
-      "id": "q7",
-      "question": "Can a client bypass the facade and call subsystems directly?",
-      "type": "mcq",
-      "options": [
-        "No — the facade pattern enforces access control",
-        "Yes — the facade doesn't prevent direct subsystem access; it just provides a simpler path",
-        "Only if the subsystem implements a special bypass interface",
-        "Only the facade is allowed to instantiate subsystems"
-      ],
-      "correct": 1,
-      "explanation": "The Facade pattern is not an access-control mechanism (that's the Proxy). Advanced clients that need fine-grained control can still use subsystems directly — the facade is a convenience, not a gate."
-    },
-    {
-      "id": "q8",
-      "question": "Which real-world example best illustrates the Facade pattern?",
-      "type": "mcq",
-      "options": [
-        "A JavaScript Proxy object intercepting property access",
-        "A hotel concierge who coordinates transport, wake-up, and room service for a guest with one request",
-        "A power strip that allows multiple devices to share one socket",
-        "A recursive file tree traversal algorithm"
-      ],
-      "correct": 1,
-      "explanation": "The concierge is the canonical Facade analogy: one point of contact, hiding the complexity of coordinating multiple internal departments."
-    },
-    {
-      "id": "q9",
       "question": "How does the Facade pattern differ from the Mediator pattern?",
       "type": "mcq",
       "options": [
-        "The Mediator is one-directional (clients → facade); the Facade is bidirectional",
-        "The Facade is one-directional (clients → facade, subsystems don't know it exists); the Mediator coordinates bidirectional communication between components that know about it",
-        "They are identical patterns with different names",
-        "The Mediator hides complexity; the Facade coordinates events"
+        "The Facade coordinates bidirectional communication between subsystems that know about it; the Mediator is one-directional",
+        "The Facade is one-directional (clients call it; subsystems are unaware); the Mediator coordinates bidirectional communication between components that know about it",
+        "They are identical — both coordinate subsystem interactions and both are known to subsystems",
+        "The Mediator hides complexity from external clients; the Facade coordinates internal events"
       ],
       "correct": 1,
-      "explanation": "In the Facade, subsystems are unaware of it — communication is one-way. In the Mediator, components know about the mediator and route communication through it — relationships are bidirectional."
+      "explanation": "In the Facade, subsystems do not know the facade exists — communication is one-directional (client → facade → subsystems). In the Mediator, components know about the mediator and route communication through it bidirectionally, like an air-traffic control tower that planes actively contact."
+    },
+    {
+      "id": "q7",
+      "question": "Why is constructor injection of subsystem dependencies a best practice when implementing a Facade?",
+      "type": "mcq",
+      "options": [
+        "It reduces the number of methods the facade needs to expose",
+        "It allows tests to substitute in-memory fakes without real network calls",
+        "It prevents callers from bypassing the facade to access subsystems directly",
+        "It makes subsystems aware of the facade so they can coordinate with it"
+      ],
+      "correct": 1,
+      "explanation": "When subsystems are injected, tests can pass fakes (in-memory objects with the same interface) instead of real services. This makes tests fast, deterministic, and free of network/database setup. Hardwired `new StripeGateway()` inside the constructor makes the facade untestable without real infrastructure."
+    },
+    {
+      "id": "q8",
+      "question": "An OrderFacade has grown to 600 lines and imports from 14 services with complex tax, discount, and fraud-check logic embedded inside it. What problem does this illustrate?",
+      "type": "mcq",
+      "options": [
+        "The subsystems are too granular and should be merged into fewer classes",
+        "The facade has become a God object and should be decomposed into proper domain services",
+        "The facade is working correctly — more coordination logic means better encapsulation",
+        "The client is violating the Single Responsibility Principle by calling so many methods"
+      ],
+      "correct": 1,
+      "explanation": "A facade should be thin — coordination and sequencing only. When business logic (tax rules, discount algorithms, fraud scoring) accumulates inside the facade, it has crossed from Facade into God object territory. The remedy is to extract dedicated domain services and keep the facade as a thin orchestrator."
+    },
+    {
+      "id": "q9",
+      "question": "Which of the following is a real-world example of the Facade pattern?",
+      "type": "mcq",
+      "options": [
+        "A JavaScript Proxy that intercepts property reads on a single object",
+        "A hotel concierge who coordinates transport, wake-up calls, and room service for a guest through one conversation",
+        "A recursive depth-first search algorithm that traverses a graph",
+        "An event emitter that broadcasts changes to all registered listeners"
+      ],
+      "correct": 1,
+      "explanation": "The hotel concierge is the canonical Facade analogy: one point of contact for the guest (client), hiding the complexity of coordinating multiple internal departments (subsystems). The Proxy intercepts a single object's access; DFS is an algorithm; an event emitter is Observer pattern."
     },
     {
       "id": "q10",
-      "question": "What does the Facade NOT do?",
+      "question": "Can a client bypass the facade and interact directly with subsystems?",
       "type": "mcq",
       "options": [
-        "Coordinate multiple subsystem calls in sequence",
-        "Reduce coupling between clients and subsystems",
-        "Implement business logic that belongs in the subsystems themselves",
-        "Provide a simplified API surface"
+        "No — the Facade pattern enforces access control at the class level",
+        "Only if the subsystem implements a special bypass interface exposed by the facade",
+        "Yes — the facade is a convenience and does not restrict direct subsystem access",
+        "Only internal tests are allowed to access subsystems directly"
       ],
       "correct": 2,
-      "explanation": "The Facade orchestrates and delegates — it does not re-implement subsystem logic. Business logic stays in the subsystems. If you find yourself duplicating or replacing subsystem logic in the facade, that's a design smell."
+      "explanation": "The Facade is not an access-control mechanism — that is the Proxy pattern's domain. Advanced clients that need fine-grained control can still use subsystems directly. The facade simply provides the simpler path for the common case."
     }
   ]
 }

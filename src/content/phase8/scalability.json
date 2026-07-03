@@ -5,57 +5,128 @@
   "week": 29,
   "icon": "architecture",
   "tagline": "How systems grow to handle millions of users without rewriting from scratch — the patterns that make scale predictable.",
-  "readTime": "~12 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "A system that works for 100 users rarely works unchanged at 1,000,000. **Scalability** is the ability to handle growing load by adding resources — ideally without redesigning the entire system. Understanding where bottlenecks form and which patterns dissolve them is what separates systems that survive growth from those that become crisis-driven rewrites.\n\nScalability splits into two axes: **vertical** (bigger machine) and **horizontal** (more machines). Most internet-scale systems rely on horizontal scaling because it removes the single point of failure and keeps costs linear. But horizontal scale introduces new complexity: stateful sessions, data consistency across nodes, and coordinating cache invalidation."
+      "content": "A system that works perfectly for 100 users often collapses at 10,000 — not because the logic is wrong, but because every architectural shortcut that seemed harmless at small scale becomes a bottleneck at large scale. **Scalability** is the engineering discipline of designing systems that handle growing load gracefully, ideally by adding resources rather than rewriting code.\n\nThis is one of the most consequential topics in software engineering because the decisions that determine whether a system can scale are mostly made at the beginning, before anyone knows how successful the product will be. Retrofitting scalability onto a monolith that was designed without it is one of the most expensive and dangerous operations an engineering team can undertake. The engineers who built Twitter's original Rails monolith did not plan for 100 million users; the ones who inherited that system spent years migrating off it.\n\nIn this chapter we cover scalability from first principles: what load actually means, the two fundamental scaling axes, statelessness as the prerequisite for horizontal scale, the caching hierarchy (and the notorious invalidation problem), database scaling strategies including read replicas and sharding, asynchronous work via message queues, CDN architecture, connection pooling, and the concept of graceful degradation. We include worked code examples and real architectural diagrams. By the end, you will be able to look at any system design and identify where the bottlenecks will form as load increases — and know which pattern dissolves each one."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  Users[\"Millions of Users\"] --> LB[\"Load Balancer\"]\n  LB --> App1[\"App Server 1\"]\n  LB --> App2[\"App Server 2\"]\n  LB --> App3[\"App Server N\"]\n  App1 --> Cache[\"Redis Cache\"]\n  App2 --> Cache\n  App3 --> Cache\n  App1 --> DB[\"Primary DB\"]\n  DB --> R1[\"Read Replica 1\"]\n  DB --> R2[\"Read Replica 2\"]\n  App1 --> CDN[\"CDN Edge\"]",
-      "caption": "A horizontally scaled stack: stateless app servers behind a load balancer, a shared cache layer, read replicas for DB scale, and a CDN for static assets."
+      "mermaid": "flowchart TD\n  Users[\"Millions of Users\"] --> CDN[\"CDN Edge Layer\"]\n  CDN --> LB[\"Load Balancer\"]\n  LB --> App1[\"App Server 1\"]\n  LB --> App2[\"App Server 2\"]\n  LB --> App3[\"App Server N\"]\n  App1 --> Cache[\"Redis Cache Cluster\"]\n  App2 --> Cache\n  App3 --> Cache\n  App1 --> Primary[\"Primary DB\"]\n  Primary --> R1[\"Read Replica 1\"]\n  Primary --> R2[\"Read Replica 2\"]\n  App1 --> Queue[\"Message Queue\"]\n  Queue --> Worker[\"Background Workers\"]",
+      "caption": "A fully horizontally scaled architecture: CDN absorbs static traffic, stateless app servers sit behind a load balancer, a shared cache layer reduces DB reads, read replicas scale reads, and a message queue decouples slow work from the HTTP response path."
     },
     {
       "type": "analogy",
       "title": "The Expanding Coffee Shop",
-      "content": "A single barista handles 10 customers but struggles at 100. **Vertical scaling** is hiring a superhuman barista with eight arms — it helps briefly but has a biological ceiling. **Horizontal scaling** is opening 10 identical shops — each barista handles the same load, you just add more shops. The trick: customers can't remember which shop they spoke to last (statelessness). If a customer's order is remembered at any shop using a shared loyalty database (shared session store / cache), the shops are truly interchangeable."
+      "content": "Imagine a coffee shop with a single barista. She handles 20 customers an hour comfortably. At 200 customers, the queue spills out the door. You have two choices.\n\n**Vertical scaling** is hiring a superhuman barista who works eight times faster — maybe a coffee robot that costs $500,000. She handles more customers per hour, but she has a physical ceiling (you cannot buy a robot that works infinitely fast) and if she breaks down, the entire shop closes.\n\n**Horizontal scaling** is opening ten identical shops with ten regular baristas. Each barista handles the same 20 customers per hour; together they handle 200. If one shop closes for repairs, the other nine keep running. The trick: every customer must be able to walk into *any* shop without the barista needing to remember their previous visit. If a customer's loyalty points are stored in a shared app (the external session store), any barista can serve them. If the points are written on a sticky note at Shop #3 (server-local state), that customer is stuck at Shop #3 forever.\n\nStatelessness — externalising session data — is the prerequisite that makes horizontal scaling work. It is the architectural equivalent of the shared loyalty app."
     },
     {
       "type": "explanation",
-      "content": "**Vertical scaling** (scale-up) means adding CPU, RAM, or faster disk to an existing machine. It is simple — no code changes — but has a hard ceiling (the largest machine available) and a single point of failure. It works well for databases where horizontal sharding is complex.\n\n**Horizontal scaling** (scale-out) adds more instances of the same service behind a load balancer. It requires **stateless** application servers: request state (the user's session) must be stored externally — in Redis or a database — not in local memory. Otherwise, the next request might hit a different server that has no memory of the previous one. Statelessness is the architectural prerequisite for horizontal scale.\n\n**Caching** is the highest-leverage scalability tool. An in-memory cache (Redis, Memcached) can serve a response in under a millisecond that would otherwise require a 20ms database query. Cache at multiple layers: HTTP response caching (CDN, reverse proxy), application-level (Redis), and database query caching. The cost is **cache invalidation** — the famously hard problem. Strategies include TTL (time-based expiry), write-through (update cache on every write), and cache-aside (application manages cache explicitly). A **CDN** (Content Delivery Network) is geographically distributed caching: static assets, images, and API responses are cached at edge nodes close to the user, reducing latency from hundreds of milliseconds to single-digit milliseconds."
+      "title": "Vertical vs. Horizontal Scaling — The Fundamental Trade-off",
+      "content": "**Vertical scaling** (scale-up) means adding more resources to a single machine: more CPU cores, more RAM, a faster SSD, a faster network card. Its advantages are simplicity — application code needs zero changes — and transactional consistency, since there is only one machine. Its disadvantages are a hard ceiling (the largest EC2 instance or bare-metal server money can buy) and a single point of failure (one machine crashing = total outage).\n\nVertical scaling is the right first move for most systems. Moving from a 2-core to a 16-core machine with 128 GB RAM is fast, safe, and often buys months of headroom. PostgreSQL, in particular, scales remarkably well vertically before horizontal sharding becomes necessary — many companies with millions of users run on a single well-tuned PostgreSQL primary.\n\n**Horizontal scaling** (scale-out) replicates the service across multiple machines and distributes load between them. It removes the ceiling (add as many machines as you need) and the single point of failure (losing one node degrades capacity slightly but does not bring down the service). Its cost is complexity: stateful services must externalise their state, requests can hit different machines, and distributed systems introduce a whole class of failure modes that simply do not exist on a single machine — network partitions, clock skew, partial failures.\n\n**The practical pattern at internet scale**: vertical scaling for databases (expensive to shard), horizontal scaling for application servers (designed stateless from day one), and a combination for caching layers (Redis Cluster shards horizontally while each shard is a single master with replicas)."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  Write[\"Write Request\"] --> App[\"App Server\"]\n  App -->|\"1. write DB\"| DB[\"Primary DB\"]\n  App -->|\"2. invalidate or update\"| Cache[\"Redis Cache\"]\n  Read[\"Read Request\"] --> App2[\"App Server\"]\n  App2 -->|\"cache hit\"| Cache\n  App2 -->|\"cache miss: read + populate\"| Replica[\"Read Replica\"]",
-      "caption": "Cache-aside pattern: reads check cache first; a miss hits the read replica and populates the cache. Writes go to primary DB and invalidate or update the cache entry."
+      "mermaid": "flowchart LR\n  A[\"Single Server\\n(Vertical)\"] -->|\"Add CPU/RAM\"| B[\"Bigger Server\\n(Ceiling hit)\"]\n  C[\"One App Server\\n(Horizontal start)\"] -->|\"Add instances\"| D[\"N App Servers\\n(behind LB)\"]\n  D -->|\"Requires\"| E[\"Stateless Design\\n+ External Session Store\"]",
+      "caption": "Vertical scaling hits a ceiling; horizontal scaling is unbounded but requires stateless application design as a hard prerequisite."
+    },
+    {
+      "type": "explanation",
+      "title": "Statelessness — The Prerequisite for Horizontal Scale",
+      "content": "**Statelessness** means an application server holds no request-specific data in its local memory between requests. Every request arrives with everything the server needs to process it (or the server knows where to fetch missing data from a shared store).\n\nThe classic violation is **server-side session storage in local memory**. When a user logs in, server A creates a session object in its RAM and stores a session ID in a cookie. The next request from that user arrives — but the load balancer routes it to server B. Server B has no session object for that ID. The user appears logged out. The naive fix is **sticky sessions** (also called session affinity): the load balancer routes all requests from a given client to the same server using a cookie or IP hash. Sticky sessions kinda work until that server crashes, at which point all those users are logged out simultaneously — a thundering herd of re-authentication traffic.\n\nThe correct fix is externalising session state to a **shared store** — almost always Redis. When user logs in, server A writes the session to Redis with the session ID as the key. Server B (or C or N) can retrieve it on the next request. The app server itself is now stateless; Redis holds the state. Now the load balancer can route freely, instances can be added or removed, and zero-downtime rolling deploys are trivial because no server holds unique state.\n\nOther forms of state that must be externalised: uploaded files (use S3/object storage, not local disk), in-progress computation state (use Redis or a database), WebSocket connection state (requires a coordination layer like Redis pub/sub).\n\nThe `JWT` (JSON Web Token) pattern is an alternative approach: encode session data in a signed token stored in the client's browser. No server-side session store needed — the token itself is the session. The trade-off is that JWTs cannot be revoked before their expiry without a token blocklist (which brings back the shared store requirement)."
+    },
+    {
+      "type": "explanation",
+      "title": "Caching — The Highest-Leverage Scalability Tool",
+      "content": "If you can serve a response from memory instead of querying a database, you have replaced a ~20ms operation with a ~0.5ms operation — a 40× speedup per request. At scale, this difference is the distinction between a system that can handle 10,000 requests per second and one that collapses at 500.\n\n**Where to cache (the cache hierarchy)**:\n\n**1. Client-side (browser cache)**: HTTP `Cache-Control` headers instruct browsers and CDNs how long to cache responses. For immutable, content-hashed assets (e.g., `app.a1b2c3.js`), set `Cache-Control: public, max-age=31536000, immutable`. For personalised API responses, set `Cache-Control: no-store`.\n\n**2. CDN edge cache**: A Content Delivery Network like Cloudflare or AWS CloudFront caches responses at data centers distributed globally. A user in Tokyo hitting your CDN edge there gets a cached response in 5ms rather than a 150ms round-trip to your origin server in Virginia. CDNs absorb the majority of traffic for media-heavy sites — a well-configured CDN can serve 90% of requests without touching your origin servers.\n\n**3. Reverse proxy cache (Nginx, Varnish)**: Sits in front of your app servers and caches full HTTP responses for anonymous, non-personalised requests.\n\n**4. Application-level cache (Redis, Memcached)**: The workhorse for most backend caching. Store the results of expensive queries, computed aggregations, or third-party API responses. Sub-millisecond reads. Redis additionally supports rich data structures (sorted sets for leaderboards, pub/sub for real-time, streams for event logs).\n\n**5. Database query cache**: Most databases (PostgreSQL, MySQL) cache query execution plans. Some (MySQL) cached result sets historically, though this feature was removed in MySQL 8 due to its overhead.\n\n**Cache invalidation — the famously hard problem**: Phil Karlton's famous observation that \"there are only two hard things in computer science: cache invalidation and naming things\" is an understatement. Strategies:\n\n- **TTL (time-to-live)**: Set an expiry. Stale data is served for at most TTL seconds. Simple, always correct within a bounded window.\n- **Write-through**: On every write to the database, also update the cache. The cache is always fresh but writes are slower (two writes instead of one).\n- **Write-around**: Writes go only to the database; the cache is populated on the next read (lazy). Stale until TTL or explicit invalidation.\n- **Cache-aside (lazy loading)**: The application manages the cache explicitly. Read: check cache → hit returns immediately, miss fetches from DB and populates cache. Write: update DB and delete (or update) the cache key. This is the most common pattern because it is explicit and composable.\n- **Event-driven invalidation**: A change data capture (CDC) system like Debezium streams database change events to a consumer that invalidates or updates affected cache keys in real time. Powerful but complex."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Write[\"Write Request\"] --> App[\"App Server\"]\n  App -->|\"1. write primary DB\"| DB[\"Primary DB\"]\n  App -->|\"2. delete cache key\"| Cache[\"Redis Cache\"]\n  Read[\"Read Request\"] --> App2[\"App Server\"]\n  App2 -->|\"cache HIT: ~0.5ms\"| Cache\n  App2 -->|\"cache MISS: fetch + populate\"| Replica[\"Read Replica\"]",
+      "caption": "Cache-aside pattern: reads always check Redis first. A miss fetches from the read replica and repopulates the cache. Writes go to the primary DB and delete the cache key, forcing the next read to fetch fresh data."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Cache-aside pattern with Redis (Node.js / ioredis)\nimport { Redis } from 'ioredis';\nconst redis = new Redis(process.env.REDIS_URL);\nconst TTL_SECONDS = 300; // 5-minute cache\n\nasync function getUserById(userId) {\n  const cacheKey = `user:${userId}`;\n\n  // 1. Check cache first\n  const cached = await redis.get(cacheKey);\n  if (cached) {\n    return JSON.parse(cached); // cache hit — ~0.5ms\n  }\n\n  // 2. Cache miss — query the database\n  const user = await db.query(\n    'SELECT id, name, email FROM users WHERE id = $1',\n    [userId]\n  );\n\n  // 3. Populate cache for future requests\n  if (user) {\n    await redis.setex(cacheKey, TTL_SECONDS, JSON.stringify(user));\n  }\n\n  return user; // ~20ms on first request, <1ms afterward\n}\n\n// Invalidate on update\nasync function updateUserEmail(userId, newEmail) {\n  await db.query(\n    'UPDATE users SET email = $1 WHERE id = $2',\n    [newEmail, userId]\n  );\n  await redis.del(`user:${userId}`); // force re-fetch next read\n}",
-      "explanation": "The cache-aside pattern puts cache management in the application. The 300-second TTL ensures stale data expires even if explicit invalidation is missed. On update, the cache key is deleted (not updated) so the next read fetches fresh data — simpler than a write-through that must handle serialization and race conditions."
+      "label": "Example",
+      "code": "// Cache-aside pattern with Redis (Node.js / ioredis)\nimport { Redis } from 'ioredis';\n\nconst redis = new Redis(process.env.REDIS_URL);\nconst TTL_SECONDS = 300; // 5-minute TTL — defense against missed invalidations\n\nasync function getUserById(userId) {\n  const cacheKey = `user:${userId}`;\n\n  // Step 1: Check cache first\n  const cached = await redis.get(cacheKey);\n  if (cached) {\n    return JSON.parse(cached); // cache HIT — ~0.5ms\n  }\n\n  // Step 2: Cache MISS — query the read replica\n  const user = await db.queryOne(\n    'SELECT id, name, email, role FROM users WHERE id = $1',\n    [userId]\n  );\n\n  // Step 3: Populate cache for subsequent requests\n  if (user) {\n    await redis.setex(cacheKey, TTL_SECONDS, JSON.stringify(user));\n  }\n\n  return user; // ~20ms on first request, ~0.5ms for the next 5 minutes\n}\n\n// Invalidate on write — delete, not update, to avoid race conditions\nasync function updateUserEmail(userId, newEmail) {\n  await db.query(\n    'UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2',\n    [newEmail, userId]\n  );\n  // Delete: next read fetches fresh data instead of risking a race\n  // between the cache update and in-flight reads\n  await redis.del(`user:${userId}`);\n}\n\n// Cache stampede protection — only one request fetches from DB on a cold miss\n// Use a distributed lock or probabilistic early expiration in production\nasync function getUserByIdWithLock(userId) {\n  const cacheKey = `user:${userId}`;\n  const lockKey = `lock:user:${userId}`;\n\n  const cached = await redis.get(cacheKey);\n  if (cached) return JSON.parse(cached);\n\n  // Try to acquire a short-lived lock\n  const acquired = await redis.set(lockKey, '1', 'EX', 5, 'NX');\n  if (!acquired) {\n    // Another request is fetching — wait briefly and retry from cache\n    await new Promise(r => setTimeout(r, 50));\n    return getUserByIdWithLock(userId);\n  }\n\n  try {\n    const user = await db.queryOne('SELECT * FROM users WHERE id = $1', [userId]);\n    if (user) await redis.setex(cacheKey, TTL_SECONDS, JSON.stringify(user));\n    return user;\n  } finally {\n    await redis.del(lockKey); // always release the lock\n  }\n}",
+      "explanation": "The basic cache-aside pattern is three lines: get, return-if-hit, fetch-set-return. The delete-on-write (rather than update-on-write) strategy avoids a race condition where the cache update races with in-flight reads. The stampede protection section shows how a cache miss under high load causes every concurrent request to hit the DB simultaneously — a 'thundering herd'. A distributed lock or probabilistic early revalidation prevents this."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Database Scaling — Read Replicas and Sharding",
+      "content": "The database is usually the first bottleneck in a growing system because it is the hardest component to scale horizontally. Understanding the progression of database scaling strategies is essential.\n\n**Read Replicas (Read scaling)**\n\nMost web applications read far more than they write — a typical ratio is 90% reads to 10% writes. Read replicas are asynchronous copies of the primary database that serve `SELECT` queries. Writes (INSERT, UPDATE, DELETE) go to the primary and replicate to replicas within milliseconds.\n\nWith read replicas, you route read queries to replicas and writes to the primary. Read throughput scales linearly with replica count. The cost is **replication lag**: replicas are slightly behind the primary (usually milliseconds, but can be seconds under high write load). This means reads from replicas can return slightly stale data. This is acceptable for most read paths (showing a user's follower count) but not for others (showing a user their own just-submitted form data — read-your-writes consistency). Route the latter to the primary.\n\n**Connection Pooling (Connection scaling)**\n\nPostgreSQL's connection model is one process per connection. At 500 connections, PostgreSQL spends more time on connection management than query processing. With 1,000 horizontally scaled app servers each opening 10 connections, you get 10,000 DB connections — catastrophic.\n\nA **connection pool proxy** (PgBouncer for PostgreSQL, ProxySQL for MySQL) sits between app servers and the database. It accepts thousands of application connections but maintains only dozens of real database connections, multiplexing application queries across the pool. PgBouncer in `transaction` pooling mode gives a real DB connection only for the duration of a transaction, then returns it to the pool — enormously efficient.\n\n**Vertical partitioning (functional decomposition)**\n\nBefore sharding, consider splitting by domain. Move the `users` table to a `users` database, `orders` to an `orders` database, each on separate hardware. Different teams own different databases. This is how microservices databases work. Each database scales independently. JOINs across databases become application-level joins — a cost worth bearing for the isolation.\n\n**Horizontal sharding**\n\nSharding splits a single table across multiple database instances by a **shard key** (e.g., `user_id % N`). User 0's data lives on shard 0; user 1's on shard 1. Each shard handles a fraction of the total load. Sharding is the most powerful scaling technique and also the most complex.\n\nThe shard key choice is critical and nearly irreversible. A poor key causes **hot shards** — one shard receives disproportionate traffic (e.g., sharding tweets by `user_id` while celebrity accounts generate millions of tweets per day). Good shard keys distribute load uniformly: random ID (UUID v4), consistent hash of the key, or time-based IDs like Snowflake IDs that encode time and machine ID.\n\nCross-shard queries — JOINs that span shards — are expensive or impossible at the database level and must be handled in application code (scatter-gather: query all shards, aggregate results). This is why the schema must be designed with the shard key in mind from the beginning."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  App[\"App Servers\"] -->|\"writes\"| Primary[\"Primary DB\"]\n  App -->|\"reads (90%)\"| R1[\"Read Replica 1\"]\n  App -->|\"reads (90%)\"| R2[\"Read Replica 2\"]\n  Primary -->|\"async replication\"| R1\n  Primary -->|\"async replication\"| R2\n  App -->|\"all connections\"| PgBouncer[\"PgBouncer Pool Proxy\"]\n  PgBouncer -->|\"~100 real connections\"| Primary",
+      "caption": "Read replicas absorb 90% of query load. PgBouncer multiplexes thousands of app connections into ~100 real DB connections, preventing PostgreSQL connection exhaustion."
+    },
+    {
+      "type": "explanation",
+      "title": "Asynchronous Work — Message Queues and Background Workers",
+      "content": "Not every operation triggered by an HTTP request needs to complete before the response is sent. Sending a confirmation email, resizing an uploaded image, generating a PDF, sending a webhook, recalculating aggregate statistics — these are all operations that can be deferred without degrading the user experience.\n\nThe pattern is: the HTTP handler publishes a **job** to a **message queue** and immediately returns `202 Accepted`. A background **worker** process picks up the job and executes it asynchronously. The user sees a fast response; the slow work happens in the background.\n\nThe benefits compound under load:\n- **Latency isolation**: a spike in email volume does not slow API responses.\n- **Retry semantics**: if an email fails (SMTP timeout), the queue retries with exponential backoff, not the user's HTTP connection.\n- **Rate limiting third-party APIs**: the queue acts as a buffer — workers consume jobs at the rate the downstream API allows.\n- **Load levelling**: burst traffic writes jobs to the queue; workers drain it at a steady rate, preventing downstream systems from being overwhelmed.\n\nPopular message queues:\n- **Redis (BullMQ, Celery with Redis broker)**: Simple, fast, already in your stack. Suitable for most use cases. Not durably persistent by default — a Redis restart can lose queued jobs unless AOF persistence is enabled.\n- **PostgreSQL (pg-boss, Graphile Worker)**: Uses the existing database. Durable, transactional (job enqueue and DB write in the same transaction — no lost jobs). Slower than Redis but correct-by-default. Ideal for teams without a Redis operator.\n- **RabbitMQ**: Full-featured AMQP broker, reliable delivery, complex routing. Adds operational overhead.\n- **Apache Kafka**: Not a traditional queue — a distributed commit log. Suited for high-throughput event streaming (millions of events/second), event sourcing, and stream processing. Overkill for simple background jobs.\n- **AWS SQS**: Fully managed, cheap, reliable. The obvious choice for teams on AWS who do not want to operate a queue themselves."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Scalability checklist — patterns and their trade-offs\n\n// 1. Stateless app servers\n//    Requirement: sessions in Redis/DB, not server memory\n//    Enables: horizontal scaling, rolling deploys, zero-downtime restarts\n\n// 2. Read replicas\n//    Requirement: replica lag awareness (stale reads okay?)\n//    Rule of thumb: route 80% of traffic to replicas, 20% (writes) to primary\n\n// 3. CDN for static assets\n//    Set Cache-Control: public, max-age=31536000, immutable on versioned files\n//    Set Cache-Control: no-store on personalized API responses\n\n// 4. Database connection pooling (e.g., PgBouncer)\n//    Problem: 1000 app instances × 10 connections = 10,000 DB connections\n//    Solution: pool proxy limits actual DB connections to ~100\n\n// 5. Async work for slow operations\n//    Bad:  await sendEmail()  // blocks HTTP response for 500ms\n//    Good: queue.publish('send-email', payload); return 202 Accepted"
+      "label": "Example",
+      "code": "// Async background jobs with BullMQ (Redis-backed queue)\nimport { Queue, Worker } from 'bullmq';\n\n// Producer — runs in the HTTP handler\nconst emailQueue = new Queue('email-notifications', {\n  connection: { host: process.env.REDIS_HOST }\n});\n\n// HTTP handler — fast, returns immediately\nasync function registerUser(req, res) {\n  const user = await db.insert('users', {\n    email: req.body.email,\n    name: req.body.name,\n  });\n\n  // Enqueue async work — does NOT await the actual email send\n  await emailQueue.add('welcome-email', {\n    userId: user.id,\n    email: user.email,\n    name: user.name,\n  }, {\n    attempts: 3,                // retry up to 3 times on failure\n    backoff: { type: 'exponential', delay: 2000 }, // 2s, 4s, 8s\n    removeOnComplete: 100,      // keep last 100 completed jobs for debugging\n    removeOnFail: 50,\n  });\n\n  res.status(201).json({ id: user.id }); // returns in ~5ms\n}\n\n// Consumer — runs in a separate worker process\nconst emailWorker = new Worker('email-notifications', async (job) => {\n  if (job.name === 'welcome-email') {\n    await emailService.send({\n      to: job.data.email,\n      subject: 'Welcome!',\n      template: 'welcome',\n      context: { name: job.data.name },\n    });\n    console.log(`Welcome email sent to ${job.data.email}`);\n  }\n}, {\n  connection: { host: process.env.REDIS_HOST },\n  concurrency: 5, // process 5 jobs simultaneously per worker process\n});",
+      "explanation": "The HTTP handler enqueues a job and returns in ~5ms — the user gets an instant response. The worker picks up the job and calls the slow SMTP service. BullMQ handles retries automatically with exponential backoff: if the email service is down, it retries in 2s, 4s, and 8s before marking the job failed. The worker runs as a separate Node.js process (or multiple processes) that can be scaled independently of the HTTP server."
+    },
+    {
+      "type": "explanation",
+      "title": "CDN Architecture — Pushing Content to the Edge",
+      "content": "A **Content Delivery Network** is a geographically distributed network of cache servers (edge nodes or PoPs — Points of Presence) that store copies of your content close to your users. Instead of every request travelling from Tokyo to your origin server in Virginia (150ms round-trip), a cached response is served from Tokyo's edge node in 5ms.\n\n**What CDNs cache**:\n- Static assets: JavaScript bundles, CSS, images, fonts. Cache permanently with content-hash filenames (`app.a1b2c3.js`).\n- Video and large media: CDN handles byte-range requests and adaptive bitrate streaming natively.\n- API responses: Publicly cacheable API responses (public product listings, exchange rates) can be cached at the edge. Set `Cache-Control: public, max-age=60, stale-while-revalidate=300`.\n- HTML pages: For static sites (Jamstack/SSG), CDN serves pre-rendered HTML — the server is never hit for the initial page load.\n\n**Cache-Control directives that matter at the CDN layer**:\n- `public`: CDN is allowed to cache this response.\n- `private`: CDN must not cache — browser-only.\n- `max-age=N`: Cache for N seconds before revalidating.\n- `s-maxage=N`: Overrides `max-age` specifically for shared caches (CDNs).\n- `stale-while-revalidate=N`: Serve stale content immediately while revalidating in the background — eliminates the 'stale wait' for cache refreshes.\n- `immutable`: Combined with a content-hash filename, tells CDN never to revalidate (the content literally cannot change for this URL).\n\n**CDN invalidation**: When you need to purge stale content (bad deployment, recalled content), CDNs offer cache invalidation APIs. But invalidation propagates to all PoPs within seconds to minutes — not instantaneous. This is why content-hashing is preferable to cache invalidation: instead of purging `app.js`, deploy `app.a1b2c3.js` and update the HTML reference. Old URL caches expire naturally; new URL starts fresh.\n\n**Edge computing**: Modern CDNs (Cloudflare Workers, AWS Lambda@Edge) allow running code at edge nodes. Authentication checks, A/B testing redirects, personalisation headers, and geographic routing can all happen at the edge before the request reaches origin — reducing origin load and latency simultaneously."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  User[\"User in Tokyo\"] -->|\"request\"| Edge[\"CDN Edge\\nTokyo PoP\"]\n  Edge -->|\"cache HIT: 5ms\"| User\n  Edge -->|\"cache MISS: forward\"| Origin[\"Origin Server\\nVirginia\"]\n  Origin -->|\"response + Cache-Control\"| Edge\n  Edge -->|\"cache for next request\"| Edge\n  Origin2[\"Static Asset Deploy\"] -->|\"content-hash filename\"| Edge",
+      "caption": "CDN edge nodes cache responses geographically close to users. A cache hit in Tokyo serves in 5ms vs 150ms to origin. Content-hashed filenames make invalidation unnecessary — new deploys just use new URLs."
+    },
+    {
+      "type": "explanation",
+      "title": "Load Balancing Strategies",
+      "content": "A **load balancer** distributes incoming requests across a pool of app servers. The distribution algorithm determines how evenly load is spread and whether stateful concerns apply.\n\n**Round-robin**: Requests cycle through servers in sequence (server 1, 2, 3, 1, 2, 3 ...). Simple and fair if requests are roughly equal in cost. Most load balancers default to this.\n\n**Weighted round-robin**: Assign weights to servers based on capacity. A server with 4× the CPU gets 4× the requests.\n\n**Least connections**: Route each new request to the server with the fewest active connections. Better for workloads with variable request durations (WebSockets, long-polling, file uploads).\n\n**IP hash / consistent hash**: Always route the same client IP to the same server. Implements sticky sessions at the LB level without cookies. Problem: if a server goes down, all its clients must be re-routed — the same thundering herd problem as memory-based sessions.\n\n**Health checks**: Load balancers periodically send health-check requests to each server (e.g., `GET /health`). Servers that fail health checks are removed from the pool automatically. When they recover, they are re-added. This is the mechanism behind zero-downtime deploys: deploy new code to one server at a time, health checks confirm it is healthy, then proceed.\n\n**Layer 4 vs. Layer 7**: L4 load balancers (AWS NLB) operate at the TCP level — fast, but no HTTP awareness. L7 load balancers (AWS ALB, Nginx, HAProxy) parse HTTP — can route based on URL path (`/api/*` → API servers, `/static/*` → CDN), set headers, terminate TLS, and implement more sophisticated routing. Most web applications use L7."
+    },
+    {
+      "type": "explanation",
+      "title": "Rate Limiting and Graceful Degradation",
+      "content": "Scalability is not just about handling more load — it is about handling unexpected spikes without crashing, and serving degraded-but-functional responses when downstream dependencies fail.\n\n**Rate limiting** protects your system from being overwhelmed by a single client (intentional abuse or runaway code). Implementation strategies:\n\n- **Token bucket**: Each client has a bucket that refills at a fixed rate (e.g., 100 tokens/second). Each request costs one token. When the bucket is empty, requests are rejected with 429. Allows short bursts up to bucket size.\n- **Fixed window counter**: Count requests per client per minute. Reject when over limit. Simple but allows 2× the limit at window boundaries.\n- **Sliding window log**: Record timestamps of all requests in a rolling window. Accurate but memory-intensive at scale.\n- **Sliding window counter**: A hybrid that approximates the sliding window using two fixed-window counters. Efficient and accurate enough for production.\n\nRedis is the standard backend for distributed rate limiting — `INCR` + `EXPIRE` for fixed window, sorted sets for sliding window log. Upstash Rate Limit and AWS API Gateway provide managed rate limiting.\n\n**Graceful degradation** means returning a useful-but-incomplete response when a dependency fails, rather than a full error. Examples:\n\n- Recommendations service is down → return the home page without the recommendations widget, not a 500.\n- Cache cluster is unavailable → serve from database (slower but correct), not an error.\n- Third-party payment API is timing out → show users a friendly 'payment processing, please wait' page while retrying in the background, not an unhandled exception.\n\n**Circuit breakers** implement this pattern systematically. A circuit breaker wraps calls to a remote service. When the error rate exceeds a threshold (e.g., 50% of calls in 10 seconds fail), the circuit 'opens' — subsequent calls fail immediately without hitting the service (fail-fast). After a timeout, a single test request is allowed through. If it succeeds, the circuit closes (normal operation); if not, it stays open. This prevents one failing dependency from cascading into a full system outage via the **fail-fast principle**. Libraries: `opossum` (Node.js), `Hystrix` (Java, now Netflix's Resilience4j), `Polly` (.NET)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n  [*] --> Closed\n  Closed --> Open : \"error rate > threshold\"\n  Open --> HalfOpen : \"timeout elapsed\"\n  HalfOpen --> Closed : \"test request succeeds\"\n  HalfOpen --> Open : \"test request fails\"",
+      "caption": "Circuit breaker state machine: Closed (normal), Open (fail-fast), Half-Open (probe recovery). Prevents a failing dependency from cascading into total outage."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Scalability patterns — practical checklist with implementation notes\n\n// 1. STATELESS APP SERVERS\n//    Store sessions in Redis, not server memory\nimport session from 'express-session';\nimport RedisStore from 'connect-redis';\nconst sessionMiddleware = session({\n  store: new RedisStore({ client: redis }),\n  secret: process.env.SESSION_SECRET,\n  resave: false,\n  saveUninitialized: false,\n  cookie: { secure: true, httpOnly: true, maxAge: 86400000 }\n});\n\n// 2. CONNECTION POOLING\n//    Use a pool — never create one connection per request\nimport { Pool } from 'pg';\nconst pool = new Pool({\n  host: process.env.DB_HOST,\n  database: process.env.DB_NAME,\n  max: 20,         // max 20 connections per app server instance\n  idleTimeoutMillis: 30000,\n  connectionTimeoutMillis: 2000,\n});\n// PgBouncer sits in front of PostgreSQL and further pools across all app instances\n\n// 3. ROUTE READS TO REPLICAS\nconst primaryPool = new Pool({ host: process.env.DB_PRIMARY_HOST, max: 5 });\nconst replicaPool = new Pool({ host: process.env.DB_REPLICA_HOST, max: 20 });\n\nasync function findOrder(orderId) {\n  // Non-critical read: can tolerate replica lag\n  return replicaPool.query('SELECT * FROM orders WHERE id = $1', [orderId]);\n}\nasync function createOrder(data) {\n  // Write always goes to primary\n  return primaryPool.query('INSERT INTO orders ...', data);\n}\n\n// 4. HTTP CACHE HEADERS FOR STATIC ASSETS\n// In your static file middleware:\napp.use('/assets', express.static('dist/assets', {\n  setHeaders: (res, filePath) => {\n    if (filePath.match(/\\.[a-f0-9]{8}\\./)) {\n      // Content-hashed file — cache permanently\n      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');\n    } else {\n      // Non-hashed file — always revalidate\n      res.setHeader('Cache-Control', 'no-cache');\n    }\n  }\n}));\n\n// 5. RATE LIMITING with Redis sliding window\nasync function checkRateLimit(clientId, limit = 100, windowSec = 60) {\n  const key = `rl:${clientId}`;\n  const now = Date.now();\n  const windowStart = now - windowSec * 1000;\n\n  await redis.zremrangebyscore(key, '-inf', windowStart); // prune old entries\n  const count = await redis.zcard(key);                   // count in window\n\n  if (count >= limit) return { allowed: false, remaining: 0 };\n\n  await redis.zadd(key, now, `${now}`);     // record this request\n  await redis.expire(key, windowSec);       // TTL cleanup\n  return { allowed: true, remaining: limit - count - 1 };\n}",
+      "explanation": "Five patterns in one file: Redis session store for stateless app servers, pg Pool for connection reuse, separate pool references for primary vs. replica routing, content-hash-aware Cache-Control headers, and a Redis sorted-set sliding-window rate limiter. Each is self-contained and can be added independently."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**The Fallacies of Distributed Computing** (Peter Deutsch, 1994) are 8 assumptions that engineers new to distributed systems routinely make incorrectly: (1) the network is reliable, (2) latency is zero, (3) bandwidth is infinite, (4) the network is secure, (5) topology does not change, (6) there is one administrator, (7) transport cost is zero, (8) the network is homogeneous. Every scalability pattern — caching, replication lag awareness, circuit breakers, async queues — exists to compensate for one or more of these false assumptions becoming reality at scale. When a distributed system behaves unexpectedly, check which fallacy was violated."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Cache invalidation is one of the two hard problems in computer science (the other is naming things). A simple defence: always set a TTL, even if you also invalidate explicitly. A bug that skips explicit invalidation then only causes stale data for TTL seconds rather than permanently. Defense-in-depth for caches."
+      "content": "**When to scale and when NOT to**: Premature optimisation at the architectural level is as harmful as algorithmic premature optimisation. A single PostgreSQL instance with good indexes can comfortably handle thousands of requests per second. Before adding Redis, read replicas, and a message queue, measure: profile slow queries, check database metrics, and look at p95/p99 latencies. The most common real bottleneck is not the database server — it is a missing index, an N+1 query, or synchronous calls to a slow third-party API. **Fix the code before you scale the infrastructure**. Real frameworks that embody these patterns: Rails uses ActiveJob + Sidekiq for async work, Solid Queue for PostgreSQL-backed queues; Django uses Celery + Redis; NestJS uses BullMQ; Laravel uses Horizon. AWS Elasticache (Redis), RDS Read Replicas, CloudFront (CDN), and SQS map these concepts directly to managed services."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Vertical scaling** (bigger machine) is simple but has a ceiling and a single point of failure; use it for components where horizontal scale is complex (e.g., primary DB).",
-        "**Horizontal scaling** (more instances) requires **stateless** app servers — session and request state must live in a shared store (Redis), not local memory.",
-        "**Caching** (Redis, CDN) is the highest-leverage scalability technique: in-memory lookups are 10–100× faster than database queries.",
-        "**Read replicas** scale read throughput linearly; route read queries to replicas and writes to the primary to keep the primary available for writes.",
-        "**Async work** via message queues offloads slow operations (email, image processing, webhooks) from the HTTP response path, keeping API latency fast regardless of downstream slowness."
+        "**Statelessness is the prerequisite for horizontal scaling**: app servers must store session data in an external shared store (Redis) rather than local memory, enabling any instance to handle any request.",
+        "**Caching is the highest-leverage scalability tool**: in-memory lookups (Redis, ~0.5ms) are 40× faster than database queries (~20ms); cache at multiple layers — CDN edge, reverse proxy, application, and database — and always set a TTL as a safety net against missed invalidations.",
+        "**Read replicas scale read throughput linearly**: route the 90% of traffic that is reads to replicas, reserve the primary for writes, and design read paths to tolerate replica lag; use PgBouncer to prevent connection exhaustion as app server count grows.",
+        "**Message queues decouple slow work from the HTTP response path**: enqueue jobs for email, image processing, and webhooks so handlers return in <10ms regardless of downstream latency, with automatic retry and backoff semantics built in.",
+        "**CDN edge caching reduces origin load dramatically**: content-hashed filenames combined with `Cache-Control: public, max-age=31536000, immutable` let CDNs serve static assets indefinitely without invalidation overhead; `stale-while-revalidate` eliminates the cold-cache performance penalty for API responses.",
+        "**Circuit breakers prevent cascading failures**: when a dependency's error rate exceeds a threshold, the circuit opens and subsequent calls fail fast — protecting your system from a slow dependency creating a full outage through timeout accumulation.",
+        "**Measure before scaling**: the most common bottleneck is a missing database index or N+1 query, not insufficient servers; profile p95/p99 latencies and database query plans before adding infrastructure complexity."
       ]
     }
   ],
@@ -66,133 +137,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What is the key architectural requirement for horizontal scaling of app servers?",
+      "question": "What is the fundamental architectural requirement that makes horizontal scaling of app servers possible?",
       "type": "mcq",
       "options": [
-        "Each server must have its own dedicated database",
-        "App servers must be stateless — session data stored externally",
-        "All servers must run on identical hardware",
-        "The load balancer must use IP hashing to stick clients to servers"
+        "Each app server must have a dedicated database connection",
+        "App servers must be stateless — session data stored in an external shared store like Redis",
+        "All app servers must run identical hardware specifications",
+        "The load balancer must use sticky sessions to pin each client to one server"
       ],
       "correct": 1,
-      "explanation": "Stateless app servers mean any instance can handle any request. Session state stored in Redis or a database means the load balancer can route freely without sticky sessions."
+      "explanation": "Stateless app servers mean any instance can process any request because session state lives in Redis, not in the server's local memory. The load balancer can route freely, instances can be added or removed, and rolling deploys are trivial — none of which is possible when session state is local."
     },
     {
       "id": "q2",
-      "question": "Which scalability pattern reduces database read load by serving repeated queries from memory?",
+      "question": "In the cache-aside pattern, what is the correct sequence of operations on a cache MISS for a read request?",
       "type": "mcq",
       "options": [
-        "Database sharding",
-        "Write-ahead logging",
-        "In-memory caching (Redis / Memcached)",
-        "Connection pooling"
+        "Return a 404 error and let the client retry",
+        "Query the database, return the result, and lazily populate the cache on the next request",
+        "Query the database, populate the cache with a TTL, then return the result",
+        "Forward the request to the primary database and bypass the cache entirely"
       ],
       "correct": 2,
-      "explanation": "An in-memory cache stores query results. Subsequent identical requests are served from cache in sub-millisecond time rather than querying the database, dramatically reducing DB read load."
+      "explanation": "Cache-aside (lazy loading): on a miss, the application queries the database, stores the result in the cache with a TTL for future requests, then returns the result. The TTL ensures stale data expires even if explicit invalidation is later missed."
     },
     {
       "id": "q3",
-      "question": "A CDN primarily improves performance by:",
+      "question": "Why is 'delete the cache key on write' preferred over 'update the cache key on write' in the cache-aside pattern?",
       "type": "mcq",
       "options": [
-        "Compressing SQL queries before sending to the database",
-        "Caching assets at edge nodes geographically close to users",
-        "Load balancing requests across multiple origin servers",
-        "Encrypting all traffic between client and server"
+        "Deleting is faster than setting in Redis",
+        "Updating the cache requires the same serialization format used during reads",
+        "Deleting avoids a race condition where an in-flight stale read overwrites the freshly updated cache value",
+        "Redis does not support updating existing keys with new values"
       ],
-      "correct": 1,
-      "explanation": "CDN edge nodes cache static assets (images, JS, CSS) and sometimes API responses in data centers near users worldwide. This reduces latency from hundreds of milliseconds (origin round-trip) to single-digit milliseconds (edge hit)."
+      "correct": 2,
+      "explanation": "If you update the cache concurrently with an in-flight read, a stale read response could overwrite the fresh cache value after your write. Deleting the key forces the next read to fetch fresh data from the database, avoiding this race condition."
     },
     {
       "id": "q4",
-      "question": "What is the main downside of vertical scaling compared to horizontal scaling?",
+      "question": "What is replication lag, and which access pattern must route to the primary database to avoid it?",
       "type": "mcq",
       "options": [
-        "Vertical scaling requires changing application code",
-        "Vertical scaling has a hardware ceiling and creates a single point of failure",
-        "Vertical scaling cannot improve database query speed",
-        "Vertical scaling only works for stateless services"
+        "Replication lag is the time for replicas to restart; batch reports must use the primary",
+        "Replication lag is the delay between a write to the primary and its appearance on replicas; read-your-own-writes must use the primary",
+        "Replication lag is the delay caused by connection pooling; high-priority queries must bypass PgBouncer",
+        "Replication lag is a CDN concept; API responses that change frequently must skip the CDN"
       ],
       "correct": 1,
-      "explanation": "Even the largest available server has a maximum CPU/RAM spec. More importantly, one machine is a single point of failure — if it crashes, the entire service goes down. Horizontal scaling distributes both load and failure risk."
+      "explanation": "Replicas receive writes asynchronously from the primary, introducing a small lag (usually milliseconds, sometimes seconds). A user who just submitted a form and immediately reads their own data could see stale data from a replica. Route 'read-your-writes' patterns to the primary to guarantee consistency."
     },
     {
       "id": "q5",
-      "question": "In the cache-aside pattern, what happens on a cache miss?",
+      "question": "A connection pool proxy like PgBouncer solves which specific database scalability problem?",
       "type": "mcq",
       "options": [
-        "The request returns a 404 error",
-        "The load balancer retries the request",
-        "The application fetches from the database and populates the cache for future requests",
-        "The cache automatically fetches data from the database without application involvement"
+        "Replication lag between primary and read replicas",
+        "Slow query performance due to missing indexes",
+        "Thousands of app instances each holding open DB connections, exhausting PostgreSQL's connection limit",
+        "Cross-shard JOIN performance in a sharded database cluster"
       ],
       "correct": 2,
-      "explanation": "Cache-aside (lazy loading): the application checks the cache, gets a miss, queries the database, stores the result in the cache with a TTL, and returns the result. The next request for the same key is a cache hit."
+      "explanation": "PostgreSQL creates one OS process per connection. At hundreds of connections, connection management overhead degrades performance. With 1,000 app server instances each holding 10 connections, you get 10,000 DB connections — catastrophic. PgBouncer multiplexes those into ~100 real database connections, solving this without application code changes."
     },
     {
       "id": "q6",
-      "question": "Read replicas help scalability by:",
+      "question": "What is a 'cache stampede' (thundering herd) and what pattern prevents it?",
       "type": "mcq",
       "options": [
-        "Accepting writes in addition to reads to offload the primary",
-        "Serving read queries from additional DB instances, leaving the primary for writes",
-        "Automatically sharding data across multiple databases",
-        "Caching the most recent query results in memory"
+        "When a CDN edge purges all keys simultaneously; prevented by staggered TTLs",
+        "When a popular cache key expires and hundreds of concurrent requests all miss and simultaneously hit the database; prevented by a distributed lock or probabilistic early revalidation",
+        "When a Redis cluster fails over and all keys are lost; prevented by AOF persistence",
+        "When write-through caching causes write amplification; prevented by write-around caching"
       ],
       "correct": 1,
-      "explanation": "Read replicas are copies of the primary database that serve SELECT queries. Write operations (INSERT, UPDATE, DELETE) still go to the primary. This splits the load and allows read throughput to scale linearly with replica count."
+      "explanation": "When a popular cache key expires under high load, every concurrent request misses the cache and independently queries the database — a thundering herd. A distributed lock ensures only one request fetches from the DB while others wait. Probabilistic early revalidation refreshes the cache slightly before expiry to prevent the simultaneous miss."
     },
     {
       "id": "q7",
-      "question": "Why is sending an email inside a synchronous HTTP handler a scalability problem?",
+      "question": "Which Cache-Control header combination is appropriate for a JavaScript bundle with a content-hash in its filename (e.g., app.a1b2c3d4.js)?",
       "type": "mcq",
       "options": [
-        "Email libraries are not thread-safe",
-        "It blocks the HTTP response for hundreds of milliseconds, reducing server throughput",
-        "Emails cannot be sent from behind a load balancer",
-        "HTTP connections time out before the email SMTP handshake completes"
+        "Cache-Control: no-cache",
+        "Cache-Control: private, max-age=3600",
+        "Cache-Control: public, max-age=31536000, immutable",
+        "Cache-Control: no-store"
       ],
-      "correct": 1,
-      "explanation": "A synchronous email call (SMTP or API) can take 200-500ms. During this time the HTTP thread/connection is blocked. Under high load, this reduces requests per second and increases latency for all users. Offloading to a queue returns 202 immediately."
+      "correct": 2,
+      "explanation": "A content-hashed filename (e.g., app.a1b2c3d4.js) is unique to that exact content — a change produces a new filename. So the URL can be cached forever. `public` allows CDN caching; `max-age=31536000` (1 year) maximises cache lifetime; `immutable` tells browsers not to revalidate even on forced refresh."
     },
     {
       "id": "q8",
-      "question": "Connection pooling (e.g., PgBouncer) solves which database scalability problem?",
+      "question": "What is the primary benefit of enqueuing a background job for sending a welcome email rather than sending it synchronously in the HTTP handler?",
       "type": "mcq",
       "options": [
-        "Read replicas falling behind the primary",
-        "Thousands of app instances each holding many open DB connections, overwhelming the DB",
-        "Slow query performance due to missing indexes",
-        "Cross-shard JOIN performance in sharded databases"
+        "Email libraries are not thread-safe and crash under concurrent load",
+        "HTTP response latency is kept low regardless of SMTP latency, and failures retry automatically via the queue",
+        "Background workers have access to a faster network interface than HTTP servers",
+        "HTTP handlers cannot open TCP connections to SMTP servers due to firewall rules"
       ],
       "correct": 1,
-      "explanation": "PostgreSQL can handle a few hundred connections before performance degrades. With 1000 app server instances each opening 10 connections, you'd have 10,000 connections. A pool proxy like PgBouncer multiplexes thousands of app connections over ~100 real DB connections."
+      "explanation": "A synchronous email call can take 200–500ms and may timeout or fail. Enqueuing returns the HTTP response in <10ms — the user gets an instant confirmation. The queue handles retries with exponential backoff if the SMTP service is temporarily unavailable, without blocking the user's connection."
     },
     {
       "id": "q9",
-      "question": "Which Cache-Control header value is appropriate for a versioned JavaScript bundle (e.g., app.a1b2c3.js)?",
+      "question": "A circuit breaker is in the OPEN state. What does this mean for incoming requests to the wrapped service?",
       "type": "mcq",
       "options": [
-        "Cache-Control: no-store",
-        "Cache-Control: no-cache",
-        "Cache-Control: public, max-age=31536000, immutable",
-        "Cache-Control: private, max-age=60"
+        "Requests are queued and replayed once the service recovers",
+        "Requests are routed to a backup service automatically",
+        "Requests fail immediately without calling the remote service (fail-fast)",
+        "Requests are allowed through at 50% capacity to probe recovery"
       ],
       "correct": 2,
-      "explanation": "A content-hashed filename (app.a1b2c3.js) never changes for the same content. Setting max-age=31536000 (1 year) with immutable tells browsers and CDNs to cache forever without revalidation, since any content change produces a new filename."
+      "explanation": "In the Open state, the circuit breaker short-circuits all calls — they fail immediately without attempting to reach the remote service. This prevents a slow or failing dependency from accumulating timeouts across all concurrent requests, which would otherwise cascade into total resource exhaustion."
     },
     {
       "id": "q10",
-      "question": "The 'two hard problems' mnemonic for caching is cache invalidation and naming. The practical advice to defend against invalidation bugs is:",
+      "question": "Which sharding concern makes the choice of shard key effectively irreversible once production data exists?",
       "type": "mcq",
       "options": [
-        "Never invalidate cache entries manually — always rely on TTL",
-        "Always set a TTL even when explicit invalidation is also implemented",
-        "Use write-through caching so the cache is always up to date",
-        "Clear the entire cache on every database write"
+        "Shard keys must be globally unique integers, and changing the type requires a full table rebuild",
+        "Changing the shard key requires redistributing all existing data across shards, which is operationally prohibitive at scale",
+        "The shard key is stored in the database schema and cannot be altered with ALTER TABLE",
+        "CDN caching is keyed on the shard key, so changing it invalidates all cached responses"
       ],
       "correct": 1,
-      "explanation": "Defense-in-depth: explicit invalidation handles the common case; a TTL ensures that if invalidation is missed due to a bug, the stale data expires within a bounded time window rather than living forever."
+      "explanation": "When you reshard — changing how data is distributed across nodes — every row must be read, re-hashed, and written to its new shard. At terabyte scale with live traffic this is an enormous, risky migration. This is why teams invest heavily in choosing the right shard key before data grows large enough to make resharding painful."
     }
   ]
 }

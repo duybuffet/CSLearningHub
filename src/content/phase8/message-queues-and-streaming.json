@@ -5,58 +5,116 @@
   "week": 29,
   "icon": "architecture",
   "tagline": "Async decoupling is the backbone of resilient systems — queues and streams let services communicate without waiting for each other.",
-  "readTime": "~12 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "When Service A calls Service B synchronously, A waits for B to respond. If B is slow, A is slow. If B crashes, A fails. **Message queues** break this coupling: A drops a message into a queue and immediately continues, while B processes it whenever it is ready. This single change converts brittle, latency-chained architectures into resilient, independently scalable services.\n\nBeyond simple queues, **event streaming** platforms like **Apache Kafka** add durability and replay: every event is persisted to disk, consumers can re-read old events, and multiple independent consumer groups can each read the same stream from their own position. Understanding the difference between a queue (each message consumed once by one consumer) and a pub/sub stream (each message consumed by every subscriber group) is fundamental to choosing the right tool for async communication."
+      "content": "Picture a busy e-commerce checkout: the user clicks **Buy**. Your API must confirm the order, trigger a payment charge, reserve inventory, send a confirmation email, update loyalty points, and log an analytics event — all before responding. If any one of those steps is slow or fails, the user waits. If your email provider is down, your checkout fails. This is the tyranny of **synchronous coupling**: services that call each other directly share each other's latency and failure modes.\n\n**Message queues** and **event streams** break this coupling at the architectural level. Instead of Service A calling Service B and waiting, A publishes a message to a durable intermediary and immediately returns. B reads and processes that message whenever it is ready — seconds later, or after recovering from a crash. The user gets a fast response; downstream work happens reliably in the background.\n\nThis chapter covers the full landscape of async messaging: **point-to-point queues** (RabbitMQ, SQS, BullMQ) versus **publish/subscribe** fan-out, the conceptual leap from queues to **durable event streams** (Apache Kafka, Redpanda), the critical trade-offs around **delivery guarantees** (at-most-once, at-least-once, exactly-once), **backpressure** and **consumer lag**, and the patterns that make async systems reliable in production — idempotency, dead-letter queues, and consumer group management. By the end you will be able to reason about which messaging tool belongs in which part of a system, and why."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart LR\n  Producer[\"Producer Service\"] -->|\"publish\"| Queue[\"Message Queue / Topic\"]\n  Queue -->|\"deliver\"| C1[\"Consumer 1\"]\n  Queue -->|\"deliver\"| C2[\"Consumer 2\"]\n  Queue -->|\"deliver\"| C3[\"Consumer N\"]\n  C1 -->|\"ack\"| Queue\n  C2 -->|\"ack\"| Queue\n  C3 -->|\"ack\"| Queue",
-      "caption": "A queue decouples producer from consumers. The producer publishes and moves on. Consumers pull messages at their own pace and acknowledge (ack) after successful processing. Unacknowledged messages are redelivered."
+      "mermaid": "flowchart TD\n  P[\"Producer\\nAPI Server\"] -->|\"publish\"| MQ[\"Message Broker\\nQueue / Topic\"]\n  MQ -->|\"deliver\"| C1[\"Consumer A\\nEmail Service\"]\n  MQ -->|\"deliver\"| C2[\"Consumer B\\nInventory Service\"]\n  MQ -->|\"deliver\"| C3[\"Consumer C\\nAnalytics Service\"]\n  C1 -->|\"ack\"| MQ\n  C2 -->|\"ack\"| MQ\n  C3 -->|\"ack\"| MQ\n  MQ -->|\"redeliver on failure\"| C1",
+      "caption": "The core pattern: the producer publishes once and returns immediately. The broker durably holds the message and delivers it to each consumer. Consumers acknowledge after successful processing; the broker redelivers on failure. This decouples producer speed from consumer speed."
     },
     {
       "type": "analogy",
-      "title": "The Restaurant Ticket System",
-      "content": "In a busy restaurant, waiters do not stand in the kitchen waiting for each dish. They write an **order ticket**, pin it to the rail, and go serve other customers. The kitchen reads tickets in order, prepares dishes, and rings the bell when ready. The ticket rail is the **message queue**: it decouples waiter speed from kitchen speed, buffers demand during a rush, and lets the kitchen scale independently (add more cooks) without changing how waiters take orders.\n\n**Kafka** is like a restaurant that keeps every order ticket ever written, filed by table and date, so that a new cook can read back all orders from the beginning of service to understand what happened — and a health inspector can audit the full history even months later."
+      "title": "The Restaurant Order Rail",
+      "content": "In a busy restaurant, a waiter does not stand in the kitchen watching the chef cook. The waiter writes an **order ticket**, clips it to the rail above the pass, and immediately returns to serve other tables. The kitchen reads tickets in sequence, cooks each dish, and rings the bell when the food is ready. The rail is the **message queue**: it decouples the waiter's speed from the kitchen's speed, buffers demand during a rush hour, and lets the kitchen scale independently — add more cooks, rearrange their stations — without changing how waiters take orders.\n\nNow imagine the restaurant also has a **health inspector** who wants to audit every order that was ever placed, and a trainee who wants to replay all of today's orders to learn the patterns. A normal order rail does not help them — once a ticket is served, it is thrown away. **Apache Kafka** is like a restaurant that keeps a permanent, numbered logbook of every ticket ever written, filed by day. The kitchen still reads and cooks as before. But the inspector can read the logbook from any point. The trainee can replay from 9 a.m. Both can do so without interfering with the kitchen. Multiple readers, one permanent record — that is the streaming model."
     },
     {
       "type": "explanation",
-      "content": "**Point-to-point queues** (RabbitMQ, SQS, BullMQ) guarantee that each message is delivered to exactly one consumer. This is ideal for task distribution: resize this image, send this email, process this payment. Workers compete for messages; adding more workers scales throughput linearly.\n\n**Pub/sub** (publish/subscribe) broadcasts each message to all subscribed groups. One event — \"order.placed\" — can simultaneously trigger an inventory service, an email notification service, and an analytics service, each consuming independently. This is the basis of **event-driven architectures**.\n\n**Apache Kafka** is a distributed event streaming platform that combines both models at massive scale. Key concepts:\n- **Topic**: a named, partitioned log. Messages are appended to a topic and retained on disk (configurable, often days or weeks).\n- **Partition**: a topic is split into ordered, immutable partitions for parallelism. A 12-partition topic can be consumed by up to 12 consumers in parallel within a consumer group.\n- **Offset**: each message in a partition has a sequential integer offset. Consumers track their own offset, allowing independent progress and arbitrary replay.\n- **Consumer group**: a named group of consumers that collectively read a topic. Kafka assigns partitions across the group — each partition is owned by exactly one consumer in the group.\n\n**Delivery guarantees** are a critical trade-off:\n- **At-most-once**: message is delivered without confirmation; may be lost on crash. Fast but lossy.\n- **At-least-once**: message is redelivered until acknowledged; duplicates are possible. Consumer must be **idempotent**.\n- **Exactly-once**: Kafka supports this with transactional producers and idempotent consumers, but it adds complexity and reduces throughput."
+      "title": "Point-to-Point Queues: Task Distribution",
+      "content": "The simplest async pattern is the **point-to-point queue**: one producer publishes a message; exactly one consumer receives and processes it. Multiple consumers can listen on the same queue — they **compete** for messages, each consumer taking a different message from the queue. This competition is the scaling mechanism: add more worker processes to handle more messages per second.\n\n**When to use point-to-point queues:**\n- **Background jobs**: resize this image, send this email, process this payment. Each job should be done once by one worker.\n- **Task queues with rate limiting**: BullMQ lets you configure concurrency per worker and a global rate limit, which is essential when calling third-party APIs that enforce quotas.\n- **Work distribution across heterogeneous workers**: different workers can specialize in different task types by listening to different queues.\n\n**Popular implementations:**\n- **RabbitMQ** — mature, AMQP-based, excellent routing via exchanges and binding keys. Supports priority queues, delayed messages, and complex topologies.\n- **Amazon SQS** — managed, nearly zero ops, Standard (at-least-once, out-of-order) and FIFO (exactly-once, in-order) variants. Scales automatically.\n- **BullMQ** (Redis-backed) — popular in Node.js ecosystems. Supports job priorities, retries with exponential backoff, scheduled/cron jobs, and a built-in dashboard.\n\n**Key mechanics:**\n- **Visibility timeout**: when a consumer fetches a message, the broker hides it from other consumers for a configurable timeout. If the consumer does not acknowledge within that window (e.g., it crashes), the message becomes visible again and is redelivered. This is the mechanism behind at-least-once delivery.\n- **Dead-letter queue (DLQ)**: after N failed delivery attempts, the message is moved to a DLQ for inspection. Without a DLQ, a poison message (one that always causes the consumer to crash) can block a queue indefinitely."
+    },
+    {
+      "type": "explanation",
+      "title": "Publish/Subscribe: Event Fan-Out",
+      "content": "**Pub/sub** (publish/subscribe) inverts the model: instead of competing for messages, every subscriber receives a copy of every message. One event — `order.placed` — simultaneously triggers an email notification, an inventory deduction, and an analytics record, each service consuming independently.\n\nThis fan-out pattern is the foundation of **event-driven architectures**. Services are not aware of each other — the email service does not know the inventory service exists. They both just subscribe to `order.placed`. Adding a new downstream service (say, a loyalty-points service) requires no change to the order API: just add a new subscriber.\n\n**Pub/sub implementations:**\n- **Redis Pub/Sub** — ultra-fast, in-memory fan-out. Messages are delivered only to currently-connected subscribers; if a subscriber is offline, the message is lost. Not durable. Best for real-time broadcasts (chat messages, cache invalidation signals, live dashboards) where occasional loss is acceptable.\n- **Amazon SNS** — managed pub/sub. Each SNS topic can fan out to multiple SQS queues, Lambda functions, HTTP endpoints, and email addresses simultaneously. Durable delivery to SQS subscribers. The classic pattern is **SNS → multiple SQS queues**: fan-out + durable per-subscriber queues.\n- **Google Cloud Pub/Sub** — durable, globally replicated, at-least-once delivery. Handles millions of messages per second.\n\n**Redis Pub/Sub vs Redis Streams**: Redis Streams (added in Redis 5.0) are a durable, consumer-group-aware alternative to basic Pub/Sub. Streams persist messages and support consumer groups with acknowledgement — closer to Kafka than to classic Pub/Sub, but within the Redis ecosystem."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n  participant API as API Server\n  participant K as Kafka Topic\n  participant G1 as Notification Consumer\n  participant G2 as Analytics Consumer\n  API->>K: publish order.placed offset=42\n  K-->>G1: deliver offset=42\n  K-->>G2: deliver offset=42\n  G1->>K: commit offset=43\n  G2->>K: commit offset=43\n  Note over G1,G2: Independent consumer groups,each tracks own offset",
-      "caption": "Two independent consumer groups consume the same Kafka topic. Each group maintains its own offset, so the analytics service can lag behind without affecting the notification service, and either can replay from any offset."
+      "mermaid": "flowchart LR\n  API[\"Order API\"] -->|\"publish\\norder.placed\"| SNS[\"SNS Topic\"]\n  SNS -->|\"fan-out\"| SQS1[\"SQS Queue\\nEmail Workers\"]\n  SNS -->|\"fan-out\"| SQS2[\"SQS Queue\\nInventory Workers\"]\n  SNS -->|\"fan-out\"| SQS3[\"SQS Queue\\nAnalytics Workers\"]\n  SQS1 --> E1[\"Email Service\"]\n  SQS2 --> E2[\"Inventory Service\"]\n  SQS3 --> E3[\"Analytics Service\"]",
+      "caption": "SNS fan-out to multiple SQS queues: the classic AWS pattern. SNS broadcasts to all subscribers; each SQS queue provides independent buffering and at-least-once delivery for its consumer group. Adding a new downstream service means subscribing a new SQS queue to SNS — no changes to the Order API."
+    },
+    {
+      "type": "explanation",
+      "title": "Apache Kafka: The Durable Event Log",
+      "content": "Apache Kafka is conceptually different from traditional queues. Where a queue deletes messages after consumption, **Kafka is an append-only, durable, ordered log**. Messages are written to disk and retained for a configurable period (hours, days, weeks, or forever). Consumers read the log by tracking their own position — messages are never deleted because a consumer read them.\n\nThis single design decision unlocks capabilities that queues cannot provide:\n- **Replay**: reprocess all events from the beginning, or from any arbitrary point in time. Essential for debugging, migrating to a new data model, or bootstrapping a new service.\n- **Multiple independent consumer groups**: an analytics team and a notification team each read the same topic from their own position. Neither affects the other.\n- **Event sourcing**: the log is the authoritative record of what happened. Downstream state (databases, caches) is derived from the log and can always be rebuilt.\n- **Stream processing**: tools like **Kafka Streams**, **Apache Flink**, and **ksqlDB** can join, aggregate, and transform event streams in real-time directly on top of the Kafka log.\n\n**Core Kafka concepts in depth:**\n\n**Broker**: A Kafka server. A production cluster has multiple brokers for replication and availability. Each broker holds some partitions of each topic.\n\n**Topic**: A named, partitioned, ordered, durable log. Think of it as a database table where rows are only ever appended, never updated or deleted.\n\n**Partition**: A topic is split into N ordered, immutable partitions. Each partition is a physically separate append-only file on disk. Partitions are the unit of parallelism: a 12-partition topic can be consumed by up to 12 consumers in parallel within one consumer group.\n\n**Offset**: Each message in a partition has a monotonically increasing integer offset (0, 1, 2, …). Consumers commit their current offset to track progress. They can seek to any offset — past or future — at any time. This is the mechanism for replay.\n\n**Consumer group**: A named logical group of consumers that collectively process a topic. Kafka assigns partitions across the group: each partition is owned by exactly one consumer in the group at a time. If a consumer dies, Kafka rebalances its partitions to other members (a **rebalance** event). Adding consumers scales throughput up to the partition count.\n\n**Replication factor**: Each partition is replicated to N brokers (typically 3). One replica is the **leader** (receives writes); others are **followers** that replicate asynchronously. If the leader broker dies, a follower is promoted. This provides durability and availability."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  P[\"Producer\"] -->|\"append\"| T[\"Topic: orders\\n12 partitions\"]\n  T --> PA[\"Partition 0\\noffset 0..N\"]\n  T --> PB[\"Partition 1\\noffset 0..N\"]\n  T --> PC[\"Partition 11\\noffset 0..N\"]\n  PA --> G1A[\"Group: notifications\\nConsumer 1\"]\n  PB --> G1B[\"Group: notifications\\nConsumer 2\"]\n  PA --> G2A[\"Group: analytics\\nConsumer A\"]\n  PB --> G2B[\"Group: analytics\\nConsumer B\"]",
+      "caption": "Two independent consumer groups reading the same topic. The notifications group and analytics group each maintain their own offsets per partition. The analytics group can lag behind without affecting notifications. Each group sees all messages independently."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Producer + Consumer with KafkaJS (Node.js)\nimport { Kafka } from 'kafkajs';\n\nconst kafka = new Kafka({ brokers: [process.env.KAFKA_BROKER] });\n\n// --- PRODUCER ---\nconst producer = kafka.producer();\nawait producer.connect();\n\nasync function publishOrderPlaced(order) {\n  await producer.send({\n    topic: 'orders',\n    messages: [{\n      key: String(order.id),   // same key → same partition (ordering)\n      value: JSON.stringify({\n        eventType: 'order.placed',\n        orderId: order.id,\n        userId: order.userId,\n        total: order.total,\n        timestamp: Date.now(),\n      }),\n    }],\n  });\n  // Returns immediately — API response is not blocked by downstream\n}\n\n// --- CONSUMER (Notification Service) ---\nconst consumer = kafka.consumer({ groupId: 'notification-service' });\nawait consumer.connect();\nawait consumer.subscribe({ topic: 'orders', fromBeginning: false });\n\nawait consumer.run({\n  eachMessage: async ({ message }) => {\n    const event = JSON.parse(message.value.toString());\n    if (event.eventType === 'order.placed') {\n      await sendOrderConfirmationEmail(event.userId, event.orderId);\n      // Kafka commits offset after eachMessage resolves (at-least-once)\n    }\n  },\n});",
-      "explanation": "Using `order.id` as the message key ensures all events for the same order land on the same partition, preserving per-order ordering even across retries. The consumer's `groupId` is unique per service — a separate analytics consumer group with a different `groupId` reads the same topic independently. If the email send fails and throws, Kafka retries the message (at-least-once); ensuring `sendOrderConfirmationEmail` is idempotent prevents duplicate emails."
+      "label": "Example",
+      "code": "// KafkaJS Producer + Consumer (Node.js)\nimport { Kafka, Partitioners } from 'kafkajs';\n\nconst kafka = new Kafka({\n  clientId: 'order-service',\n  brokers: [process.env.KAFKA_BROKER ?? 'localhost:9092'],\n});\n\n// ── PRODUCER ──────────────────────────────────────────────────\nconst producer = kafka.producer({\n  createPartitioner: Partitioners.LegacyPartitioner,\n  // idempotent: true  // enable for exactly-once producer semantics\n});\nawait producer.connect();\n\nasync function publishOrderPlaced(order) {\n  const record = await producer.send({\n    topic: 'orders',\n    messages: [\n      {\n        // Partition key: all events for the same order go to the same\n        // partition, preserving per-order ordering across retries.\n        key: String(order.id),\n        value: JSON.stringify({\n          eventType: 'order.placed',\n          orderId: order.id,\n          userId: order.userId,\n          total: order.total,\n          items: order.items,\n          timestamp: Date.now(),\n        }),\n        // Headers carry metadata without bloating the payload\n        headers: {\n          'content-type': 'application/json',\n          'schema-version': '2',\n        },\n      },\n    ],\n  });\n  // Returns immediately — the API response is never blocked by downstream\n  // processing. The message is durably stored on the Kafka broker.\n  console.log('Published to partition', record[0].partition,\n    'offset', record[0].baseOffset);\n}\n\n// ── CONSUMER (Notification Service) ───────────────────────────\nconst consumer = kafka.consumer({ groupId: 'notification-service' });\nawait consumer.connect();\nawait consumer.subscribe({ topic: 'orders', fromBeginning: false });\n\nawait consumer.run({\n  // autoCommit: false  // set to false for manual offset control\n  eachMessage: async ({ topic, partition, message }) => {\n    const event = JSON.parse(message.value.toString());\n\n    if (event.eventType === 'order.placed') {\n      // Idempotency check — safe to process twice\n      const key = `notif:${event.orderId}`;\n      const alreadySent = await redis.setnx(key, '1', 'EX', 86400);\n      if (!alreadySent) {\n        console.log('Duplicate, skipping', event.orderId);\n        return; // offset still committed — do not redeliver\n      }\n\n      await sendOrderConfirmationEmail(event.userId, event.orderId);\n      // KafkaJS auto-commits the offset after eachMessage resolves.\n      // If sendEmail throws, the offset is NOT committed and Kafka\n      // redelivers the message — at-least-once behaviour.\n    }\n  },\n});",
+      "explanation": "Using `order.id` as the partition key is the canonical pattern for Kafka ordering: all events for a given order land on the same partition, consumed sequentially by one consumer. The idempotency check with Redis `SETNX` (set-if-not-exists) guards against the duplicate processing that at-least-once delivery allows. If `sendOrderConfirmationEmail` throws and the message is redelivered, the `SETNX` check prevents a second email. The 24-hour TTL keeps Redis memory bounded."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Delivery Guarantees: The Critical Trade-Off",
+      "content": "Every messaging system makes a fundamental trade-off between **performance**, **simplicity**, and **correctness**. Understanding the three delivery guarantees is non-negotiable for production system design.\n\n**At-most-once delivery**\nThe broker delivers the message without waiting for consumer confirmation. If the consumer crashes after receiving the message but before processing it, the message is lost — it will not be redelivered. The broker considers its job done the moment it sends.\n- **When to use**: metrics, logs, analytics events where occasional loss is acceptable and throughput is paramount. You would rather drop 0.01% of events than slow down the pipeline.\n- **Implementation**: fire-and-forget. Producer does not wait for broker acknowledgement (`acks=0` in Kafka). Consumer does not ack.\n\n**At-least-once delivery**\nThe broker keeps the message until the consumer explicitly acknowledges it. If the consumer crashes before acking, the message is redelivered (possibly to a different consumer). The consumer may see the same message more than once.\n- **When to use**: the default for almost all production systems. Acceptable as long as consumers are **idempotent** — processing the same message twice has the same effect as processing it once.\n- **Implementation**: Kafka's default (`acks=all` on producer, consumer commits offset after processing). RabbitMQ's `basic.ack`. SQS visibility timeout.\n\n**Exactly-once delivery**\nEach message is processed exactly once — no loss, no duplicates. Sounds ideal; the reality is it requires coordination between the broker and consumer state that adds significant complexity and latency.\n- **Kafka's approach**: Kafka 0.11+ supports exactly-once semantics (EOS) via idempotent producers (each message gets a sequence number; duplicates are deduplicated at the broker) combined with transactional producers (atomic multi-partition writes) and transactional consumers (offset commits and downstream writes happen atomically within a Kafka transaction).\n- **When to use**: financial transactions, inventory deductions, any domain where duplicates cannot be tolerated and idempotency is difficult or impossible to achieve on the consumer side.\n- **Cost**: ~20-30% throughput reduction versus at-least-once. Increased operational complexity. In most systems, idempotent at-least-once is the right answer.\n\n**The practical recommendation**: design consumers to be **idempotent** and accept at-least-once delivery. Use exactly-once only when the domain truly demands it and you are prepared to pay the cost."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant P as Producer\n  participant K as Kafka Broker\n  participant C as Consumer\n  P->>K: send(msg, acks=all)\n  K-->>P: ack (durable on N replicas)\n  K->>C: deliver msg offset=42\n  Note over C: process message\n  C->>K: commitOffset(43)\n  Note over K: message retained\\nuntil retention expires\n  Note over K,C: Consumer crash before commit\\nredelivers offset=42",
+      "caption": "At-least-once delivery sequence. The broker acknowledges only after writing to N replicas. The consumer commits the next offset (current+1) after successful processing. If the consumer crashes between delivery and commit, the message is redelivered — hence 'at least once'."
+    },
+    {
+      "type": "explanation",
+      "title": "Idempotency Patterns for At-Least-Once Systems",
+      "content": "Since at-least-once is the practical default, **idempotent consumers** are the most important pattern in async system design. An operation is idempotent if running it multiple times with the same input produces the same result as running it once.\n\n**Pattern 1: Idempotency key in a fast store**\nStore a unique identifier for each processed message (e.g., `orderId` or a UUID embedded in the message) in Redis with a TTL. Before processing, check if the key exists. If yes, skip. If no, set the key and process. The Redis `SETNX` (set-not-exists) is atomic — no race condition.\n\n```javascript\nasync function processIdempotent(event) {\n  const set = await redis.set(\n    `proc:${event.id}`, '1', 'NX', 'EX', 86400\n  );\n  if (!set) return; // duplicate — already processed\n  await doActualWork(event);\n}\n```\n\n**Pattern 2: Unique constraint in the database**\nFor events that write to a database, include the event ID as a unique column. A duplicate message will trigger a unique constraint violation on insert, which you catch and ignore. The database itself is the idempotency store — no separate Redis needed.\n\n**Pattern 3: Upsert semantics**\nInstead of INSERT, use an `INSERT ... ON CONFLICT DO UPDATE` (PostgreSQL) or equivalent. The second execution of the same message overwrites with the same data — idempotent by nature.\n\n**Pattern 4: Natural idempotency**\nSome operations are already idempotent. Setting a user's email address to a specific value is idempotent — do it twice, same result. Marking an order as 'shipped' (if it is already shipped, the second write is a no-op via a status check) can be made idempotent. Design your domain operations to be idempotent wherever possible, and the async messaging layer becomes much simpler to reason about.\n\n**What idempotency does NOT solve**: ordering issues. If you receive `order.cancelled` before `order.placed` (possible if they land on different partitions), your consumer must handle out-of-order events. Using the same partition key for all events of the same entity (e.g., `orderId`) guarantees ordering within an entity — a critical design decision for event-driven systems."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// Queue vs Pub/Sub vs Kafka — when to use what\n\n// Point-to-point Queue (BullMQ / SQS)\n// - Each job consumed by exactly ONE worker\n// - Best for: task queues — resize image, send email, process payment\n// - Scaling: add more workers to increase throughput\n\n// Pub/Sub (Redis Pub/Sub, SNS)\n// - Each message delivered to ALL subscribers\n// - Best for: fanout events, real-time notifications, cache invalidation broadcasts\n// - Not durable — if subscriber is offline, messages are lost\n\n// Kafka\n// - Durable log — messages retained days/weeks after consumption\n// - Multiple independent consumer groups, each with own offset\n// - Best for: event sourcing, audit logs, data pipelines, high-throughput streams\n// - Partition key determines ordering guarantee\n\n// Delivery guarantees\nconst guarantees = {\n  atMostOnce:    'fast, may lose messages — ok for metrics/logs',\n  atLeastOnce:  'default for most queues, consumers must be idempotent',\n  exactlyOnce:  'Kafka transactions, high cost — use only when required',\n};\n\n// Idempotency pattern for at-least-once consumers\nasync function processOrderIdempotent(orderId) {\n  const processed = await redis.setnx(`processed:${orderId}`, 1);\n  if (!processed) return; // already handled, skip duplicate\n  await doActualWork(orderId);\n}",
-      "explanation": ""
+      "label": "Example",
+      "code": "// BullMQ — Production Task Queue (Node.js + Redis)\nimport { Queue, Worker, QueueEvents } from 'bullmq';\nimport IORedis from 'ioredis';\n\nconst connection = new IORedis(process.env.REDIS_URL);\n\n// ── PRODUCER: enqueue jobs from your API ───────────────────────\nconst emailQueue = new Queue('email', { connection });\n\nasync function enqueueWelcomeEmail(userId, email) {\n  await emailQueue.add(\n    'welcome',\n    { userId, email },\n    {\n      attempts: 5,                // retry up to 5 times\n      backoff: { type: 'exponential', delay: 1000 }, // 1s, 2s, 4s, 8s, 16s\n      removeOnComplete: 100,      // keep last 100 completed jobs\n      removeOnFail: 500,          // keep last 500 failed jobs for inspection\n      jobId: `welcome-${userId}`, // deduplication key — prevents duplicate jobs\n    }\n  );\n}\n\n// ── CONSUMER: worker process ───────────────────────────────────\nconst worker = new Worker(\n  'email',\n  async (job) => {\n    const { userId, email } = job.data;\n    console.log(`Processing job ${job.id}, attempt ${job.attemptsMade + 1}`);\n\n    // Transient failures (network, rate limit) cause retries.\n    // Permanent failures (invalid email) should throw a non-retryable error.\n    await sendEmail({ to: email, template: 'welcome', userId });\n  },\n  {\n    connection,\n    concurrency: 10,              // process 10 jobs simultaneously\n    limiter: { max: 100, duration: 60_000 }, // 100 emails/minute (rate limit)\n  }\n);\n\n// ── MONITORING: observe job lifecycle ─────────────────────────\nconst queueEvents = new QueueEvents('email', { connection });\nqueueEvents.on('completed', ({ jobId }) =>\n  console.log('Job completed', jobId));\nqueueEvents.on('failed', ({ jobId, failedReason }) =>\n  console.error('Job failed', jobId, failedReason));\n\n// Dead-letter pattern: inspect permanently failed jobs\nconst failed = await emailQueue.getFailed(0, 50);\nfor (const job of failed) {\n  console.error('Dead job:', job.id, job.failedReason);\n  // alert on-call, move to DLQ table, trigger manual review\n}",
+      "explanation": "BullMQ's `jobId` deduplication prevents enqueuing the same welcome email twice if the API is called twice (e.g., user double-submits the form). Exponential backoff prevents hammering a struggling email provider. The `concurrency` setting controls parallelism per worker process — run multiple worker processes to scale horizontally. The `limiter` enforces a global rate limit across all worker instances via Redis, essential when third-party APIs have quota constraints."
+    },
+    {
+      "type": "explanation",
+      "title": "Backpressure and Consumer Lag",
+      "content": "A message queue is only as useful as its consumers' ability to keep up. When producers publish faster than consumers can process, messages accumulate — this is **consumer lag**. Uncontrolled lag causes problems:\n- Queue depth grows without bound, consuming memory and disk.\n- Events are processed with increasing delay, defeating the purpose of near-real-time processing.\n- In systems with retention windows (Kafka), slow consumers may fall behind the retention boundary and lose events permanently — the dreaded **consumer offset expired** error.\n\n**Backpressure** is the mechanism by which downstream capacity signals upstream producers to slow down. In synchronous systems, backpressure is automatic: if the database is slow, the caller blocks and naturally slows. In async systems you must design it explicitly.\n\n**Strategies for managing consumer lag:**\n\n**Scale consumers horizontally**: Add more consumer instances (up to the partition count in Kafka). This is the first and most effective tool. BullMQ and SQS scale automatically; Kafka requires pre-provisioned partitions to be consumed in parallel.\n\n**Increase partition count (Kafka)**: More partitions = more parallelism. But partition count can only be increased, never decreased, and rebalancing is disruptive. Plan partition counts generously at topic creation (12 or 24 are common starting points).\n\n**Optimize consumer processing**: Profile the hot path. Is the consumer spending most time on a database query? Add an index. Calling an external API? Batch the calls. Doing heavy CPU work? Offload to a worker pool.\n\n**Shed non-critical load**: If lag spikes during a traffic event, consider processing only the freshest N messages and skipping older ones (seek to near-latest offset). For analytics pipelines, approximate answers from recent data are often more valuable than exact answers from stale data.\n\n**Alert on lag**: Instrument consumer group lag as a metric (Kafka exposes it via JMX and APIs; tools like Burrow, Kminion, or the Confluent operator aggregate it). Alert when lag exceeds a threshold — for example, when lag represents more than 5 minutes of events. This is a leading indicator of a system in distress, not a lagging one."
+    },
+    {
+      "type": "explanation",
+      "title": "Dead-Letter Queues and Poison Messages",
+      "content": "A **poison message** is one that consistently causes the consumer to crash or error — perhaps a malformed payload, an unexpected null field, or data that violates an invariant your code assumes. Without protection, a poison message can loop infinitely: consume, crash, redeliver, consume, crash.\n\nThe solution is a **dead-letter queue (DLQ)**: after N failed delivery attempts, the broker automatically moves the message to a separate DLQ topic or queue. Your normal consumers are unblocked; the DLQ accumulates poison messages for inspection and manual intervention.\n\n**Configuring DLQs:**\n- **SQS**: Set `maxReceiveCount` on the queue and point `redrivePolicy` to a DLQ ARN. After `maxReceiveCount` failed attempts, SQS automatically moves the message.\n- **RabbitMQ**: Configure a dead-letter exchange (DLX) and routing key on the queue. Messages rejected with `nack` (or expired, or exceeding max length) are forwarded to the DLX.\n- **Kafka**: Kafka itself has no built-in DLQ concept. The pattern is to implement it in the consumer: catch all exceptions, publish the failed message to a `-dlq` topic (e.g., `orders-dlq`), and commit the offset. A separate DLQ consumer can later replay messages back to the main topic after the bug is fixed.\n- **BullMQ**: Failed jobs beyond `attempts` are moved to the `failed` state. They persist in Redis and can be retried programmatically via `job.retry()`.\n\n**Schema evolution and DLQs**: A common cause of poison messages is a schema change in the producer that breaks existing consumers. The producer adds a required field; old consumer code crashes on null access. **Schema registries** (Confluent Schema Registry, AWS Glue Schema Registry) enforce backward compatibility: the registry rejects producer schemas that would break existing consumer schemas. This prevents the class of bugs that create poison messages from schema drift."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  P[\"Producer\"] -->|\"publish\"| T[\"Topic: orders\"]\n  T -->|\"deliver\"| C[\"Consumer\"]\n  C -->|\"process fails\\n3x retries\"| DLQ[\"DLQ: orders-dlq\"]\n  DLQ --> OPS[\"Ops / Alert\"]\n  OPS -->|\"fix bug + replay\"| T",
+      "caption": "The dead-letter queue pattern. After N failed attempts, the broker moves the poison message to a DLQ. An operations alert fires; engineers inspect the DLQ, fix the consumer bug, and replay the messages back to the main topic. The DLQ prevents one bad message from blocking the entire queue."
+    },
+    {
+      "type": "explanation",
+      "title": "Kafka Streams and Stream Processing",
+      "content": "Reading events from Kafka and writing results back to Kafka — transforming, filtering, joining, or aggregating events in real-time — is **stream processing**. It is the async equivalent of an online database query, but operating on an infinite, continuous stream of events rather than a static dataset.\n\n**Kafka Streams** is a Java library (part of the Apache Kafka project) for building stream processing applications. It runs as a normal application — no separate cluster required — and uses Kafka topics as both input and output. Key operations:\n- **map / filter**: transform or exclude individual events.\n- **groupByKey + aggregate**: compute running aggregates (counts, sums) per key, stored in a local state store (RocksDB) backed by a Kafka changelog topic.\n- **join**: join two streams (e.g., `orders` and `payments`) on a common key within a time window. Requires both topics to be co-partitioned (same partition count, same key).\n- **windowing**: group events by time window (tumbling: non-overlapping fixed windows; hopping: overlapping; session: gaps-based). Essential for \"count events in the last 5 minutes\" type queries.\n\n**ksqlDB** provides a SQL interface on top of Kafka Streams — write streaming SQL queries that run continuously against Kafka topics:\n```sql\nCREATE TABLE order_counts AS\n  SELECT userId, COUNT(*) AS count\n  FROM orders\n  WINDOW TUMBLING (SIZE 1 HOUR)\n  GROUP BY userId;\n```\n\n**Apache Flink** is the more powerful alternative for complex stateful stream processing: exactly-once guarantees, event-time semantics (handling late-arriving events), and massive scale. Used by Uber, Netflix, and Alibaba for real-time analytics at billions of events per day.\n\n**Use stream processing when**: you need to enrich events (join order events with product data), detect patterns across multiple events (fraud detection: more than 3 failed payments in 10 minutes), compute real-time aggregates (dashboard showing orders per minute), or implement event-driven microservices that read from one topic and write to another."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**When NOT to use Kafka**: Kafka excels at high-throughput, durable, ordered event streams — but it is operationally heavy. For simple background jobs in a single service or small team, **BullMQ** (Redis-backed) or **Amazon SQS** is far simpler and equally reliable. For real-time pub/sub within a single datacenter with acceptable message loss, **Redis Pub/Sub** is faster and simpler. Introduce Kafka when you need: (1) multi-consumer group fan-out with independent offsets, (2) replay of historical events, (3) retention beyond consumption, or (4) throughput in the millions of events per second. If your team is spending more time managing Kafka than building features, reconsider whether you have crossed the complexity threshold where Kafka pays off."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Design consumers to be idempotent** — safe to run twice with the same message. At-least-once delivery (the default for Kafka and most queues) means duplicates are possible on retry. An idempotency key check (`setnx` in Redis, or a unique constraint in the DB) lets you accept this trade-off without corrupting data. Exactly-once semantics exist but add significant complexity; prefer idempotent at-least-once in almost every real system."
+      "content": "**Production checklist for any messaging system**: (1) **DLQ configured** — never let poison messages loop. (2) **Consumer lag monitored** — alert before lag becomes catastrophic. (3) **Idempotent consumers** — design for at-least-once from day one. (4) **Schema versioning** — use a schema registry or include a `schemaVersion` field in every message; old consumers must handle new fields gracefully. (5) **Graceful shutdown** — consumers must finish in-flight messages and commit offsets before shutting down; abrupt kills cause unnecessary redelivery storms. (6) **Partition count planned generously** — in Kafka, you can increase but not decrease partitions; start with 12 or more for any topic expected to grow. (7) **Retention configured per topic** — do not use the cluster default for everything; high-volume low-importance topics (click events) can have 1-day retention; critical financial event topics may need 30 days or more."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Message queues** decouple producers from consumers: the producer publishes and moves on; consumers process at their own pace, enabling independent scaling and absorbing traffic spikes.",
-        "**Point-to-point queues** deliver each message to one consumer (task distribution); **pub/sub** delivers each message to all subscriber groups (event fanout). Choose based on whether downstream services compete or cooperate.",
-        "**Kafka** stores messages durably in partitioned, ordered logs. Multiple consumer groups each track their own offset, enabling independent consumption, replay, and audit at scale.",
-        "**Partitions** are the unit of parallelism in Kafka: a topic with N partitions can be consumed by at most N consumers in parallel within one consumer group. Partition keys control which partition a message lands on, preserving ordering per key.",
-        "**At-least-once delivery** is the practical default — design consumers to be **idempotent** (safe to process the same message twice) rather than paying the cost of exactly-once transactions."
+        "**Message queues** decouple producers from consumers: the producer publishes and returns immediately, consumers process at their own pace. This eliminates latency coupling and failure propagation — if the email service is down, the checkout API is unaffected.",
+        "**Point-to-point queues** (SQS, RabbitMQ, BullMQ) deliver each message to exactly one competing consumer — ideal for task distribution. **Pub/sub** (SNS, Redis Pub/Sub) delivers each message to all subscriber groups — ideal for event fan-out across independent services.",
+        "**Apache Kafka** is a durable, append-only, partitioned log. Messages are retained after consumption; multiple independent consumer groups each track their own offset, enabling replay, event sourcing, and stream processing alongside normal task consumers.",
+        "**Delivery guarantees** are a core trade-off: at-most-once (fast, may lose messages), at-least-once (the practical default — duplicates possible), and exactly-once (highest correctness, highest cost). Design consumers to be **idempotent** and use at-least-once in almost every system.",
+        "**Kafka partitions** are the unit of parallelism: a topic with N partitions can be consumed by at most N consumers in parallel within one consumer group. Partition keys (e.g., `orderId`) route related events to the same partition, preserving per-entity ordering.",
+        "**Dead-letter queues** prevent poison messages from blocking consumers indefinitely. After N failed attempts, the broker moves the message to a DLQ for inspection — a non-negotiable safety net in any production messaging system.",
+        "**Consumer lag** — the gap between latest produced offset and latest consumed offset — is the key health metric for any async pipeline. Monitor it, alert on it, and plan partition counts and consumer scaling to keep lag bounded under peak load."
       ]
     }
   ],
@@ -67,133 +125,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What is the primary benefit of using a message queue between two services instead of a direct synchronous HTTP call?",
+      "question": "What is the primary architectural benefit of using a message queue between two services instead of a direct synchronous HTTP call?",
       "type": "mcq",
       "options": [
         "Message queues are always faster than HTTP for individual requests",
-        "The producer is decoupled from the consumer — it does not block waiting for a response",
-        "Message queues automatically retry failed HTTP connections",
-        "Queues encrypt messages in transit, making them more secure than HTTP"
+        "The producer is decoupled from the consumer — it publishes and returns immediately without waiting for downstream processing",
+        "Message queues automatically encrypt messages in transit",
+        "Queues prevent duplicate requests from reaching the consumer"
       ],
       "correct": 1,
-      "explanation": "With a queue the producer publishes a message and immediately moves on. The consumer processes it asynchronously, at its own pace. This eliminates the latency coupling and failure propagation of synchronous calls."
+      "explanation": "With a queue, the producer publishes and moves on immediately. The consumer processes asynchronously at its own pace. This eliminates the latency coupling and failure propagation of synchronous calls — if the consumer crashes, the producer is unaffected."
     },
     {
       "id": "q2",
-      "question": "In Kafka, what is an 'offset'?",
+      "question": "In Kafka, what is a 'consumer offset' and why does it matter?",
       "type": "mcq",
       "options": [
         "The number of milliseconds a message is delayed before delivery",
-        "A sequential integer identifying the position of a message within a partition",
-        "The byte size of a message in the Kafka broker",
-        "A consumer group's lag behind the producer in seconds"
+        "A sequential integer identifying each message's position within a partition, tracked per consumer group to enable independent progress and replay",
+        "The byte size of a Kafka message stored on the broker",
+        "A broker-side counter tracking how many consumers have read a message"
       ],
       "correct": 1,
-      "explanation": "Each message within a Kafka partition is assigned a monotonically increasing offset. Consumers commit their current offset to track progress, and can seek to any offset to replay historical messages."
+      "explanation": "Each message in a Kafka partition has a monotonically increasing offset. Each consumer group commits its current offset independently, allowing different groups to be at different positions in the same topic. A group can seek to any past offset to replay events — a capability queues that delete-on-consume cannot provide."
     },
     {
       "id": "q3",
-      "question": "How many consumers (in the same consumer group) can read from a Kafka topic with 6 partitions in parallel?",
+      "question": "A Kafka topic has 8 partitions. How many consumers in the same consumer group can actively consume in parallel at most?",
       "type": "mcq",
       "options": [
         "Unlimited — any number of consumers can read any partition simultaneously",
-        "1 — Kafka is single-threaded per topic",
-        "6 — each partition is assigned to at most one consumer in a group",
-        "3 — half the partition count, as Kafka uses pair-wise assignment"
+        "4 — Kafka uses pair-wise partition assignment",
+        "8 — each partition is assigned to at most one consumer in a group",
+        "1 — Kafka is single-threaded per topic within a group"
       ],
       "correct": 2,
-      "explanation": "Kafka assigns each partition to exactly one consumer within a consumer group at a time. With 6 partitions you can have at most 6 active consumers reading in parallel. A 7th consumer in the same group would be idle, waiting for a partition to become available."
+      "explanation": "Kafka assigns each partition to exactly one consumer within a consumer group at a time. With 8 partitions, at most 8 consumers can read in parallel. A 9th consumer in the same group would be idle, waiting for a partition to become available via rebalance."
     },
     {
       "id": "q4",
-      "question": "What is the key difference between a point-to-point queue and pub/sub?",
+      "question": "What is the key difference between at-least-once and exactly-once delivery in messaging systems?",
       "type": "mcq",
       "options": [
-        "Point-to-point queues support persistence; pub/sub does not",
-        "In pub/sub each message is delivered to every subscriber group; in a queue each message is consumed by one consumer",
-        "Pub/sub requires acknowledgement; queues are fire-and-forget",
-        "Queues are push-based; pub/sub is pull-based"
+        "At-least-once is slower; exactly-once is always faster",
+        "At-least-once may redeliver messages after crashes causing duplicates; exactly-once prevents duplicates but requires coordination overhead that reduces throughput",
+        "At-least-once requires consumer acknowledgement; exactly-once is fire-and-forget",
+        "Exactly-once is only available in RabbitMQ, not Kafka or SQS"
       ],
       "correct": 1,
-      "explanation": "A point-to-point queue distributes messages among competing consumers — each message goes to exactly one. Pub/sub broadcasts each message to every subscriber group, enabling fan-out (e.g., one event triggering multiple independent services)."
+      "explanation": "At-least-once redelivers messages if the consumer crashes before committing the offset, causing potential duplicates. Exactly-once prevents this via idempotent producers and transactional offset commits, but adds ~20-30% throughput overhead. The practical recommendation is at-least-once with idempotent consumers."
     },
     {
       "id": "q5",
       "question": "Why should consumers be designed to be idempotent when using at-least-once delivery?",
       "type": "mcq",
       "options": [
-        "Because Kafka consumers run in parallel and may receive the same message simultaneously",
-        "Because at-least-once delivery means a message may be redelivered after a crash, causing duplicate processing",
-        "Because message brokers compress duplicate messages into one for efficiency",
-        "Because idempotency is required to achieve exactly-once delivery"
+        "Because Kafka consumers run in parallel threads and may race on the same message",
+        "Because at-least-once delivery means a message may be redelivered after a crash before the offset was committed, and idempotent consumers handle duplicates safely",
+        "Because idempotency is required to read from multiple partitions simultaneously",
+        "Because message brokers compress duplicate messages and idempotency enables decompression"
       ],
       "correct": 1,
-      "explanation": "With at-least-once delivery, if a consumer processes a message but crashes before committing the offset, the broker redelivers the message. Idempotent consumers (e.g., using a processed-ID check) handle duplicates safely without side effects."
+      "explanation": "With at-least-once, if a consumer processes a message but crashes before committing the offset, the broker redelivers it. An idempotent consumer (e.g., using a Redis SETNX check or a database unique constraint) detects the duplicate and skips it, preventing double-charges, duplicate emails, or corrupted state."
     },
     {
       "id": "q6",
       "question": "What happens to messages published to a Redis Pub/Sub channel when no subscriber is currently connected?",
       "type": "mcq",
       "options": [
-        "Messages are stored in a buffer and delivered when the subscriber reconnects",
-        "Messages are dropped — Redis Pub/Sub has no persistence or buffering",
-        "Messages are stored for up to 24 hours then expired",
-        "Redis automatically switches to a durable queue mode"
+        "Messages are buffered in Redis memory and delivered when the subscriber reconnects",
+        "Messages are dropped immediately — Redis Pub/Sub has no persistence or delivery buffering",
+        "Messages are stored for up to 24 hours then automatically expired",
+        "Redis switches to a durable queue mode and retains messages until the next subscriber connects"
       ],
       "correct": 1,
-      "explanation": "Redis Pub/Sub is not durable. If no subscriber is listening when a message is published, the message is silently dropped. For reliable delivery use Redis Streams, a dedicated queue (BullMQ, SQS), or Kafka."
+      "explanation": "Redis Pub/Sub is not durable. If no subscriber is listening when a message is published, the message is silently dropped. For reliable delivery across service restarts, use Redis Streams, BullMQ, SQS, or Kafka instead."
     },
     {
       "id": "q7",
-      "question": "What is the purpose of using a message's key (e.g., order ID) as the Kafka partition key?",
+      "question": "Why is using `orderId` as the Kafka partition key for order events important?",
       "type": "mcq",
       "options": [
-        "It compresses the message to reduce broker storage",
-        "It ensures all messages with the same key land on the same partition, preserving order per key",
-        "It routes the message to a specific consumer by ID",
-        "It enables exactly-once delivery for that message"
+        "It compresses the message payload to reduce broker storage costs",
+        "It ensures all events for the same order land on the same partition, preserving per-order event ordering even across retries and multiple producers",
+        "It routes the message to a specific consumer instance by matching its ID",
+        "It enables exactly-once delivery semantics for that specific message"
       ],
       "correct": 1,
-      "explanation": "Kafka hashes the partition key to select a partition. All messages with the same key (e.g., same order ID) go to the same partition, which is consumed sequentially by one consumer — preserving ordering per entity even at high throughput."
+      "explanation": "Kafka hashes the partition key to deterministically select a partition. All messages with the same key go to the same partition, which is consumed sequentially by one consumer in the group. This preserves per-order ordering (order.placed before order.shipped before order.delivered) even at high throughput with multiple producers."
     },
     {
       "id": "q8",
-      "question": "Which delivery guarantee adds the most complexity and reduces throughput in Kafka?",
+      "question": "What is a dead-letter queue (DLQ) and why is it essential in production messaging systems?",
       "type": "mcq",
       "options": [
-        "At-most-once",
-        "At-least-once",
-        "Exactly-once",
-        "Best-effort"
+        "A queue that stores messages awaiting manual approval before delivery",
+        "A separate queue where messages are moved after N failed delivery attempts, preventing a single poison message from blocking normal consumers indefinitely",
+        "A replica queue used for disaster recovery and cross-region failover",
+        "A queue that holds messages exceeding the maximum payload size limit"
       ],
-      "correct": 2,
-      "explanation": "Exactly-once semantics require Kafka's transactional producer API and idempotent consumer processing, coordinated across broker and consumer state. This adds latency and operational complexity. Most systems instead use at-least-once with idempotent consumers."
+      "correct": 1,
+      "explanation": "A poison message — one that consistently causes the consumer to fail — can loop forever without a DLQ: receive, fail, redeliver, receive, fail. The DLQ breaks this loop by moving the message after N attempts. Engineers can inspect the DLQ, fix the bug, and replay messages. Without a DLQ, one bad message can stall an entire queue."
     },
     {
       "id": "q9",
-      "question": "A Kafka topic retains messages for 7 days. A consumer group falls 3 days behind due to a bug fix deployment. What can it do?",
+      "question": "A Kafka topic retains messages for 7 days. A new analytics service needs to process all events from the past 5 days. What can it do?",
       "type": "mcq",
       "options": [
-        "Nothing — unconsumed messages are deleted after one day",
-        "It can reset its offset to any point within the 7-day retention window and replay events",
-        "It must request the producer to republish the missed messages",
-        "Kafka automatically delivers buffered messages in a batch on reconnection"
+        "Nothing — messages older than one hour are inaccessible to new consumer groups",
+        "It can create a new consumer group with fromBeginning=true or seek to a specific offset within the 7-day retention window and process all retained events",
+        "It must request the producer to republish the missing events to a separate topic",
+        "Kafka automatically batches and delivers all retained messages to new consumer groups on first connection"
       ],
       "correct": 1,
-      "explanation": "Kafka's durable log retains all messages for the configured retention period. A consumer group can seek to any offset within that window and replay events — a capability not available with traditional queues that delete messages after consumption."
+      "explanation": "Kafka's durable log retains all messages for the configured retention period regardless of whether they have been consumed. A new consumer group can set fromBeginning=true to start from the oldest retained offset, or seek to a specific timestamp-based offset. This replay capability is a core Kafka differentiator from traditional queues that delete messages after consumption."
     },
     {
       "id": "q10",
-      "question": "In an event-driven architecture, which scenario is best served by pub/sub rather than a point-to-point queue?",
+      "question": "Which scenario is best served by a pub/sub fan-out architecture rather than a point-to-point queue?",
       "type": "mcq",
       "options": [
-        "Distributing image resize jobs across a pool of worker processes",
-        "An 'order.placed' event that must trigger notifications, inventory updates, and analytics simultaneously",
-        "Processing payment transactions one at a time to prevent double-charging",
-        "Scheduling background database cleanup jobs every night"
+        "Distributing video transcoding jobs across a pool of GPU worker processes, where each video is transcoded once",
+        "An order.placed event that must simultaneously trigger an email notification, an inventory deduction, and an analytics record in three independent services",
+        "Processing payment transactions sequentially to prevent any possibility of double-charging",
+        "Scheduling nightly database cleanup jobs that must run exactly once"
       ],
       "correct": 1,
-      "explanation": "Pub/sub fans out one event to multiple independent subscribers. All three services (notifications, inventory, analytics) consume the same event independently. A point-to-point queue would only deliver the message to one of the three."
+      "explanation": "Pub/sub fans out one event to multiple independent subscriber groups, each receiving a full copy. All three services consume the same event without interfering with each other. A point-to-point queue would deliver the message to only one of the three consumers. Fan-out to independent services is exactly the use case pub/sub solves."
     }
   ]
 }

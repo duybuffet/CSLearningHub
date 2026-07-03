@@ -5,58 +5,123 @@
   "week": 34,
   "icon": "pattern",
   "tagline": "Decouple producers from consumers — one subject, many observers, zero hard-wired dependencies.",
-  "readTime": "~15 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "**Problem:** A `Store` object holds application state. Whenever state changes, a chart, a table, and a status bar all need to refresh — but the store should not know anything about the UI components. Hard-coding `chart.update()` inside the store creates brittle, untestable coupling: adding a fourth consumer means editing the store.\n\n**Core idea:** The **Observer** pattern (also called Publish/Subscribe) defines a one-to-many dependency so that when one object (the **Subject**) changes state, all its registered **Observers** are notified automatically. The subject only knows the abstract `Observer` interface — not the concrete subscribers. This is the backbone of Node.js `EventEmitter`, browser `addEventListener`, RxJS `Observable`, and Redux's `store.subscribe()`."
+      "content": "Imagine you are building a dashboard for an e-commerce platform. The `OrderStore` holds live order data. Every time a new order arrives, five things need to happen: a `LiveChart` redraws its bar graph, a `NotificationBanner` flashes a message, a `SoundAlert` plays a chime, an `AnalyticsService` sends an event to a third-party tracker, and a `Badge` on the nav updates its count. The naive approach is to call each of those directly from inside `OrderStore.addOrder()`. That creates a nightmare: the store is now tightly coupled to five concrete classes. Adding a sixth consumer means editing `addOrder`. Removing the sound alert means touching the store. Testing the store alone becomes impossible because it drags in all five dependents.\n\nThe **Observer** pattern — also known as Publish/Subscribe at the object level — solves this cleanly. You define a one-to-many dependency so that when one object (the **Subject**) changes state, all registered **Observers** are notified and updated automatically. The subject knows nothing about the concrete classes listening to it. It knows only a single abstract method: `update(data)`. Adding a sixth observer is a one-liner outside the store. Removing one is equally trivial. Testing the store means mocking one simple interface.\n\nThis is not an academic curiosity. Every major JavaScript framework, every server-side event system, and every reactive library is built on this exact idea. Node.js `EventEmitter`, browser `addEventListener`, RxJS `Observable`, Vue's reactivity system, MobX `autorun`, Redux `store.subscribe`, and React's `useEffect` cleanup are all Observer in disguise. Mastering the pattern means you understand the engine underneath half the JavaScript ecosystem.\n\nThis chapter covers the problem the pattern solves, the canonical four participants (Subject, Observer, ConcreteSubject, ConcreteObserver), push vs pull notification models, synchronous vs asynchronous delivery, memory leak traps, real before/after code in JavaScript, how production frameworks implement it, when to reach for it, and when a simpler tool is the right answer."
     },
     {
       "type": "diagram",
-      "mermaid": "classDiagram\n    class Subject {\n        -observers: Observer[]\n        +subscribe(obs) void\n        +unsubscribe(obs) void\n        +notify(data) void\n    }\n    class Observer {\n        +update(data) void\n    }\n    class ConcreteSubject {\n        -state: any\n        +setState(val) void\n    }\n    class ChartObserver {\n        +update(data) void\n    }\n    class TableObserver {\n        +update(data) void\n    }\n    Subject <|-- ConcreteSubject\n    Observer <|.. ChartObserver\n    Observer <|.. TableObserver\n    ConcreteSubject --> Observer : notifies",
-      "caption": "Subject maintains a list of Observers and broadcasts state changes — neither side knows the concrete type of the other."
+      "mermaid": "classDiagram\n    class Subject {\n        -observers: Observer[]\n        +subscribe(obs) void\n        +unsubscribe(obs) void\n        +notify(data) void\n    }\n    class Observer {\n        <<interface>>\n        +update(data) void\n    }\n    class ConcreteSubject {\n        -state: any\n        +setState(val) void\n        +getState() any\n    }\n    class ChartObserver {\n        +update(data) void\n    }\n    class TableObserver {\n        +update(data) void\n    }\n    class LogObserver {\n        +update(data) void\n    }\n    Subject <|-- ConcreteSubject\n    Observer <|.. ChartObserver\n    Observer <|.. TableObserver\n    Observer <|.. LogObserver\n    ConcreteSubject --> Observer : notifies",
+      "caption": "The four GoF participants: Subject manages the observer list; ConcreteSubject holds real state; Observer is the interface; ConcreteObservers implement domain-specific reactions. The subject depends only on the interface — never on concrete types."
     },
     {
       "type": "analogy",
-      "title": "A Newsletter Subscription",
-      "content": "A news publisher doesn't know who reads its newsletter. Readers **subscribe** to receive issues; the publisher just **broadcasts** to the subscription list. A reader can **unsubscribe** at any time without the publisher caring. New readers can be added without touching the publisher's editorial process.\n\nThe publisher is the **Subject**; each subscriber is an **Observer**. The newsletter is the **event/notification**. This decoupling is exactly why you can plug a Redux DevTools extension into any Redux store — the store just calls `notify`, and the extension is one more subscriber."
+      "title": "A Newsletter with Opt-In Subscribers",
+      "content": "Picture a newspaper publisher running a weekly newsletter. The editorial team writes the issue and ships it to everyone on the mailing list. They have no idea if subscribers are doctors, students, or retirees. They do not care. They just blast the issue to the list.\n\nA reader can **subscribe** by giving their address. They can **unsubscribe** at any time. When a new issue is published, every subscriber on the current list receives it simultaneously. Adding a thousand new readers does not change the editorial process one bit.\n\nThe publisher is the **Subject**. Each subscriber is an **Observer**. The newsletter issue is the **notification payload**. The mailing list is the `observers[]` array.\n\nNow extend the analogy: what if the publisher started calling each subscriber personally? *'Hey Dr Smith, the issue is out — I know you like the health section.'* *'Hey Jamie, you always read the sports page.'* That is tight coupling: the publisher must know each subscriber personally, and adding a new subscriber means rewriting the publisher's contact routine. The newsletter model is far more scalable.\n\nThis is exactly why you can plug a Redux DevTools extension into any Redux store without modifying the store code. The store just calls `notify`. The DevTools extension registers itself as one more subscriber. The store has no idea it exists."
     },
     {
       "type": "explanation",
-      "content": "**Participants:**\n\n- **Subject** — maintains a list of observers; exposes `subscribe(obs)`, `unsubscribe(obs)`, and `notify(data)`. It calls `obs.update(data)` on each registered observer when its state changes.\n- **Observer** — a single method interface (`update(data)`). Any object implementing this interface can be plugged in.\n- **ConcreteSubject** — extends Subject; holds the real state. When state is mutated via `setState()`, it calls `this.notify(newState)` internally.\n- **ConcreteObserver** — implements `update(data)` with domain-specific logic (re-render a chart, log to console, persist to localStorage).\n\n**Push vs Pull:** In the *push* model (shown here) the subject sends data directly in `notify(data)`. In the *pull* model, `notify()` carries no data — observers call back into the subject via a getter to fetch what they need. Push is simpler; pull avoids sending data observers don't need.\n\n**Memory leaks:** Always pair `subscribe` with `unsubscribe` in component teardown. Forgetting this is the leading cause of JavaScript memory leaks in long-lived single-page apps — the subject holds a reference that prevents garbage collection.\n\n**In the wild:** Node.js `EventEmitter.on/off/emit`, DOM `addEventListener/removeEventListener`, RxJS `Observable.subscribe`, Vue's reactivity system, MobX `autorun`, and Redux `store.subscribe` all implement this pattern."
+      "title": "The Problem: Hard-Coded Fan-Out",
+      "content": "Before reaching for the Observer pattern, it helps to feel the pain it eliminates. Here is a representative before-state — a `TemperatureSensor` that needs to drive three outputs:\n\n```js\n// BEFORE: brittle, tightly coupled\nclass TemperatureSensor {\n  constructor() {\n    this.alarm = new OverheatAlarm();\n    this.dashboard = new DashboardWidget();\n    this.dataLogger = new DataLogger();\n  }\n\n  setTemperature(temp) {\n    this.alarm.check(temp);\n    this.dashboard.refresh(temp);\n    this.dataLogger.record(temp);\n  }\n}\n```\n\nProblems:\n- **Adding a consumer** (e.g. `EmailAlert`) forces you to edit `TemperatureSensor` — a class that should have no knowledge of email.\n- **Unit testing** `TemperatureSensor` requires instantiating `OverheatAlarm`, `DashboardWidget`, and `DataLogger`, or mocking all three.\n- **Removing a consumer** at runtime (e.g. the user closes the dashboard) is impossible without another conditional inside `setTemperature`.\n- **Reusing** `TemperatureSensor` in a different context (say, a CLI tool with no dashboard) means dragging the dashboard dependency along.\n\nThe Observer pattern turns the dependency arrow around. Instead of the subject knowing its consumers, consumers register with the subject. The subject knows only the abstract `update(data)` interface."
+    },
+    {
+      "type": "explanation",
+      "title": "The Four Participants in Detail",
+      "content": "**Subject (Observable)**\n\nThe Subject maintains a private list of observer references — typically an array or Set. It exposes three operations:\n- `subscribe(obs)` — adds an observer to the list\n- `unsubscribe(obs)` — removes it\n- `notify(data)` — iterates the list and calls `obs.update(data)` on each entry\n\nCritically, the Subject depends only on the `Observer` interface, never on concrete classes. This is the **Dependency Inversion Principle** in action: both sides depend on the abstraction.\n\n**Observer (interface / abstract class)**\n\nA single-method contract: `update(data)`. In JavaScript this is typically enforced by convention (duck typing) rather than a formal interface. In TypeScript you would write `interface Observer<T> { update(data: T): void; }`. In Java or C# you would use an explicit interface.\n\n**ConcreteSubject**\n\nExtends Subject and holds the actual domain state. When domain state changes — via `setState()`, `addOrder()`, `setTemperature()`, or similar — it calls `this.notify(newState)` internally. It can also expose `getState()` for the pull model (discussed below).\n\n**ConcreteObserver**\n\nImplements `update(data)` with domain-specific behaviour. One observer re-renders a chart. Another appends to a log file. A third sends an HTTP request to an analytics endpoint. They share nothing except the `update` contract. Because they are separate classes, you can add, remove, or replace them independently.\n\n**Why this satisfies the Open/Closed Principle:** The Subject is open for extension (new observers can be registered) and closed for modification (you never touch the Subject to add a new consumer). This is the canonical example of OCP in the GoF book."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant Client\n    participant Store as ConcreteSubject\n    participant Chart as ChartObserver\n    participant Table as TableObserver\n    Client->>Store: subscribe(chart)\n    Client->>Store: subscribe(table)\n    Client->>Store: setState({sales: 42})\n    Store->>Store: notify({sales: 42})\n    Store->>Chart: update({sales: 42})\n    Chart-->>Store: (renders chart)\n    Store->>Table: update({sales: 42})\n    Table-->>Store: (renders table)\n    Client->>Store: unsubscribe(table)\n    Client->>Store: setState({sales: 99})\n    Store->>Chart: update({sales: 99})\n    Note over Table: not called — unsubscribed",
-      "caption": "Sequence of subscribe → state change → notify → each observer reacts. After unsubscribe, the table is no longer notified."
+      "mermaid": "sequenceDiagram\n    participant Client\n    participant Store as ConcreteSubject\n    participant Chart as ChartObserver\n    participant Table as TableObserver\n    participant Log as LogObserver\n    Client->>Store: subscribe(chart)\n    Client->>Store: subscribe(table)\n    Client->>Store: subscribe(log)\n    Client->>Store: setState(newData)\n    Store->>Store: notify(newData)\n    Store->>Chart: update(newData)\n    Chart-->>Store: renders chart\n    Store->>Table: update(newData)\n    Table-->>Store: renders table\n    Store->>Log: update(newData)\n    Log-->>Store: writes log entry\n    Client->>Store: unsubscribe(table)\n    Client->>Store: setState(laterData)\n    Store->>Chart: update(laterData)\n    Store->>Log: update(laterData)\n    Note over Table: silent after unsubscribe",
+      "caption": "Full lifecycle: subscribe → state change → fan-out notify → each observer reacts independently → unsubscribe silences a specific observer without affecting others."
+    },
+    {
+      "type": "explanation",
+      "title": "Push Model vs Pull Model",
+      "content": "There are two fundamental delivery strategies when the subject notifies observers.\n\n**Push Model**\n\nThe subject sends the changed data directly as an argument: `notify(newState)` → `observer.update(newState)`. Observers receive everything they need in the call. This is simpler, but it can send data that a particular observer does not need — wasted bandwidth in distributed systems or expensive serialization in large state objects.\n\n```js\n// Push: subject sends the full new state\nnotify(data) {\n  this._observers.forEach(obs => obs.update(data));\n}\n```\n\n**Pull Model**\n\nThe subject sends no payload: `notify()` → `observer.update()`. Observers call back into the subject via a getter to fetch only the slice they need. This is more selective — the chart observer fetches sales data, the log observer fetches audit fields — but it requires observers to hold a reference to the subject, creating a back-reference that some consider smelly.\n\n```js\n// Pull: no payload; observer queries the subject\nnotify() {\n  this._observers.forEach(obs => obs.update(this)); // passes 'this'\n}\n// In the observer:\nupdate(subject) {\n  const salesData = subject.getSalesData();\n  this._chart.render(salesData);\n}\n```\n\n**Which to choose?** Push is the default and works for 90% of cases. Pull makes sense when observers need radically different subsets of a large state object, or when the state is expensive to serialize. RxJS operators like `pluck` and `select` are essentially a typed push model where the pipeline filters the payload before it reaches the subscriber.\n\n**Named events (Event Emitter variant)**\n\nA practical evolution: instead of a single `notify`, the subject emits named events. Observers subscribe to specific events. This is the Node.js `EventEmitter` model and is far more practical for real applications where a subject may produce many different kinds of changes:\n\n```js\nstore.on('orderAdded', observer1);\nstore.on('orderCancelled', observer2);\n// Only observer1 fires when an order is added\n```"
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// ── Observable store (push model) ───────────────────────────────\nclass EventEmitter {\n  constructor() { this._listeners = {}; }\n\n  on(event, fn) {\n    if (!this._listeners[event]) this._listeners[event] = [];\n    this._listeners[event].push(fn);\n    return () => this.off(event, fn); // returns unsubscribe fn\n  }\n\n  off(event, fn) {\n    this._listeners[event] = (this._listeners[event] || []).filter(l => l !== fn);\n  }\n\n  emit(event, data) {\n    (this._listeners[event] || []).forEach(fn => fn(data));\n  }\n}\n\nclass SalesStore extends EventEmitter {\n  constructor() {\n    super();\n    this._state = { sales: 0, region: 'APAC' };\n  }\n\n  getState() { return { ...this._state }; }\n\n  setSales(amount) {\n    this._state = { ...this._state, sales: amount };\n    this.emit('change', this.getState()); // notify all observers\n  }\n}\n\n// ── Observers ────────────────────────────────────────────────────\nconst store = new SalesStore();\n\nconst chartObserver = (state) =>\n  console.log(`[Chart] Rendering bar at ${state.sales} for ${state.region}`);\n\nconst logObserver = (state) =>\n  console.log(`[Log]   State updated:`, JSON.stringify(state));\n\nconst unsubChart = store.on('change', chartObserver);\nconst unsubLog   = store.on('change', logObserver);\n\nstore.setSales(42);\n// [Chart] Rendering bar at 42 for APAC\n// [Log]   State updated: {\"sales\":42,\"region\":\"APAC\"}\n\nunsubLog(); // remove log observer\n\nstore.setSales(99);\n// [Chart] Rendering bar at 99 for APAC  ← only chart fires\n\nconsole.log('Done.');\n",
-      "explanation": "The `EventEmitter` base class is a minimal, framework-free Observable. `SalesStore` is the ConcreteSubject. Two lambdas act as observers; calling `unsubLog()` stops future notifications to the logger. This is structurally identical to Node.js `EventEmitter` and Redux `store.subscribe`."
+      "label": "Example",
+      "code": "// ── Minimal Subject/Observer skeleton (class-based) ─────────────\nclass Subject {\n  constructor() {\n    this._observers = [];\n  }\n\n  subscribe(obs) {\n    this._observers.push(obs);\n  }\n\n  unsubscribe(obs) {\n    this._observers = this._observers.filter(o => o !== obs);\n  }\n\n  notify(data) {\n    // iterate a snapshot in case an observer unsubscribes during iteration\n    [...this._observers].forEach(o => o.update(data));\n  }\n}\n\n// ── ConcreteSubject ───────────────────────────────────────────────\nclass TemperatureSensor extends Subject {\n  constructor() {\n    super();\n    this._temp = 0;\n  }\n\n  setTemperature(temp) {\n    this._temp = temp;\n    console.log(`[Sensor] temperature set to ${temp}°C`);\n    this.notify({ temp: this._temp });\n  }\n}\n\n// ── ConcreteObservers ────────────────────────────────────────────\nclass OverheatAlarm {\n  update({ temp }) {\n    if (temp > 80) console.log(`  [ALARM] CRITICAL: ${temp}°C — shutting down!`);\n    else           console.log(`  [Alarm] ${temp}°C — within safe range`);\n  }\n}\n\nclass DataLogger {\n  constructor() { this._log = []; }\n  update({ temp }) {\n    this._log.push({ temp, time: Date.now() });\n    console.log(`  [Logger] recorded ${temp}°C (${this._log.length} entries)`);\n  }\n}\n\nclass DashboardWidget {\n  update({ temp }) {\n    console.log(`  [Dashboard] rendering thermometer at ${temp}°C`);\n  }\n}\n\n// ── Wiring ───────────────────────────────────────────────────────\nconst sensor    = new TemperatureSensor();\nconst alarm     = new OverheatAlarm();\nconst logger    = new DataLogger();\nconst dashboard = new DashboardWidget();\n\nsensor.subscribe(alarm);\nsensor.subscribe(logger);\nsensor.subscribe(dashboard);\n\nsensor.setTemperature(65);\n// [Sensor] temperature set to 65°C\n//   [Alarm] 65°C — within safe range\n//   [Logger] recorded 65°C (1 entries)\n//   [Dashboard] rendering thermometer at 65°C\n\nsensor.unsubscribe(dashboard); // user closes the dashboard\n\nsensor.setTemperature(95);\n// [Sensor] temperature set to 95°C\n//   [ALARM] CRITICAL: 95°C — shutting down!\n//   [Logger] recorded 95°C (2 entries)\n// (dashboard NOT called — correctly unsubscribed)\n",
+      "explanation": "Notice `[...this._observers].forEach(...)` — iterating a snapshot of the array prevents bugs when an observer calls `unsubscribe` on itself during the notification loop (modifying the array mid-iteration). This defensive copy is a subtle but important production detail."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "The Event Emitter Pattern: Named Events in Practice",
+      "content": "The class-based `Subject.notify()` broadcasts a single event type. Real applications need multiple event types from one subject. The **Event Emitter** pattern solves this by naming events and mapping them to separate observer lists:\n\n```js\nthis._listeners = {\n  'order:added':     [fn1, fn2],\n  'order:cancelled': [fn3],\n  'stock:low':       [fn4, fn5, fn6]\n};\n```\n\n`on(event, fn)` appends to the appropriate list. `emit(event, data)` calls only that list. `off(event, fn)` removes from it. This is structurally identical to GoF Observer — the only difference is the routing table for event names.\n\nNode.js `EventEmitter` is the canonical implementation of this in a production runtime. It adds features like `once(event, fn)` (auto-unsubscribe after first call), `setMaxListeners(n)` (warn when >n listeners, which usually indicates a leak), and error event special-casing.\n\nBrowser DOM events follow the same model: `element.addEventListener('click', handler)` subscribes `handler` to the `'click'` event on that element. `removeEventListener` unsubscribes. The element is the Subject; your handler is the Observer. `dispatchEvent` is `notify`.\n\nThe practical advantage of named events is **precision**: a component can subscribe only to the events it cares about, not every state change. This avoids unnecessary re-renders — a lesson React learned painfully and addressed with `useMemo`, `useSelector`, and fine-grained subscriptions."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// ── Minimal Observer skeleton ────────────────────────────────────\nclass Subject {\n  constructor() { this._observers = []; }\n  subscribe(obs)   { this._observers.push(obs); }\n  unsubscribe(obs) { this._observers = this._observers.filter(o => o !== obs); }\n  notify(data)     { this._observers.forEach(o => o.update(data)); }\n}\n\nclass Observer {\n  update(data) { throw new Error('update() must be implemented'); }\n}\n\n// ── Concrete participants ────────────────────────────────────────\nclass TemperatureSensor extends Subject {\n  setTemperature(temp) {\n    console.log(`Sensor: temp = ${temp}°C`);\n    this.notify({ temp });\n  }\n}\n\nclass AlarmDisplay extends Observer {\n  update({ temp }) {\n    if (temp > 80) console.log('ALARM: Overheat!');\n    else console.log(`Display: ${temp}°C — OK`);\n  }\n}\n\nclass DataLogger extends Observer {\n  update({ temp }) { console.log(`Logger: recorded ${temp}°C`); }\n}\n\nconst sensor  = new TemperatureSensor();\nconst alarm   = new AlarmDisplay();\nconst logger  = new DataLogger();\n\nsensor.subscribe(alarm);\nsensor.subscribe(logger);\nsensor.setTemperature(70);\nsensor.setTemperature(95);\n",
-      "explanation": "Classic class-based skeleton. `Subject` holds the observer list; concrete classes override `update()`. Structurally identical to the GoF definition."
+      "label": "Example",
+      "code": "// ── Production-style EventEmitter (named events) ─────────────────\nclass EventEmitter {\n  constructor() {\n    this._listeners = Object.create(null);\n  }\n\n  on(event, fn) {\n    if (!this._listeners[event]) this._listeners[event] = [];\n    this._listeners[event].push(fn);\n    // return an unsubscribe handle — same pattern as Redux store.subscribe\n    return () => this.off(event, fn);\n  }\n\n  once(event, fn) {\n    const wrapper = (data) => { fn(data); this.off(event, wrapper); };\n    return this.on(event, wrapper);\n  }\n\n  off(event, fn) {\n    if (!this._listeners[event]) return;\n    this._listeners[event] = this._listeners[event].filter(l => l !== fn);\n  }\n\n  emit(event, data) {\n    // snapshot in case a listener calls off() during emit\n    const fns = [...(this._listeners[event] || [])];\n    fns.forEach(fn => fn(data));\n  }\n}\n\n// ── ConcreteSubject: an order store ─────────────────────────────\nclass OrderStore extends EventEmitter {\n  constructor() {\n    super();\n    this._orders = [];\n  }\n\n  addOrder(order) {\n    this._orders.push(order);\n    this.emit('order:added', order);\n    if (this._orders.length % 100 === 0) {\n      this.emit('milestone:reached', { count: this._orders.length });\n    }\n  }\n\n  cancelOrder(id) {\n    this._orders = this._orders.filter(o => o.id !== id);\n    this.emit('order:cancelled', { id });\n  }\n}\n\n// ── Observers as plain functions ─────────────────────────────────\nconst store = new OrderStore();\n\nconst unsubChart = store.on('order:added', (order) => {\n  console.log(`[Chart] new order from ${order.customer} — $${order.total}`);\n});\n\nconst unsubBadge = store.on('order:added', (order) => {\n  console.log(`[Badge] +1 → total ${store._orders.length} orders`);\n});\n\nstore.once('milestone:reached', ({ count }) => {\n  console.log(`[Confetti] milestone: ${count} orders!`);\n  // auto-removed after first fire — no memory leak\n});\n\nstore.on('order:cancelled', ({ id }) => {\n  console.log(`[Log] order ${id} cancelled`);\n});\n\nstore.addOrder({ id: 1, customer: 'Alice', total: 49.99 });\n// [Chart] new order from Alice — $49.99\n// [Badge] +1 → total 1 orders\n\nunsubBadge(); // user collapses the badge panel\n\nstore.addOrder({ id: 2, customer: 'Bob', total: 129.00 });\n// [Chart] new order from Bob — $129\n// (Badge observer silently gone)\n\nstore.cancelOrder(1);\n// [Log] order 1 cancelled\n",
+      "explanation": "`once()` implements auto-unsubscribe by wrapping the callback. The unsubscribe function returned by `on()` mirrors Redux `store.subscribe()` exactly. `Object.create(null)` creates a prototype-free dict so event names like `'constructor'` or `'toString'` do not accidentally collide with inherited properties."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"Subject state changes\"] --> B[\"notify called\"]\n    B --> C[\"Iterate observer list snapshot\"]\n    C --> D[\"observer.update(data) called\"]\n    D --> E{\"Observer still subscribed?\"}\n    E -- yes --> F[\"Execute handler logic\"]\n    E -- no --> G[\"Already removed — skip\"]\n    F --> H[\"Next observer in list\"]\n    G --> H\n    H --> I{\"More observers?\"}\n    I -- yes --> D\n    I -- no --> J[\"Notification complete\"]",
+      "caption": "The notify loop iterates a snapshot of the list so that observers which remove themselves mid-loop do not cause skipped entries or index errors."
+    },
+    {
+      "type": "explanation",
+      "title": "Memory Leaks: The Hidden Danger of Observer",
+      "content": "The Observer pattern's biggest practical pitfall is **memory leaks from forgotten unsubscriptions**. The subject's observer list holds a reference to each observer. In a garbage-collected language, an object is only collected when no references to it remain. If a component subscribes to a store and then is destroyed without unsubscribing, the store still holds a reference — the component can never be collected.\n\nIn browser apps this manifests as:\n- DOM nodes that should have been removed but remain in memory\n- React components that continue receiving state updates and trying to `setState` after unmounting (the classic *'Can't perform a React state update on an unmounted component'* warning)\n- Growing memory usage over time as users navigate between pages\n\n**How to prevent leaks in practice:**\n\n*Pattern 1: Return an unsubscribe function (Redux / EventEmitter style)*\n```js\nconst unsub = store.on('change', handler);\n// In React:\nuseEffect(() => {\n  const unsub = store.on('change', handler);\n  return () => unsub(); // cleanup runs on unmount\n}, []);\n```\n\n*Pattern 2: WeakRef observers (advanced)*\nStore `WeakRef` objects instead of direct references. The subject automatically skips dead references during `notify`. The downside: you must filter the list during iteration, and the semantics become non-deterministic with GC timing.\n\n*Pattern 3: Scoped subscriptions*\nBind the subscription lifetime to a parent scope (component, module). When the scope is destroyed, it tears down all its subscriptions. Angular's `Subscription.add()` and `takeUntil()` pattern in RxJS implement this.\n\n*Pattern 4: Node.js `setMaxListeners` warning*\nIf you attach more than 10 listeners to a single EventEmitter event, Node prints a warning. This is not a bug — it is a deliberate nudge: more than ~10 listeners on one event usually indicates a subscription leak in a loop.\n\nThe rule: **every `subscribe`/`on`/`addEventListener` must have a corresponding `unsubscribe`/`off`/`removeEventListener` in the teardown path**."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n    [*] --> Idle\n    Idle --> Subscribed : subscribe(obs)\n    Subscribed --> Notified : subject state changes\n    Notified --> Subscribed : ready for next change\n    Subscribed --> Idle : unsubscribe(obs)\n    Notified --> Leaked : component destroyed WITHOUT unsubscribe\n    Leaked --> Leaked : subject keeps reference - GC blocked\n    Subscribed --> [*] : subject destroyed",
+      "caption": "Observer lifecycle state machine. The 'Leaked' state is the memory leak trap: the observer is logically dead but the subject's reference prevents garbage collection."
+    },
+    {
+      "type": "explanation",
+      "title": "Synchronous vs Asynchronous Notification",
+      "content": "Standard Observer pattern is **synchronous**: `notify()` calls each `update()` in sequence before returning. This is simple and predictable — by the time `setState()` returns, all observers have already executed. But it can cause performance problems if observers are expensive (repainting the DOM, running heavy calculations), and it can cause re-entrancy bugs if an observer triggers another state change on the same subject.\n\n**Async notification** defers observer calls using `setTimeout`, `queueMicrotask`, or a scheduler:\n\n```js\nnotify(data) {\n  queueMicrotask(() => {\n    [...this._observers].forEach(o => o.update(data));\n  });\n}\n```\n\nThis batches multiple rapid state changes into fewer notification rounds (like React's batched updates in 18+). The tradeoff: observers no longer see state synchronously, which can complicate testing.\n\n**RxJS and reactive streams** generalise this further. Instead of a single `update(data)` call, they model the stream of notifications as a first-class object (an `Observable`). Observers subscribe to the stream and can apply operators (`filter`, `debounceTime`, `switchMap`) between the source and the handler. This is Observer pattern with a full operator pipeline — enormously powerful for complex async scenarios like autocomplete search boxes, real-time collaboration, or WebSocket streams.\n\n**Redux** uses synchronous dispatch: every `store.dispatch(action)` runs the reducer synchronously, then notifies all subscribers synchronously. Middleware like `redux-thunk` adds async coordination on top, but the core Observer loop remains synchronous and predictable.\n\n**Vue 3 / MobX** use a fine-grained reactive system: they track which computed values and effects depend on which reactive properties (automatic subscription), then schedule updates in a microtask queue. This is Observer pattern with automatic dependency tracking — you never call `subscribe` manually; the framework instruments property access to do it for you."
+    },
+    {
+      "type": "explanation",
+      "title": "Notification Chains and the Cascade Problem",
+      "content": "A **notification chain** occurs when an observer's `update()` method triggers another state change on a different (or the same) subject, which triggers another round of notifications. In small systems this is harmless. In large systems it creates cascading fan-out that is nearly impossible to trace in a debugger.\n\nExample of a dangerous chain:\n```js\nclass CartStore extends Subject {\n  addItem(item) {\n    this._items.push(item);\n    this.notify(this._items);\n  }\n}\n\nclass PriceCalculator {\n  update(items) {\n    const total = items.reduce((s, i) => s + i.price, 0);\n    priceStore.setTotal(total); // triggers ANOTHER notify chain!\n  }\n}\n\nclass TaxStore extends Subject {\n  // observes priceStore and recomputes tax...\n  // which triggers YET ANOTHER chain\n}\n```\n\nThis produces execution order that depends on subscription order, with state changing multiple times per user action. Bugs appear that only reproduce when components subscribe in a particular sequence.\n\n**Solutions:**\n- Keep observers **read-only** with respect to the subject graph. Observers should update UI or fire external side effects, not mutate other observable state.\n- Use a **command bus or event bus** that collects all state changes from a single user action and processes them in one batch before notifying observers.\n- Apply **unidirectional data flow** (the Flux/Redux architecture): actions → reducer → new state → notify. No observer is allowed to dispatch another action during a dispatch cycle — Redux enforces this explicitly and throws if you try.\n- In RxJS, avoid `subscribe` callbacks that call `next` on another Subject; prefer composing operators in the pipeline instead."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n    A[\"User action\"] --> B[\"CartStore.addItem\"]\n    B --> C[\"notify observers\"]\n    C --> D[\"ChartObserver.update\"]\n    C --> E[\"PriceCalculator.update\"]\n    E --> F[\"PriceStore.setTotal\"]\n    F --> G[\"notify observers\"]\n    G --> H[\"TaxStore.update\"]\n    H --> I[\"TaxStore.notify\"]\n    I --> J[\"SummaryWidget.update\"]\n    style E fill:#f88,color:#000\n    style F fill:#f88,color:#000\n    style H fill:#f88,color:#000",
+      "caption": "A notification chain: one user action spawns three notification rounds across three subjects. Execution order depends on subscription order, creating fragile and hard-to-debug behaviour. Prefer flat fan-out (one notify per action)."
+    },
+    {
+      "type": "explanation",
+      "title": "Real-World Implementations in Popular Frameworks",
+      "content": "Understanding where Observer lives in the frameworks you already use daily makes the abstract pattern concrete.\n\n**Node.js EventEmitter**\nThe canonical server-side implementation. Every readable stream, writable stream, HTTP server, and TCP socket extends EventEmitter. `process` itself is an EventEmitter — `process.on('uncaughtException', handler)` is you subscribing to the process subject.\n\n**Browser DOM Events**\n`element.addEventListener(type, listener)` is `subscribe`. `removeEventListener` is `unsubscribe`. `dispatchEvent` is `notify`. The browser implements Observer for every interactive element on the page. Event propagation (capture/bubble) is an extension: the notification travels up or down the DOM tree, with each ancestor acting as a secondary subject.\n\n**Redux**\n`store.subscribe(listener)` returns an unsubscribe function. The store calls all listeners synchronously after every `dispatch`. React-Redux's `connect()` and `useSelector()` are wrappers that subscribe to the store and re-render only when the selected state slice changes — a selective pull model on top of the push subscribe.\n\n**RxJS Observable**\nA first-class Observable models the *entire stream* of future notifications. `observable.subscribe(observer)` returns a `Subscription` object with an `unsubscribe()` method. The power comes from operators: `pipe(filter(...), debounceTime(300), switchMap(...))` transforms the notification stream before it reaches the observer. This is Observer plus composable async pipelines.\n\n**Vue 3 Reactivity / MobX**\nThese use **automatic dependency tracking**: when a reactive getter is accessed inside a computed/effect function, the framework notes the dependency. When the reactive property changes, it re-runs only the effects that accessed it. You never call `subscribe` manually — the framework does it via ES6 Proxy interception. Conceptually it is still Observer; the innovation is automatic subscription management.\n\n**React useEffect**\nThe cleanup function returned from `useEffect` is React's way of calling `unsubscribe`. `useEffect(() => { const unsub = store.on('change', fn); return unsub; }, [])` is the idiomatic React-Observer integration. Forgetting the return value is the React equivalent of the memory leak trap."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// ── TypeScript: typed Observable with generics ───────────────────\ntype Handler<T> = (data: T) => void;\n\nclass TypedEmitter<Events extends Record<string, unknown>> {\n  private listeners = {} as { [K in keyof Events]?: Array<Handler<Events[K]>> };\n\n  on<K extends keyof Events>(event: K, fn: Handler<Events[K]>): () => void {\n    if (!this.listeners[event]) this.listeners[event] = [];\n    this.listeners[event]!.push(fn);\n    return () => this.off(event, fn);\n  }\n\n  off<K extends keyof Events>(event: K, fn: Handler<Events[K]>): void {\n    const list = this.listeners[event];\n    if (list) this.listeners[event] = list.filter(l => l !== fn) as typeof list;\n  }\n\n  emit<K extends keyof Events>(event: K, data: Events[K]): void {\n    [...(this.listeners[event] || [])].forEach(fn => fn(data));\n  }\n}\n\n// ── Typed event map ───────────────────────────────────────────────\ntype StoreEvents = {\n  'order:added':     { id: number; customer: string; total: number };\n  'order:cancelled': { id: number };\n  'stock:low':       { sku: string; remaining: number };\n};\n\nconst store = new TypedEmitter<StoreEvents>();\n\n// TypeScript enforces the payload shape at compile time\nconst unsub = store.on('order:added', ({ id, customer, total }) => {\n  console.log(`New order #${id} from ${customer}: $${total}`);\n});\n\nstore.emit('order:added', { id: 42, customer: 'Alice', total: 99.99 });\n// New order #42 from Alice: $99.99\n\nstore.emit('order:added', { id: 43, customer: 'Bob', total: 14.50 });\n// New order #43 from Bob: $14.5\n\nunsub(); // clean up before end of scope\n\n// TypeScript will catch mismatches at compile time:\n// store.emit('order:added', { id: 'bad', customer: 123 }); // TS error!\n// store.on('unknown:event', fn); // TS error!\n",
+      "explanation": "Generic mapped types in TypeScript give you full type safety on both `emit` and `on` calls — the compiler catches mismatched payload shapes at build time, not at runtime. This pattern is used in production by libraries like `mitt` (0.2 KB typed event emitter) and `eventemitter3`."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Observer vs Pub/Sub: What is the difference?**\n\nThese terms are often used interchangeably, but they describe different scopes:\n\n- **Observer** (GoF) is an *intra-process* pattern. The Subject and Observers live in the same memory space. Notification is a direct method call. Zero latency, zero serialization.\n- **Publish/Subscribe** (messaging architecture) adds a **message broker** (Kafka, RabbitMQ, Redis Pub/Sub, AWS SNS) between publishers and subscribers. Publishers do not know subscribers exist; subscribers do not know publishers exist. Messages are serialized, queued, and delivered asynchronously — possibly across machines, possibly to millions of subscribers.\n\nObserver is the micro-level pattern inside a process. Pub/Sub is the macro-level architecture across services. The same mental model — one source, many consumers, zero coupling — scales from a single in-memory object all the way to a planet-scale event streaming platform."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**When to use:** Anytime you have one source of truth and multiple dependents (UI layers, logging, analytics, caching). Use it when the number of consumers is unknown at compile time.\n\n**When NOT to use:** For one-to-one relationships a simple callback is cleaner. Avoid deep observer chains (observer triggers another observer) — they create debugging nightmares. If ordering of notifications matters, a synchronous event bus or a message queue with explicit priority is safer.\n\n**Real frameworks:** Node.js `EventEmitter`, browser `addEventListener`, RxJS `Observable`, Vue reactivity, MobX `reaction`, Redux `store.subscribe`, React's `useEffect` cleanup = implicit unsubscribe."
+      "content": "**When to use Observer:**\n- One source of truth with multiple independent consumers (UI layers, logging, analytics, caching).\n- The number or identity of consumers is unknown at compile time or changes at runtime.\n- You need to support dynamic registration and removal of consumers without modifying the subject.\n- You are building a plugin system where third-party code must hook into lifecycle events.\n\n**When NOT to use Observer:**\n- One-to-one, fire-once scenarios: a plain callback or a `Promise` is simpler and clearer.\n- Tight ordering guarantees are required: synchronous Observer fan-out does not guarantee order beyond insertion order, and async observers abandon ordering entirely.\n- Deep observer chains where observers trigger other observers: prefer a unidirectional command bus or reducer pattern (Redux/Flux) to keep state changes traceable.\n- Performance-critical hot paths: the overhead of iterating a listener list and dispatching calls, while small, adds up if `notify` fires thousands of times per second. Profile before assuming Observer is the bottleneck.\n\n**Frameworks that use it:**\nNode.js `EventEmitter`, browser `addEventListener`, RxJS `Observable`, Vue 3 reactivity, MobX `reaction`, Redux `store.subscribe`, Angular `EventEmitter`, Svelte stores (`subscribe`/`set`), Socket.io event system."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Decoupling:** The subject never imports concrete observer classes — it depends only on the `update(data)` interface, making it trivially extensible.",
-        "**Push vs Pull:** Push sends data in `notify(data)`; pull sends no data and observers query the subject. Push is simpler; pull is selective.",
-        "**Always unsubscribe:** Leaving observers registered after a component is destroyed causes memory leaks — the subject's array keeps the reference alive.",
-        "**Event Emitter = Observer:** Node's EventEmitter, browser DOM events, and RxJS Observable are all production-grade implementations of this pattern.",
-        "**Avoid notification chains:** An observer that triggers another subject's state change creates cascading, hard-to-trace side effects — prefer flat fan-out."
+        "**Problem solved:** Observer eliminates hard-coded fan-out by turning the dependency arrow around — consumers register with the subject rather than the subject importing its consumers. Adding or removing a consumer never touches the subject.",
+        "**Four participants:** Subject (manages the list), Observer (the `update` interface), ConcreteSubject (holds real state, calls `notify`), ConcreteObserver (implements domain-specific reaction). The subject depends only on the interface, never on concrete types.",
+        "**Push vs Pull:** Push sends data in `notify(data)` for simplicity; Pull sends no data and observers query the subject for the slice they need. Named events (EventEmitter style) are Push with routing — the most practical choice for real applications.",
+        "**Always unsubscribe:** Every `subscribe`/`on`/`addEventListener` must pair with a corresponding teardown. Forgetting this is the leading cause of memory leaks and stale-update bugs in JavaScript SPAs — the subject's reference prevents garbage collection of logically dead components.",
+        "**Avoid notification chains:** Observers that mutate other observable subjects create cascading, order-dependent side effects. Apply unidirectional data flow (Flux/Redux): one action → one reducer → one notification round.",
+        "**Production implementations are everywhere:** Node.js EventEmitter, browser DOM events, RxJS Observable, Vue reactivity, Redux, Angular EventEmitter, and Svelte stores are all Observer pattern with varying levels of type safety, operator pipelines, and automatic subscription management.",
+        "**Observer scales to distributed Pub/Sub:** The same mental model — one producer, many consumers, zero coupling — extends from an in-memory array to a planet-scale message broker (Kafka, RabbitMQ, AWS SNS). Understanding Observer is the foundation for understanding event-driven microservices architecture."
       ]
     }
   ],
@@ -64,133 +129,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "In the Observer pattern, what is the Subject's responsibility?",
+      "question": "In the Observer pattern, what is the primary responsibility of the Subject?",
       "type": "mcq",
       "options": [
-        "To implement the update() method for each observer.",
-        "To maintain a list of observers and notify them when state changes.",
-        "To pull state from observers on demand.",
-        "To store a reference to each concrete observer class."
+        "To implement the update() method for each registered observer",
+        "To maintain a list of observers and notify them when its state changes",
+        "To pull state from observers whenever the UI needs to refresh",
+        "To store a direct reference to each concrete observer class"
       ],
       "correct": 1,
-      "explanation": "The Subject manages the observer list and calls notify(), which iterates the list and invokes each observer's update(). It does not know concrete types."
+      "explanation": "The Subject manages the observer list via subscribe/unsubscribe and calls notify() which iterates the list and invokes each observer's update(). It never depends on concrete observer types — only on the Observer interface."
     },
     {
       "id": "q2",
-      "question": "Which real-world JavaScript API directly implements the Observer pattern?",
+      "question": "What is the key difference between the Push and Pull notification models?",
       "type": "mcq",
       "options": [
-        "Array.prototype.map",
-        "JSON.parse",
-        "Node.js EventEmitter (on/emit/off)",
-        "Promise.all"
+        "Push uses async delivery; Pull uses synchronous delivery",
+        "In Push, notify() sends data directly to update(data); in Pull, notify() sends no data and observers call a getter on the subject",
+        "Push supports multiple event types; Pull supports only a single event type",
+        "Pull is used in Node.js EventEmitter; Push is used in RxJS"
       ],
-      "correct": 2,
-      "explanation": "EventEmitter.on() = subscribe, emit() = notify, off() = unsubscribe — a textbook Observer implementation."
+      "correct": 1,
+      "explanation": "Push: notify(data) passes the changed data as an argument. Pull: notify() carries no payload — observers call back into the subject via a getter to fetch only the slice they need. Push is simpler; Pull is more selective for large state objects."
     },
     {
       "id": "q3",
-      "question": "What is the primary risk of forgetting to call unsubscribe() in a single-page app?",
+      "question": "Why does the standard notify() implementation iterate a snapshot ([...this._observers]) instead of iterating the live array?",
       "type": "mcq",
       "options": [
-        "The subject will throw a ReferenceError.",
-        "The observer will never receive events.",
-        "Memory leaks — the subject's array keeps destroyed components alive.",
-        "The observer's update() will run twice per notification."
+        "To improve performance by caching the array in memory",
+        "Because observers need to be notified in reverse order",
+        "To prevent bugs when an observer removes itself during the notification loop, which would otherwise skip or double-notify entries",
+        "Because the spread operator automatically deduplicates observers"
       ],
       "correct": 2,
-      "explanation": "The subject holds a reference to the observer function/object, preventing garbage collection even after the component unmounts."
+      "explanation": "If an observer calls unsubscribe(this) inside its own update(), it mutates the array while it is being iterated. Iterating a snapshot ([...this._observers]) ensures every observer that was registered at the start of notify() is called exactly once, regardless of mid-loop mutations."
     },
     {
       "id": "q4",
-      "question": "In the PUSH model of Observer, what does notify() send to each observer?",
+      "question": "Which of the following correctly describes how Redux's store.subscribe() implements the Observer pattern?",
       "type": "mcq",
       "options": [
-        "Nothing — observers pull data via a getter.",
-        "The changed data directly as an argument.",
-        "A Promise that resolves with the new state.",
-        "The observer's own previous state."
+        "store.subscribe(fn) is the Subject; fn is called with the action object as data",
+        "store.subscribe(fn) registers fn as an observer; it returns an unsubscribe function; store.dispatch() triggers notify(), calling all listeners synchronously",
+        "store.subscribe(fn) implements the Pull model by passing the store reference into fn",
+        "store.subscribe(fn) uses WeakRef internally to prevent memory leaks automatically"
       ],
       "correct": 1,
-      "explanation": "Push model: notify(data) passes data directly to update(data). Pull model sends no argument and observers call a getter."
+      "explanation": "Redux is a textbook Observer: subscribe(fn) adds fn to the listener list and returns an unsubscribe handle. After every dispatch, Redux calls all listeners synchronously. Listeners typically call store.getState() to pull the new state — making it a Pull-flavoured Observer."
     },
     {
       "id": "q5",
-      "question": "What does Redux's store.subscribe(listener) return?",
+      "question": "What is the most common cause of memory leaks when using the Observer pattern in JavaScript SPAs?",
       "type": "mcq",
       "options": [
-        "The current state snapshot.",
-        "A Promise that resolves on the next dispatch.",
-        "An unsubscribe function.",
-        "The listener's index in the observer list."
+        "Calling notify() too frequently, which fills the call stack",
+        "Storing the observer list as an array instead of a Set",
+        "Failing to call unsubscribe/off/removeEventListener when a component is destroyed, so the subject keeps a reference that prevents garbage collection",
+        "Using arrow functions as observers, which cannot be compared by reference for removal"
       ],
       "correct": 2,
-      "explanation": "Redux follows the Observer pattern: subscribe() returns an unsubscribe function, mirroring the on() → () => off() idiom."
+      "explanation": "The subject's observer list holds a reference to each observer. If a component subscribes and is then destroyed without unsubscribing, that reference keeps the component alive in memory. The subject continues calling update() on a logically dead component — causing both a leak and potentially stale-update bugs."
     },
     {
       "id": "q6",
-      "question": "Which scenario is a BAD use case for the Observer pattern?",
-      "type": "mcq",
-      "options": [
-        "A shopping cart notifying a price display, a stock counter, and an analytics tracker.",
-        "A temperature sensor broadcasting readings to a logger and an alarm.",
-        "A one-off HTTP response callback that fires exactly once.",
-        "A Redux store notifying multiple connected React components."
-      ],
-      "correct": 2,
-      "explanation": "One-to-one, fire-once callbacks are simpler and cleaner as plain callbacks or Promises. Observer adds overhead with no benefit."
-    },
-    {
-      "id": "q7",
       "question": "How does the Observer pattern satisfy the Open/Closed Principle?",
       "type": "mcq",
       "options": [
-        "By requiring the subject to be abstract.",
-        "By allowing new observers to be added without modifying the subject.",
-        "By storing observers in a closed Set.",
-        "By preventing observers from calling subject methods."
+        "By making the Subject class final so it cannot be subclassed",
+        "By allowing new observers to be added without modifying the Subject's source code",
+        "By closing the observer list to removal once the first observer has been added",
+        "By preventing observers from holding any references to the subject"
       ],
       "correct": 1,
-      "explanation": "Adding a new consumer (analytics, logging) is done by subscribing a new observer — the subject code is never touched. Open for extension, closed for modification."
+      "explanation": "Adding a new consumer (an analytics tracker, a sound alert, a DevTools extension) means implementing the Observer interface and calling subscribe() — the Subject is never modified. Open for extension, closed for modification — the canonical OCP example from the GoF book."
+    },
+    {
+      "id": "q7",
+      "question": "What is a notification chain in the Observer pattern, and why is it dangerous?",
+      "type": "mcq",
+      "options": [
+        "When notify() is called before subscribe() — throws a ReferenceError",
+        "When an observer's update() mutates another subject, triggering further notification rounds — creates cascading, order-dependent side effects that are extremely hard to trace",
+        "When two observers simultaneously call unsubscribe() during the same notify() loop",
+        "When notify() is called inside a Promise callback, causing the microtask queue to overflow"
+      ],
+      "correct": 1,
+      "explanation": "A notification chain occurs when observer A's update() triggers a state change on subject B, which notifies observer C, which changes subject D, and so on. The execution order depends on subscription order, state can change multiple times per user action, and bugs only appear in specific subscription sequences. Redux prevents this by throwing if you dispatch during a dispatch."
     },
     {
       "id": "q8",
-      "question": "What distinguishes a 'ConcreteObserver' from the 'Observer' interface in GoF terminology?",
+      "question": "Which JavaScript API is the most direct production implementation of the Observer pattern?",
       "type": "mcq",
       "options": [
-        "ConcreteObserver holds the state that the Subject depends on.",
-        "ConcreteObserver implements update() with domain-specific logic.",
-        "ConcreteObserver can have multiple subjects.",
-        "ConcreteObserver is always a singleton."
+        "Array.prototype.forEach",
+        "Node.js EventEmitter (on / emit / off / once)",
+        "Promise.then / Promise.catch",
+        "Object.defineProperty"
       ],
       "correct": 1,
-      "explanation": "The Observer interface/abstract class defines only the update() contract. ConcreteObserver provides the actual behaviour — rendering a chart, writing a log, etc."
+      "explanation": "Node.js EventEmitter maps directly: on() = subscribe, emit() = notify, off() = unsubscribe, once() = auto-unsubscribing subscribe. The only extension over classic GoF Observer is named event routing (a map of event name → listener list)."
     },
     {
       "id": "q9",
-      "question": "What is a notification chain in Observer, and why is it dangerous?",
+      "question": "How does Vue 3's reactivity system differ from the classic Observer pattern?",
       "type": "mcq",
       "options": [
-        "When notify() is called before subscribe() — causes RangeError.",
-        "When an observer's update() mutates another subject, triggering further notifications — hard to trace, can cause infinite loops.",
-        "When two observers call unsubscribe() simultaneously.",
-        "When notify() is called from inside a Promise callback."
+        "Vue 3 does not use Observer — it uses polling to detect state changes",
+        "Vue 3 uses ES6 Proxy to automatically track which effects depend on which reactive properties, so subscriptions are implicit rather than manually registered",
+        "Vue 3 requires you to call subject.subscribe(component) manually in every component's setup() function",
+        "Vue 3 implements the Pull model exclusively — components call getState() on every render"
       ],
       "correct": 1,
-      "explanation": "Cascading notifications across subjects create non-linear, order-dependent execution that is extremely hard to debug or reason about."
+      "explanation": "Vue 3 (and MobX) use automatic dependency tracking via ES6 Proxy: when a reactive getter is read inside a computed/effect, the framework records the dependency. When that property changes, only the effects that accessed it are re-run. Conceptually it is Observer, but subscriptions are managed automatically — you never call subscribe() manually."
     },
     {
       "id": "q10",
-      "question": "Which statement about the Observer pattern and event-driven architecture is correct?",
+      "question": "What is the architectural difference between the Observer design pattern and a distributed Pub/Sub system like Kafka or RabbitMQ?",
       "type": "mcq",
       "options": [
-        "Observer requires synchronous notification; async events are not supported.",
-        "The subject must know the concrete class of every observer at compile time.",
-        "Observer is the micro-level pattern; event-driven architecture scales the same idea across processes and services.",
-        "Observers must share the same thread as the subject."
+        "Observer supports multiple event types; Pub/Sub supports only one topic",
+        "Observer is intra-process (direct method calls, same memory); Pub/Sub adds a message broker that decouples publishers from subscribers across processes or machines with serialized, queued, asynchronous delivery",
+        "Pub/Sub requires observers to implement the update() method; Observer does not",
+        "Observer is asynchronous; Pub/Sub is always synchronous"
       ],
-      "correct": 2,
-      "explanation": "Observer works inside a process. Message brokers (Kafka, RabbitMQ) apply the same publish/subscribe concept across services — same principle, distributed scale."
+      "correct": 1,
+      "explanation": "Observer is an intra-process pattern: Subject and Observers share memory, notification is a direct synchronous method call, zero latency. Pub/Sub scales the same concept across processes/services via a message broker: messages are serialized, durably queued, and delivered asynchronously — possibly to millions of subscribers across a distributed system. Same mental model, radically different scope."
     }
   ]
 }

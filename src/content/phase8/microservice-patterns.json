@@ -5,57 +5,113 @@
   "week": 31,
   "icon": "architecture",
   "tagline": "Circuit breakers, sagas, CQRS, event sourcing — the patterns that keep distributed systems from cascading into chaos.",
-  "readTime": "~14 min",
+  "readTime": "~22 min",
   "sections": [
     {
       "type": "intro",
-      "content": "Splitting a monolith into microservices trades one class of problems for another. Gone is the dreaded 'big ball of mud' — but in its place arrive **partial failures**, **distributed transactions**, **data consistency across databases**, and **network storms**. Every experienced microservices engineer has been paged at 3 AM because one slow service brought down ten healthy ones.\n\nA handful of **patterns** exist precisely to handle these failure modes. Circuit breaker stops cascading failures. Saga coordinates transactions without a distributed lock. CQRS separates reads from writes for independent scaling. Event sourcing makes the event log the source of truth. API gateway and service discovery are the infrastructure glue that holds it all together."
+      "content": "The sales pitch for microservices is compelling: independent deployments, polyglot freedom, isolated failure domains, and the ability to scale a hot checkout service without touching the notification service. The reality that follows the rewrite is messier. Gone is the monolith's shared memory, its single ACID transaction that rolls everything back, its straightforward function call with a stack trace. In their place: **partial network failures**, **data consistency spread across a dozen databases**, **cascading timeouts that bring down healthy services**, and distributed workflows where no single machine knows the full state.\n\nEvery experienced distributed-systems engineer has been paged at 3 AM because the Payment service started returning 503s and, within ninety seconds, the Order service's thread pool was full of hanging connections, which cascaded to the API gateway exhausting its upstream connections, which cascaded to the frontend timing out for every user.\n\nA small canon of **patterns** exist precisely to handle these failure modes at the architectural level. **Circuit Breaker** cuts off calls to unhealthy services. **Saga** coordinates multi-service workflows without a distributed lock. **CQRS** separates the write path from the read path so each can be scaled and optimised independently. **Event Sourcing** makes the event log itself the source of truth, unlocking audit trails and temporal queries. **API Gateway** and **Service Discovery** are the load-bearing infrastructure that holds everything together.\n\nThis chapter covers all five patterns in textbook depth: the problem each solves, the mechanism, the state machines and sequence flows, worked JavaScript implementations, real frameworks that ship the pattern, and — critically — when NOT to apply each one."
     },
     {
       "type": "diagram",
-      "mermaid": "flowchart TD\n  GW[\"API Gateway\"]\n  SD[\"Service Discovery\"]\n  GW --> SD\n  SD --> SvcA[\"Order Service\"]\n  SD --> SvcB[\"Payment Service\"]\n  SD --> SvcC[\"Inventory Service\"]\n  SvcA -->|\"circuit breaker\"| SvcB\n  SvcA --> MQ[\"Event Bus\"]\n  MQ --> SvcD[\"Notification Service\"]\n  MQ --> SvcE[\"Analytics Service\"]",
-      "caption": "An API gateway routes to services found via service discovery. A circuit breaker sits between Order and Payment services. The event bus decouples downstream consumers."
+      "mermaid": "flowchart TD\n  Client[\"External Client\"]\n  GW[\"API Gateway\\n(auth, rate-limit, routing)\"]\n  SD[\"Service Registry\\n(Consul / k8s DNS)\"]\n  CB[\"Circuit Breaker\"]\n  OrderSvc[\"Order Service\"]\n  PaySvc[\"Payment Service\"]\n  InvSvc[\"Inventory Service\"]\n  Bus[\"Event Bus\\n(Kafka / RabbitMQ)\"]\n  NotifSvc[\"Notification Service\"]\n  ReadDB[\"Read DB\\n(CQRS query side)\"]\n  Client --> GW\n  GW --> SD\n  SD --> OrderSvc\n  OrderSvc --> CB\n  CB --> PaySvc\n  OrderSvc --> InvSvc\n  OrderSvc --> Bus\n  Bus --> NotifSvc\n  Bus --> ReadDB",
+      "caption": "High-level microservice topology: the API gateway routes authenticated requests to services discovered via the registry. A circuit breaker wraps inter-service calls. The event bus decouples producers from downstream consumers, and a separate read database serves CQRS query traffic."
     },
     {
       "type": "analogy",
-      "title": "Power Grid and Circuit Breakers",
-      "content": "A **circuit breaker** in your home trips when a short circuit would otherwise overheat the wiring — it stops the damage before it spreads. Microservice circuit breakers do the same: when the Payment service starts timing out, the breaker trips and Order Service immediately returns a fallback rather than waiting on thousands of hanging threads.\n\nA **saga** is like a multi-step wire transfer with a cancellation policy at each step. If the money leaves your account but the destination bank rejects it, the saga's compensating transaction refunds you. There is no global lock — each bank does its step independently, with a known rollback procedure if anything fails downstream."
+      "title": "Electricity Grid, Wire Transfers, and Microservices",
+      "content": "Three everyday systems illuminate the patterns.\n\n**Circuit breaker — your home fuse box.** When a short circuit dumps a surge of current through the wiring, the breaker trips instantly — it opens the circuit rather than let heat build until the cable melts and the whole house burns. It has three states: normal operation (closed), tripped (open), and a quick test after you flip it back (half-open). Microservice circuit breakers work identically: when the Payment service starts failing or hanging, the breaker opens and the Order service stops sending requests. Callers get an instant failure they can handle gracefully — no more threads piling up on a dead connection.\n\n**Saga — an international wire transfer with a cancellation policy at every step.** Moving money internationally is not atomic. Your bank debits you, sends a SWIFT message, a correspondent bank receives it, the destination bank credits the recipient — each step happens in a different country, a different database, under different regulations. If the destination bank rejects the credit, the correspondent bank issues a reversal, and your bank refunds you. No global lock spans every institution. Instead, each step succeeds locally with a known *compensating action* if anything downstream fails. That is exactly the Saga pattern applied to distributed microservice transactions.\n\n**CQRS — a library with a catalogue desk and a reading room.** The catalogue desk handles all changes: check-in, check-out, new acquisitions. The reading room provides a separate, denormalised card catalogue optimised purely for browsing — visitors never interrupt the cataloguing workflow by running complex searches against the master records system. Writes go to one model, reads come from another."
     },
     {
       "type": "explanation",
-      "content": "**Circuit Breaker** (popularized by Michael Nygard in *Release It!*) wraps outgoing calls and tracks failure rates. It has three states: **Closed** (requests flow normally), **Open** (requests fail fast with no network call, after failures exceed a threshold), and **Half-Open** (a probe request tests if the downstream recovered). This prevents a slow service from exhausting the caller's thread pool and triggering a cascade across the system. Libraries: Resilience4j (Java), Polly (.NET), `opossum` (Node.js).\n\n**Saga Pattern** handles distributed transactions across services that each own their own database. Two flavors: **Choreography-based** — each service publishes an event and the next service reacts to it; no central coordinator, but the flow is harder to trace. **Orchestration-based** — a saga orchestrator sends commands to each service in sequence and handles failures by sending compensating commands (e.g., `RefundPayment`, `ReleaseInventory`). Orchestration is easier to reason about for complex flows.\n\n**CQRS** (Command Query Responsibility Segregation) separates the write model (commands that mutate state) from the read model (queries that return data). The write side can be normalized and strongly consistent. The read side can be denormalized, cached, and horizontally scaled in a separate data store optimized for queries. CQRS is often paired with **event sourcing** but does not require it.\n\n**Event Sourcing** stores every state change as an immutable event rather than overwriting rows. The current state is derived by replaying the event log. Benefits: a complete audit trail, the ability to replay events to rebuild read models, and temporal queries ('what did the order look like yesterday?'). Cost: eventual consistency, complex projections, and event schema evolution. Event sourcing is not a default choice — it shines for domains where audit and replay matter: financial ledgers, e-commerce orders, collaborative documents.\n\n**API Gateway** is the single entry point for external clients: auth, rate limiting, routing, SSL termination. **Service Discovery** solves the problem of services finding each other's addresses when instances are ephemeral (containers scale up and down). Tools: Consul, etcd, or the built-in DNS of Kubernetes. Services register on startup and deregister on shutdown; the gateway and other services query the registry for current addresses."
+      "title": "Pattern 1 — Circuit Breaker: Stopping Cascades Before They Happen",
+      "content": "**The problem.** In a monolith, a slow database query blocks one thread. In a microservice mesh, a slow downstream service is far more dangerous. Every caller waiting for the slow service holds a thread or connection. If the downstream takes 30 seconds to time out and your service has 50 threads, it only takes 50 simultaneous requests to exhaust the pool — at which point *your* service becomes slow, propagating the problem to *your* callers. This is a **cascading failure**, and it is the most common reason a single point of degradation escalates into a system-wide outage.\n\n**The mechanism.** The circuit breaker wraps every outgoing remote call. Internally it tracks recent failures and latencies using a **sliding window** (count-based or time-based). When the failure rate crosses a configurable threshold, the breaker **opens** — no further network calls are made at all. The caller receives an instant error (or a cached fallback value) so its threads are freed immediately.\n\nAfter a configurable **sleep window** (e.g. 10 seconds), the breaker enters **HALF_OPEN**: a limited probe of requests is allowed through to test whether the downstream has recovered. If those probes succeed, the breaker **closes** and normal traffic resumes. If they fail, the breaker opens again and the sleep window resets.\n\n**Three states in detail:**\n- `CLOSED` — healthy baseline. All requests flow normally. Failures are counted. If the failure rate in the sliding window exceeds the threshold, transition to OPEN.\n- `OPEN` — fail-fast mode. No requests attempt the network call. Return error or fallback immediately. After the sleep window, transition to HALF_OPEN.\n- `HALF_OPEN` — recovery probe. Allow a small batch of requests. If enough succeed, transition to CLOSED. If enough fail, transition back to OPEN.\n\n**Fallback strategies.** A circuit breaker without a fallback is less useful. The caller should have a plan for the OPEN state: return a cached last-known-good value; return a degraded response (e.g. show \"price unavailable\" instead of crashing); enqueue the request for retry; redirect to a secondary service. The pattern is most powerful when the caller *degrades gracefully* rather than propagating the error upward.\n\n**Production libraries.** Netflix Hystrix (now in maintenance) popularised the pattern on the JVM. Its successor, **Resilience4j**, provides count-based and time-based sliding windows, bulkhead isolation, rate limiting, and retry — all composable. On .NET, **Polly** offers an identical feature set. In Node.js, **opossum** is the standard circuit-breaker library. In Go, **gobreaker** and **hystrix-go** are common. **Istio** and **Envoy** implement circuit breaking as a sidecar proxy, meaning it works transparently across languages with zero application code changes."
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n  participant O as Order Saga\n  participant P as Payment Svc\n  participant I as Inventory Svc\n  participant N as Notification Svc\n  O->>P: ReservePayment\n  P-->>O: PaymentReserved\n  O->>I: ReserveInventory\n  I-->>O: InventoryReserved\n  O->>N: SendConfirmation\n  N-->>O: Sent\n  Note over O,N: On any failure, orchestrator sends compensating commands\n  O->>P: RefundPayment\n  O->>I: ReleaseInventory",
-      "caption": "Orchestration-based saga: the Order Saga coordinator drives each step and issues compensating commands if any step fails — no distributed lock required."
+      "mermaid": "stateDiagram-v2\n  [*] --> CLOSED\n  CLOSED --> OPEN : \"failure rate > threshold\"\n  OPEN --> HALF_OPEN : \"sleep window expires\"\n  HALF_OPEN --> CLOSED : \"probe requests succeed\"\n  HALF_OPEN --> OPEN : \"probe requests fail\"\n  CLOSED --> CLOSED : \"success — reset window\"\n  OPEN --> OPEN : \"fast-fail all requests\"",
+      "caption": "Circuit breaker state machine: CLOSED is the happy path, OPEN is fail-fast mode, HALF_OPEN is the recovery probe. The transition thresholds are configurable per service call."
     },
     {
       "type": "code_example",
       "language": "javascript",
-      "label": "Runtime",
-      "code": "// Circuit Breaker — simplified implementation\nclass CircuitBreaker {\n  constructor(fn, { threshold = 5, timeout = 10000 } = {}) {\n    this.fn = fn;\n    this.threshold = threshold; // failures before opening\n    this.timeout = timeout;     // ms before half-open probe\n    this.failures = 0;\n    this.state = 'CLOSED';      // CLOSED | OPEN | HALF_OPEN\n    this.nextAttempt = Date.now();\n  }\n\n  async call(...args) {\n    if (this.state === 'OPEN') {\n      if (Date.now() < this.nextAttempt) {\n        throw new Error('Circuit OPEN — fast fail');\n      }\n      this.state = 'HALF_OPEN';\n    }\n    try {\n      const result = await this.fn(...args);\n      this.onSuccess();\n      return result;\n    } catch (err) {\n      this.onFailure();\n      throw err;\n    }\n  }\n\n  onSuccess() {\n    this.failures = 0;\n    this.state = 'CLOSED';\n  }\n\n  onFailure() {\n    this.failures++;\n    if (this.failures >= this.threshold) {\n      this.state = 'OPEN';\n      this.nextAttempt = Date.now() + this.timeout;\n    }\n  }\n}\n\n// Usage\nconst paymentBreaker = new CircuitBreaker(callPaymentService, { threshold: 3 });\ntry {\n  const result = await paymentBreaker.call({ amount: 99 });\n} catch (e) {\n  // Fall back gracefully — queue for retry, return cached result, etc.\n  console.warn('Payment unavailable, falling back:', e.message);\n}",
-      "explanation": "After 3 consecutive failures the breaker opens and all calls fail immediately — no more threads pile up waiting on a dead service. After 10 seconds a probe request tests recovery. On success, the breaker closes and traffic resumes. This is the core of the pattern; production libraries add sliding windows and per-endpoint configuration."
+      "label": "Example",
+      "code": "// Circuit Breaker — production-quality implementation with sliding window\nclass CircuitBreaker {\n  constructor(fn, options = {}) {\n    this.fn = fn;\n    this.threshold = options.threshold ?? 5;       // max failures in window\n    this.windowSize = options.windowSize ?? 10;    // track last N calls\n    this.timeout = options.timeout ?? 10_000;      // ms before HALF_OPEN probe\n    this.halfOpenMax = options.halfOpenMax ?? 2;   // probes before deciding\n\n    this.state = 'CLOSED';\n    this.window = [];          // circular buffer: true = success, false = fail\n    this.nextAttempt = 0;\n    this.halfOpenCount = 0;\n    this.halfOpenSuccesses = 0;\n  }\n\n  get failureCount() {\n    return this.window.filter(r => !r).length;\n  }\n\n  record(success) {\n    this.window.push(success);\n    if (this.window.length > this.windowSize) this.window.shift();\n  }\n\n  async call(...args) {\n    if (this.state === 'OPEN') {\n      if (Date.now() < this.nextAttempt) {\n        const err = new Error('CircuitBreaker OPEN — fast fail');\n        err.code = 'CIRCUIT_OPEN';\n        throw err;\n      }\n      this.state = 'HALF_OPEN';\n      this.halfOpenCount = 0;\n      this.halfOpenSuccesses = 0;\n    }\n\n    try {\n      const result = await this.fn(...args);\n      this.onSuccess();\n      return result;\n    } catch (err) {\n      this.onFailure();\n      throw err;\n    }\n  }\n\n  onSuccess() {\n    this.record(true);\n    if (this.state === 'HALF_OPEN') {\n      this.halfOpenSuccesses++;\n      if (this.halfOpenSuccesses >= this.halfOpenMax) {\n        this.state = 'CLOSED';\n        this.window = [];  // reset window after recovery\n        console.log('[CB] Closed — service recovered');\n      }\n    }\n  }\n\n  onFailure() {\n    this.record(false);\n    if (this.state === 'HALF_OPEN') {\n      this.state = 'OPEN';\n      this.nextAttempt = Date.now() + this.timeout;\n      console.warn('[CB] Re-opened — probe failed');\n      return;\n    }\n    if (this.failureCount >= this.threshold) {\n      this.state = 'OPEN';\n      this.nextAttempt = Date.now() + this.timeout;\n      console.warn(`[CB] Opened after ${this.failureCount} failures`);\n    }\n  }\n}\n\n// --- Usage ---\nasync function callPaymentService(payload) {\n  // Simulate network call\n  const res = await fetch('https://payments.internal/charge', {\n    method: 'POST',\n    body: JSON.stringify(payload),\n  });\n  if (!res.ok) throw new Error(`HTTP ${res.status}`);\n  return res.json();\n}\n\nconst paymentBreaker = new CircuitBreaker(callPaymentService, {\n  threshold: 3,\n  windowSize: 5,\n  timeout: 15_000,\n});\n\nasync function placeOrder(order) {\n  try {\n    const charge = await paymentBreaker.call({ amount: order.total });\n    return { status: 'confirmed', chargeId: charge.id };\n  } catch (err) {\n    if (err.code === 'CIRCUIT_OPEN') {\n      // Degrade gracefully: queue for async retry\n      await orderQueue.enqueue({ order, retryAfter: Date.now() + 15_000 });\n      return { status: 'pending', message: 'Payment queued for retry' };\n    }\n    throw err;  // re-throw unexpected errors\n  }\n}",
+      "explanation": "The sliding window (`this.window`) tracks the last N call results. When failures in that window hit the threshold, the breaker opens. The HALF_OPEN state allows exactly `halfOpenMax` probe requests — requiring *multiple* successes before closing prevents flickering on a partially-recovered service. The `err.code = 'CIRCUIT_OPEN'` sentinel lets callers distinguish a circuit-open failure from a genuine service error and choose an appropriate fallback."
     },
     {
-      "type": "code_concept",
+      "type": "explanation",
+      "title": "Pattern 2 — Saga: Distributed Transactions Without a Lock",
+      "content": "**The problem.** In a monolith, placing an order — debit the account, reserve inventory, generate a shipment record — is a single ACID database transaction. If any step fails, the transaction rolls back and nothing is committed. In a microservice architecture each of those steps lives in a different service with its own database. There is no global transaction coordinator that can atomically commit or roll back across all of them (or if there is — a two-phase commit — it is a single point of failure and a performance bottleneck).\n\n**The insight.** Real-world long-running processes were never truly atomic either. A hotel booking, an airline reservation, a wire transfer — each consists of independent steps with known cancellation or reversal procedures. The Saga pattern formalises this: a saga is a **sequence of local transactions**, each of which publishes an event or sends a message upon completion. If any step fails, a series of **compensating transactions** are executed in reverse order to undo the effect of every previously completed step.\n\n**Two flavours of saga:**\n\n**Choreography-based** — no central coordinator. Each service listens on an event bus for the completion event of the previous step, executes its local transaction, and publishes its own completion event. The saga's logic is distributed across all participating services. Advantages: no single point of failure, fully decentralised. Disadvantages: the overall flow is implicit — to understand the saga you must read every service's event handler. Debugging a failed saga means correlating events across multiple services and message queues. This approach works well for simple flows with 2–3 steps.\n\n**Orchestration-based** — a dedicated **saga orchestrator** (often a persistent state machine) drives the workflow. It sends *commands* to each service and awaits *reply events*. If a step fails, the orchestrator issues compensating commands to every previously completed step in reverse order. Advantages: the full workflow is in one place, observable, and testable. Disadvantages: the orchestrator is a new service to deploy and operate; coupling the orchestrator to every participant's API. This approach is preferred for complex flows with 4+ steps, conditional branches, or parallel steps.\n\n**Compensating transactions.** The key subtlety: compensations are *semantic* reversals, not database rollbacks. If the Payment service successfully charged the card, the compensation is issuing a refund — not rolling back a transaction (which has long since committed). Compensation must be idempotent: if the saga fails and restarts, the same compensating command may be sent twice. Design compensations with idempotency keys.\n\n**Exactly-once delivery.** Message brokers typically guarantee *at-least-once* delivery. This means saga steps must be **idempotent**: processing the same `OrderPlaced` event twice must produce the same result as processing it once. A common pattern: use a `correlation_id` (the saga's unique ID) as an idempotency key in each service's database, and skip processing if a record with that key already exists."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n  participant OS as Order Saga\\nOrchestrator\n  participant P as Payment Svc\n  participant I as Inventory Svc\n  participant S as Shipment Svc\n  OS->>P: ReservePayment(sagaId, amount)\n  P-->>OS: PaymentReserved\n  OS->>I: ReserveInventory(sagaId, items)\n  I-->>OS: InventoryReserved\n  OS->>S: CreateShipment(sagaId, address)\n  S-->>OS: ShipmentFailed\n  Note over OS,S: Shipment failed — run compensations in reverse\n  OS->>I: ReleaseInventory(sagaId)\n  I-->>OS: InventoryReleased\n  OS->>P: RefundPayment(sagaId)\n  P-->>OS: PaymentRefunded",
+      "caption": "Orchestration-based saga: the orchestrator drives each step sequentially. When Shipment fails, it issues compensating commands in reverse — ReleaseInventory, then RefundPayment. The sagaId ties all messages together for tracing and idempotency."
+    },
+    {
+      "type": "code_example",
       "language": "javascript",
-      "label": "Concept",
-      "code": "// CQRS + Event Sourcing — conceptual model\n\n// --- WRITE side: append events, never overwrite ---\nasync function placeOrder(orderId, items, userId) {\n  const event = {\n    type: 'OrderPlaced',\n    orderId,\n    items,\n    userId,\n    occurredAt: new Date().toISOString(),\n  };\n  await eventStore.append('orders', orderId, event); // immutable append\n  await eventBus.publish(event);                     // notify read-side projectors\n}\n\n// --- READ side: materialized view, rebuilt from events ---\nasync function rebuildOrderView(orderId) {\n  const events = await eventStore.load('orders', orderId);\n  return events.reduce((state, event) => {\n    switch (event.type) {\n      case 'OrderPlaced':   return { ...state, status: 'placed', items: event.items };\n      case 'OrderShipped':  return { ...state, status: 'shipped', trackingId: event.trackingId };\n      case 'OrderCancelled': return { ...state, status: 'cancelled' };\n      default: return state;\n    }\n  }, {});\n}\n// The read model can be a Redis cache or a denormalized Postgres table —\n// optimized for query patterns without affecting the write model."
+      "label": "Example",
+      "code": "// Orchestration-based Saga — persistent state machine\n// Each saga step persists its state before executing (so restarts are safe)\n\nconst SagaStatus = {\n  STARTED:             'STARTED',\n  PAYMENT_RESERVED:    'PAYMENT_RESERVED',\n  INVENTORY_RESERVED:  'INVENTORY_RESERVED',\n  COMPLETED:           'COMPLETED',\n  COMPENSATING:        'COMPENSATING',\n  COMPENSATED:         'COMPENSATED',\n  FAILED:              'FAILED',\n};\n\nclass PlaceOrderSaga {\n  constructor({ sagaId, order, sagaStore, paymentSvc, inventorySvc, shipmentSvc }) {\n    this.sagaId = sagaId;\n    this.order = order;\n    this.store = sagaStore;        // persistent key-value store\n    this.payment = paymentSvc;\n    this.inventory = inventorySvc;\n    this.shipment = shipmentSvc;\n  }\n\n  async execute() {\n    await this.store.save(this.sagaId, { status: SagaStatus.STARTED, order: this.order });\n\n    try {\n      // Step 1: reserve payment\n      const charge = await this.payment.reserve({\n        idempotencyKey: `${this.sagaId}-payment`,\n        amount: this.order.total,\n      });\n      await this.store.save(this.sagaId, {\n        status: SagaStatus.PAYMENT_RESERVED,\n        chargeId: charge.id,\n      });\n\n      // Step 2: reserve inventory\n      const reservation = await this.inventory.reserve({\n        idempotencyKey: `${this.sagaId}-inventory`,\n        items: this.order.items,\n      });\n      await this.store.save(this.sagaId, {\n        status: SagaStatus.INVENTORY_RESERVED,\n        reservationId: reservation.id,\n      });\n\n      // Step 3: create shipment\n      await this.shipment.create({\n        idempotencyKey: `${this.sagaId}-shipment`,\n        address: this.order.address,\n        items: this.order.items,\n      });\n      await this.store.save(this.sagaId, { status: SagaStatus.COMPLETED });\n      return { success: true };\n\n    } catch (err) {\n      console.error(`[Saga ${this.sagaId}] Step failed:`, err.message);\n      await this.compensate();\n      return { success: false, reason: err.message };\n    }\n  }\n\n  async compensate() {\n    await this.store.save(this.sagaId, { status: SagaStatus.COMPENSATING });\n    const state = await this.store.load(this.sagaId);\n\n    // Compensate in reverse order of steps completed\n    if (state.reservationId) {\n      await this.inventory.release({\n        idempotencyKey: `${this.sagaId}-inv-release`,\n        reservationId: state.reservationId,\n      });\n    }\n    if (state.chargeId) {\n      await this.payment.refund({\n        idempotencyKey: `${this.sagaId}-payment-refund`,\n        chargeId: state.chargeId,\n      });\n    }\n    await this.store.save(this.sagaId, { status: SagaStatus.COMPENSATED });\n  }\n}\n\n// --- Invoke ---\nconst saga = new PlaceOrderSaga({\n  sagaId: crypto.randomUUID(),\n  order: { total: 99.99, items: [{ sku: 'A1', qty: 2 }], address: '...' },\n  sagaStore,\n  paymentSvc,\n  inventorySvc,\n  shipmentSvc,\n});\nconst result = await saga.execute();",
+      "explanation": "The saga persists its status and step-specific IDs (chargeId, reservationId) to the store **before** proceeding. If the process crashes mid-saga, it can be resumed from the last persisted state. Idempotency keys on every service call prevent double-charging or double-reserving on retry. The compensate() method reads the persisted state to know which steps completed and need to be reversed — making the compensation safe even if execute() crashed partway through."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 3 — CQRS: Separate Models for Writes and Reads",
+      "content": "**The problem.** Most applications read far more than they write. Yet in a typical CRUD architecture, the same data model — the same normalized table, the same ORM entity — serves both. Write concerns (validating invariants, enforcing consistency, preventing concurrent mutation) pull the model toward normalization and strict schema. Read concerns (aggregations, joins across entities, complex filters, pagination) pull toward denormalization and query-optimised structures. Trying to satisfy both with one model produces either a read that is artificially slow (because the model is normalized) or a write that is fragile (because the schema has been denormalized for reads).\n\n**CQRS** (Command Query Responsibility Segregation, introduced by Greg Young building on Bertrand Meyer's CQS principle) solves this by splitting the model in two:\n\n- **Command side (write model):** Handles mutations — `PlaceOrder`, `CancelOrder`, `UpdateShippingAddress`. The model is normalized, strictly consistent, and enforces business invariants. Commands go through domain logic (validation, aggregate rules) and are persisted to the **write store**.\n- **Query side (read model):** Handles reads — `GetOrderById`, `ListOrdersByCustomer`, `OrderDashboardStats`. The read model is a denormalized, pre-aggregated **projection** that is optimised for exactly the queries the UI needs. It is updated asynchronously by listening to events emitted from the command side.\n\n**Eventual consistency.** Because the read model is updated asynchronously, it lags slightly behind the write model. A user places an order and their order list might not update for a few hundred milliseconds. This is usually acceptable — it is the same trade-off made by every CDN and every DNS system. CQRS is not appropriate when reads must see their own writes immediately with zero lag.\n\n**Projection rebuilding.** A killer feature of CQRS: if you realize your read model is wrong — missing a field, badly indexed — you can **rebuild** it from scratch by replaying all events from the write side. No data is lost; you simply re-derive the read model. This decouples the evolution of the read schema from the write schema.\n\n**Technology choices.** The write and read stores do not have to be the same database. Common combinations:\n- Write: PostgreSQL (relational, transactional). Read: Elasticsearch (full-text search), Redis (low-latency cache), MongoDB (flexible document).\n- Write: Event store (append-only). Read: Cassandra (wide-column, optimised for known access patterns).\n\n**When CQRS makes sense:** High read-to-write ratio with complex read requirements. Different scalability needs for reads and writes. Teams that own separate parts of the system. Paired with event sourcing where projections are the natural read model. **When to avoid:** Simple CRUD with low traffic. When the operational overhead of synchronizing two models outweighs the benefit. When immediate read-your-writes consistency is required and cannot be worked around."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  UI[\"UI / API Consumer\"]\n  CmdHandler[\"Command Handler\\n(validate + persist)\"]\n  WriteDB[\"Write Store\\n(normalized, consistent)\"]\n  EventBus[\"Event Bus\"]\n  Projector[\"Projection Builder\\n(async listener)\"]\n  ReadDB[\"Read Store\\n(denormalized, indexed)\"]\n  QueryHandler[\"Query Handler\"]\n  UI -->|\"Command: PlaceOrder\"| CmdHandler\n  CmdHandler --> WriteDB\n  CmdHandler --> EventBus\n  EventBus --> Projector\n  Projector --> ReadDB\n  UI -->|\"Query: GetOrders\"| QueryHandler\n  QueryHandler --> ReadDB",
+      "caption": "CQRS flow: commands mutate the write store and emit events. An async projector builds the read store from those events. Queries hit the read store only — no joins, no aggregation at query time."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 4 — Event Sourcing: The Log Is the Truth",
+      "content": "**The problem with CRUD.** Traditional Create/Read/Update/Delete mutates rows in place. When an order's status changes from `pending` to `shipped`, the row is updated and the previous state is gone. You can reconstruct *what* the order is now but not *what it was*, *when it changed*, or *why*. Audit logs are bolted on separately. Analytics queries become complex, expensive joins. Rebuilding a read cache from scratch requires a painful data migration.\n\n**Event Sourcing** flips the model. Instead of persisting current state, you persist a **stream of immutable events** that represent every state change. The `orders` stream might contain: `OrderPlaced → PaymentReserved → InventoryAllocated → OrderShipped → OrderDelivered`. Current state is derived by **replaying** those events through a fold (reduce). Events are never modified or deleted — they are facts that happened.\n\n**What you gain:**\n- **Complete audit trail** — every change has a timestamp, a who, and a why (the event payload).\n- **Temporal queries** — replay events up to a point in time to see what state the system was in yesterday.\n- **Projection flexibility** — build any number of read-side views from the same event log without touching the write model.\n- **Debugging and root-cause analysis** — replay the exact sequence of events that led to a bug.\n- **Event-driven integration** — downstream services subscribe to the same event stream, eliminating polling.\n\n**What it costs:**\n- **Eventual consistency** — read models are projections derived asynchronously; they lag.\n- **Event schema evolution** — once published, an event format is effectively public API. Changing it requires careful versioning and upcasting.\n- **Snapshot management** — replaying 10 million events to load one aggregate is expensive. Periodic **snapshots** cache the aggregate state at a point in time; replay starts from the nearest snapshot.\n- **Operational complexity** — event stores, projection services, snapshot strategies, and consumer offset management are all new infrastructure concerns.\n\n**When to use:** Financial ledgers, e-commerce orders, collaborative documents, compliance-driven domains where every change must be auditable. **When to avoid:** Simple CRUD domains where history is irrelevant. Systems where you need immediate strong consistency in read models. Teams without the operational maturity to run event stores.\n\n**Tools.** **EventStoreDB** is purpose-built for event sourcing. **Kafka** (with log compaction disabled for event sourcing use cases) is widely used. **Axon Framework** (Java) provides an opinionated event sourcing + CQRS stack. **Marten** (.NET) turns PostgreSQL into an event store."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  E1[\"OrderPlaced\\nt=0\"]\n  E2[\"PaymentReserved\\nt=1\"]\n  E3[\"InventoryAllocated\\nt=2\"]\n  E4[\"OrderShipped\\nt=3\"]\n  E5[\"OrderDelivered\\nt=4\"]\n  Fold[\"fold(events)\\n→ current state\"]\n  Snap[\"Snapshot @ t=2\\n(optional optimisation)\"]\n  E1 --> E2 --> E3 --> E4 --> E5\n  E3 --> Snap\n  Snap --> Fold\n  E4 --> Fold\n  E5 --> Fold",
+      "caption": "Event log for one order: five immutable events in sequence. Current state is a fold over all events. A snapshot at t=2 lets replay start mid-stream, avoiding full replay from the beginning — critical for high-volume aggregates."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Event Sourcing + CQRS — write and read sides\n\n// ─── WRITE SIDE: append events, never overwrite ─────────────────\nclass OrderAggregate {\n  constructor(id) {\n    this.id = id;\n    this.status = null;\n    this.items = [];\n    this.version = 0;\n    this._uncommitted = [];\n  }\n\n  // Reconstitute from event history\n  static fromHistory(id, events) {\n    const agg = new OrderAggregate(id);\n    for (const event of events) agg.apply(event);\n    return agg;\n  }\n\n  // Apply an event to mutate local state\n  apply(event) {\n    switch (event.type) {\n      case 'OrderPlaced':\n        this.status = 'placed';\n        this.items = event.payload.items;\n        break;\n      case 'PaymentReserved':\n        this.status = 'payment_reserved';\n        this.chargeId = event.payload.chargeId;\n        break;\n      case 'OrderShipped':\n        this.status = 'shipped';\n        this.trackingId = event.payload.trackingId;\n        break;\n      case 'OrderCancelled':\n        this.status = 'cancelled';\n        break;\n    }\n    this.version++;\n  }\n\n  // Raise a new event (validate business rules first)\n  placeOrder(items, userId) {\n    if (this.status !== null) throw new Error('Order already exists');\n    const event = {\n      type: 'OrderPlaced',\n      aggregateId: this.id,\n      version: this.version + 1,\n      occurredAt: new Date().toISOString(),\n      payload: { items, userId },\n    };\n    this.apply(event);\n    this._uncommitted.push(event);\n  }\n\n  shipOrder(trackingId) {\n    if (this.status !== 'payment_reserved') {\n      throw new Error('Cannot ship — payment not reserved');\n    }\n    const event = {\n      type: 'OrderShipped',\n      aggregateId: this.id,\n      version: this.version + 1,\n      occurredAt: new Date().toISOString(),\n      payload: { trackingId },\n    };\n    this.apply(event);\n    this._uncommitted.push(event);\n  }\n\n  getUncommittedEvents() {\n    return this._uncommitted.splice(0);\n  }\n}\n\n// ─── Event Store abstraction ─────────────────────────────────────\nclass InMemoryEventStore {\n  constructor() { this.streams = new Map(); }\n\n  async append(aggregateId, events, expectedVersion) {\n    const stream = this.streams.get(aggregateId) ?? [];\n    // Optimistic concurrency check\n    if (stream.length !== expectedVersion) {\n      throw new Error(`Concurrency conflict: expected v${expectedVersion}, got v${stream.length}`);\n    }\n    this.streams.set(aggregateId, [...stream, ...events]);\n  }\n\n  async load(aggregateId) {\n    return this.streams.get(aggregateId) ?? [];\n  }\n}\n\n// ─── READ SIDE: projection updated from events ───────────────────\nclass OrderReadModelProjector {\n  constructor(readDb) { this.db = readDb; }\n\n  async handle(event) {\n    switch (event.type) {\n      case 'OrderPlaced':\n        await this.db.upsert('order_views', {\n          id: event.aggregateId,\n          status: 'placed',\n          itemCount: event.payload.items.length,\n          userId: event.payload.userId,\n          placedAt: event.occurredAt,\n        });\n        break;\n      case 'OrderShipped':\n        await this.db.update('order_views', event.aggregateId, {\n          status: 'shipped',\n          trackingId: event.payload.trackingId,\n          shippedAt: event.occurredAt,\n        });\n        break;\n      case 'OrderCancelled':\n        await this.db.update('order_views', event.aggregateId, { status: 'cancelled' });\n        break;\n    }\n  }\n}\n\n// ─── Usage ───────────────────────────────────────────────────────\nconst store = new InMemoryEventStore();\nconst orderId = crypto.randomUUID();\n\n// Place an order\nconst order = new OrderAggregate(orderId);\norder.placeOrder([{ sku: 'BOOK-1', qty: 1 }], 'user-42');\nconst events = order.getUncommittedEvents();\nawait store.append(orderId, events, 0);  // v0 → v1\n\n// Later: reconstitute from event log\nconst history = await store.load(orderId);\nconst restored = OrderAggregate.fromHistory(orderId, history);\nconsole.log(restored.status);  // 'placed'\nconsole.log(restored.version); // 1",
+      "explanation": "The aggregate's `apply()` method is the single place where events mutate state — both when raising new events and when replaying history. Optimistic concurrency (expectedVersion) prevents two concurrent processes from both appending at version 5 — the second append throws a conflict error, forcing a retry. The projector is a separate listener that updates the read model denormalized view; it can be replayed from scratch by replaying all events from the store."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 5 — API Gateway and Service Discovery: The Infrastructure Glue",
+      "content": "**API Gateway.** External clients — browsers, mobile apps, third-party integrations — should not need to know the internal topology of your microservice mesh. An **API gateway** is the single entry point for all external traffic. It handles cross-cutting concerns that would otherwise be duplicated across every service:\n\n- **Authentication and authorization** — verify JWTs, API keys, or OAuth tokens before requests reach any downstream service.\n- **Rate limiting and throttling** — protect the mesh from abusive clients without implementing limits in every service.\n- **Request routing** — route `GET /orders/*` to the Order service, `POST /payments/*` to the Payment service, by path, header, or query parameter.\n- **SSL termination** — handle TLS at the edge; internal services communicate over plaintext within a secured VPC.\n- **Request/response transformation** — adapt external API contracts without changing internal service APIs.\n- **Circuit breaking and retry** — some gateways (Kong, Envoy) implement these at the edge layer.\n\nPrimary options: **Kong** (plugin-based, extends nginx), **AWS API Gateway** (serverless, deep AWS integration), **nginx** (manual configuration), **Traefik** (auto-discovers services in Docker/Kubernetes), **Envoy** (low-level, used by Istio as a sidecar).\n\n**Service Discovery.** In a dynamic containerized environment, services are not at fixed IPs. A Payment service replica that crashes is replaced by a new container with a new IP. An Order service scaled from 2 to 10 replicas suddenly has 10 different IPs. Service discovery solves this.\n\nTwo models exist:\n- **Client-side discovery** — the calling service queries a **service registry** (Consul, etcd) to get a list of healthy instances, then load-balances itself. The client has more control but must embed discovery logic.\n- **Server-side discovery** — the client calls a load balancer or gateway; the gateway queries the registry. The client knows nothing about discovery — simpler client code, but the gateway is a dependency.\n\nIn Kubernetes, service discovery is built in: a `Service` object provides a stable DNS name (`payment-svc.default.svc.cluster.local`) backed by `kube-proxy` that load-balances across healthy pods. Services register by label selector, not by code. This is why Kubernetes dramatically simplifies microservice operations — discovery, health-checking, and rolling updates are first-class platform features."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart LR\n  Ext[\"External Client\"]\n  GW[\"API Gateway\\n(auth + routing)\"]\n  Reg[\"Service Registry\\n(Consul / k8s)\"]\n  Ord[\"Order Svc\\n:3000\"]\n  Pay[\"Payment Svc\\n:3001\"]\n  Inv[\"Inventory Svc\\n:3002\"]\n  Ext --> GW\n  GW -->|\"lookup: payment-svc\"| Reg\n  Reg -->|\"[10.0.0.5:3001, 10.0.0.6:3001]\"| GW\n  GW --> Ord\n  GW --> Pay\n  GW --> Inv",
+      "caption": "Server-side discovery: the API gateway queries the registry to resolve service names to healthy instance addresses. Clients only know the gateway's address — internal topology is invisible to them."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Misconception: 'microservice patterns solve microservice problems.'** These patterns solve the problems *created by* decomposing a monolith. A monolith with good module boundaries has none of the consistency, discovery, or cascading-failure problems these patterns address. Before adding circuit breakers, sagas, CQRS, and event sourcing to a new project, ask whether microservices are genuinely needed. Martin Fowler calls this the **Microservice Premium** — the operational and architectural overhead you pay upfront, before you earn the benefits of independent scaling and deployment. Most teams should start with a well-structured monolith and extract services only when specific scaling or team-autonomy pressures make decomposition worthwhile."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "Event sourcing is powerful but expensive to operate. Before adopting it, ask: 'Do I need a full audit trail? Do I need to replay history to build new views?' If the answer is no, a simple append-only events table with a current-state row gives 80% of the benefit with 20% of the complexity. Reach for full event sourcing only when the domain genuinely demands it."
+      "content": "**Choosing the right pattern for the right problem:**\n- Use **Circuit Breaker** on every synchronous inter-service call that crosses a network boundary. This is nearly always the right call and has low operational overhead. Use **opossum** (Node), **Resilience4j** (Java), or **Polly** (.NET), or push it to the service mesh layer with Istio/Envoy.\n- Use **Saga** when a business operation spans multiple services that each own their database. Prefer **orchestration** over choreography for flows with 3+ steps. **Temporal.io** is an excellent managed saga/workflow engine that handles persistence, retries, and timeouts for you.\n- Use **CQRS** when read and write traffic have significantly different shapes or scalability requirements. Do NOT use CQRS just because it sounds sophisticated — it adds an asynchronous projection pipeline that must be monitored and maintained.\n- Use **Event Sourcing** only when you genuinely need audit trails, temporal queries, or the ability to rebuild projections. Otherwise, a simple events table (`INSERT` only) alongside a current-state table gives 80% of the benefit with far less complexity.\n- Use **API Gateway + Service Discovery** from day one in any microservice deployment. These are table stakes, not optional — Kubernetes gives you both essentially for free."
     },
     {
       "type": "key_takeaways",
       "items": [
-        "**Circuit breaker** prevents cascading failures by failing fast when a downstream service is unhealthy — closed, open, and half-open states control traffic flow.",
-        "**Saga** coordinates distributed transactions across services without a distributed lock; orchestration-based sagas use a central coordinator to issue compensating commands on failure.",
-        "**CQRS** separates the write model (commands) from the read model (queries), allowing each to be optimized, scaled, and deployed independently.",
-        "**Event sourcing** stores state changes as an immutable event log; current state is derived by replaying events, enabling audit trails and temporal queries.",
-        "**Service discovery** solves the ephemeral-address problem in dynamic container environments — services register on startup and are found by name, not hard-coded IP."
+        "**Circuit breaker** prevents cascading failures by tracking failure rates in a sliding window and switching between CLOSED (normal), OPEN (fail-fast), and HALF_OPEN (recovery probe) states — freeing caller threads instantly instead of letting them pile up on a dead service.",
+        "**Saga** coordinates distributed transactions without a global lock by breaking the workflow into local transactions with compensating actions. Orchestration-based sagas use a persistent coordinator for complex flows; choreography works for simple two-to-three step flows but becomes hard to trace at scale.",
+        "**CQRS** separates the write model (commands that enforce business invariants and mutate normalized state) from the read model (denormalized projections optimised for query patterns), allowing each to scale, evolve, and use different databases independently.",
+        "**Event Sourcing** stores every state change as an immutable event rather than overwriting rows — current state is derived by replaying the event log. It unlocks complete audit trails, temporal queries, and projection rebuilding, but adds significant operational complexity around event schema evolution and snapshot management.",
+        "**API Gateway** consolidates cross-cutting concerns (auth, rate limiting, routing, TLS) at the network edge so individual services remain focused on business logic. **Service Discovery** solves the ephemeral-address problem in container environments by maintaining a live registry of healthy service instances.",
+        "**Idempotency is not optional.** At-least-once message delivery means saga steps, event projectors, and any retry logic must be idempotent — using correlation or idempotency keys to detect and skip duplicate processing.",
+        "Apply these patterns where the problem demands them — not as a default stack. The Microservice Premium is real: most of these patterns exist to manage complexity that microservices themselves introduce. A well-structured modular monolith avoids all of it."
       ]
     }
   ],
@@ -66,133 +122,133 @@
   "quiz": [
     {
       "id": "q1",
-      "question": "What does a circuit breaker do in the OPEN state?",
+      "question": "What does a circuit breaker do while in the OPEN state?",
       "type": "mcq",
       "options": [
-        "Retries the request up to 3 times before failing",
-        "Fails immediately without making a network call to the downstream service",
-        "Routes the request to a backup service automatically",
-        "Queues the request and processes it when the service recovers"
+        "Retries the request up to 3 times with exponential back-off before failing",
+        "Fails immediately without making any network call to the downstream service",
+        "Routes the request to a secondary replica of the downstream service",
+        "Queues the request in memory and drains it when the service recovers"
       ],
       "correct": 1,
-      "explanation": "In the OPEN state, the circuit breaker does not attempt the network call at all — it throws immediately. This prevents caller threads from piling up on a dead service and exhausting the thread pool, which would cascade the failure to callers of the caller."
+      "explanation": "In OPEN state the circuit breaker skips the network call entirely and throws immediately. This is the key value: caller threads are freed instantly rather than blocking for the full timeout duration, preventing thread-pool exhaustion and cascade failure up the call chain."
     },
     {
       "id": "q2",
-      "question": "What is the key difference between choreography-based and orchestration-based sagas?",
+      "question": "Why is the HALF_OPEN state of a circuit breaker typically designed to require multiple successful probes before closing?",
       "type": "mcq",
       "options": [
-        "Choreography uses a database transaction; orchestration uses events",
-        "In choreography each service reacts to events; in orchestration a central coordinator drives all steps",
-        "Choreography is synchronous; orchestration is asynchronous",
-        "Orchestration requires a distributed lock; choreography does not"
+        "To satisfy regulatory requirements for service availability SLAs",
+        "To prevent the breaker from flickering closed on a service that is only intermittently healthy",
+        "Because a single probe uses too little bandwidth to confirm recovery",
+        "Half-open probes must match the original failure threshold exactly"
       ],
       "correct": 1,
-      "explanation": "Choreography is decentralized — each service listens for events and knows what to do next, but the overall flow is implicit. Orchestration has an explicit coordinator that knows the full workflow and sends commands to each service, making the flow traceable and easier to manage for complex sagas."
+      "explanation": "A service coming back online may be partially healthy — succeeding on the first request but still failing often. Requiring multiple consecutive probe successes before closing ensures the service is genuinely stable, not just momentarily functional, preventing rapid open/close oscillation that would cause erratic caller behaviour."
     },
     {
       "id": "q3",
-      "question": "In CQRS, why might the read model use a different database than the write model?",
+      "question": "What is the fundamental difference between a choreography-based saga and an orchestration-based saga?",
       "type": "mcq",
       "options": [
-        "To comply with GDPR data residency requirements",
-        "The write model must use SQL; the read model must use NoSQL",
-        "The read model can be denormalized and indexed for query patterns without affecting write performance",
-        "CQRS requires two physically separate database servers for consistency"
+        "Choreography uses synchronous HTTP calls; orchestration uses asynchronous events",
+        "Choreography requires a shared database; orchestration uses separate databases per service",
+        "In choreography each service reacts to events independently; in orchestration a central coordinator drives and tracks every step",
+        "Orchestration requires a distributed lock across all participating services"
       ],
       "correct": 2,
-      "explanation": "The read side can be a materialized view, a Redis cache, or a denormalized table optimized for the exact query patterns the UI needs — without joins, aggregations at read time, or write-side normalization constraints. The write side stays normalized and consistent."
+      "explanation": "Choreography distributes the workflow logic across all services — each listens for events and knows what to do next, but no single place describes the full flow. Orchestration centralises the flow in a coordinator that sends explicit commands and awaits replies, making the workflow observable, testable, and easier to operate for complex multi-step processes."
     },
     {
       "id": "q4",
-      "question": "What is the main benefit of event sourcing over traditional CRUD updates?",
+      "question": "In a saga, why must compensating transactions be idempotent?",
       "type": "mcq",
       "options": [
-        "Writes are faster because you never update a row",
-        "A complete audit trail and the ability to replay history to build new projections",
-        "Simpler data model with fewer tables",
-        "Lower storage cost because old state is discarded"
+        "Because compensations run in a different database transaction than the original step",
+        "Because message brokers guarantee at-least-once delivery, so the same compensating command may arrive more than once",
+        "Because idempotency is a legal requirement for financial transactions",
+        "Because the saga orchestrator always sends compensation commands twice as a safety measure"
       ],
       "correct": 1,
-      "explanation": "Event sourcing keeps every state-change event forever. You can replay the event log to rebuild a read model, answer temporal queries ('what was the state on Tuesday?'), or build a new projection. Traditional CRUD overwrites state, destroying history."
+      "explanation": "Message brokers and retry logic can deliver the same message more than once. If ReleaseInventory is processed twice, you could release a reservation that was already released — potentially making inventory available twice. Using an idempotency key (e.g. the sagaId) lets the service detect and safely skip a duplicate command."
     },
     {
       "id": "q5",
-      "question": "Service discovery is needed in a microservices environment primarily because:",
+      "question": "In CQRS, the read model accepts eventual consistency because:",
       "type": "mcq",
       "options": [
-        "DNS does not support HTTP",
-        "Container instances are ephemeral — their IPs change when they restart or scale",
-        "Each service uses a different port that must be centrally registered",
-        "Service discovery encrypts traffic between services"
+        "The read database cannot support strong consistency at scale",
+        "The read model is updated asynchronously by projectors listening to command-side events, so it lags slightly behind the write model",
+        "CQRS requires the read and write stores to be in different geographic regions",
+        "The read model uses optimistic locking which allows stale reads"
       ],
       "correct": 1,
-      "explanation": "In dynamic environments like Kubernetes, container IPs change with every deployment or scaling event. Hard-coding addresses breaks constantly. Service discovery provides a stable name-to-address mapping that updates as instances come and go."
+      "explanation": "The read model projection is updated by async event listeners. Between when a command is processed and when the projector updates the read store, the read model is stale. This lag is usually milliseconds and is acceptable for most use cases, but CQRS is inappropriate when the user must immediately see the effect of their own write."
     },
     {
       "id": "q6",
-      "question": "A saga's compensating transaction for a payment reservation step would be:",
+      "question": "What is the primary advantage of being able to rebuild a CQRS read model from scratch?",
       "type": "mcq",
       "options": [
-        "Retrying the payment reservation with a different amount",
-        "Issuing a refund or releasing the reserved funds",
-        "Rolling back the database transaction on the payment service",
-        "Sending an alert to the engineering team"
+        "It allows the write model to be deleted after the read model is built",
+        "It means schema changes to the read model do not require a risky data migration — just replay events and re-project",
+        "It eliminates the need for database backups on the read side",
+        "Rebuilding allows the read model to be encrypted with a new key"
       ],
       "correct": 1,
-      "explanation": "Compensating transactions semantically undo the effect of a previously completed step. Since the payment was reserved (not charged), the compensation releases the reservation. There is no shared database transaction to roll back — each service has already committed locally."
+      "explanation": "If you discover the read model needs a new field or a different index, you can drop the read store, update the projector, and replay all events from the event log (or the write store's history). No complex data migration is needed because the events are the source of truth and contain all the information needed to reconstruct any view."
     },
     {
       "id": "q7",
-      "question": "The HALF_OPEN state of a circuit breaker is used to:",
-      "type": "mcq",
-      "options": [
-        "Limit traffic to 50% of normal volume permanently",
-        "Allow one probe request through to test if the downstream service has recovered",
-        "Route traffic to a secondary region while the primary is down",
-        "Log all failures without rejecting requests"
-      ],
-      "correct": 1,
-      "explanation": "HALF_OPEN is a recovery probe state. After the timeout expires, one request is allowed through. If it succeeds, the breaker closes and normal traffic resumes. If it fails, the breaker reopens and the timeout resets."
-    },
-    {
-      "id": "q8",
       "question": "Which statement about event sourcing is FALSE?",
       "type": "mcq",
       "options": [
-        "Current state is derived by replaying all events from the beginning",
-        "Events are immutable — once written they are never modified",
-        "Event sourcing is the simplest database pattern and should be used by default",
-        "Snapshots can be used to avoid replaying the entire event history every time"
+        "Current state is derived by replaying all events for an aggregate",
+        "Events in the store are immutable — they are never updated or deleted",
+        "Event sourcing is simpler than CRUD and should be the default persistence strategy",
+        "Snapshots can be used to avoid replaying the entire event history on every load"
       ],
       "correct": 2,
-      "explanation": "Event sourcing is significantly more complex than CRUD — it requires event schema versioning, projection management, and careful consistency handling. It is a specialized pattern suited to domains with audit, replay, or temporal query requirements, not a default choice."
+      "explanation": "Event sourcing is significantly more complex than CRUD — it requires event schema versioning, upcasters for old event formats, projection management, snapshot strategies, and careful handling of eventual consistency. It is a specialised pattern for domains where auditability, temporal queries, or projection flexibility justify the overhead."
+    },
+    {
+      "id": "q8",
+      "question": "What is the purpose of an optimistic concurrency check (expectedVersion) in an event store?",
+      "type": "mcq",
+      "options": [
+        "To ensure events are stored in alphabetical order by type",
+        "To prevent two concurrent processes from both appending to the same aggregate stream, causing conflicting state changes",
+        "To validate that events conform to the registered schema",
+        "To limit the number of events stored per aggregate to reduce disk usage"
+      ],
+      "correct": 1,
+      "explanation": "If two processes simultaneously load the same aggregate at version 5 and both try to append at version 6, one must fail. The expectedVersion check enforces this — the second append throws a concurrency conflict, and the caller must reload the aggregate, re-apply its business logic, and retry. This is the distributed equivalent of a row-level optimistic lock."
     },
     {
       "id": "q9",
-      "question": "An API gateway differs from a load balancer in that an API gateway:",
+      "question": "What is the key difference between an API gateway and a load balancer?",
       "type": "mcq",
       "options": [
-        "Operates at Layer 4 (TCP) while a load balancer operates at Layer 7 (HTTP)",
-        "Handles application-layer concerns like auth, routing by path, and request transformation",
-        "Cannot distribute traffic across multiple instances of the same service",
-        "Is only used with gRPC services"
+        "A load balancer operates at Layer 7 (HTTP); an API gateway operates at Layer 4 (TCP)",
+        "An API gateway handles application-layer concerns like auth, routing by path, and rate limiting; a load balancer distributes traffic across instances of the same service",
+        "An API gateway can only be used with REST APIs; a load balancer supports any protocol",
+        "A load balancer requires service discovery; an API gateway does not"
       ],
       "correct": 1,
-      "explanation": "A load balancer distributes traffic across instances of the same service (Layer 4 or 7). An API gateway operates at the application layer: it authenticates requests, applies rate limits, routes by URL path to different services, and transforms requests/responses — concerns a load balancer does not handle."
+      "explanation": "A load balancer distributes requests across multiple instances of one service to spread load. An API gateway is an application-layer component that routes to different services based on request attributes, enforces authentication, applies rate limits, terminates TLS, and may transform requests — concerns that are orthogonal to simple traffic distribution."
     },
     {
       "id": "q10",
-      "question": "In a choreography-based saga, what is the main operational challenge compared to orchestration?",
+      "question": "In client-side service discovery, who is responsible for querying the registry and load-balancing across instances?",
       "type": "mcq",
       "options": [
-        "Choreography requires a dedicated database for event storage",
-        "Choreography cannot handle compensating transactions",
-        "The overall workflow is implicit and spread across services, making it hard to trace and debug",
-        "Choreography uses synchronous calls, increasing latency"
+        "The API gateway queries the registry on behalf of all clients",
+        "The service registry itself routes the request to the best instance",
+        "The calling service queries the registry and selects an instance to call directly",
+        "The operating system's DNS resolver handles instance selection transparently"
       ],
       "correct": 2,
-      "explanation": "With choreography, no single place describes the complete workflow — you have to read every service's event handler to understand the full flow. When something goes wrong, tracing a failed saga across services is significantly harder than inspecting a single orchestrator's log."
+      "explanation": "In client-side discovery (used by Netflix Eureka + Ribbon, for example), the calling service fetches the list of healthy instances from the registry and applies its own load-balancing strategy (round-robin, least-connections, etc.) to pick one. This gives the client fine-grained control but requires embedding discovery logic in every service — in contrast to server-side discovery where the gateway or a proxy handles all of this transparently."
     }
   ]
 }
