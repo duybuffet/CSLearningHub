@@ -1,0 +1,17 @@
+# Vietnamese translation — phase17-18
+
+Validator: `node scripts/validate-translations.mjs vi phase17/ phase18/` → 12 topics, 0 errors (only "curriculum-titles out of sync" warnings, for the lead to sync).
+Number formats in prose were normalised back to the English form (e.g. `2.5s`, `16.67ms`, `10,000`) as the brief requires.
+
+- phase17/how-browsers-work — title "Trình duyệt hoạt động thế nào". "cargo-culted rules" → "quy tắc làm theo mà không hiểu vì sao"; glossed FOUC once ("trang chớp lên khi chưa có style"), "replay (phát lại)". Kept render-blocking/parser-blocking, preload scanner, above-the-fold in English.
+- phase17/dom-and-rendering-pipeline — title kept "DOM & Rendering Pipeline". Newspaper analogy kept ("xưởng in báo", "thợ sắp chữ"). Glossed "layer explosion (bùng nổ số layer)", "yield (nhường main thread)". Kept dirty region, stacking context, jank in English.
+- phase17/http-caching-cookies-cors — title kept in English. fresh/stale, revalidate, conditional request, preflight, credentials, same-site kept in English; "federated authentication" glossed "xác thực liên kết". Unsure: "cookie jar" (CHIPS) rendered as "hũ" in quotes.
+- phase17/javascript-event-loop — title kept in English. drain, microtask/macrotask, continuation, frame budget kept in English; glossed "starvation (bỏ đói)", "desugar (gỡ đường)"; yield → "nhường quyền".
+- phase17/web-performance-optimization — title "Tối ưu hiệu năng web (Web Performance Optimization)". Metric names and threshold labels ('Good', 'Needs Improvement', 'Poor') kept in English. Unsure: "75th percentile" → "phân vị thứ 75", "synthetic metrics" → "metric tổng hợp (synthetic)".
+- phase17/websockets-and-sse — title kept in English. Glossed "framing (đóng khung)"; thundering herd, sticky session, back-pressure, jitter, exponential backoff kept. Unsure: "repurposed" → "chuyển mục đích sử dụng".
+- phase18/cloud-computing-fundamentals — title "Nền tảng điện toán đám mây (Cloud Computing Fundamentals)". Glossed CapEx/OpEx, data gravity ("lực hút dữ liệu"), co-location, man-trap. "Pizza as a Service" and the "security OF/IN the cloud" quote kept in English. Unsure: "undifferentiated heavy lifting" → "việc nặng nhọc nhưng không tạo khác biệt".
+- phase18/compute-storage-networking — title "Compute, Storage và Networking". Glossed lift-and-shift ("bê nguyên lên cloud"), defense-in-depth ("phòng thủ nhiều lớp"), right-sizing, failure mode.
+- phase18/docker-and-containers — title "Docker và Container". Glossed "máy ảo (virtual machine)", content-addressed, veth pair. Unsure: "bake a secret into the image" → "nướng cứng".
+- phase18/infrastructure-as-code — title kept in English. Glossed snowflake server, imperative/declarative, immutable infrastructure; pets/cattle → "thú cưng (pet)"/"gia súc (cattle)". Unsure: "pessimistic constraint" kept as "ràng buộc pessimistic"; "killer feature" → "tính năng 'ăn tiền'".
+- phase18/kubernetes-orchestration — title kept in English. Glossed declarative infrastructure, source of truth, filtering/scoring. All K8s resource/component names, rollout, taint/toleration, cordon/drain kept. Unsure: "Secrets hygiene" → "Vệ sinh Secret".
+- phase18/serverless-computing — title kept in English. Glossed idempotency guard, poison-pill ("message độc"), event-driven architecture, break-even. Unsure: "fan-out decoupling" → "tách rời kiểu fan-out", "The multi-cloud myth" → "Huyền thoại multi-cloud".

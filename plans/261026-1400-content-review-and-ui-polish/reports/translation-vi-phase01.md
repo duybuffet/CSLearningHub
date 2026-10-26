@@ -1,0 +1,11 @@
+# Vietnamese translation — phase01
+
+Validator: `node scripts/validate-translations.mjs vi phase1/` → 7/7 overlays, 0 errors (only warnings: curriculum-titles out of sync — lead runs sync-translated-titles). Emoji/ZWJ/tag-char sequences verified preserved per field.
+
+- week1-how-computers-work-binary-and-bits — title kept "Binary & Bits". Glossed: bit (binary digit — chữ số nhị phân), off-by-one (lệch một). "two's complement" rendered "bù hai".
+- week1-how-computers-work-cpu-fetch-decode-execute — title kept English. Kept fetch/decode/execute, stage, stall, flush, superscalar, out-of-order, micro-op in English; "addressing mode" → "chế độ địa chỉ"; "branch" → "rẽ nhánh" (branch prediction kept English).
+- week1-how-computers-work-logic-gates-boolean-algebra — title "Cổng logic & đại số Boole (Logic Gates & Boolean Algebra)" (unsure: descriptive vs term; chose bilingual). Boolean law names translated (đồng nhất, trung hòa, lũy đẳng, bù, hấp thụ…). half/full adder, ripple carry, standard cell kept English; "truth table" → "bảng chân trị".
+- week1-how-computers-work-memory-hierarchy — title "Phân cấp bộ nhớ (Memory Hierarchy)" per brief. Glossed AMAT once; temporal/spatial locality → "cục bộ thời gian/không gian" with English in parentheses at first use. Cache miss sentence follows brief example.
+- week3-data-representation-character-encoding — title kept "Character Encoding". Kept code point, code unit, surrogate pair, grapheme cluster, BOM, mojibake in English; "combining mark" → "dấu kết hợp", "precomposed" → "dựng sẵn". Escaped-backtick punctuation code span copied verbatim.
+- week3-data-representation-number-encoding — title "Mã hóa số (Number Encoding)". sign-magnitude → "dấu-độ lớn", one's complement → "bù một", fixed/floating-point → "dấu phẩy tĩnh/động" (English kept in parens at first use); mantissa/exponent/subnormal kept English.
+- week3-data-representation-program-execution — title "Chương trình được thực thi thế nào (Program Execution)" (descriptive). Fenced code blocks inside content kept byte-identical. Kept AOT/JIT/bytecode/VM/AST/IR/hot path/warm-up/deoptimize in English; "interpretation" → "thông dịch". Recipe analogy: "your native language" → "tiếng mẹ đẻ"/"tiếng Việt" in option 3.
