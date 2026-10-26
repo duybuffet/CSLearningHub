@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useColorScheme, type ColorScheme } from '@/hooks/use-color-scheme';
+import { useT } from '@/lib/ui-strings';
 
 type Mermaid = typeof import('mermaid').default;
 
@@ -80,6 +81,7 @@ interface MermaidDiagramRendererProps {
 // Renders a Mermaid diagram to inline SVG. Falls back to the raw source on error.
 export function MermaidDiagramRenderer({ chart, caption }: MermaidDiagramRendererProps) {
   const scheme = useColorScheme();
+  const { t } = useT();
   const [svg, setSvg] = useState<string>('');
   const [failed, setFailed] = useState(false);
   const [overflows, setOverflows] = useState(false);
@@ -143,7 +145,7 @@ export function MermaidDiagramRenderer({ chart, caption }: MermaidDiagramRendere
       {(caption || overflows) && (
         <figcaption className="mx-auto mt-4 max-w-prose font-serif text-[15px] italic leading-snug text-text-muted">
           {overflows && (
-            <span className="block pb-1 font-sans text-xs not-italic">Scroll sideways to see the whole figure.</span>
+            <span className="block pb-1 font-sans text-xs not-italic">{t('scrollFigure')}</span>
           )}
           {caption}
         </figcaption>

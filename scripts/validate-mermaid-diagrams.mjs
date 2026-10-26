@@ -14,7 +14,8 @@ const files = [];
 (function walk(dir) {
   for (const f of fs.readdirSync(dir)) {
     const p = path.join(dir, f);
-    if (fs.statSync(p).isDirectory()) walk(p);
+    // English phase folders only — overlays carry no diagrams
+    if (fs.statSync(p).isDirectory()) { if (!dir.endsWith('src/content') || f.startsWith('phase')) walk(p); }
     else if (f.endsWith('.json') && f !== 'curriculum.json') files.push(p);
   }
 })(path.join(root, 'src/content'));

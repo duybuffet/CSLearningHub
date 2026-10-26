@@ -2,6 +2,7 @@ import type { ContentSection, CalloutVariant } from '@/types/content-schema-type
 import { MermaidDiagramRenderer } from '@/components/ui/mermaid-diagram-renderer';
 import { SyntaxHighlightedCodeBlock } from '@/components/ui/syntax-highlighted-code-block';
 import { ProseMarkdownRenderer } from './prose-markdown-renderer';
+import { useT, type StringKey } from '@/lib/ui-strings';
 
 interface DeepDiveContentRendererProps {
   sections: ContentSection[];
@@ -18,10 +19,10 @@ const COMPACT_TYPES = new Set<string>([
 ]);
 
 // Margin-note style asides: a colored rule plus a plain-language label.
-const CALLOUTS: Record<CalloutVariant, { rule: string; label: string; labelColor: string }> = {
-  tip: { rule: 'border-success', label: 'Tip', labelColor: 'text-success' },
-  info: { rule: 'border-accent', label: 'Note', labelColor: 'text-accent' },
-  warning: { rule: 'border-warn', label: 'Watch out', labelColor: 'text-warn' },
+const CALLOUTS: Record<CalloutVariant, { rule: string; label: StringKey; labelColor: string }> = {
+  tip: { rule: 'border-success', label: 'tip', labelColor: 'text-success' },
+  info: { rule: 'border-accent', label: 'note', labelColor: 'text-accent' },
+  warning: { rule: 'border-warn', label: 'watchOut', labelColor: 'text-warn' },
 };
 
 // Reading text: serif, generous leading, ~68ch measure.
@@ -111,10 +112,11 @@ function AnalogyAside({ section }: { section: ContentSection }) {
 
 function CalloutBox({ section }: { section: ContentSection }) {
   const style = CALLOUTS[section.variant ?? 'info'];
+  const { t } = useT();
   return (
     <aside className={`rounded-r-btn border-l-[3px] ${style.rule} bg-bg-panel/60 py-3.5 pl-4 pr-4`}>
       <p className="mb-1 font-sans text-sm">
-        <span className={`font-semibold ${style.labelColor}`}>{style.label}</span>
+        <span className={`font-semibold ${style.labelColor}`}>{t(style.label)}</span>
         {section.title && <span className="font-semibold text-text-primary">: {section.title}</span>}
       </p>
       <ProseMarkdownRenderer
@@ -141,10 +143,11 @@ function InlineCodeBlock({ section }: { section: ContentSection }) {
 }
 
 function KeyTakeaways({ section }: { section: ContentSection }) {
+  const { t } = useT();
   return (
     <section className="border-t border-border-subtle pt-6">
       <h2 className="mb-4 font-sans text-[21px] font-semibold text-text-primary sm:text-[23px]">
-        {section.title || 'Key takeaways'}
+        {section.title || t('keyTakeaways')}
       </h2>
       <ul className="space-y-3">
         {(section.items ?? []).map((item, i) => (

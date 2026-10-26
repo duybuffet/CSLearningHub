@@ -6,12 +6,15 @@ import { useProgressStore } from '@/store/progress-store-with-persist';
 import { getCurriculum, numberedTopic } from '@/lib/content-loader';
 import { overallCompletion } from '@/lib/completion-progress-helpers';
 import { TableOfContentsPart } from '@/components/home/table-of-contents-part';
+import { localizedTopicTitle } from '@/lib/translation-overlay';
+import { useT } from '@/lib/ui-strings';
 
 export function HomePage() {
   const progress = useProgressStore((s) => s.progress);
   const lastVisited = useProgressStore((s) => s.lastVisited);
   const curriculum = getCurriculum();
   const { pct, read, total } = overallCompletion(curriculum, progress);
+  const { lang, t } = useT();
 
   // lastVisited is "<phaseId>_<slug>"; phase ids contain no underscore
   const [lastPhase, ...slugParts] = (lastVisited ?? '').split('_');
@@ -36,16 +39,15 @@ export function HomePage() {
           CS Learning Hub
         </h1>
         <p className="mt-4 font-serif text-[19px] leading-relaxed text-text-secondary sm:text-[21px]">
-          Computer science from the transistor up to distributed systems, written to be read
-          one chapter at a time.
+          {t('homeLede')}
         </p>
 
         <div className="mt-8 font-sans">
-          <div className="h-[3px] w-full bg-border-subtle" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="Chapters read">
+          <div className="h-[3px] w-full bg-border-subtle" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label={t('chaptersRead', { read, total })}>
             <div className="h-full bg-accent transition-[width] duration-500" style={{ width: `${pct}%` }} />
           </div>
           <p className="mt-2 text-sm text-text-muted">
-            {read === 0 ? `${total} chapters in ${curriculum.phases.length} parts` : `${read} of ${total} chapters read`}
+            {read === 0 ? t('chaptersInParts', { total, parts: curriculum.phases.length }) : t('chaptersRead', { read, total })}
           </p>
         </div>
 
@@ -54,21 +56,21 @@ export function HomePage() {
             to={resume.href}
             className="group mt-6 flex items-baseline gap-3 rounded-btn border border-border-subtle bg-bg-card px-4 py-3.5 font-sans"
           >
-            <span className="shrink-0 text-sm text-text-muted">Continue</span>
+            <span className="shrink-0 text-sm text-text-muted">{t('continue')}</span>
             <span className="min-w-0 flex-1 truncate text-[16px] text-text-primary group-hover:text-accent">
-              {resume.number} {resume.title}
+              {resume.number} {localizedTopicTitle(resume.file, resume.title, lang)}
             </span>
           </Link>
         )}
       </header>
 
       <div className="mb-2 flex items-baseline justify-between font-sans">
-        <h2 className="text-[15px] font-semibold text-text-primary">Contents</h2>
+        <h2 className="text-[15px] font-semibold text-text-primary">{t('contents')}</h2>
         <button
           onClick={() => setOpenParts(allOpen ? new Set() : new Set(curriculum.phases.map((p) => p.id)))}
           className="text-sm text-text-muted hover:text-accent"
         >
-          {allOpen ? 'Collapse all' : 'Expand all'}
+          {allOpen ? t('collapseAll') : t('expandAll')}
         </button>
       </div>
 

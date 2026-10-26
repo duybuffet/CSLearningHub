@@ -1,17 +1,20 @@
 import type {
   Curriculum,
   CurriculumTopic,
+  Lang,
   TopicContent,
+  TopicOverlay,
 } from '@/types/content-schema-types';
 import curriculumJson from '@/content/curriculum.json';
+import { applyOverlay } from './translation-overlay';
 
-// Lazy glob of all topic JSON under content/ — each topic becomes its own chunk,
+// Lazy globs — each topic (and each translation overlay) becomes its own chunk,
 // so the initial bundle stays small on mobile (the PWA service worker precaches
 // them for offline reading). curriculum.json is imported statically above.
-const topicModules = import.meta.glob<TopicContent>(
-  ['../content/**/*.json', '!../content/curriculum.json'],
-  { import: 'default' },
-);
+const topicModules = import.meta.glob<TopicContent>('../content/phase*/*.json', { import: 'default' });
+const overlayModules: Partial<Record<Lang, Record<string, () => Promise<TopicOverlay>>>> = {
+  vi: import.meta.glob<TopicOverlay>('../content/vi/phase*/*.json', { import: 'default' }),
+};
 
 const curriculum = curriculumJson as Curriculum;
 
@@ -19,10 +22,26 @@ export function getCurriculum(): Curriculum {
   return curriculum;
 }
 
-/** Resolve a topic's JSON by its curriculum `file` path (e.g. "phase1/week1-x.json"). */
-export async function loadTopicByFile(file: string): Promise<TopicContent | null> {
-  const loader = Object.entries(topicModules).find(([key]) => key.endsWith(`/${file}`))?.[1];
-  return loader ? loader() : null;
+function findLoader<T>(modules: Record<string, () => Promise<T>> | undefined, file: string) {
+  return modules && Object.entries(modules).find(([key]) => key.endsWith(`/${file}`))?.[1];
+}
+
+export interface LoadedTopic {
+  topic: TopicContent;
+  /** false when the requested language isn't available and English is shown */
+  translated: boolean;
+}
+
+/** Resolve a topic by its curriculum `file` path (e.g. "phase1/x.json"), in `lang` when translated. */
+export async function loadTopicByFile(file: string, lang: Lang = 'en'): Promise<LoadedTopic | null> {
+  const loader = findLoader(topicModules, file);
+  if (!loader) return null;
+  const topic = await loader();
+  if (lang === 'en') return { topic, translated: true };
+
+  const overlayLoader = findLoader(overlayModules[lang], file);
+  const localized = overlayLoader ? applyOverlay(topic, await overlayLoader()) : null;
+  return localized ? { topic: localized, translated: true } : { topic, translated: false };
 }
 
 /** Find a topic entry in the curriculum tree by phase id + slug. */
@@ -48,6 +67,7 @@ export interface NumberedTopic {
   phaseId: string;
   slug: string;
   title: string;
+  file: string;
   /** book-style chapter number, e.g. "3.6" = phase 3, sixth topic */
   number: string;
   href: string;
@@ -62,6 +82,7 @@ const numberedTopics: NumberedTopic[] = curriculum.phases.flatMap((phase, p) =>
       phaseId: phase.id,
       slug: t.slug,
       title: t.title,
+      file: t.file!,
       number: `${p + 1}.${i + 1}`,
       href: `/phase/${phase.id}/${t.slug}`,
     })),

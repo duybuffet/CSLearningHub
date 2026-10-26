@@ -1,5 +1,7 @@
 import { Link } from 'react-router-dom';
 import type { NumberedTopic } from '@/lib/content-loader';
+import { localizedTopicTitle } from '@/lib/translation-overlay';
+import { useT } from '@/lib/ui-strings';
 
 interface QuizResultSummaryProps {
   score: number;
@@ -11,12 +13,8 @@ interface QuizResultSummaryProps {
 }
 
 export function QuizResultSummary({ score, bestScore, correctCount, total, onRetry, next }: QuizResultSummaryProps) {
-  const message =
-    score === 100
-      ? 'Every answer correct.'
-      : score >= 70
-        ? 'Solid. Skim the explanations for the ones you missed.'
-        : 'Re-read the sections behind the questions you missed, then try again.';
+  const { lang, t } = useT();
+  const message = score === 100 ? t('resultPerfect') : score >= 70 ? t('resultGood') : t('resultRetry');
 
   return (
     <div className="flex flex-col gap-5">
@@ -27,7 +25,7 @@ export function QuizResultSummary({ score, bestScore, correctCount, total, onRet
         </p>
         <p className="mt-2 font-sans text-[15px] text-text-secondary">{message}</p>
         {bestScore !== undefined && bestScore > score && (
-          <p className="mt-1 font-sans text-sm text-text-muted">Your best is {bestScore}%.</p>
+          <p className="mt-1 font-sans text-sm text-text-muted">{t('yourBest', { score: bestScore })}</p>
         )}
       </div>
 
@@ -36,14 +34,14 @@ export function QuizResultSummary({ score, bestScore, correctCount, total, onRet
           onClick={onRetry}
           className="rounded-btn border border-border-subtle bg-bg-card px-4 py-2.5 font-sans text-sm font-medium text-text-primary hover:border-accent/60"
         >
-          Try again
+          {t('tryAgain')}
         </button>
         {next && (
           <Link
             to={next.href}
             className="rounded-btn bg-accent px-4 py-2.5 text-center font-sans text-sm font-medium text-bg-primary hover:bg-accent/90"
           >
-            Next: {next.number} {next.title}
+            {t('nextChapter', { number: next.number, title: localizedTopicTitle(next.file, next.title, lang) })}
           </Link>
         )}
       </div>

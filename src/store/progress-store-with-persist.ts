@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { TopicProgress } from '@/types/content-schema-types';
+import type { Lang, TopicProgress } from '@/types/content-schema-types';
 
 // ── Global progress + UI state, persisted to localStorage ─────
 export type ViewMode = 'deep' | 'compact';
@@ -10,12 +10,14 @@ interface ProgressState {
   lastVisited: string | null; // topic id
   sidebarOpen: boolean; // mobile drawer
   viewMode: ViewMode; // deep chapter vs compact cheat-sheet
+  lang: Lang; // reading language (chapters fall back to English when untranslated)
 
   markRead: (topicId: string) => void;
   setQuizScore: (topicId: string, score: number) => void;
   setLastVisited: (topicId: string) => void;
   toggleSidebar: (open?: boolean) => void;
   setViewMode: (mode: ViewMode) => void;
+  setLang: (lang: Lang) => void;
 }
 
 const emptyProgress = (): TopicProgress => ({ read: false, quizAttempts: 0 });
@@ -27,6 +29,7 @@ export const useProgressStore = create<ProgressState>()(
       lastVisited: null,
       sidebarOpen: false,
       viewMode: 'deep',
+      lang: 'en',
 
       markRead: (topicId) =>
         set((state) => {
@@ -68,6 +71,7 @@ export const useProgressStore = create<ProgressState>()(
         set((state) => ({ sidebarOpen: open ?? !state.sidebarOpen })),
 
       setViewMode: (mode) => set({ viewMode: mode }),
+      setLang: (lang) => set({ lang }),
     }),
     { name: 'cs-hub-progress' },
   ),

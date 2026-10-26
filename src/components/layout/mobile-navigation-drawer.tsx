@@ -3,10 +3,12 @@ import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useProgressStore } from '@/store/progress-store-with-persist';
 import { SidebarNavigationTree } from './sidebar-navigation-tree';
+import { useT } from '@/lib/ui-strings';
 
 export function MobileNavigationDrawer() {
   const sidebarOpen = useProgressStore((s) => s.sidebarOpen);
   const toggleSidebar = useProgressStore((s) => s.toggleSidebar);
+  const { t } = useT();
 
   // Close after navigating (a chapter was picked) — not on every tap inside,
   // so parts can be expanded without the drawer closing.
@@ -66,7 +68,7 @@ export function MobileNavigationDrawer() {
             <button
               onClick={() => toggleSidebar(false)}
               className="absolute right-2 top-3 rounded-btn p-2.5 text-text-muted transition-colors hover:bg-bg-panel hover:text-text-primary"
-              aria-label="Close contents"
+              aria-label={t('closeContents')}
             >
               <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
                 <path

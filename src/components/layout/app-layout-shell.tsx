@@ -1,10 +1,19 @@
+import { useEffect } from 'react';
 import { Link, Outlet, ScrollRestoration } from 'react-router-dom';
 import { useProgressStore } from '@/store/progress-store-with-persist';
+import { useT } from '@/lib/ui-strings';
+import { LanguageSwitch } from '@/components/ui/language-switch';
 import { SidebarNavigationTree } from './sidebar-navigation-tree';
 import { MobileNavigationDrawer } from './mobile-navigation-drawer';
 
 export function AppLayoutShell() {
   const toggleSidebar = useProgressStore((s) => s.toggleSidebar);
+  const { lang, t } = useT();
+
+  // Keep <html lang> in sync for screen readers, hyphenation and fonts
+  useEffect(() => {
+    document.documentElement.lang = lang;
+  }, [lang]);
 
   return (
     <div className="flex min-h-screen bg-bg-primary">
@@ -23,7 +32,7 @@ export function AppLayoutShell() {
           <button
             onClick={() => toggleSidebar()}
             className="rounded-btn p-2.5 text-text-secondary transition-colors hover:bg-bg-panel hover:text-text-primary"
-            aria-label="Open contents"
+            aria-label={t('openContents')}
           >
             <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
               <path
@@ -34,9 +43,12 @@ export function AppLayoutShell() {
               />
             </svg>
           </button>
-          <Link to="/" className="font-serif text-[17px] font-semibold text-text-primary">
+          <Link to="/" className="min-w-0 flex-1 truncate font-serif text-[17px] font-semibold text-text-primary">
             CS Learning Hub
           </Link>
+          <div className="pr-2">
+            <LanguageSwitch />
+          </div>
         </header>
 
         {/* Page content */}

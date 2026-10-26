@@ -95,7 +95,8 @@ if (!filters.length) {
   (function walk(dir) {
     for (const f of fs.readdirSync(dir)) {
       const p = path.join(dir, f);
-      if (fs.statSync(p).isDirectory()) walk(p);
+      // Only English phase folders; translation overlays (vi/…) are checked by validate-translations
+      if (fs.statSync(p).isDirectory()) { if (dir !== ROOT || f.startsWith('phase')) walk(p); }
       else if (f.endsWith('.json') && f !== 'curriculum.json') {
         const rel = path.relative(ROOT, p);
         if (!referenced.has(rel)) err(rel, 'file not referenced from curriculum.json');

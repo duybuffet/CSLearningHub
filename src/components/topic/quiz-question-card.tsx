@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { QuizQuestion } from '@/types/content-schema-types';
+import { useT } from '@/lib/ui-strings';
 
 interface QuizQuestionCardProps {
   question: QuizQuestion;
@@ -12,6 +13,7 @@ export function QuizQuestionCard({ question, questionNumber, total, onAnswered }
   const [selected, setSelected] = useState<number | null>(null);
   const answered = selected !== null;
   const isLast = questionNumber === total;
+  const { t } = useT();
 
   function optionClass(idx: number): string {
     const base =
@@ -38,9 +40,9 @@ export function QuizQuestionCard({ question, questionNumber, total, onAnswered }
           >
             <span className="w-4 shrink-0 text-text-muted">{String.fromCharCode(65 + idx)}</span>
             <span className="min-w-0 flex-1">{opt}</span>
-            {answered && idx === question.correct && <span className="shrink-0 text-success">Correct</span>}
+            {answered && idx === question.correct && <span className="shrink-0 text-success">{t('correct')}</span>}
             {answered && idx === selected && idx !== question.correct && (
-              <span className="shrink-0 text-danger">Your answer</span>
+              <span className="shrink-0 text-danger">{t('yourAnswer')}</span>
             )}
           </button>
         ))}
@@ -56,7 +58,7 @@ export function QuizQuestionCard({ question, questionNumber, total, onAnswered }
               onClick={() => onAnswered(selected === question.correct)}
               className="rounded-btn bg-accent px-5 py-2.5 font-sans text-sm font-medium text-bg-primary hover:bg-accent/90"
             >
-              {isLast ? 'See results' : 'Next question'}
+              {isLast ? t('seeResults') : t('nextQuestion')}
             </button>
           </div>
         </>

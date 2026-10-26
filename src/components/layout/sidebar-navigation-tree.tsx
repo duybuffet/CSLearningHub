@@ -4,10 +4,15 @@ import { getCurriculum, topicIdFor, topicsInPhase } from '@/lib/content-loader';
 import { overallCompletion } from '@/lib/completion-progress-helpers';
 import { useProgressStore } from '@/store/progress-store-with-persist';
 import type { CurriculumPhase } from '@/types/content-schema-types';
+import { useT } from '@/lib/ui-strings';
+import { localizedPhaseTitle, localizedTopicTitle } from '@/lib/translation-overlay';
+import { LanguageSwitch } from '@/components/ui/language-switch';
 
 function PartSection({ phase, partNumber, defaultOpen }: { phase: CurriculumPhase; partNumber: number; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const progress = useProgressStore((s) => s.progress);
+  const { lang } = useT();
+  const partTitle = localizedPhaseTitle(phase.id, phase.title, lang);
 
   return (
     <div>
@@ -17,14 +22,15 @@ function PartSection({ phase, partNumber, defaultOpen }: { phase: CurriculumPhas
         aria-expanded={open}
       >
         <span className="w-5 shrink-0 font-serif text-[15px] text-text-muted">{partNumber}</span>
-        <span className="flex-1 truncate font-medium" title={phase.title}>
-          {phase.title}
+        <span className="flex-1 truncate font-medium" title={partTitle}>
+          {partTitle}
         </span>
       </button>
 
       {open && (
         <ol className="mb-2 mt-0.5">
           {topicsInPhase(phase.id).map((c) => {
+            const title = localizedTopicTitle(c.file, c.title, lang);
             const isRead = progress[topicIdFor(c.phaseId, c.slug)]?.read ?? false;
             return (
               <li key={c.slug}>
@@ -40,8 +46,8 @@ function PartSection({ phase, partNumber, defaultOpen }: { phase: CurriculumPhas
                   }
                 >
                   <span className="w-7 shrink-0 tabular-nums text-text-muted">{c.number}</span>
-                  <span className="flex-1 truncate" title={c.title}>
-                    {c.title}
+                  <span className="flex-1 truncate" title={title}>
+                    {title}
                   </span>
                   {isRead && <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-marker" aria-label="Read" />}
                 </NavLink>
@@ -58,15 +64,20 @@ export function SidebarNavigationTree() {
   const curriculum = getCurriculum();
   const progress = useProgressStore((s) => s.progress);
   const { pct, read, total } = overallCompletion(curriculum, progress);
+  const { t } = useT();
   // Expand the part being read (fallback: first part on the home page)
   const { phaseId } = useParams<{ phaseId?: string }>();
 
   return (
-    <nav className="flex h-full flex-col font-sans" aria-label="Contents">
-      <div className="px-5 pb-4 pr-12 pt-5">
-        <Link to="/" className="font-serif text-[19px] font-semibold text-text-primary hover:text-accent">
+    <nav className="flex h-full flex-col font-sans" aria-label={t('contents')}>
+      <div className="flex items-center gap-3 px-5 pb-4 pr-12 pt-5 md:pr-5">
+        <Link to="/" className="min-w-0 flex-1 truncate font-serif text-[19px] font-semibold text-text-primary hover:text-accent">
           CS Learning Hub
         </Link>
+        {/* Desktop only — phones have the switch in the top bar */}
+        <div className="hidden md:block">
+          <LanguageSwitch />
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
@@ -85,7 +96,7 @@ export function SidebarNavigationTree() {
           <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
         </div>
         <p className="mt-2 text-xs text-text-muted">
-          {read} of {total} chapters read
+          {t('chaptersRead', { read, total })}
         </p>
       </div>
     </nav>

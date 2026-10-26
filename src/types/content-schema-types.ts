@@ -105,3 +105,32 @@ export interface TopicProgress {
   quizAttempts: number;
   lastVisited?: string; // ISO date
 }
+
+// ── Translation overlays (src/content/<lang>/…) ───────────────
+// Only reader-facing text; code, diagrams and quiz answers come from English.
+export type Lang = 'en' | 'vi';
+
+export interface OverlaySection {
+  type: SectionType;
+  title?: string;
+  content?: string;
+  explanation?: string;
+  caption?: string;
+  label?: string;
+  items?: string[];
+}
+
+export interface TopicOverlay {
+  sourceHash: string;
+  title: string;
+  tagline: string;
+  sections: OverlaySection[];
+  quiz: { id: string; question: string; options: string[]; explanation: string }[];
+  visualizerCaption?: string;
+}
+
+export interface CurriculumTitleOverlay {
+  phases: Record<string, { title: string }>;
+  /** keyed by curriculum `file` path */
+  topics: Record<string, string>;
+}

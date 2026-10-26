@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { HighlighterCore } from 'shiki/core';
+import { useT } from '@/lib/ui-strings';
 
 // Lazy singleton highlighter — fine-grained bundle with only the languages the
 // content actually uses (keeps the PWA precache small) and the JS regex engine
@@ -57,6 +58,7 @@ export function SyntaxHighlightedCodeBlock({
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { t } = useT();
 
   useEffect(() => {
     let cancelled = false;
@@ -100,9 +102,9 @@ export function SyntaxHighlightedCodeBlock({
           opacity-100 [@media(hover:hover)]:opacity-0 group-hover:opacity-100 focus-visible:opacity-100
           transition-opacity duration-150 hover:text-text-primary
         "
-        aria-label="Copy code"
+        aria-label={t('copyCode')}
       >
-        {copied ? 'Copied' : 'Copy'}
+        {copied ? t('copied') : t('copy')}
       </button>
 
       {html ? (

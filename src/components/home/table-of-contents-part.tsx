@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom';
 import type { CurriculumPhase, TopicProgress } from '@/types/content-schema-types';
 import { topicIdFor, topicsInPhase } from '@/lib/content-loader';
+import { localizedPhaseTitle, localizedTopicTitle } from '@/lib/translation-overlay';
+import { useT } from '@/lib/ui-strings';
 
 interface TableOfContentsPartProps {
   phase: CurriculumPhase;
@@ -16,6 +18,7 @@ export function TableOfContentsPart({ phase, partNumber, progress, open, onToggl
   const chapters = topicsInPhase(phase.id);
   const readCount = chapters.filter((c) => progress[topicIdFor(c.phaseId, c.slug)]?.read).length;
   const listId = `part-${phase.id}`;
+  const { lang, t } = useT();
 
   return (
     <section className="border-t border-border-subtle">
@@ -27,10 +30,10 @@ export function TableOfContentsPart({ phase, partNumber, progress, open, onToggl
       >
         <span className="w-7 shrink-0 font-serif text-[20px] leading-none text-text-muted sm:text-[22px]">{partNumber}</span>
         <span className="min-w-0 flex-1 font-serif text-[19px] leading-tight text-text-primary sm:text-[21px] group-hover:text-accent">
-          {phase.title}
+          {localizedPhaseTitle(phase.id, phase.title, lang)}
         </span>
         <span className="shrink-0 font-sans text-sm tabular-nums text-text-muted">
-          {readCount > 0 ? `${readCount} of ${chapters.length}` : `${chapters.length} chapters`}
+          {readCount > 0 ? t('partRead', { read: readCount, n: chapters.length }) : t('partChapters', { n: chapters.length })}
         </span>
         <svg
           width="14"
@@ -58,11 +61,11 @@ export function TableOfContentsPart({ phase, partNumber, progress, open, onToggl
                           : undefined
                       }
                     >
-                      {c.title}
+                      {localizedTopicTitle(c.file, c.title, lang)}
                     </span>
                   </span>
                   {p?.quizScore !== undefined && (
-                    <span className="shrink-0 font-sans text-xs tabular-nums text-text-muted" title="Best quiz score">
+                    <span className="shrink-0 font-sans text-xs tabular-nums text-text-muted" title={t('bestQuizScore')}>
                       {p.quizScore}%
                     </span>
                   )}
