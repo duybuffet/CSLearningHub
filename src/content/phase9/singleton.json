@@ -13,7 +13,7 @@
     },
     {
       "type": "diagram",
-      "mermaid": "classDiagram\n    class Singleton {\n        -instance: Singleton\n        -constructor()\n        +getInstance() Singleton\n        +someOperation() void\n    }\n    class ClientA {\n        +run() void\n    }\n    class ClientB {\n        +run() void\n    }\n    ClientA --> Singleton : \"getInstance()\"\n    ClientB --> Singleton : \"getInstance()\"\n    note for Singleton \"Private constructor\\nStatic instance cache\\nLazy init on first call\"",
+      "mermaid": "classDiagram\n    class Singleton {\n        -instance$ : Singleton\n        -constructor()\n        +getInstance()$ Singleton\n        +someOperation() void\n    }\n    class ClientA {\n        +run() void\n    }\n    class ClientB {\n        +run() void\n    }\n    ClientA --> Singleton : \"getInstance()\"\n    ClientB --> Singleton : \"getInstance()\"\n    note for Singleton \"Private constructor<br/>Static instance cache<br/>Lazy init on first call\"",
       "caption": "The Singleton class diagram: both ClientA and ClientB call `getInstance()` and always receive the identical object. The private constructor prevents `new Singleton()` from outside, removing any other creation path."
     },
     {
@@ -28,30 +28,35 @@
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant A as \"ClientA\"\n    participant S as \"Singleton\"\n    participant B as \"ClientB\"\n    A->>S: getInstance()\n    Note over S: \"instance is null\\ncreate new Singleton()\"\n    S-->>A: \"return instance ref#1\"\n    B->>S: getInstance()\n    Note over S: \"instance exists\\nskip creation\"\n    S-->>B: \"return instance ref#1\"\n    Note over A,B: \"A and B hold the SAME reference\"",
+      "mermaid": "sequenceDiagram\n    participant A as \"ClientA\"\n    participant S as \"Singleton\"\n    participant B as \"ClientB\"\n    A->>S: getInstance()\n    Note over S: \"instance is null<br/>create new Singleton()\"\n    S-->>A: \"return instance ref#1\"\n    B->>S: getInstance()\n    Note over S: \"instance exists<br/>skip creation\"\n    S-->>B: \"return instance ref#1\"\n    Note over A,B: \"A and B hold the SAME reference\"",
       "caption": "Sequence view: the first call triggers construction; all subsequent calls short-circuit and return the cached reference. Identity check `a === b` returns true."
     },
     {
       "type": "explanation",
       "title": "Lazy vs. Eager Initialization",
-      "content": "The two creation strategies differ in *when* the single instance is constructed.\n\n**Lazy initialization** defers construction until the first call to `getInstance()`. The static field is `null` at class definition time. When `getInstance()` is first called, it detects the null, constructs the object, stores it, and returns it. All subsequent calls skip construction.\n\n*Advantages:* The instance is never created if the code path that needs it is never reached in a given run. For an expensive resource — a connection pool, a compiled regex library, a full configuration parse — this matters. It also keeps startup time predictable: expensive work happens on demand, not at module load.\n\n*Disadvantages:* There is a brief null-check on every call. In multi-threaded environments (Java, C++), two threads can simultaneously pass the null check and both construct an instance — the classic *double-checked locking* problem. JavaScript's single-threaded event loop makes this impossible on the main thread, but Node.js Worker threads each have their own module registry and own call stack, so they bypass the issue differently (see thread safety below).\n\n**Eager initialization** constructs the instance at class-load time (or at module evaluation time). A module-level statement `const instance = new DatabasePool()` runs when the module is first imported, before any `getInstance()` call.\n\n*Advantages:* Simpler — no null-check, no race condition, no lazy-related bugs. If the resource is always needed, there is no benefit to deferring.\n\n*Disadvantages:* Incurs the construction cost even if the singleton is never used. In serverless functions that are cold-started, eager initialization of heavy resources adds to cold-start latency for every invocation — even ones that do not need that resource.\n\n**Practical rule for JavaScript:** Use module-level eager initialization (the idiomatic `export default new MyService()`) unless you have a specific, measured reason for lazy initialization. Lazy class-based Singletons add boilerplate without benefit in most JS scenarios."
+      "content": "The two creation strategies differ in *when* the single instance is constructed.\n\n**Lazy initialization** defers construction until the first call to `getInstance()`. The static field is `null` at class definition time. When `getInstance()` is first called, it detects the null, constructs the object, stores it, and returns it. All subsequent calls skip construction.\n\n*Advantages:* The instance is never created if the code path that needs it is never reached in a given run. For an expensive resource — a connection pool, a compiled regex library, a full configuration parse — this matters. It also keeps startup time predictable: expensive work happens on demand, not at module load.\n\n*Disadvantages:* There is a brief null-check on every call. In multi-threaded environments (Java, C++), two threads can simultaneously pass the null check and both construct an instance — the classic check-then-act race, which languages like Java solve with `synchronized`, a static holder class, or *double-checked locking* (correct in Java only with a `volatile` field since Java 5). JavaScript's single-threaded event loop makes this race impossible on the main thread; Node.js Worker threads do not race either, because each has its own module registry and therefore its own instance (see thread safety below).\n\n**Eager initialization** constructs the instance at class-load time (or at module evaluation time). A module-level statement `const instance = new DatabasePool()` runs when the module is first imported, before any `getInstance()` call.\n\n*Advantages:* Simpler — no null-check, no race condition, no lazy-related bugs. If the resource is always needed, there is no benefit to deferring.\n\n*Disadvantages:* Incurs the construction cost even if the singleton is never used. In serverless functions that are cold-started, eager initialization of heavy resources adds to the latency of every cold start — even for invocations that never touch that resource.\n\n**Practical rule for JavaScript:** Use module-level eager initialization (the idiomatic `export default new MyService()`) unless you have a specific, measured reason for lazy initialization. Lazy class-based Singletons add boilerplate without benefit in most JS scenarios."
     },
     {
       "type": "code_example",
       "language": "javascript",
       "label": "Example",
       "code": "// ── BEFORE: naive approach — multiple instances, diverging state ──\nclass Logger {\n  constructor() {\n    this._logs = [];\n  }\n  log(msg) { this._logs.push({ ts: Date.now(), msg }); }\n  dump() { return this._logs; }\n}\n\nconst loggerInModuleA = new Logger();\nconst loggerInModuleB = new Logger();\n\nloggerInModuleA.log('App started');\nloggerInModuleB.log('User logged in');\n\n// Monitoring reads from whichever instance it has:\nconsole.log(loggerInModuleA.dump().length); // 1 — only sees its own log\nconsole.log(loggerInModuleB.dump().length); // 1 — different buffer!\n// They are completely isolated. State is split across two objects.\n\n\n// ── AFTER: class-based Singleton — shared state, one instance ────\nclass SingletonLogger {\n  static #instance = null;\n\n  #logs = [];\n\n  constructor() {\n    if (SingletonLogger.#instance) {\n      throw new Error('Use SingletonLogger.getInstance() — do not call new directly');\n    }\n    SingletonLogger.#instance = this;\n  }\n\n  static getInstance() {\n    if (!SingletonLogger.#instance) {\n      new SingletonLogger(); // constructor stores the instance\n    }\n    return SingletonLogger.#instance;\n  }\n\n  log(msg)   { this.#logs.push({ ts: Date.now(), msg }); }\n  dump()     { return [...this.#logs]; }\n  get count(){ return this.#logs.length; }\n}\n\nconst logA = SingletonLogger.getInstance();\nconst logB = SingletonLogger.getInstance();\n\nconsole.log(logA === logB); // true — exact same reference\n\nlogA.log('App started');\nlogB.log('User logged in');  // writing through a different reference...\n\nconsole.log(logA.dump());   // [{msg:'App started',...},{msg:'User logged in',...}]\nconsole.log(logA.count);    // 2 — both writes land in one buffer\nconsole.log(logB.count);    // 2 — same object, same count\n\n// Attempting to bypass getInstance:\ntry {\n  const rogue = new SingletonLogger(); // throws!\n} catch (e) {\n  console.log(e.message); // 'Use SingletonLogger.getInstance()...'\n}",
-      "explanation": "The before/after comparison makes the problem concrete. The `#instance` ES2022 private static field is truly inaccessible from outside the class — unlike older patterns using a WeakRef or a module-scoped variable. The constructor both creates and stores the instance in one step, so `getInstance()` only needs to detect whether `#instance` is null."
+      "explanation": "The before/after comparison makes the problem concrete. The `#instance` ES2022 private static field is truly inaccessible from outside the class — unlike the older `_instance` underscore convention, which anyone can overwrite. The constructor both creates and stores the instance in one step, so `getInstance()` only needs to detect whether `#instance` is null.\n\nCaveat: JavaScript has no private constructors. The guard only rejects the *second* `new`; a caller who writes `new SingletonLogger()` before anyone calls `getInstance()` succeeds (and simply becomes the instance). TypeScript's `private constructor()` blocks outside `new` at compile time only — the emitted JavaScript is still callable."
     },
     {
       "type": "explanation",
       "title": "The JavaScript Module Singleton: The Idiomatic Alternative",
-      "content": "JavaScript has a built-in singleton mechanism that requires zero boilerplate: **the module system**. In Node.js (CommonJS and ESM) and in bundlers like webpack and Vite, a module is evaluated exactly once, and its exports are cached. Every subsequent import of the same module receives the cached export — the exact same object reference.\n\nThis means that writing:\n\n```js\n// db-pool.js\nimport { Pool } from 'pg';\nconst pool = new Pool({ max: 5, connectionString: process.env.DATABASE_URL });\nexport default pool;\n```\n\n...gives you a fully functioning Singleton with no `getInstance()`, no static field, no constructor guard. Every file that does `import pool from './db-pool.js'` gets the same `Pool` instance. The module runtime enforces the singleton guarantee.\n\n**When to use the module singleton:**\n- The instance is always needed (eager construction is acceptable)\n- The instance does not need to be subclassed or swapped at runtime\n- You want minimal boilerplate and maximum clarity\n\n**When to use the class-based Singleton instead:**\n- The resource is expensive and may never be needed (true lazy initialization)\n- You need to support subclassing (a Singleton class can be extended, though this is tricky)\n- You need a mechanism to reset or replace the instance in tests without mocking the module system\n- The singleton must be created with runtime parameters not available at module load time\n\n**Object-literal singleton:** For pure value containers — configuration constants, utility collections — an exported frozen object literal is the simplest approach of all:\n\n```js\n// config.js\nexport default Object.freeze({\n  apiUrl:  process.env.API_URL  ?? 'http://localhost:3000',\n  timeout: Number(process.env.TIMEOUT ?? 5000),\n  env:     process.env.NODE_ENV ?? 'development',\n});\n```\n\n`Object.freeze` prevents accidental mutation. Any attempt to assign a property in strict mode throws a `TypeError`; in sloppy mode it silently fails. For configuration this is exactly the right behaviour — configuration should be read-only after initialization."
+      "content": "JavaScript has a built-in singleton mechanism that requires zero boilerplate: **the module system**. In Node.js (CommonJS and ESM) and in bundlers like webpack and Vite, a module is evaluated once per resolved path, and its exports are cached. Every subsequent import of the same module receives the cached export — the exact same object reference.\n\nThis means that writing:\n\n```js\n// db-pool.js\nimport { Pool } from 'pg';\nconst pool = new Pool({ max: 5, connectionString: process.env.DATABASE_URL });\nexport default pool;\n```\n\n...gives you a fully functioning Singleton with no `getInstance()`, no static field, no constructor guard. Every file that does `import pool from './db-pool.js'` gets the same `Pool` instance. The module runtime enforces the singleton guarantee.\n\n**When to use the module singleton:**\n- The instance is always needed (eager construction is acceptable)\n- The instance does not need to be subclassed or swapped at runtime\n- You want minimal boilerplate and maximum clarity\n\n**When to use the class-based Singleton instead:**\n- The resource is expensive and may never be needed (true lazy initialization)\n- You need to support subclassing (a Singleton class can be extended, though this is tricky)\n- You need a mechanism to reset or replace the instance in tests without mocking the module system\n- The singleton must be created with runtime parameters not available at module load time\n\n**Object-literal singleton:** For pure value containers — configuration constants, utility collections — an exported frozen object literal is the simplest approach of all:\n\n```js\n// config.js\nexport default Object.freeze({\n  apiUrl:  process.env.API_URL  ?? 'http://localhost:3000',\n  timeout: Number(process.env.TIMEOUT ?? 5000),\n  env:     process.env.NODE_ENV ?? 'development',\n});\n```\n\n`Object.freeze` prevents accidental mutation (it is shallow — nested objects stay mutable unless frozen too). Any attempt to assign a property in strict mode throws a `TypeError`; in sloppy mode it silently fails. For configuration this is exactly the right behaviour — configuration should be read-only after initialization."
     },
     {
       "type": "diagram",
       "mermaid": "flowchart TD\n    A[\"import db-pool.js\"] --> B{\"Module cached?\"}  \n    B -->|\"No (first import)\"| C[\"Evaluate module\\nnew Pool(...) runs\"]\n    C --> D[\"Cache the export\"]\n    D --> E[\"Return pool ref\"]\n    B -->|\"Yes (subsequent)\"| F[\"Return cached export\"]\n    E --> G[\"Caller A gets pool\"]\n    F --> H[\"Caller B gets pool\"]\n    G --> I[\"pool A === pool B → true\"]",
       "caption": "Node's module system is itself a singleton registry. Modules are evaluated once; all importers share the cached export — zero boilerplate needed."
+    },
+    {
+      "type": "callout",
+      "variant": "warning",
+      "content": "**Module singletons are per *resolved file*, not per package name.** Node caches modules by resolved path, so anything that loads the same code from two paths gets two \"singletons\":\n- Two copies of a package in `node_modules` (e.g. `lib@1` nested under one dependency, `lib@2` at the root) — the classic cause of \"two copies of React\" invalid-hook errors.\n- The *dual package hazard*: one dependency `require()`s the CommonJS build while another `import`s the ESM build of the same package — two separate module instances.\n- Different specifiers that resolve to different files, or a symlinked package in a monorepo resolved via two real paths.\n\nCheck with `npm ls <pkg>`, dedupe, or keep the shared state on `globalThis` behind a `Symbol.for('my-lib.state')` key when it truly must be process-wide."
     },
     {
       "type": "explanation",
@@ -67,8 +72,8 @@
       "type": "code_example",
       "language": "javascript",
       "label": "Example",
-      "code": "// ── Module singleton: Prisma client (real-world Node.js pattern) ─\n// prisma.js — evaluated once by Node's module system\nimport { PrismaClient } from '@prisma/client';\n\n// Singleton: created once at module evaluation time\nconst prisma = new PrismaClient({\n  log: process.env.NODE_ENV === 'development' ? ['query'] : [],\n});\n\n// In development with hot-reload (Next.js, ts-node-dev),\n// the module system re-evaluates on each reload, creating a new client\n// and exceeding the DB connection limit. The standard fix:\nif (process.env.NODE_ENV !== 'production') {\n  // Attach to global (not re-evaluated on hot reload)\n  globalThis.__prisma ??= prisma;\n}\n\nexport default process.env.NODE_ENV !== 'production'\n  ? globalThis.__prisma\n  : prisma;\n\n\n// ── Lazy class-based Singleton: config with runtime params ───────\nclass AppConfig {\n  static #instance = null;\n\n  #settings;\n\n  constructor(overrides = {}) {\n    if (AppConfig.#instance) {\n      throw new Error('AppConfig already initialised — use AppConfig.getInstance()');\n    }\n    this.#settings = {\n      apiUrl:      process.env.API_URL ?? 'http://localhost:3000',\n      timeout:     Number(process.env.TIMEOUT ?? 5000),\n      maxRetries:  3,\n      ...overrides,   // allow test-time overrides\n    };\n    Object.freeze(this.#settings);\n    AppConfig.#instance = this;\n  }\n\n  static getInstance(overrides) {\n    if (!AppConfig.#instance) {\n      new AppConfig(overrides);\n    }\n    return AppConfig.#instance;\n  }\n\n  get(key) { return this.#settings[key]; }\n\n  // Escape hatch for testing — resets the singleton\n  static _resetForTests() {\n    AppConfig.#instance = null;\n  }\n}\n\n// First call — initialise with overrides\nconst cfg1 = AppConfig.getInstance({ timeout: 1000 });\n\n// Subsequent calls — overrides argument is ignored (instance exists)\nconst cfg2 = AppConfig.getInstance({ timeout: 9999 });\n\nconsole.log(cfg1 === cfg2);        // true\nconsole.log(cfg1.get('timeout'));  // 1000 — first call's overrides win\n\n// In Jest tests:\n// AppConfig._resetForTests();\n// const testCfg = AppConfig.getInstance({ apiUrl: 'http://mock-server' });",
-      "explanation": "The Prisma pattern is production-proven: in hot-reload environments, modules re-evaluate and the naive singleton breaks by creating too many connections. Attaching to `globalThis` sidesteps re-evaluation. The `AppConfig` lazy class shows how to expose an `_resetForTests()` escape hatch — a necessary concession when using class-based Singletons that need to be isolated across test cases."
+      "code": "// ── Module singleton: Prisma client (real-world Node.js pattern) ─\n// prisma.js — evaluated once by Node's module system\nimport { PrismaClient } from '@prisma/client';\n\n// In development with hot-reload (Next.js, nodemon-style reloaders),\n// this module is re-evaluated on each reload. A plain\n// `const prisma = new PrismaClient()` would create a NEW client (and\n// connection pool) every time and exhaust the DB connection limit.\n// The standard fix: reuse a client cached on globalThis, which survives\n// module re-evaluation. Check the cache BEFORE constructing.\nconst prisma = globalThis.__prisma ?? new PrismaClient({\n  log: process.env.NODE_ENV === 'development' ? ['query'] : [],\n});\n\nif (process.env.NODE_ENV !== 'production') {\n  globalThis.__prisma = prisma; // cache only in dev; prod has no hot reload\n}\n\nexport default prisma;\n\n\n// ── Lazy class-based Singleton: config with runtime params ───────\nclass AppConfig {\n  static #instance = null;\n\n  #settings;\n\n  constructor(overrides = {}) {\n    if (AppConfig.#instance) {\n      throw new Error('AppConfig already initialised — use AppConfig.getInstance()');\n    }\n    this.#settings = {\n      apiUrl:      process.env.API_URL ?? 'http://localhost:3000',\n      timeout:     Number(process.env.TIMEOUT ?? 5000),\n      maxRetries:  3,\n      ...overrides,   // allow test-time overrides\n    };\n    Object.freeze(this.#settings);\n    AppConfig.#instance = this;\n  }\n\n  static getInstance(overrides) {\n    if (!AppConfig.#instance) {\n      new AppConfig(overrides);\n    }\n    return AppConfig.#instance;\n  }\n\n  get(key) { return this.#settings[key]; }\n\n  // Escape hatch for testing — resets the singleton\n  static _resetForTests() {\n    AppConfig.#instance = null;\n  }\n}\n\n// First call — initialise with overrides\nconst cfg1 = AppConfig.getInstance({ timeout: 1000 });\n\n// Subsequent calls — overrides argument is ignored (instance exists)\nconst cfg2 = AppConfig.getInstance({ timeout: 9999 });\n\nconsole.log(cfg1 === cfg2);        // true\nconsole.log(cfg1.get('timeout'));  // 1000 — first call's overrides win\n\n// In Jest tests:\n// AppConfig._resetForTests();\n// const testCfg = AppConfig.getInstance({ apiUrl: 'http://mock-server' });",
+      "explanation": "The Prisma pattern is production-proven: in hot-reload environments, modules re-evaluate and the naive singleton breaks by creating too many connections. Reading `globalThis.__prisma` *before* calling `new PrismaClient()` sidesteps re-evaluation — the order matters: constructing first and caching second would still build a fresh client on every reload. The `AppConfig` lazy class shows how to expose an `_resetForTests()` escape hatch — a necessary concession when using class-based Singletons that need to be isolated across test cases."
     },
     {
       "type": "explanation",
@@ -78,7 +83,7 @@
     {
       "type": "explanation",
       "title": "The Costs of Singleton: Global State, Testing, and Coupling",
-      "content": "Singleton is frequently cited as an anti-pattern, and the criticism is valid enough to take seriously. Understanding *why* helps you use it well.\n\n**1. Hidden coupling and implicit dependencies.** When module A calls `Database.getInstance()` deep inside a method, the dependency is invisible from A's public API. A consumer of A cannot tell from the type signature that A needs a database. This makes A harder to understand, harder to compose, and impossible to reuse in a context where the database configuration differs.\n\nDependency injection (DI) solves this by making dependencies explicit: `class OrderService { constructor(private db: DatabasePool) {} }`. Now every reader of `OrderService` immediately sees the dependency. Testing becomes simple: pass a mock `db`. Singletons make DI optional and then tempt you to skip it.\n\n**2. Test isolation.** The canonical problem: test A runs, the singleton acquires state. Test B runs, it inherits that state. Tests pass in isolation but fail in suite order — or, worse, tests pass locally but fail in CI where the suite order differs. The fix (resetting the singleton between tests) requires either exposing an internal reset method (breaking encapsulation) or using module mocking (`jest.resetModules()` + `jest.isolateModules()`).\n\nModule mocking in Jest requires re-requiring the module inside `jest.isolateModules()`. This is effective but adds ceremony and can mislead engineers into thinking they are testing the real singleton when they are testing a freshly mocked version.\n\n**3. Single Responsibility Principle (SRP) violation.** A Singleton class has two responsibilities: performing its domain logic AND managing its own lifecycle (ensuring uniqueness). These are orthogonal concerns. The class should not care how many instances exist; that is the concern of whoever wires the application together.\n\n**4. Multi-tenancy and scoped singletons.** The moment requirements evolve — 'we need one logger per HTTP request for distributed tracing', 'we need one cache per tenant in a multi-tenant SaaS' — a strict Singleton becomes the wrong shape. DI containers with scoped lifetimes (Angular's request-scoped providers, NestJS scoped injection) exist precisely because 'one instance' is too coarse-grained for many real systems.\n\n**When Singleton is the right answer despite the costs:**\n- The shared resource is stateless or append-only (no divergence is possible)\n- The resource is expensive and must genuinely be shared (connection pools)\n- The system is simple enough that DI infrastructure is overkill\n- You are using the module singleton, which is idiomatic and carries minimal extra coupling\n- The singleton is a thin facade over a system resource (logger, config) with a stable interface unlikely to need mocking"
+      "content": "Singleton is frequently cited as an anti-pattern, and the criticism is valid enough to take seriously. Understanding *why* helps you use it well.\n\n**1. Hidden coupling and implicit dependencies.** When module A calls `Database.getInstance()` deep inside a method, the dependency is invisible from A's public API. A consumer of A cannot tell from the type signature that A needs a database. This makes A harder to understand, harder to compose, and impossible to reuse in a context where the database configuration differs.\n\nDependency injection (DI) solves this by making dependencies explicit: `class OrderService { constructor(private db: DatabasePool) {} }`. Now every reader of `OrderService` immediately sees the dependency. Testing becomes simple: pass a mock `db`. Singletons make DI optional and then tempt you to skip it.\n\n**2. Test isolation.** The canonical problem: test A runs, the singleton acquires state. Test B runs, it inherits that state. Tests pass in isolation but fail in suite order — or, worse, tests pass locally but fail in CI where the suite order differs. The fix (resetting the singleton between tests) requires either exposing an internal reset method (breaking encapsulation) or using module mocking (`jest.resetModules()` + `jest.isolateModules()`).\n\nModule mocking in Jest requires re-requiring the module inside `jest.isolateModules()`. This is effective but adds ceremony, and each test then talks to a freshly evaluated copy of the module — not the instance other already-imported modules hold, which is a common source of confusing test failures.\n\n**3. Single Responsibility Principle (SRP) violation.** A Singleton class has two responsibilities: performing its domain logic AND managing its own lifecycle (ensuring uniqueness). These are orthogonal concerns. The class should not care how many instances exist; that is the concern of whoever wires the application together.\n\n**4. Multi-tenancy and scoped singletons.** The moment requirements evolve — 'we need one logger per HTTP request for distributed tracing', 'we need one cache per tenant in a multi-tenant SaaS' — a strict Singleton becomes the wrong shape. DI containers with scoped lifetimes (NestJS `Scope.REQUEST` providers, Angular's component-level providers in its hierarchical injector) exist precisely because 'one instance' is too coarse-grained for many real systems.\n\n**When Singleton is the right answer despite the costs:**\n- The shared resource is stateless or append-only (no divergence is possible)\n- The resource is expensive and must genuinely be shared (connection pools)\n- The system is simple enough that DI infrastructure is overkill\n- You are using the module singleton, which is idiomatic and carries minimal extra coupling\n- The singleton is a thin facade over a system resource (logger, config) with a stable interface unlikely to need mocking"
     },
     {
       "type": "diagram",
@@ -93,7 +98,7 @@
     {
       "type": "callout",
       "variant": "info",
-      "content": "**Gang of Four history:** Singleton is one of the 23 patterns in 'Design Patterns: Elements of Reusable Object-Oriented Software' (Gamma, Helm, Johnson, Vlissides, 1994). In the original book, written for C++ and Smalltalk, thread safety was a real concern and the double-checked locking pattern was proposed as the solution — though the GoF later acknowledged DCL has subtle issues on some memory models. JavaScript's event loop sidesteps all of this on the main thread. The pattern's intent has remained unchanged: 'Ensure a class only has one instance, and provide a global point of access to it.'"
+      "content": "**Gang of Four history:** Singleton is one of the 23 patterns in 'Design Patterns: Elements of Reusable Object-Oriented Software' (Gamma, Helm, Johnson, Vlissides, 1994). The original book (examples in C++ and Smalltalk) barely discusses threads; double-checked locking was published separately (Schmidt & Harrison, 1996) and was later shown to be broken under the pre-Java-5 memory model unless the field is `volatile`. JavaScript's event loop sidesteps all of this on the main thread. The pattern's intent has remained unchanged: 'Ensure a class only has one instance, and provide a global point of access to it.'"
     },
     {
       "type": "callout",
@@ -107,13 +112,17 @@
         "**Lazy vs. eager** — lazy initialization (class-based, null-check in `getInstance()`) defers construction until first use; eager initialization (module-level `const x = new X()`) runs at import time. In JavaScript, prefer eager module singletons unless you have a specific reason for laziness.",
         "**The JS module system is a free singleton** — `export default new MyService()` gives you singleton semantics guaranteed by the runtime's module cache, with zero boilerplate. This is the idiomatic JavaScript approach.",
         "**Worker threads break module singletons** — each Node.js Worker thread has its own module registry and creates its own instance of every module. Cross-worker shared state requires `SharedArrayBuffer` + `Atomics` or message passing through the main thread.",
+        "**Module cache is per resolved path** — duplicate package copies in `node_modules`, or the same package loaded as both CJS and ESM, silently create two \"singletons\". Dedupe or key shared state on `globalThis` with `Symbol.for(...)`.",
         "**Global state is the real cost** — Singletons are global variables with extra ceremony. They couple callers invisibly, make testing require reset hooks or module mocking, and violate SRP by mixing domain logic with lifecycle management.",
         "**Prefer DI for testable singletons** — a singleton registered in a DI container (NestJS `@Injectable()`, Angular `providedIn: 'root'`) gives you singleton semantics with a swappable interface in tests — the best of both approaches.",
         "**Real frameworks use it everywhere** — Prisma, Redux, Angular services, React Query, Winston, and the Node.js `process` object are all singletons. Recognising the pattern in production code removes magic and aids debugging."
       ]
     }
   ],
-  "visualizer": { "type": "none", "caption": "" },
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
   "quiz": [
     {
       "id": "q1",
@@ -121,11 +130,11 @@
       "type": "mcq",
       "options": [
         "The instance is created at application startup, never lazily.",
-        "A class has exactly one instance and provides a global access point to it.",
+        "The object is immutable and cannot be mutated after creation.",
         "All methods on the class are static and stateless.",
-        "The object is immutable and cannot be mutated after creation."
+        "A class has exactly one instance and provides a global access point to it."
       ],
-      "correct": 1,
+      "correct": 3,
       "explanation": "Singleton's core guarantee is exactly-one-instance plus a global access point (getInstance()). Neither eager timing, nor static-only methods, nor immutability are inherent requirements of the pattern."
     },
     {
@@ -134,11 +143,11 @@
       "type": "mcq",
       "options": [
         "Attach the instance to the `window` global object.",
-        "Export a pre-constructed instance from a module (`export default new MyService()`).",
         "Wrap the class constructor in a `try/catch` so it can only succeed once.",
+        "Export a pre-constructed instance from a module (`export default new MyService()`).",
         "Declare the class with `const` to prevent reassignment."
       ],
-      "correct": 1,
+      "correct": 2,
       "explanation": "Node's (and bundlers') module system caches modules after the first evaluation. Exporting a pre-constructed instance gives you a free Singleton — every importer receives the same object reference, enforced by the runtime."
     },
     {
@@ -146,12 +155,12 @@
       "question": "What is 'lazy initialization' in the context of the Singleton pattern?",
       "type": "mcq",
       "options": [
-        "The instance is created when the class file is loaded or imported.",
         "The instance is created only on the first call to `getInstance()`.",
+        "The instance is created when the class file is loaded or imported.",
         "The instance is recreated on every call for freshness.",
         "The class delays loading its dependencies until a method is called."
       ],
-      "correct": 1,
+      "correct": 0,
       "explanation": "Lazy initialization means the Singleton instance is not created until the first `getInstance()` call. This avoids resource usage if the singleton is never needed during a particular program run."
     },
     {
@@ -161,10 +170,10 @@
       "options": [
         "One — Worker threads share the main thread's module cache.",
         "Two — one for the main thread and one shared by all workers.",
-        "Three — each thread has its own module registry and creates its own instance.",
-        "Zero — modules cannot be imported inside Worker threads."
+        "Zero — modules cannot be imported inside Worker threads.",
+        "Three — each thread has its own module registry and creates its own instance."
       ],
-      "correct": 2,
+      "correct": 3,
       "explanation": "Each Node.js Worker thread has an independent module registry. Importing a module in a worker produces a fresh evaluation — a separate instance from the main thread's singleton and from each other worker's instance."
     },
     {
@@ -198,12 +207,12 @@
       "question": "Which SOLID principle does an overused Singleton most directly violate?",
       "type": "mcq",
       "options": [
-        "Open/Closed Principle — the class is closed to extension.",
         "Dependency Inversion Principle — callers depend on a concrete global rather than an injected abstraction.",
+        "Open/Closed Principle — the class is closed to extension.",
         "Interface Segregation Principle — the singleton interface is too broad.",
         "Liskov Substitution Principle — subclasses cannot be used in place of the singleton."
       ],
-      "correct": 1,
+      "correct": 0,
       "explanation": "Hard-coding `Singleton.getInstance()` inside a class makes it depend on a concrete global, not an abstraction injected from outside. This violates DIP and makes the class impossible to test with a substitute implementation."
     },
     {
@@ -211,12 +220,12 @@
       "question": "What does `Object.freeze(config)` add when applied to a module-level singleton configuration object?",
       "type": "mcq",
       "options": [
-        "It ensures the object is only created once across all imports.",
         "It prevents any consumer from accidentally mutating the shared configuration.",
+        "It ensures the object is only created once across all imports.",
         "It makes all property reads asynchronous for performance.",
         "It serialises the object to JSON for cross-thread sharing."
       ],
-      "correct": 1,
+      "correct": 0,
       "explanation": "`Object.freeze` makes an object's properties non-writable and non-configurable. Any accidental property assignment silently fails in sloppy mode or throws a `TypeError` in strict mode. For a shared configuration singleton this is a safety net against mutation bugs."
     },
     {
@@ -224,12 +233,12 @@
       "question": "When is the class-based `getInstance()` Singleton PREFERABLE over a module-level export singleton?",
       "type": "mcq",
       "options": [
-        "When the instance must be created lazily only if a runtime condition is met, to avoid up-front cost.",
-        "When the class needs to be imported with `require` instead of `import`.",
         "When you want to make the singleton immutable using `Object.freeze`.",
+        "When the class needs to be imported with `require` instead of `import`.",
+        "When the instance must be created lazily only if a runtime condition is met, to avoid up-front cost.",
         "When the singleton needs to be shared across Worker threads."
       ],
-      "correct": 0,
+      "correct": 2,
       "explanation": "Module-level exports are evaluated eagerly at import time. If construction is expensive and the singleton may never be needed (conditional code paths, optional features), a class-based lazy `getInstance()` avoids the up-front cost. Module singletons always pay construction cost at import."
     },
     {
@@ -238,11 +247,11 @@
       "type": "mcq",
       "options": [
         "Object-literal singleton — the service is a plain exported object.",
-        "Lazy class-based Singleton — Angular calls `getInstance()` internally.",
         "DI-container-managed singleton — the framework's root injector guarantees one instance and makes it swappable in tests.",
+        "Lazy class-based Singleton — Angular calls `getInstance()` internally.",
         "Worker-thread singleton — Angular runs services in a separate thread."
       ],
-      "correct": 2,
+      "correct": 1,
       "explanation": "Angular's root injector creates one instance of the service for the entire application and injects it wherever requested — singleton semantics. Crucially, tests can override it via `TestBed.configureTestingModule({ providers: [{ provide: MyService, useClass: MockService }] })`, making it testable — the advantage of a DI-managed singleton over a raw class-based one."
     }
   ]

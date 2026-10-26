@@ -1,0 +1,278 @@
+{
+  "id": "phase7_sql-queries-and-joins",
+  "title": "SQL Queries & Joins",
+  "phase": 7,
+  "week": 26,
+  "icon": "database",
+  "tagline": "Write SQL that is correct and fast: evaluation order, NULL logic, every join type, window functions, upserts and reading query plans.",
+  "readTime": "~25 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Almost every backend you will ever touch ends in a SQL query. ORMs, GraphQL resolvers, analytics dashboards and data pipelines all eventually emit `SELECT ... FROM ... JOIN ...` and hand it to a relational database. Engineers who can read and write that SQL fluently debug faster, ship fewer performance regressions, and get a lot more done in interviews and on call.\n\nSQL is **declarative**: you describe *what* result you want, and the database's **query planner** decides *how* to compute it: which index to use, which table to read first, which join algorithm to run. That split is the source of SQL's power and its surprises. The same query can take 2 ms or 20 seconds depending on indexes and statistics, and a query that looks right can quietly return wrong rows because of `NULL` semantics or a misplaced filter on an outer join.\n\nThis chapter works through one small dataset, customers and their orders, and builds up from the relational model to production concerns:\n- the core clauses and the **logical order** in which the database evaluates them,\n- `NULL` and **three-valued logic**, the source of many subtle bugs,\n- every join type, with the exact result tables,\n- aggregation, subqueries vs `EXISTS` vs joins, CTEs (including recursive ones) and **window functions**,\n- `INSERT ... ON CONFLICT` upserts,\n- reading `EXPLAIN` output and the three **join algorithms** behind it,\n- the two classic application-side failures: **N+1 queries** and **SQL injection**.\n\nAll SQL is PostgreSQL (16–18) and every result table shown was produced by running the query. Transactions, isolation and B-tree internals are covered in the ACID & Indexes chapter. This one is about writing the queries themselves."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"1. FROM + JOIN: build the working row set\"] --> B[\"2. WHERE: keep rows where the predicate is TRUE\"]\n  B --> C[\"3. GROUP BY: collapse rows into groups\"]\n  C --> D[\"4. HAVING: keep groups where the predicate is TRUE\"]\n  D --> E[\"5. SELECT: compute expressions, aggregates, window functions\"]\n  E --> F[\"6. DISTINCT: remove duplicate output rows\"]\n  F --> G[\"7. ORDER BY: sort, output aliases visible here\"]\n  G --> H[\"8. LIMIT / OFFSET: cut the sorted result\"]",
+      "caption": "Logical query processing order. You write SELECT first, but the database conceptually evaluates it fifth. That is why a SELECT alias cannot be used in WHERE but can be used in ORDER BY."
+    },
+    {
+      "type": "analogy",
+      "title": "The Very Literal Warehouse Clerk",
+      "content": "Imagine a warehouse clerk who follows your written request exactly and in a fixed order, regardless of the order you wrote it in.\n\nFirst they pull every box from the shelves you named (**FROM**), taping together boxes from different shelves when the labels match (**JOIN**). Then they throw away boxes that fail your condition (**WHERE**). Next they sort the survivors into piles (**GROUP BY**) and discard piles that are too small (**HAVING**). Only now do they write the summary sheet you asked for (**SELECT**), put it in order (**ORDER BY**) and hand you the first few lines (**LIMIT**).\n\nThe clerk is also strict about uncertainty. If a box has a blank label and you asked for \"boxes not labelled Hanoi\", the clerk will not guess. A blank label is *unknown*, not \"not Hanoi\", so the box is left out. That is SQL's `NULL`.\n\nFinally, the clerk has a foreman (the **query planner**) who is allowed to change *how* the work is done, using an index instead of walking every aisle or checking shelf B before shelf A, as long as the final sheet is identical. You control *what*; the foreman controls *how*. Your job is to write requests that are correct and that give the foreman good options."
+    },
+    {
+      "type": "explanation",
+      "title": "The Relational Model and Our Sample Dataset",
+      "content": "In the relational model (E. F. Codd, 1970) data lives in **relations**, which SQL calls tables. A relation is a set of **tuples** (rows), each with the same named, typed **attributes** (columns). A few consequences shape everything else:\n\n- **Rows have no inherent order.** A table is a set (strictly, SQL tables are multisets because duplicates are allowed). Without `ORDER BY`, the database may return rows in any order, and that order can change between runs.\n- **Rows are identified by values, not positions.** A **primary key** uniquely identifies a row. A **foreign key** in one table references a key in another, which is how relationships are expressed.\n- **Queries produce relations.** The output of a `SELECT` is itself a table, so queries compose: you can join a subquery, or feed one CTE into another.\n\nOur running dataset has two tables. `orders.customer_id` is a foreign key to `customers.id`. It is nullable, because order 104 was a guest checkout. Chen has no orders and no city.\n\n**customers**\n| id | name | city |\n|---|---|---|\n| 1 | Alice | Hanoi |\n| 2 | Bob | Saigon |\n| 3 | Chen | NULL |\n| 4 | Dana | Hanoi |\n\n**orders**\n| id | customer_id | amount | created_at |\n|---|---|---|---|\n| 101 | 1 | 50.00 | 2026-01-05 |\n| 102 | 1 | 30.00 | 2026-01-20 |\n| 103 | 2 | 120.00 | 2026-02-02 |\n| 104 | NULL | 15.00 | 2026-02-10 |\n| 105 | 4 | 80.00 | 2026-03-01 |\n\nThese few rows already contain every edge case a join can hit: a parent with several children (Alice), a parent with none (Chen), and a child with no parent (order 104)."
+    },
+    {
+      "type": "explanation",
+      "title": "SELECT, WHERE, ORDER BY, LIMIT and the Logical Processing Order",
+      "content": "The skeleton of a query:\n\n```sql\nSELECT name, upper(name) AS shout     -- which columns / expressions\nFROM customers                         -- which rows to start from\nWHERE city = 'Hanoi'                   -- row filter\nORDER BY shout DESC                    -- sort (alias allowed here)\nLIMIT 1;                               -- Dana | DANA\n```\n\nUseful predicates: `IN ('Hanoi', 'Hue')`, `BETWEEN 10 AND 50` (inclusive on both ends), `LIKE 'Al%'` (`ILIKE` for case-insensitive in PostgreSQL), `IS NULL`. `SELECT DISTINCT` removes duplicate output rows.\n\n**Logical processing order.** The database evaluates clauses in this order: `FROM`/`JOIN` → `WHERE` → `GROUP BY` → `HAVING` → `SELECT` → `DISTINCT` → `ORDER BY` → `LIMIT`/`OFFSET`. This explains several rules that otherwise look arbitrary:\n- `WHERE shout = 'DANA'` fails because `shout` is defined in `SELECT`, which runs later. Repeat the expression or wrap the query in a subquery or CTE.\n- `ORDER BY shout` works because sorting happens after `SELECT`.\n- `WHERE count(*) > 1` is illegal because aggregates don't exist until after grouping. That is what `HAVING` is for.\n- Window functions (`row_number() OVER ...`) are computed in the `SELECT` step, so you cannot filter on them in `WHERE` either. PostgreSQL has no `QUALIFY` clause, so you wrap the query instead.\n\nThis is the *logical* order that defines the result. The physical plan can differ: the planner pushes filters down into scans, uses an index to avoid sorting, or stops early once `LIMIT` is satisfied.\n\n**ORDER BY + LIMIT must be deterministic.** `ORDER BY created_at LIMIT 20` with duplicate timestamps can return different rows on each run, so pages overlap or skip rows. Add a unique tiebreaker: `ORDER BY created_at, id`.\n\n**OFFSET pagination gets slower the deeper you go.** `LIMIT 20 OFFSET 100000` still produces and throws away 100,000 rows. **Keyset (seek) pagination** remembers the last row seen and continues from it, using an index on `(created_at, id)`:\n\n```sql\nSELECT * FROM orders\nWHERE (created_at, id) > ($1, $2)   -- last row of the previous page\nORDER BY created_at, id\nLIMIT 20;\n```"
+    },
+    {
+      "type": "explanation",
+      "title": "NULL and Three-Valued Logic",
+      "content": "`NULL` means \"unknown or missing\", and it is not a value like `0` or `''`. Any comparison with `NULL` returns a third truth value, **UNKNOWN** (SQL represents it as a `NULL` boolean):\n\n| Expression | Result |\n|---|---|\n| `NULL = NULL` | NULL (unknown) |\n| `NULL <> 'Hanoi'` | NULL |\n| `NULL AND false` | false |\n| `NULL AND true` | NULL |\n| `NULL OR true` | true |\n| `NOT NULL` | NULL |\n\nThe crucial rule: **WHERE, JOIN ... ON and HAVING keep a row only when the predicate is TRUE.** Both FALSE and UNKNOWN reject it. (A `CHECK` constraint is the opposite: it passes unless the result is FALSE, so `NULL` slips through a `CHECK`.)\n\nConsequences on our data:\n- `WHERE city <> 'Hanoi'` returns only **Bob**. Chen's city is NULL, `NULL <> 'Hanoi'` is unknown, so Chen is dropped. If you meant \"not Hanoi, including unknown\", write `WHERE city IS DISTINCT FROM 'Hanoi'` (returns Bob and Chen) or `city <> 'Hanoi' OR city IS NULL`.\n- `WHERE city = NULL` never matches anything. Use `IS NULL` / `IS NOT NULL`.\n- **The `NOT IN` trap:** `SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders)` returns **zero rows**, even though Chen has no orders. The subquery contains NULL (order 104), so for Chen the test becomes `3 <> 1 AND 3 <> 2 AND 3 <> 4 AND 3 <> NULL`, which is `true AND ... AND unknown` = unknown. Use `NOT EXISTS`, which returns Chen correctly.\n\nAggregates have their own NULL rules:\n- `count(*)` counts rows, while `count(city)` skips NULLs. On customers: `count(*) = 4`, `count(city) = 3`, `count(DISTINCT city) = 2`.\n- `sum`, `avg`, `min` and `max` ignore NULLs, and over zero rows they return **NULL**, not 0. Wrap with `coalesce(sum(amount), 0)` when the application expects a number.\n- `GROUP BY city` puts all NULLs into **one** group, even though `NULL = NULL` is unknown.\n- PostgreSQL sorts NULLs as larger than any value: last in `ASC`, first in `DESC`. Override with `NULLS FIRST` / `NULLS LAST`.\n- A `UNIQUE` constraint allows many NULLs by default. PostgreSQL 15+ supports `UNIQUE NULLS NOT DISTINCT` to allow only one."
+    },
+    {
+      "type": "explanation",
+      "title": "The Join Family: INNER, LEFT, RIGHT, FULL and CROSS",
+      "content": "A join combines rows from two tables. Conceptually it starts from every pairing of rows (the Cartesian product) and keeps the pairs where the `ON` condition is TRUE. The join type decides what happens to rows that matched nothing.\n\n**INNER JOIN** (plain `JOIN`) keeps only matched pairs. Chen (no orders) and order 104 (no customer) both disappear:\n\n| name | order_id | amount |\n|---|---|---|\n| Alice | 101 | 50.00 |\n| Alice | 102 | 30.00 |\n| Bob | 103 | 120.00 |\n| Dana | 105 | 80.00 |\n\nNotice Alice appears **twice**. Joining a parent to a child table produces one row per child, which is the most common reason a `sum` comes out inflated: you joined two child tables at once and multiplied the rows.\n\n**LEFT [OUTER] JOIN** keeps every row of the left table. Where no right row matched, the right columns are NULL:\n\n| name | order_id |\n|---|---|\n| Alice | 101 |\n| Alice | 102 |\n| Bob | 103 |\n| Chen | NULL |\n| Dana | 105 |\n\n**RIGHT JOIN** is the mirror image: every order survives, and order 104 appears with `name = NULL` while Chen disappears. Any RIGHT JOIN can be rewritten as a LEFT JOIN with the tables swapped, and most teams use LEFT only, for readability.\n\n**FULL [OUTER] JOIN** keeps unmatched rows from **both** sides: the four matched rows, plus `Chen | NULL`, plus `NULL | 104`, for 6 rows. It is useful for reconciliation jobs (\"which records exist in A but not B, or B but not A\").\n\n**CROSS JOIN** has no condition and returns every combination: 4 customers × 5 orders = **20 rows**. It is useful on purpose (generating a calendar × product grid) and dangerous by accident (a forgotten join condition in old comma syntax `FROM a, b`).\n\n**Anti-join pattern:** `LEFT JOIN orders o ... WHERE o.id IS NULL` returns customers with no orders (Chen). Test a column that is NOT NULL in the right table, such as its primary key, so a NULL can only mean \"no match\".\n\n**ON vs WHERE in outer joins.** The `ON` condition decides *which rows match*. `WHERE` filters *after* the join. For INNER joins they are equivalent. For LEFT joins they are not:\n- `LEFT JOIN orders o ON o.customer_id = c.id AND o.amount > 60` keeps **all 4 customers** (Alice and Chen with NULL order).\n- `LEFT JOIN orders o ON o.customer_id = c.id WHERE o.amount > 60` returns **only Bob and Dana**, because the NULL-extended rows fail `NULL > 60`. The WHERE clause silently turned your LEFT JOIN into an INNER JOIN.\n\n**Self joins** join a table to itself under two aliases. This is the standard way to relate rows in the same table, such as employee → manager, or comparing each row to its predecessor. The code below joins `employees e` to `employees m` on `m.id = e.manager_id`, using LEFT so the CEO (no manager) stays."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  Q{\"Which rows must survive?\"}\n  Q -->|\"Only matched pairs\"| I[\"INNER JOIN\"]\n  Q -->|\"Every left row, matches if any\"| L[\"LEFT JOIN\"]\n  Q -->|\"Unmatched rows from both sides\"| F[\"FULL OUTER JOIN\"]\n  Q -->|\"Every combination\"| X[\"CROSS JOIN\"]\n  Q -->|\"Left rows that HAVE a match, no duplicates\"| S[\"EXISTS: semi-join\"]\n  Q -->|\"Left rows with NO match\"| A[\"NOT EXISTS: anti-join\"]\n  L --> R[\"RIGHT JOIN = LEFT JOIN with the tables swapped\"]",
+      "caption": "Choosing a join by asking which rows must survive. Semi-joins and anti-joins are written with EXISTS / NOT EXISTS and never duplicate left rows."
+    },
+    {
+      "type": "code_example",
+      "language": "sql",
+      "label": "Joins",
+      "code": "-- Sample dataset used throughout this chapter\nCREATE TABLE customers (\n  id   integer PRIMARY KEY,\n  name text NOT NULL,\n  city text                                     -- nullable: Chen has no city\n);\nCREATE TABLE orders (\n  id          integer PRIMARY KEY,\n  customer_id integer REFERENCES customers (id), -- NULL = guest checkout\n  amount      numeric(10,2) NOT NULL,\n  created_at  date NOT NULL\n);\nINSERT INTO customers VALUES\n  (1, 'Alice', 'Hanoi'), (2, 'Bob', 'Saigon'), (3, 'Chen', NULL), (4, 'Dana', 'Hanoi');\nINSERT INTO orders VALUES\n  (101, 1,     50.00, '2026-01-05'), (102, 1,  30.00, '2026-01-20'),\n  (103, 2,    120.00, '2026-02-02'), (104, NULL, 15.00, '2026-02-10'),\n  (105, 4,     80.00, '2026-03-01');\n\n-- INNER JOIN: only matched pairs (Chen and guest order 104 disappear)\nSELECT c.name, o.id AS order_id, o.amount\nFROM customers c\nJOIN orders o ON o.customer_id = c.id\nORDER BY o.id;\n--  name  | order_id | amount\n--  Alice |      101 |  50.00\n--  Alice |      102 |  30.00\n--  Bob   |      103 | 120.00\n--  Dana  |      105 |  80.00          (4 rows)\n\n-- LEFT JOIN: every customer, NULLs where no order matched\nSELECT c.name, o.id AS order_id\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id\nORDER BY c.id, o.id;\n--  Alice 101 | Alice 102 | Bob 103 | Chen NULL | Dana 105   (5 rows)\n\n-- FULL JOIN: unmatched rows from BOTH sides\nSELECT c.name, o.id AS order_id\nFROM customers c\nFULL JOIN orders o ON o.customer_id = c.id\nORDER BY c.id NULLS LAST, o.id;\n--  Alice 101 | Alice 102 | Bob 103 | Chen NULL | Dana 105 | NULL 104   (6 rows)\n\n-- CROSS JOIN: every combination, 4 x 5\nSELECT count(*) FROM customers CROSS JOIN orders;   -- 20\n\n-- Anti-join: customers with no orders\nSELECT c.name\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id\nWHERE o.id IS NULL;                                 -- Chen\n\n-- Filter placement matters for outer joins\nSELECT c.name, o.id FROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id AND o.amount > 60\nORDER BY c.id;          -- Alice NULL | Bob 103 | Chen NULL | Dana 105  (4 rows, LEFT kept)\nSELECT c.name, o.id FROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id\nWHERE o.amount > 60\nORDER BY c.id;          -- Bob 103 | Dana 105  (2 rows: WHERE turned it into an INNER join)\n\n-- Self join: each employee next to their manager\nCREATE TABLE employees (\n  id         integer PRIMARY KEY,\n  name       text NOT NULL,\n  manager_id integer REFERENCES employees (id)\n);\nINSERT INTO employees VALUES (1, 'Mai', NULL), (2, 'Tuan', 1), (3, 'Linh', 1), (4, 'Khoa', 2);\nSELECT e.name AS employee, m.name AS manager\nFROM employees e\nLEFT JOIN employees m ON m.id = e.manager_id\nORDER BY e.id;\n--  Mai NULL | Tuan Mai | Linh Mai | Khoa Tuan",
+      "explanation": "Run this top to bottom in psql to reproduce every result in this chapter. The two queries under \"Filter placement\" differ only in where `o.amount > 60` sits, yet return 4 rows vs 2. The FULL JOIN uses `NULLS LAST` so the guest order lands at the end. In PostgreSQL's default ascending sort NULLs already come last, but saying so makes the intent explicit."
+    },
+    {
+      "type": "explanation",
+      "title": "Aggregation: GROUP BY, HAVING and FILTER",
+      "content": "**Aggregate functions** (`count`, `sum`, `avg`, `min`, `max`, `string_agg`, `array_agg`, `bool_and`...) collapse many rows into one value. **GROUP BY** splits rows into groups and produces one output row per group:\n\n```sql\nSELECT city, count(*) AS n\nFROM customers\nGROUP BY city\nHAVING count(*) > 1;      -- Hanoi | 2\n```\n\nRules worth knowing precisely:\n- Every column in `SELECT` must be either inside an aggregate or listed in `GROUP BY`. PostgreSQL relaxes this when you group by a table's primary key: `GROUP BY c.id` lets you select `c.name` because it is functionally dependent on the key. MySQL enforces the strict rule by default (`ONLY_FULL_GROUP_BY`, since 5.7). Older MySQL silently picked an arbitrary value.\n- **WHERE filters rows before grouping. HAVING filters groups after.** Put row-level conditions in `WHERE` so fewer rows reach the grouping step. Use `HAVING` only for conditions on aggregates.\n- `count(o.id)` vs `count(*)` after a LEFT JOIN: Chen's NULL-extended row counts as 1 under `count(*)` but 0 under `count(o.id)`. When counting children, count a child column.\n- **Conditional aggregation** with `FILTER` replaces several separate queries: `count(*) FILTER (WHERE amount >= 50) AS big, count(*) AS all_orders` returns `3 | 5` in one pass. The portable equivalent is `sum(CASE WHEN amount >= 50 THEN 1 ELSE 0 END)`.\n- `GROUP BY ROLLUP (city)` / `CUBE` / `GROUPING SETS` produce subtotals and grand totals in one query. They are the SQL behind most pivot-table reports.\n\n**Fan-out trap:** if you join customers → orders → order_items and then `sum(orders.amount)`, every order is repeated once per item, so the sum is too large. Aggregate each child table in its own subquery or CTE first, then join the pre-aggregated results."
+    },
+    {
+      "type": "explanation",
+      "title": "Subqueries vs EXISTS vs JOIN",
+      "content": "There are usually three ways to ask \"customers who placed an order over 40\":\n\n```sql\n-- 1. IN (subquery)\nSELECT name FROM customers WHERE id IN (SELECT customer_id FROM orders WHERE amount > 40);\n-- 2. EXISTS (correlated subquery)\nSELECT name FROM customers c\nWHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.amount > 40);\n-- 3. JOIN + DISTINCT\nSELECT DISTINCT c.name FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.amount > 40;\n```\n\nAll three return Alice, Bob and Dana, but they mean different things:\n- `IN` and `EXISTS` are **semi-joins**: each customer appears **at most once**, no matter how many orders match. The PostgreSQL planner turns both into a `Semi Join` plan node, so they usually perform identically.\n- The `JOIN` version produces one row per matching order. Alice would appear twice without `DISTINCT`, and `DISTINCT` adds a sort or hash step. Use a join when you actually need columns from the other table, and a semi-join when you only need to test existence.\n- For the negative case, prefer **`NOT EXISTS`**. The planner turns it into a `Hash Anti Join`, and it handles NULLs correctly. `NOT IN (subquery)` returns nothing if the subquery yields any NULL, and PostgreSQL cannot convert it to an anti-join (it runs as a hashed SubPlan, or worse, a per-row subplan when the subquery result is too large for memory).\n\nOther subquery forms:\n- **Scalar subquery** in SELECT: `(SELECT count(*) FROM orders o WHERE o.customer_id = c.id) AS n` must return at most one row (otherwise a runtime error), and returns NULL for zero rows. It is fine for small outputs, but it runs per output row unless the planner can optimize it.\n- **Derived table** in FROM: `FROM (SELECT ...) AS t`. In PostgreSQL every derived table needs an alias in versions before 16.\n- **LATERAL** lets a subquery in FROM reference earlier tables, which gives \"top-N per row\" elegantly:\n\n```sql\nSELECT c.name, o.id, o.amount\nFROM customers c\nCROSS JOIN LATERAL (\n  SELECT id, amount FROM orders o\n  WHERE o.customer_id = c.id ORDER BY amount DESC LIMIT 1\n) o;   -- Alice 101 50.00 | Bob 103 120.00 | Dana 105 80.00\n```\n\nWith an index on `orders (customer_id, amount DESC)`, this runs as one tiny index probe per customer."
+    },
+    {
+      "type": "explanation",
+      "title": "CTEs and Recursive CTEs",
+      "content": "A **Common Table Expression** (`WITH name AS (...)`) names a subquery so the main query reads top-down instead of inside-out:\n\n```sql\nWITH totals AS (\n  SELECT customer_id, sum(amount) AS total FROM orders GROUP BY customer_id\n)\nSELECT c.name, t.total FROM customers c JOIN totals t ON t.customer_id = c.id;\n```\n\n**Performance semantics (PostgreSQL 12+):** a non-recursive, side-effect-free CTE referenced **once** is inlined into the main query and optimized as if you had written a subquery. A CTE referenced **more than once** is materialized (computed once into a temporary result) by default. You can override this with `WITH t AS MATERIALIZED (...)` or `NOT MATERIALIZED`. Before version 12 every CTE was an \"optimization fence\", which is why older blog posts warn against them. That advice is outdated for PostgreSQL, but check your engine. CTEs can also hold data-modifying statements: `WITH moved AS (DELETE FROM queue ... RETURNING *) INSERT INTO archive SELECT * FROM moved;`.\n\n**Recursive CTEs** traverse hierarchies and graphs (org charts, category trees, bill of materials, \"all transitive dependencies\"):\n\n```sql\nWITH RECURSIVE chain AS (\n  SELECT id, name, 0 AS depth FROM employees WHERE manager_id IS NULL   -- anchor\n  UNION ALL\n  SELECT e.id, e.name, c.depth + 1\n  FROM employees e JOIN chain c ON e.manager_id = c.id                  -- recursive step\n)\nSELECT * FROM chain;\n```\n\nExecution is iterative, not truly recursive. The anchor rows seed a *working table*. Each iteration runs the recursive term against only the rows produced by the previous iteration. Iteration stops when a step produces no new rows. Two safety points:\n- **Cycles** (A manages B, B manages A) loop forever with `UNION ALL`. Use `UNION` (which discards duplicate rows, though it only helps if the rows are identical), track a visited path array, or use PostgreSQL 14's `CYCLE id SET is_cycle USING path` clause. PostgreSQL 14 also added `SEARCH DEPTH FIRST / BREADTH FIRST BY` for ordering.\n- Add a depth limit (`WHERE c.depth < 20`) as a guardrail on user-controlled graphs."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"Run the anchor query\"] --> B[\"Rows go to the result AND the working table\"]\n  B --> C{\"Working table empty?\"}\n  C -->|\"No\"| D[\"Run the recursive term against the working table only\"]\n  D --> E[\"New rows replace the working table and are appended to the result\"]\n  E --> C\n  C -->|\"Yes\"| F[\"Return the accumulated result\"]",
+      "caption": "How WITH RECURSIVE executes. Each pass sees only the previous pass's new rows, so an org chart of depth 3 takes 3 passes plus a final empty one."
+    },
+    {
+      "type": "explanation",
+      "title": "Window Functions: Ranking, Running Totals and LAG",
+      "content": "A **window function** computes a value across a set of rows related to the current row, **without collapsing them**. GROUP BY turns 5 orders into 3 customer rows. A window function keeps all 5 rows and adds a column. The syntax is `function() OVER (PARTITION BY ... ORDER BY ... frame)`:\n- `PARTITION BY` splits rows into independent groups (like GROUP BY, but rows are kept).\n- `ORDER BY` orders rows within each partition, which is required for ranking and running calculations.\n- The **frame** (`ROWS BETWEEN ...`) chooses which neighbouring rows an aggregate sees.\n\n**Ranking functions** differ only in how they treat ties. With customer totals Bob 120, Alice 80, Dana 80:\n| name | total | row_number | rank | dense_rank |\n|---|---|---|---|---|\n| Bob | 120.00 | 1 | 1 | 1 |\n| Alice | 80.00 | 2 | 2 | 2 |\n| Dana | 80.00 | 3 | 2 | 2 |\n\n`row_number` always gives unique numbers (break ties explicitly or the order between Alice and Dana is arbitrary). `rank` gives ties the same number and **leaves a gap** (a fourth customer would be rank 4). `dense_rank` leaves no gap (it would be 3).\n\n**Top-N per group**, a classic interview problem: number rows with `row_number() OVER (PARTITION BY customer_id ORDER BY amount DESC)` in a subquery, then filter `WHERE rn = 1` outside, because window results don't exist yet at the `WHERE` step.\n\n**Running totals and moving averages:** `sum(revenue) OVER (ORDER BY month)`. Beware the default frame. When `ORDER BY` is present it is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which includes all **peers** (rows with an equal sort key). If two rows share a date, both show the same running total. Use `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` for a strict row-by-row total, and `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` for a 7-row moving average.\n\n**LAG / LEAD** read a value from the previous or next row in the window. Use them for month-over-month change, session gaps (\"time since the user's previous event\"), or detecting state transitions. `lag(x)` returns NULL on the first row. `lag(x, 1, 0)` supplies a default instead.\n\nOther useful window functions are `first_value`, `last_value` (mind the frame), `ntile(4)` for quartiles, and `percent_rank`. To reuse one definition, name it: `... OVER w FROM t WINDOW w AS (PARTITION BY a ORDER BY b)`."
+    },
+    {
+      "type": "code_example",
+      "language": "sql",
+      "label": "Analytics",
+      "code": "-- 1. Aggregation: GROUP BY collapses rows, HAVING filters the groups\nSELECT c.name, count(o.id) AS orders, sum(o.amount) AS total\nFROM customers c\nLEFT JOIN orders o ON o.customer_id = c.id\nGROUP BY c.id, c.name\nHAVING count(o.id) >= 1                 -- drops Chen (0 orders)\nORDER BY total DESC, c.name;\n--  Bob   | 1 | 120.00\n--  Alice | 2 |  80.00\n--  Dana  | 1 |  80.00\n\n-- 2. CTE + ranking window functions (note the tie at 80.00)\nWITH totals AS (\n  SELECT c.name, sum(o.amount) AS total\n  FROM customers c\n  JOIN orders o ON o.customer_id = c.id\n  GROUP BY c.id, c.name\n)\nSELECT name, total,\n       row_number() OVER (ORDER BY total DESC, name) AS row_num,\n       rank()       OVER (ORDER BY total DESC)       AS rnk,\n       dense_rank() OVER (ORDER BY total DESC)       AS dense\nFROM totals\nORDER BY total DESC, name;\n--  name  | total  | row_num | rnk | dense\n--  Bob   | 120.00 |       1 |   1 |     1\n--  Alice |  80.00 |       2 |   2 |     2\n--  Dana  |  80.00 |       3 |   2 |     2\n\n-- 3. Running total and month-over-month change\nWITH monthly AS (\n  SELECT date_trunc('month', created_at)::date AS month, sum(amount) AS revenue\n  FROM orders\n  GROUP BY 1\n)\nSELECT month, revenue,\n       sum(revenue) OVER (ORDER BY month)            AS running_total,\n       revenue - lag(revenue) OVER (ORDER BY month)  AS change\nFROM monthly\nORDER BY month;\n--  month      | revenue | running_total | change\n--  2026-01-01 |   80.00 |         80.00 |   NULL\n--  2026-02-01 |  135.00 |        215.00 |  55.00\n--  2026-03-01 |   80.00 |        295.00 | -55.00\n\n-- 4. Top-N per group: each customer's largest order\nSELECT customer_id, id, amount\nFROM (\n  SELECT o.*, row_number() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn\n  FROM orders o\n  WHERE customer_id IS NOT NULL\n) ranked\nWHERE rn = 1\nORDER BY customer_id;\n--  1 | 101 |  50.00\n--  2 | 103 | 120.00\n--  4 | 105 |  80.00\n\n-- 5. Recursive CTE: walk the org chart from the root\nWITH RECURSIVE chain AS (\n  SELECT id, name, 0 AS depth, name AS path          -- anchor: the CEO\n  FROM employees\n  WHERE manager_id IS NULL\n  UNION ALL\n  SELECT e.id, e.name, c.depth + 1, c.path || ' > ' || e.name\n  FROM employees e\n  JOIN chain c ON e.manager_id = c.id                -- recursive step\n)\nSELECT name, depth, path FROM chain ORDER BY path;\n--  Mai  | 0 | Mai\n--  Linh | 1 | Mai > Linh\n--  Tuan | 1 | Mai > Tuan\n--  Khoa | 2 | Mai > Tuan > Khoa",
+      "explanation": "Each result was produced by running the query on the sample data. Query 2 shows the three ranking functions disagreeing only on the Alice/Dana tie. Query 3 combines a CTE (monthly revenue) with two window functions. `lag` is NULL in January because there is no earlier month. Query 4 is the standard top-N-per-group pattern. Query 5 walks the org chart one level per iteration. Sorting by `path` gives a depth-first listing."
+    },
+    {
+      "type": "explanation",
+      "title": "UPSERT: INSERT ... ON CONFLICT",
+      "content": "\"Insert this row, or update it if it already exists\" is a very common write, and the naive version is a race condition:\n\n```sql\n-- WRONG under concurrency: two requests both see \"no row\" and both INSERT\nSELECT 1 FROM page_views WHERE page = '/home';\n-- ...then INSERT or UPDATE in application code\n```\n\nPostgreSQL's **`INSERT ... ON CONFLICT`** (9.5+) does it atomically:\n\n```sql\nCREATE TABLE page_views (\n  page      text PRIMARY KEY,\n  views     bigint NOT NULL DEFAULT 0,\n  last_seen timestamptz\n);\n\nINSERT INTO page_views (page, views, last_seen)\nVALUES ('/home', 1, now())\nON CONFLICT (page) DO UPDATE\n  SET views     = page_views.views + EXCLUDED.views,\n      last_seen = EXCLUDED.last_seen\nRETURNING page, views;\n-- 1st run: /home | 1   (inserted)\n-- 2nd run: /home | 2   (updated)\n```\n\nDetails that matter in production:\n- The conflict target `(page)` must match a **unique index or constraint** (or you can name it with `ON CONFLICT ON CONSTRAINT name`). Without a unique constraint there is nothing to conflict with, and you get duplicates.\n- `EXCLUDED` is the row you *tried* to insert. The table name (`page_views.views`) refers to the existing row.\n- `DO NOTHING` skips conflicting rows. This is ideal for idempotent event ingestion keyed by an event id. Note that `RETURNING` returns nothing for skipped rows.\n- Add `WHERE` to the update to skip no-op writes: `DO UPDATE SET ... WHERE page_views.last_seen < EXCLUDED.last_seen`, which is useful for \"last write wins by timestamp\".\n- A single statement cannot update the same row twice: `INSERT ... VALUES ('/a',1), ('/a',1) ON CONFLICT ... DO UPDATE` errors with \"cannot affect row a second time\". De-duplicate the batch first.\n- Sequence-backed ids are consumed even when the row ends up updated, so expect gaps. Gaps in ids are normal and never a bug.\n- PostgreSQL 15 added the SQL-standard **`MERGE`** (with `RETURNING` since 17), which is good for complex sync logic (insert / update / delete in one statement). For plain upserts under concurrency, `ON CONFLICT` is still preferred: `MERGE` can fail with a unique-violation error when a concurrent transaction inserts the same key. MySQL's equivalent is `INSERT ... ON DUPLICATE KEY UPDATE`. SQLite supports PostgreSQL-style `ON CONFLICT`."
+    },
+    {
+      "type": "explanation",
+      "title": "EXPLAIN and the Three Join Algorithms",
+      "content": "`EXPLAIN` shows the plan the optimizer chose. `EXPLAIN ANALYZE` actually **runs** the query and adds real row counts and timings. Never run `EXPLAIN ANALYZE` on an `UPDATE`/`DELETE` in production without wrapping it in `BEGIN; ... ROLLBACK;`. Add `BUFFERS` to see cache hits vs disk reads.\n\nHere is a real plan (PostgreSQL, 1M orders × 100k customers, parallelism off for readability, widths trimmed):\n\n```text\nHashAggregate  (cost=37592..37592 rows=3) (actual time=705..705 rows=3 loops=1)\n  Group Key: c.city\n  ->  Hash Join  (cost=3342..32592 rows=1000000) (actual time=29..545 rows=1000000 loops=1)\n        Hash Cond: (o.customer_id = c.id)\n        ->  Seq Scan on big_orders o  (rows=1000000) (actual time=0.3..98 rows=1000000)\n        ->  Hash  (rows=100000) (actual time=29..29 rows=100000)\n              Buckets: 131072  Batches: 2  Memory Usage: 3107kB\n              ->  Seq Scan on big_customers c  (rows=100000) (actual time=0.004..9 rows=100000)\nExecution Time: 705.378 ms\n```\n\nHow to read it:\n- It is a **tree**. Execution starts at the most-indented leaves and flows upward. Here two sequential scans feed a hash join, which feeds an aggregate.\n- `cost=startup..total` is in arbitrary planner units. `rows=` is the **estimate** and `actual ... rows=` is reality. A 10× or larger mismatch is the number one cause of bad plans. Run `ANALYZE`, or create extended statistics for correlated columns.\n- `loops=N` means the node ran N times. Actual time and rows are **per loop**, so multiply.\n- `Batches: 2` means the hash table did not fit in `work_mem` (times `hash_mem_multiplier`, default 2.0 since PG 15) and spilled to disk.\n\n**The three join algorithms**, which every relational engine implements:\n- **Nested loop**: for each outer row, look up matching inner rows. It is O(N × M) naively, but with an index on the inner side it becomes O(N log M) and it is the best plan when the outer side is small. Example: `WHERE c.id = 42` gives 1 customer row, then an index probe on `orders.customer_id`, finishing in 2 ms. It is also the only algorithm that handles arbitrary non-equality conditions (`ON a.ts BETWEEN b.start_at AND b.end_at`).\n- **Hash join**: build an in-memory hash table on the smaller input (the `Hash` node), then stream the larger input and probe it. It is O(N + M) and the workhorse for large equi-joins with no useful ordering. It needs memory and works only for equality conditions. MySQL gained hash joins in 8.0.18. Before that it only had nested loops.\n- **Merge join**: if both inputs are already sorted on the join key (by an index or an earlier sort), zip through them together in one pass. It is O(N + M) plus any sort cost. On the same tables, `ORDER BY c.id` made PostgreSQL pick `Merge Join` over two index scans, because the output had to be sorted anyway.\n\nThe planner picks based on estimated row counts, available indexes and memory. You rarely force a choice (PostgreSQL has no hints, only `enable_*` settings for experiments). You influence it by adding the right index, keeping statistics fresh, and writing sargable predicates: `WHERE created_at >= '2026-01-01'` can use an index, while `WHERE date(created_at) = ...` cannot unless you index the expression."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  S{\"What does the planner know?\"}\n  S -->|\"Outer side small, index on inner join key\"| N[\"Nested Loop: one index probe per outer row\"]\n  S -->|\"Large inputs, equality condition, no useful order\"| H[\"Hash Join: build hash on smaller side, probe with larger\"]\n  S -->|\"Both inputs sorted on the join key\"| M[\"Merge Join: walk both sorted streams once\"]\n  S -->|\"Non-equality condition such as BETWEEN\"| N2[\"Nested Loop: the only general option\"]\n  H --> W{\"Hash fits in work_mem?\"}\n  W -->|\"No\"| B[\"Batches greater than 1: spills to disk, slower\"]\n  W -->|\"Yes\"| OK[\"Single in-memory pass\"]",
+      "caption": "How PostgreSQL's planner typically chooses a join algorithm. All three appear in EXPLAIN output as Nested Loop, Hash Join and Merge Join."
+    },
+    {
+      "type": "explanation",
+      "title": "From Application Code: N+1 Queries and SQL Injection",
+      "content": "Two of the most common production incidents involving SQL happen in application code, not in the database.\n\n**N+1 queries.** An ORM loads a list (1 query), then lazily loads a relation for each item inside a loop (N queries). With 3 customers that is 4 round trips. With 500 rows on a dashboard it is 501. Each query may take only 1 ms on the server, but with 1–2 ms of network latency per round trip the page takes over a second, and the database spends its time parsing tiny queries. Signs: query count grows with page size, and the same statement shape repeats in the logs or APM trace.\n\nFixes, in order of preference:\n- **Eager loading** in the ORM: Rails `includes`, Django `select_related` (JOIN) / `prefetch_related` (second query with `IN`), Hibernate/JPA `JOIN FETCH` or `@BatchSize`, Prisma `include`, SQLAlchemy `selectinload`.\n- **Batch by key**: one query with `WHERE customer_id = ANY($1)` (or `IN (...)`), then group the results in memory. GraphQL servers use **DataLoader** to do this automatically within a request tick.\n- **A single JOIN** or a lateral subquery when you need rows from both sides in one result.\n- Detect regressions automatically: Bullet (Rails), nplusone / django-debug-toolbar, or a test asserting the query count.\n\n**SQL injection.** Building SQL by string concatenation lets user input change the *structure* of the statement. With `email = \"x' OR '1'='1\"`, the query `... WHERE email = '${email}'` becomes `WHERE email = 'x' OR '1'='1'`, which matches every row. Variants can append `; DROP TABLE`, use `UNION SELECT` to read other tables, or leak data through timing (`pg_sleep`). It remains one of the most exploited vulnerability classes.\n\nThe fix is **parameterized queries** (also called bind parameters or prepared statements): the SQL text contains placeholders (`$1` in PostgreSQL, `?` in MySQL/SQLite), and values are sent separately in the protocol, so the server never parses them as SQL. Every mainstream driver and ORM supports this, and tagged-template SQL libraries (postgres.js, Slonik, Drizzle's `sql` helper) turn each `${value}` interpolation into a bind parameter automatically.\n\nRules:\n- **Never** interpolate user input into SQL, even \"trusted\" internal input. Escaping by hand is fragile.\n- Placeholders work for **values only**, not identifiers or keywords. For a user-chosen sort column or direction, map the input through an **allowlist** (`{ newest: 'created_at DESC' }`). For dynamic identifiers inside the database, use `format('%I', name)` or `quote_ident`.\n- `LIKE` patterns: parameterize the value and escape `%`/`_` in the user's search term if they should be literal.\n- Defence in depth: the app's database role should have least privilege (no DDL, no superuser), so a bug cannot become `DROP TABLE`."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "N+1 & injection",
+      "code": "// A fake \"database\" that counts round trips — each query costs ~2 ms of network latency.\nconst db = {\n  roundTrips: 0,\n  customers: [{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }, { id: 3, name: 'Chen' }],\n  orders: [{ id: 101, customerId: 1 }, { id: 102, customerId: 1 }, { id: 103, customerId: 2 }],\n  query(text, values = []) {\n    this.roundTrips++;\n    if (text.startsWith('SELECT * FROM customers')) return this.customers;\n    if (text.includes('customer_id = $1')) return this.orders.filter((o) => o.customerId === values[0]);\n    if (text.includes('customer_id = ANY($1)')) return this.orders.filter((o) => values[0].includes(o.customerId));\n    throw new Error('unknown query');\n  },\n};\n\n// N+1: one query for the list, then one query PER row (what lazy-loading ORMs do in a loop)\ndb.roundTrips = 0;\nfor (const c of db.query('SELECT * FROM customers')) {\n  c.orders = db.query('SELECT * FROM orders WHERE customer_id = $1', [c.id]);\n}\nconsole.log('N+1 round trips:', db.roundTrips); // 4  (1 list query + 3 per-row queries)\n\n// Batched: 2 queries total, no matter how many customers (ORM \"eager loading\" / DataLoader)\ndb.roundTrips = 0;\nconst customers = db.query('SELECT * FROM customers');\nconst orders = db.query('SELECT * FROM orders WHERE customer_id = ANY($1)', [customers.map((c) => c.id)]);\nconst byCustomer = Map.groupBy(orders, (o) => o.customerId); // Node 21+\nfor (const c of customers) c.orders = byCustomer.get(c.id) ?? [];\nconsole.log('Batched round trips:', db.roundTrips); // 2\nconsole.log(customers.map((c) => `${c.name}:${c.orders.length}`).join(' ')); // Alice:2 Bob:1 Chen:0\n\n// SQL injection: concatenation lets input rewrite the statement\nconst email = \"x' OR '1'='1\";\nconst unsafe = `SELECT * FROM users WHERE email = '${email}'`;\nconsole.log(unsafe); // SELECT * FROM users WHERE email = 'x' OR '1'='1'  <- matches every row\n// Parameterized: the SQL text is fixed; the value travels separately and is never parsed as SQL\nconst safe = { text: 'SELECT * FROM users WHERE email = $1', values: [email] };\nconsole.log(JSON.stringify(safe));\n// {\"text\":\"SELECT * FROM users WHERE email = $1\",\"values\":[\"x' OR '1'='1\"]}\n// With node-postgres: await pool.query(safe) — the server compares email to that literal string.",
+      "explanation": "The fake `db` only counts round trips, which is the cost that matters for N+1. The batched version stays at 2 queries whether there are 3 customers or 3,000. `Map.groupBy` is built into Node 21+. The last part prints the actual SQL produced by concatenation (the injected `OR '1'='1'` makes the predicate true for every row) next to the parameterized form, where the SQL text never changes and the malicious string is just a value to compare. Run with `node` to see the exact output shown in the comments."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Mistakes and Misconceptions",
+      "content": "- **Expecting order without ORDER BY.** Results come back in whatever order the plan produces. That often looks like insertion order until a parallel scan or a new index changes it.\n- **`= NULL` / `<> value` on nullable columns.** `WHERE city <> 'Hanoi'` silently drops NULL cities. Use `IS NULL` or `IS DISTINCT FROM`.\n- **`NOT IN (subquery)` with a nullable column** returns zero rows. Default to `NOT EXISTS`.\n- **Filtering the right table of a LEFT JOIN in WHERE** turns it into an INNER JOIN. Move the condition into `ON`, or test `IS NULL` deliberately.\n- **Summing across a fan-out join.** Joining two child tables multiplies rows. Pre-aggregate each child in a subquery or CTE.\n- **`count(*)` after a LEFT JOIN** counts the NULL-extended row as 1. Count a column from the right table.\n- **`SELECT *` in application queries** breaks when columns are added, defeats index-only scans and ships unused bytes. Name the columns.\n- **Functions on indexed columns** (`WHERE lower(email) = $1`, `WHERE created_at::date = $1`) prevent plain index use. Rewrite as a range, or create an expression index.\n- **Deep OFFSET pagination** gets linearly slower. Use keyset pagination for feeds and infinite scroll.\n- **Read-then-write upserts** race under concurrency. Use `INSERT ... ON CONFLICT` backed by a unique constraint.\n- **Trusting `EXPLAIN` without `ANALYZE`** on slow queries. Estimates can be wrong by orders of magnitude, and the mismatch is usually the bug.\n- **Thinking \"the ORM handles SQL\".** It generates SQL. Turn on query logging in development and read what it produces."
+    },
+    {
+      "type": "callout",
+      "variant": "warning",
+      "title": "Three NULL traps that pass code review",
+      "content": "1. `WHERE id NOT IN (SELECT customer_id FROM orders)`: one NULL in the subquery and the whole query returns nothing. Use `NOT EXISTS`.\n2. `LEFT JOIN orders o ON ... WHERE o.amount > 60`: the WHERE clause rejects the NULL-extended rows, so the LEFT JOIN became an INNER JOIN. Put the condition in `ON`.\n3. `sum(amount)` over zero rows is **NULL**, not 0, and `NULL + 5` is NULL. Use `coalesce(sum(amount), 0)` at the boundary where a number is required."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "SQL is **declarative**: you specify the result, the **planner** chooses indexes, join order and algorithms. The same query can be fast or slow depending on indexes and statistics.",
+        "**Logical order:** FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT (incl. window functions) → DISTINCT → ORDER BY → LIMIT. That is why SELECT aliases work in ORDER BY but not in WHERE, and why aggregates are filtered with HAVING.",
+        "**Three-valued logic:** comparisons with NULL yield UNKNOWN, and WHERE/ON/HAVING keep only TRUE rows. Use `IS NULL` / `IS DISTINCT FROM`, and prefer `NOT EXISTS` over `NOT IN` because one NULL makes `NOT IN` return nothing.",
+        "**Joins:** INNER keeps matched pairs, LEFT keeps all left rows (NULL-filled), FULL keeps unmatched rows from both, CROSS returns N×M. A WHERE filter on the right table of a LEFT JOIN silently makes it INNER.",
+        "**Joining parent to child repeats the parent** once per child. Summing across two child tables inflates totals, so pre-aggregate each child first. Use EXISTS (semi-join) when you only need to test existence.",
+        "**CTEs** make queries readable and, in PostgreSQL 12+, are inlined when referenced once. **WITH RECURSIVE** iterates anchor → recursive step until no new rows, which is how you walk trees and graphs (guard against cycles).",
+        "**Window functions** add a computed column without collapsing rows: `row_number` (unique), `rank` (ties share, gaps follow), `dense_rank` (no gaps), running `sum() OVER (ORDER BY ...)`, `lag`/`lead` for row-to-row deltas. Filter on them in an outer query.",
+        "**Upsert** with `INSERT ... ON CONFLICT (key) DO UPDATE SET col = EXCLUDED.col`. It is atomic under concurrency but requires a unique constraint on the conflict target. Read-then-write in app code races.",
+        "**Join algorithms:** nested loop (small outer side + index, or non-equality joins), hash join (large equi-joins, needs work_mem), merge join (inputs already sorted). Read EXPLAIN ANALYZE bottom-up and compare estimated vs actual rows.",
+        "**N+1** (one query per row from lazy ORM loading) is fixed by eager loading or batching with `= ANY($1)`. **SQL injection** is fixed only by parameterized queries, with allowlists for identifiers such as sort columns."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Why does `SELECT amount * 2 AS doubled FROM orders WHERE doubled > 100` fail in PostgreSQL, while `... ORDER BY doubled` works?",
+      "type": "mcq",
+      "options": [
+        "WHERE is evaluated before SELECT, so the alias does not exist yet. ORDER BY is evaluated after SELECT",
+        "Aliases can only be used for aggregate expressions",
+        "PostgreSQL requires aliases to be quoted in WHERE clauses",
+        "ORDER BY re-executes the SELECT list, while WHERE cannot run expressions"
+      ],
+      "correct": 0,
+      "explanation": "Logical processing order is FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT. Aliases are created in the SELECT step, so only later steps (ORDER BY) can reference them. Repeat the expression in WHERE, or wrap the query in a subquery or CTE."
+    },
+    {
+      "id": "q2",
+      "question": "customers has rows with city = 'Hanoi', 'Saigon' and NULL. What does `SELECT name FROM customers WHERE city <> 'Hanoi'` return?",
+      "type": "mcq",
+      "options": [
+        "Only the Saigon customers, because NULL <> 'Hanoi' is unknown and WHERE keeps only TRUE rows",
+        "The Saigon customers and the NULL-city customers",
+        "An error, because the column contains NULLs",
+        "Every row, because NULL is treated as an empty string"
+      ],
+      "correct": 0,
+      "explanation": "Under three-valued logic a comparison with NULL yields UNKNOWN, and WHERE discards both FALSE and UNKNOWN. To include unknown cities write `city IS DISTINCT FROM 'Hanoi'` or add `OR city IS NULL`."
+    },
+    {
+      "id": "q3",
+      "question": "`SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders)` returns zero rows, even though some customers have no orders. What is the most likely cause?",
+      "type": "mcq",
+      "options": [
+        "The orders table has no index on customer_id",
+        "The subquery returns at least one NULL customer_id, which makes every NOT IN test UNKNOWN",
+        "NOT IN only works with literal lists, not subqueries",
+        "The planner converted NOT IN into an INNER JOIN"
+      ],
+      "correct": 1,
+      "explanation": "`x NOT IN (a, b, NULL)` expands to `x <> a AND x <> b AND x <> NULL`. The last term is UNKNOWN, so the whole predicate can never be TRUE. `NOT EXISTS` doesn't have this problem and the planner runs it as an anti-join."
+    },
+    {
+      "id": "q4",
+      "question": "You run `customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE o.amount > 60`. Customers without orders are missing from the result. Why?",
+      "type": "mcq",
+      "options": [
+        "LEFT JOIN never returns rows without matches when a WHERE clause is present",
+        "The planner ignores LEFT when an index exists on orders",
+        "The WHERE clause runs after the join, and `NULL > 60` is UNKNOWN, so the NULL-extended rows are filtered out, which makes it behave like an INNER JOIN",
+        "Customers without orders are only returned by a RIGHT JOIN"
+      ],
+      "correct": 2,
+      "explanation": "ON decides which rows match, and WHERE filters the joined result afterwards. The unmatched customers have o.amount = NULL, which fails `> 60`. Move the condition into the ON clause (`ON o.customer_id = c.id AND o.amount > 60`) to keep every customer."
+    },
+    {
+      "id": "q5",
+      "question": "Customer totals are Bob 120, Alice 80, Dana 80 and Eve 50. What does `rank() OVER (ORDER BY total DESC)` assign to Eve?",
+      "type": "mcq",
+      "options": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "correct": 2,
+      "explanation": "rank gives tied rows the same number and then skips: Bob 1, Alice 2, Dana 2, Eve 4. dense_rank would give Eve 3, and row_number gives unique numbers 1–4 with an arbitrary order between the tied rows unless you add a tiebreaker."
+    },
+    {
+      "id": "q6",
+      "question": "What is required for `INSERT INTO page_views ... ON CONFLICT (page) DO UPDATE ...` to work as an upsert?",
+      "type": "mcq",
+      "options": [
+        "A unique index or unique/primary-key constraint on `page`",
+        "The table must be declared WITH (upsert = true)",
+        "The statement must run at SERIALIZABLE isolation",
+        "A trigger that detects existing rows before insert"
+      ],
+      "correct": 0,
+      "explanation": "ON CONFLICT is driven by a uniqueness violation, so the conflict target must correspond to a unique index or constraint (or an exclusion constraint). With that in place the upsert is atomic even under concurrent inserts, at the default READ COMMITTED level."
+    },
+    {
+      "id": "q7",
+      "question": "EXPLAIN shows `Nested Loop` with an outer `Index Scan ... rows=1` and an inner `Index Scan on orders_customer_id_idx`. Why is this a good plan?",
+      "type": "mcq",
+      "options": [
+        "Nested loops are always the fastest join algorithm",
+        "The outer side yields very few rows, so the join costs only a handful of cheap index probes on the inner table",
+        "A nested loop avoids reading any table pages at all",
+        "It is the only join algorithm PostgreSQL supports for foreign keys"
+      ],
+      "correct": 1,
+      "explanation": "A nested loop costs roughly (outer rows) × (cost of one inner lookup). With 1 outer row and an index on the inner join key, that is one B-tree probe. For millions of outer rows on an equi-join, a hash join is usually better. For inputs already sorted on the key, a merge join is."
+    },
+    {
+      "id": "q8",
+      "question": "A page lists 50 posts and the logs show 51 almost-identical queries: one for the posts and one `SELECT * FROM users WHERE id = $1` per post. What is the best fix?",
+      "type": "mcq",
+      "options": [
+        "Add an index on users.id",
+        "Increase the database connection pool size to 51",
+        "Cache each user row in a global in-process map forever",
+        "Eager-load the authors: one batched query with `WHERE id = ANY($1)` (or a JOIN), then group in memory"
+      ],
+      "correct": 3,
+      "explanation": "This is the N+1 pattern. The cost is round trips, not lookup speed: users.id is already the primary key, so an index changes nothing. Eager loading or batching reduces 51 round trips to 1 or 2 regardless of page size. A bigger pool or an unbounded cache treats the symptom and adds new problems."
+    },
+    {
+      "id": "q9",
+      "question": "Which approach correctly lets users sort a product list by a column they choose (e.g. `?sort=price`)?",
+      "type": "mcq",
+      "options": [
+        "Pass the column name as a bind parameter: `ORDER BY $1`",
+        "Escape quotes in the input and concatenate it into the SQL",
+        "Map the input through an allowlist of known column expressions, and bind all user values as parameters",
+        "Use a stored procedure, because stored procedures cannot be injected"
+      ],
+      "correct": 2,
+      "explanation": "Bind parameters only carry values. `ORDER BY $1` sorts by a constant, not by a column. Identifiers must come from an allowlist (`{price: 'price ASC'}`) or be quoted with format('%I'). Hand-escaping is fragile, and stored procedures that build dynamic SQL by concatenation are just as injectable."
+    },
+    {
+      "id": "q10",
+      "question": "Which statement about CTEs in PostgreSQL 12 and later is correct?",
+      "type": "mcq",
+      "options": [
+        "Every CTE is materialized and acts as an optimization fence",
+        "A non-recursive, side-effect-free CTE referenced once is inlined into the main query, and you can force behaviour with MATERIALIZED / NOT MATERIALIZED",
+        "CTEs cannot contain INSERT, UPDATE or DELETE",
+        "Recursive CTEs execute by true recursion and are limited by the call stack depth"
+      ],
+      "correct": 1,
+      "explanation": "Since PostgreSQL 12, single-reference CTEs are inlined and optimized like subqueries, while multiply-referenced ones are materialized by default. Data-modifying CTEs (`WITH x AS (DELETE ... RETURNING *)`) are allowed. Recursive CTEs run iteratively over a working table until no new rows appear."
+    }
+  ]
+}

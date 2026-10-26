@@ -1,0 +1,279 @@
+{
+  "id": "phase2_functions-scope-closures",
+  "title": "Functions, Scope & Closures",
+  "phase": 2,
+  "week": 5,
+  "icon": "code",
+  "tagline": "How functions see the variables around them — and why that one rule powers private state, memoization, callbacks, and a famous class of bugs.",
+  "readTime": "~25 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "A function is the smallest unit of abstraction in programming: a named, reusable piece of behaviour with inputs and an output. That much every engineer knows. What separates people who *use* functions from people who *understand* them is a second set of questions: **which variables can a function see**, **when are those variables created**, **what happens to them after the function returns**, and **what exactly gets copied when you pass an argument**?\n\nThe answers form a small set of rules — scope, hoisting, closures, argument-passing semantics, and `this` binding — that explain a surprising amount of real-world behaviour. They explain why a loop of `setTimeout` callbacks all print the same number, why a React hook sees a \"stale\" value, why a function that \"changes\" its parameter sometimes affects the caller and sometimes does not, why `this` is `undefined` inside a callback, and why a single forgotten event listener can keep megabytes of memory alive.\n\nIn JavaScript, functions are **first-class values**: you can store them in variables, pass them as arguments, return them from other functions, and attach properties to them. Combined with **lexical scoping**, this gives you **closures** — functions that carry their surrounding variables with them. Closures are the mechanism behind module privacy, memoization, partial application, event handlers, middleware chains, and most of functional programming.\n\nThis chapter builds the full mental model: functions as values, parameters vs arguments, call-by-sharing, lexical vs dynamic scope, `var`/`let`/`const` and the Temporal Dead Zone, hoisting, how closures capture variables, the classic loop bug, practical closure patterns, the four `this` rules and arrow functions, higher-order and pure functions, and closure-related memory leaks. Examples are in JavaScript, with comparisons to Python, Java, C++, and others where the semantics differ."
+    },
+    {
+      "type": "analogy",
+      "title": "A Function Is a Recipe Card Clipped to Its Kitchen",
+      "content": "Think of a function as a recipe card. The card lists **parameters** — \"2 eggs, 1 cup of flour\" — which are placeholders. When someone actually cooks, they hand over real eggs and real flour: those are the **arguments**.\n\nNow imagine every recipe card is written *in a specific kitchen*, and it is permanently clipped to that kitchen's pantry. The recipe says \"add a pinch of the house spice blend\" without listing it as an ingredient — it just reaches into the pantry where it was written. That pantry is the card's **lexical scope**. If you carry the card to a different kitchen, it still reaches into the *original* pantry, not the new one. That is **lexical scoping**: what a name refers to is decided by where the code was *written*, not where it is *called from*.\n\nA **closure** is the card plus its clipped-on pantry. Even after the original kitchen closes for the night (the outer function returns), the pantry stays alive as long as some card still points to it. Two cards written in the same kitchen share one pantry: if one recipe uses up the spice blend, the other finds it empty. And if you keep an old card in a drawer forever, you also keep its whole pantry — which is exactly how closures cause memory leaks."
+    },
+    {
+      "type": "explanation",
+      "title": "Functions as Values; Parameters vs Arguments",
+      "content": "In JavaScript a function is an ordinary object (of type `Function`) that also happens to be callable. That makes functions **first-class**: anything you can do with a number or an object, you can do with a function.\n\n- **Store** it: `const double = (n) => n * 2;`\n- **Pass** it: `[1, 2, 3].map(double)`\n- **Return** it: `const adder = (a) => (b) => a + b;`\n- **Attach data** to it: `double.description = 'x2'` (functions are objects)\n\nThere are three common ways to create one, and they differ in more than syntax:\n\n| Form | Hoisted? | Own `this`/`arguments`? | Usable with `new`? |\n|---|---|---|---|\n| `function f() {}` (declaration) | Yes, fully | Yes | Yes |\n| `const f = function () {}` (expression) | Only the variable, per `const` rules | Yes | Yes |\n| `const f = () => {}` (arrow) | Only the variable | No — inherits both lexically | No |\n\n**Parameters** are the names in the function's definition; **arguments** are the actual values supplied at the call site. JavaScript is lenient about the match: missing arguments become `undefined`, extra arguments are ignored (but still visible through `arguments` in non-arrow functions or a rest parameter `...rest`). **Default parameters** apply only when the argument is `undefined` — passing `null` does *not* trigger the default. A function's `length` property reports its **arity**: the number of parameters before the first one with a default or a rest parameter.\n\nOther languages are stricter. Java and C# check argument count and types at compile time and support *overloading* (several functions with the same name but different parameter lists). Python raises `TypeError` for a missing positional argument and supports keyword arguments (`f(x=1)`), which JavaScript imitates by passing an options object (`f({ x: 1 })`). Note a classic Python trap with no JavaScript equivalent: Python evaluates default values **once**, at definition time, so `def f(items=[])` shares one list across all calls. JavaScript evaluates defaults **on every call**.\n\nOlder languages like C have \"function pointers\" but not closures; Java gained lambdas in Java 8, which can capture only *effectively final* local variables. JavaScript, Python, Go, Swift, Kotlin, and Rust all support true closures."
+    },
+    {
+      "type": "explanation",
+      "title": "Pass-by-Value, Pass-by-Reference, and Call-by-Sharing",
+      "content": "This is one of the most misunderstood topics in programming, and a favourite interview question. Precise definitions first:\n\n- **Pass-by-value**: the callee receives a *copy* of the argument. Assigning to the parameter cannot affect the caller's variable.\n- **Pass-by-reference**: the callee receives an *alias to the caller's variable itself*. Assigning to the parameter **rebinds the caller's variable**. C++ `void f(int& x)`, C# `ref`, and PHP `&$x` work this way. A swap function that works for the caller is the litmus test.\n\n**JavaScript is always pass-by-value.** But for objects, arrays, and functions, *the value being copied is a reference* — the address of the heap object. This is often called **call-by-sharing** (a term coined by Barbara Liskov for CLU). The consequences:\n\n1. **Mutating** through the parameter (`obj.name = 'x'`, `arr.push(1)`) is visible to the caller, because both references point to the *same* object.\n2. **Reassigning** the parameter (`obj = {}`) only rebinds the local copy; the caller's variable is untouched.\n3. A `swap(a, b)` function can never swap the caller's variables.\n\nJava, Python, Ruby, and Go (for pointers, maps, slices) behave the same way — Java is strictly pass-by-value, with object variables holding references. Go additionally lets you pass structs by value (copying all fields) or by pointer. C passes everything by value but lets you pass a pointer explicitly; C++ adds true references.\n\nThe practical rule: **if a function must not affect the caller, never mutate its object parameters** — return a new object instead (`{ ...obj, field: newValue }`, `arr.toSorted()`, `arr.with(i, v)`), or make a deep copy with `structuredClone()` when nested data must be independent. The ES2023 \"change array by copy\" methods (`toSorted`, `toReversed`, `toSpliced`, `with`) exist precisely because in-place methods like `sort()` silently mutate shared arrays."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Call-by-sharing",
+      "code": "// JavaScript is \"call by sharing\": every argument is passed BY VALUE,\n// but for objects that value is a reference (a pointer to the heap object).\n\nfunction reassign(obj) {\n  obj = { name: 'replaced' }; // rebinds the LOCAL parameter only\n}\n\nfunction mutate(obj) {\n  obj.name = 'mutated';       // follows the reference -> changes the shared object\n}\n\nfunction swap(a, b) {         // a classic C++ pass-by-reference exercise\n  const tmp = a;\n  a = b;\n  b = tmp;                    // only the local copies are swapped\n}\n\nconst user = { name: 'original' };\nreassign(user);\nconsole.log(user.name); // original\n\nmutate(user);\nconsole.log(user.name); // mutated\n\nlet x = 1, y = 2;\nswap(x, y);\nconsole.log(x, y);      // 1 2  (no change: JS has no pass-by-reference)\n\n// Defensive copy when a function must not touch caller data:\nfunction withBonus(player) {\n  return { ...player, score: player.score + 50 }; // new object, caller untouched\n}\nconst p = { name: 'Bob', score: 200 };\nconst q = withBonus(p);\nconsole.log(p.score, q.score); // 200 250\n\n// Parameters vs arguments: defaults, rest, and arity\nfunction greet(greeting = 'Hello', ...names) {\n  return `${greeting}, ${names.join(' & ') || 'stranger'}!`;\n}\nconsole.log(greet());                     // Hello, stranger!\nconsole.log(greet(undefined, 'Ann'));     // Hello, Ann!  (undefined triggers the default)\nconsole.log(greet(null, 'Ann'));          // null, Ann!   (null does NOT)\nconsole.log(greet.length);                // 0  (params before the first default/rest)",
+      "explanation": "`reassign` rebinds its local parameter, so the caller's `user` still points to the original object. `mutate` follows the shared reference and changes the object both variables see. `swap` proves JavaScript has no pass-by-reference: only the local copies are exchanged. `withBonus` shows the non-mutating style — it returns a new object and leaves the caller's data alone. The last block shows defaults firing for `undefined` but not for `null`, and `length` counting only parameters before the first default."
+    },
+    {
+      "type": "explanation",
+      "title": "Lexical vs Dynamic Scope",
+      "content": "**Scope** is the region of code in which a name refers to a particular variable. When code uses a name like `total`, the language must decide *which* `total` is meant. There are two strategies.\n\n**Lexical (static) scope** — the binding is determined by the *textual structure* of the program. A function sees the variables of the blocks and functions it is *written inside*, regardless of who calls it. You can resolve every name by reading the source. JavaScript, Python, Java, C, Go, Rust, and nearly every modern language are lexically scoped.\n\n**Dynamic scope** — the binding is determined by the *call stack at runtime*. A function sees the variables of whoever *called* it, then their caller, and so on. Early Lisps, Emacs Lisp (by default), and shell languages such as Bash (`local` variables are visible to called functions) are dynamically scoped. Perl offers both (`my` is lexical, `local` is dynamic).\n\n```javascript\nconst level = 'global';\nfunction show() { return level; }\nfunction caller() {\n  const level = 'caller';\n  return show();\n}\ncaller(); // 'global' — show() sees where it was written, not who called it\n```\n\nUnder dynamic scope, `caller()` would return `'caller'`. Lexical scope wins in practice because it is **predictable** (you can reason about a function in isolation), **toolable** (editors and compilers resolve names statically, enabling fast variable lookup), and it is what makes **closures** meaningful.\n\nJavaScript resolves a name by walking the **scope chain**: the current block, then each enclosing block and function, then the module scope, then the global scope. The first match wins (an inner declaration **shadows** an outer one of the same name). If nothing matches, reading throws a `ReferenceError`; in sloppy mode, *assigning* to an undeclared name silently creates a global — one reason strict mode and ES modules (strict by default) exist.\n\nOne part of JavaScript *feels* dynamic: `this`. Its value depends on *how* a function is called, not where it is written. We cover its rules later — and arrow functions exist largely to make `this` lexical too."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  G[\"Global scope: level = 'global'\"] --> M[\"Module scope\"]\n  M --> F[\"Function scope: outer()\"]\n  F --> B[\"Block scope: if / for body\"]\n  B --> L[\"Lookup of a name starts here\"]\n  L -->|\"not found\"| B2[\"Check enclosing block\"]\n  B2 -->|\"not found\"| F2[\"Check enclosing function\"]\n  F2 -->|\"not found\"| M2[\"Check module\"]\n  M2 -->|\"not found\"| G2[\"Check global\"]\n  G2 -->|\"not found\"| E[\"ReferenceError\"]",
+      "caption": "Scopes nest according to where code is written. Name lookup walks outward along this lexical scope chain and stops at the first match; reaching the end throws a ReferenceError."
+    },
+    {
+      "type": "explanation",
+      "title": "var, let, const, Hoisting, and the Temporal Dead Zone",
+      "content": "JavaScript has three variable declarations with different scoping and initialisation rules:\n\n| | Scope | Hoisted | Initialised at hoist time | Re-declare | Reassign |\n|---|---|---|---|---|---|\n| `var` | Function (or global) | Yes | Yes, to `undefined` | Allowed | Yes |\n| `let` | Block | Yes | **No** (TDZ) | Error | Yes |\n| `const` | Block | Yes | **No** (TDZ) | Error | **No** |\n\n**Hoisting** is the name for what happens when the engine enters a scope: before running any statement, it creates bindings for every declaration in that scope. It is not code being physically moved; it is the scope being set up in advance.\n\n- **Function declarations** are hoisted *with their body*, so you can call them before the line where they appear.\n- **`var`** bindings are created and immediately set to `undefined`. Reading one early gives `undefined` instead of an error — a classic source of silent bugs.\n- **`let`, `const`, and `class`** bindings are created but left **uninitialised**. From the start of the scope until the declaration line executes, the variable is in the **Temporal Dead Zone (TDZ)**. Any access — even `typeof x` — throws `ReferenceError: Cannot access 'x' before initialization`.\n\nThe TDZ is \"temporal\" because it is about *time of execution*, not position in the text: a function defined above a `let` can safely read it as long as the function is *called* after the declaration has run.\n\nWhy does the TDZ exist? Because `const` must never be observed with two different values; if it were initialised to `undefined` first, you could see `undefined` and then the real value. The TDZ also turns \"used before defined\" mistakes into loud errors instead of silent `undefined`s.\n\nTwo more details matter in practice:\n\n- **`var` ignores blocks.** A `var` inside an `if` or `for` belongs to the whole function. This is the root cause of the loop bug covered below.\n- **`const` freezes the binding, not the value.** `const cfg = {}` prevents `cfg = somethingElse`, but `cfg.debug = true` is fine. Use `Object.freeze` for (shallow) immutability.\n\nModern style: default to `const`, use `let` when you genuinely need reassignment, and avoid `var` in new code. Python, for comparison, has no block scope at all: a variable assigned anywhere in a function is local to the whole function, and assigning to an outer variable requires `nonlocal` or `global`."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n  [*] --> Created: scope entered, binding hoisted\n  Created --> Undefined: var\n  Created --> TDZ: let / const / class\n  Undefined --> Assigned: assignment runs\n  TDZ --> Initialized: declaration line executes\n  TDZ --> Error: any read or write\n  Initialized --> Initialized: let reassign\n  Assigned --> Assigned: reassign\n  Error --> [*]",
+      "caption": "Lifecycle of a binding. var is hoisted and pre-filled with undefined; let, const, and class are hoisted but stay in the Temporal Dead Zone until their declaration runs, and any access before then throws ReferenceError."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Hoisting & TDZ",
+      "code": "// ── Hoisting: declarations are registered before any code runs ──\nconsole.log(typeof hoistedFn); // function  (whole function is hoisted)\nconsole.log(v);                // undefined (var is hoisted AND initialised to undefined)\nvar v = 'var value';\n\nfunction hoistedFn() { return 'ok'; }\n\n// ── TDZ: let/const/class are hoisted but NOT initialised ──\ntry {\n  console.log(l); // l exists in scope, but is in its Temporal Dead Zone\n} catch (e) {\n  console.log(e.constructor.name + ': ' + e.message);\n  // ReferenceError: Cannot access 'l' before initialization\n}\nlet l = 'let value';\n\n// typeof is not a safe probe inside the TDZ either\ntry {\n  typeof t;\n} catch (e) {\n  console.log('typeof in TDZ ->', e.constructor.name); // ReferenceError\n}\nconst t = 1;\n\n// ── Function expressions follow their variable's rules ──\ntry {\n  arrow();\n} catch (e) {\n  console.log(e.constructor.name); // ReferenceError (const arrow is in TDZ)\n}\nconst arrow = () => 'arrow';\n\n// ── Block scope vs function scope ──\nfunction scopes() {\n  if (true) {\n    var fnScoped = 'visible in whole function';\n    let blockScoped = 'visible only in this block';\n  }\n  console.log(fnScoped);            // visible in whole function\n  console.log(typeof blockScoped);  // undefined (not declared out here)\n}\nscopes();\n\n// ── const freezes the BINDING, not the value ──\nconst cfg = { debug: false };\ncfg.debug = true;       // fine: mutating the object\nconsole.log(cfg.debug); // true\ntry {\n  cfg = {};             // TypeError: Assignment to constant variable.\n} catch (e) {\n  console.log(e.constructor.name + ': ' + e.message);\n}",
+      "explanation": "The function declaration is fully hoisted, so `typeof hoistedFn` is already `'function'`. The `var` exists early but holds `undefined`. Reading `l` (a `let`) before its declaration throws, and so does `typeof t` — `typeof` only protects you from *undeclared* names, not TDZ ones. An arrow function stored in a `const` follows `const` rules, unlike a function declaration. `var` leaks out of the `if` block while `let` does not. Finally, `const` allows mutating the object but not rebinding the name."
+    },
+    {
+      "type": "explanation",
+      "title": "Closures: How Functions Capture Their Environment",
+      "content": "A **closure** is a function together with references to the variables of the scopes in which it was defined. Every JavaScript function is technically a closure; the term matters when a function **outlives** the scope that created it — returned, stored, or passed as a callback.\n\nMechanically, every time a scope is entered (a function call, a block with `let`/`const`), the engine creates an **environment record** holding that scope's bindings, with a link to its parent environment. When a function object is created, it stores a hidden reference (the spec calls it `[[Environment]]`) to the environment it was created in. Calling the function creates a new environment whose parent is that stored one — that is how lexical scope works at runtime.\n\nNormally a function's environment can be thrown away when the call returns. But if an inner function still references it, the environment must stay alive — so engines keep it on the **heap**. V8 analyses which variables inner functions actually use and places only those in a heap-allocated **Context** object; variables no closure needs stay in the fast stack frame or registers.\n\nThree properties of closures cause most of the confusion:\n\n1. **Closures capture variables, not values.** A closure holds a live link to the binding. If the variable changes later, the closure sees the new value. That is why a React `useEffect` callback sees the value of the render it was created in (a different binding per render), while a closure over a single `let` sees every update.\n2. **Each call creates a fresh environment.** Calling `makeCounter()` twice produces two independent `count` variables. Closures created *in the same call* share one environment.\n3. **Captured variables are private.** Nothing outside can reach `count` except through the functions that closed over it. This is real encapsulation without classes.\n\nLanguage comparison: Python closures also capture variables (late binding), and assigning to a captured variable needs `nonlocal`. Java lambdas and anonymous classes can only capture *effectively final* locals — effectively capturing values, which sidesteps the loop bug entirely. C++ lambdas make you choose explicitly: `[x]` copies, `[&x]` captures by reference (and dangles if the lambda outlives `x`). Rust also makes the choice explicit with `move` closures and checks lifetimes at compile time. Go closures capture variables by reference — and Go had the same loop bug until Go 1.22 (2024) made loop variables per-iteration."
+    },
+    {
+      "type": "explanation",
+      "title": "The Classic Loop Bug",
+      "content": "The most famous closure bug looks like this:\n\n```javascript\nfor (var i = 0; i < 3; i++) {\n  setTimeout(() => console.log(i), 0);\n}\n// prints 3, 3, 3\n```\n\nEvery callback closes over the **same** variable `i`, because `var` is function-scoped: there is only one `i` for the whole loop. The callbacks run after the loop has finished, when `i` is `3`. Nothing was \"captured wrong\" — closures capture variables, and there was only one variable.\n\n**The fix is `let`.** The spec gives `for (let ...)` loops special behaviour: each iteration gets a **fresh binding** of `i`, initialised with the value from the end of the previous iteration. Each callback closes over its own `i`, so the output is `0, 1, 2`.\n\nBefore ES2015, the fix was an **IIFE** (Immediately Invoked Function Expression) that created a new function scope per iteration and passed the current value in as a parameter: `((n) => () => n)(i)`. You will still see this pattern in older codebases. Another pre-`let` fix was `arr.forEach((x, i) => ...)`, since each callback invocation has its own parameter `i`.\n\nThe same bug class shows up wherever a callback reads a variable that changes before the callback runs: event handlers registered in a loop, promises created in a loop, or React effects reading state that has since changed (\"stale closures\"). The diagnostic question is always the same: **how many bindings exist, and which one does this closure point to?**"
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  subgraph V[\"for var i: one binding\"]\n    VI[\"i = 3 after loop ends\"]\n    V0[\"callback 0\"] --> VI\n    V1[\"callback 1\"] --> VI\n    V2[\"callback 2\"] --> VI\n  end\n  subgraph L[\"for let i: binding per iteration\"]\n    L0[\"callback 0\"] --> LI0[\"i = 0\"]\n    L1[\"callback 1\"] --> LI1[\"i = 1\"]\n    L2[\"callback 2\"] --> LI2[\"i = 2\"]\n  end",
+      "caption": "With var, all three callbacks close over one shared binding that ends at 3. With let, each loop iteration creates a new binding, so each callback keeps its own value."
+    },
+    {
+      "type": "explanation",
+      "title": "Practical Closures: Private State, Memoization, Partial Application, Currying",
+      "content": "Closures are not an academic curiosity — they are the everyday mechanism behind several patterns.\n\n**Private state (the module pattern).** A factory function declares local variables and returns functions that read and write them. Callers can only interact through the returned API. Before ES modules and `#private` class fields, this was *the* way to hide state in JavaScript, and it is still idiomatic for small stateful utilities (rate limiters, ID generators, once-only initialisers). React hooks rely on the same idea: event handlers close over the props and state of their render.\n\n**Memoization.** A higher-order `memoize(fn)` returns a wrapper whose closure holds a cache (`Map`). Repeated calls with the same argument skip the computation. This is how you turn exponential naive Fibonacci into linear time. Caveats: the cache key must uniquely identify the input (multi-argument and object keys need care), the function must be **pure** (same input → same output, no side effects), and an unbounded cache grows forever — production memoizers use an LRU bound or a `WeakMap` keyed by objects.\n\n**Partial application.** Fix some arguments now and supply the rest later: `partial(log, 'WARN', 'db')` returns a function that only needs the message. `Function.prototype.bind` also does this (`log.bind(null, 'WARN')`), at the cost of fixing `this` too.\n\n**Currying.** Transform a function of *n* arguments into a chain of single-argument functions: `add(a, b, c)` becomes `add(a)(b)(c)`. Named after logician Haskell Curry, it is the default in Haskell and ML, where every function technically takes one argument. In JavaScript a generic `curry` helper uses `fn.length` to know when enough arguments have arrived — which is why it breaks on functions with default or rest parameters (their `length` is smaller). Currying shines for building specialised functions to pass to `map`/`filter`; overusing it makes stack traces and call sites harder to read.\n\nOther uses you meet daily: **debounce/throttle** (the closure holds the timer ID), **once** (the closure holds a \"called\" flag), **middleware and decorators** (a wrapper closing over the next handler), and **iterators/generators** implemented by hand."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Closures in practice",
+      "code": "// ── 1. Closures capture VARIABLES (bindings), not snapshots of values ──\nfunction makeCounter() {\n  let count = 0;                 // private: no outside code can reach it\n  return {\n    increment: () => ++count,\n    get: () => count,\n  };\n}\nconst c1 = makeCounter();\nconst c2 = makeCounter();        // a fresh environment -> independent count\nc1.increment(); c1.increment(); c2.increment();\nconsole.log(c1.get(), c2.get()); // 2 1\nconsole.log(c1.count);           // undefined (truly private)\n\n// ── 2. The classic loop bug ──\nconst withVar = [];\nfor (var i = 0; i < 3; i++) withVar.push(() => i);   // ONE shared i\nconsole.log(withVar.map((f) => f()));               // [ 3, 3, 3 ]\n\nconst withLet = [];\nfor (let j = 0; j < 3; j++) withLet.push(() => j);   // a NEW j per iteration\nconsole.log(withLet.map((f) => f()));               // [ 0, 1, 2 ]\n\n// Pre-ES2015 fix: an IIFE creates a new scope per iteration\nconst withIife = [];\nfor (var k = 0; k < 3; k++) withIife.push(((n) => () => n)(k));\nconsole.log(withIife.map((f) => f()));              // [ 0, 1, 2 ]\n\n// ── 3. Memoization: the cache lives in the closure ──\nfunction memoize(fn) {\n  const cache = new Map();\n  return function (n) {\n    if (cache.has(n)) return cache.get(n);\n    const result = fn.call(this, n);\n    cache.set(n, result);\n    return result;\n  };\n}\nlet calls = 0;\nconst slowSquare = (n) => { calls++; return n * n; };\nconst fastSquare = memoize(slowSquare);\nfastSquare(9); fastSquare(9); fastSquare(9);\nconsole.log(fastSquare(9), 'computed', calls, 'time(s)'); // 81 computed 1 time(s)\n\n// ── 4. Partial application and currying ──\nconst partial = (fn, ...preset) => (...rest) => fn(...preset, ...rest);\nconst log = (level, scope, msg) => `[${level}] ${scope}: ${msg}`;\nconst warnDb = partial(log, 'WARN', 'db');\nconsole.log(warnDb('slow query'));        // [WARN] db: slow query\n\nconst curry = (fn) => function curried(...args) {\n  return args.length >= fn.length\n    ? fn(...args)\n    : (...more) => curried(...args, ...more);\n};\nconst add3 = curry((a, b, c) => a + b + c);\nconsole.log(add3(1)(2)(3), add3(1, 2)(3), add3(1)(2, 3)); // 6 6 6",
+      "explanation": "`makeCounter` gives each caller its own private `count`; `c1.count` is `undefined` because the variable lives in the closure, not on the object. The loop demo shows the `var` bug and both fixes. `memoize` keeps a `Map` in its closure, so `slowSquare` runs once for four calls. `partial` presets arguments; `curry` collects arguments across calls until `fn.length` is reached, so all three call styles return 6."
+    },
+    {
+      "type": "explanation",
+      "title": "The Four this Rules and Arrow Functions",
+      "content": "`this` is an implicit parameter whose value is decided **at call time**, by *how* the function is called. For a regular (non-arrow) function, the rules in order of precedence:\n\n1. **`new` binding** — `new Fn()` creates a fresh object and binds `this` to it.\n2. **Explicit binding** — `fn.call(obj, ...)`, `fn.apply(obj, [...])`, or a function produced by `fn.bind(obj)`. A bound function's `this` is permanent: a later `call` cannot override it (only `new` can).\n3. **Implicit binding** — `obj.method()` binds `this` to `obj`, the object *to the left of the dot at the call site*.\n4. **Default binding** — a plain call `fn()` gives `this === undefined` in strict mode (all classes and ES modules) or `globalThis` in sloppy scripts.\n\nThe most common bug is **losing the receiver**: `const f = obj.method; f();` or passing `obj.method` as a callback (`setTimeout(obj.method)`, `button.addEventListener('click', obj.method)`). The call site no longer has `obj.` in front, so rule 4 applies. (DOM event listeners are a special case: the browser calls them with `this` set to the element.)\n\n**Arrow functions have no `this` of their own.** They resolve `this` lexically, like any other variable, from the enclosing scope. `call`, `apply`, and `bind` cannot change it, and arrows cannot be used with `new`. This makes them ideal for callbacks inside methods — `this.items.forEach((x) => this.total += x)` — and wrong as object methods that need the object (`{ name: 'a', hi: () => this.name }` does not see `name`).\n\nCommon fixes for losing `this`:\n\n- Bind once in the constructor: `this.handle = this.handle.bind(this)`.\n- Use an arrow **class field**: `handle = () => { ... }` — each instance gets its own function with `this` captured (costs one function per instance instead of one shared prototype method).\n- Wrap at the call site: `setTimeout(() => obj.method(), 100)`.\n\nOther languages avoid the problem: Python passes `self` explicitly and binds it when you access `obj.method` (a *bound method*), so `f = obj.method; f()` still works. Java and C# methods always have their instance; `this` cannot be lost."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n  A[\"How is the function called?\"] --> AR{\"Arrow function?\"}\n  AR -->|\"yes\"| LEX[\"this from enclosing scope - lexical\"]\n  AR -->|\"no\"| N{\"Called with new?\"}\n  N -->|\"yes\"| NEW[\"this = new object\"]\n  N -->|\"no\"| E{\"call / apply / bind?\"}\n  E -->|\"yes\"| EXP[\"this = the given object\"]\n  E -->|\"no\"| I{\"Called as obj.method?\"}\n  I -->|\"yes\"| IMP[\"this = obj\"]\n  I -->|\"no\"| D[\"strict: undefined, sloppy: globalThis\"]",
+      "caption": "Decision procedure for this. Arrow functions short-circuit everything with lexical this; for regular functions the rules apply in precedence order new, explicit, implicit, default."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "this binding & HOFs",
+      "code": "'use strict'; // classes and ES modules are always strict\n\nfunction whoAmI() { return this === undefined ? 'undefined' : this.name; }\nconst alice = { name: 'alice', whoAmI };\nconst bob = { name: 'bob' };\n\n// Rule 4 — default binding: plain call -> undefined in strict mode\nconsole.log(whoAmI());                   // undefined\n// Rule 3 — implicit binding: obj.method() -> obj\nconsole.log(alice.whoAmI());             // alice\n// Losing the receiver: extracting the method drops the implicit binding\nconst detached = alice.whoAmI;\nconsole.log(detached());                 // undefined\n// Rule 2 — explicit binding: call / apply / bind\nconsole.log(whoAmI.call(bob));           // bob\nconst bound = whoAmI.bind(bob);\nconsole.log(bound.call(alice));          // bob  (bind wins over call)\n// Rule 1 — new binding: this = the freshly created object\nfunction Person(name) { this.name = name; }\nconsole.log(new Person('carol').name);   // carol\n\n// Arrow functions have no own `this`: they use the enclosing scope's this\nclass Timer {\n  constructor() {\n    this.ticks = 0;\n  }\n  startRegular() {\n    return function () { return this; };  // gets its own this when called\n  }\n  startArrow() {\n    return () => { this.ticks++; return this.ticks; }; // lexical this\n  }\n}\nconst timer = new Timer();\nconsole.log(timer.startRegular()());     // undefined\nconst tick = timer.startArrow();\ntick(); tick();\nconsole.log(tick());                     // 3\n\n// Higher-order functions: callbacks that receive/return functions\nconst orders = [\n  { id: 1, total: 40, paid: true },\n  { id: 2, total: 15, paid: false },\n  { id: 3, total: 90, paid: true },\n];\nconst revenue = orders\n  .filter((o) => o.paid)            // keep paid orders\n  .map((o) => o.total)              // project to totals\n  .reduce((sum, t) => sum + t, 0);  // fold into one number\nconsole.log(revenue);                    // 130",
+      "explanation": "The same `whoAmI` function returns four different results depending only on the call site. Extracting `alice.whoAmI` into `detached` loses the implicit receiver. `bind` permanently fixes `this`, so even `bound.call(alice)` returns `bob`. Inside `Timer`, the regular function returned by `startRegular` is called plainly and gets `undefined`, while the arrow from `startArrow` keeps the instance's `this` and increments its `ticks`. The last block chains `filter`, `map`, and `reduce` — higher-order functions that take callbacks — to compute revenue from paid orders."
+    },
+    {
+      "type": "explanation",
+      "title": "Higher-Order Functions, Pure Functions, and Side Effects",
+      "content": "A **higher-order function (HOF)** takes a function as an argument, returns a function, or both. `map`, `filter`, `reduce`, `sort(compareFn)`, `addEventListener`, `Promise.then`, Express middleware, and `memoize` are all HOFs. They let you separate **what to do with each element** (the callback) from **how to iterate** (the HOF):\n\n- `map(fn)` — transform each element; output length equals input length.\n- `filter(pred)` — keep elements for which `pred` returns truthy.\n- `reduce(fn, initial)` — fold all elements into one value. Always pass `initial`: without it, `reduce` on an empty array throws `TypeError`, and the first element silently becomes the accumulator.\n\nA **pure function** satisfies two conditions: (1) its return value depends **only on its arguments**, and (2) it has **no side effects** — it does not mutate its inputs or outer variables, perform I/O, read the clock or random numbers, or throw depending on external state. Pure functions are **referentially transparent**: you can replace a call with its result without changing program behaviour.\n\nWhy care? Pure functions are trivially **testable** (no setup, no mocks), **cacheable** (memoization is only safe for pure functions), **parallelisable** (no shared state to race on), and **easy to reason about** locally. React requires components and reducers to be pure for exactly these reasons; Redux reducers must return new state instead of mutating.\n\nSide effects are not evil — a program with none does nothing observable. The discipline is to **push side effects to the edges**: keep the core logic pure (compute what to do) and confine I/O, mutation, and time to a thin outer layer (do it). This is sometimes called \"functional core, imperative shell\".\n\nPerformance note: a chain like `filter().map().reduce()` creates intermediate arrays and walks the data multiple times. For typical sizes this is irrelevant and the clarity is worth it; in a hot loop over millions of items, a single `for` loop or a lazy iterator helper (`Iterator.prototype.map/filter`, standardised in ES2025) avoids the intermediate arrays."
+    },
+    {
+      "type": "explanation",
+      "title": "Closures and Memory Leaks",
+      "content": "A closure keeps its captured environment alive for as long as the closure itself is reachable. That is the point of closures — and the source of a whole category of leaks in long-running apps (single-page apps, Node servers).\n\n**1. Long-lived callbacks holding big data.** An event listener, `setInterval` callback, or subscription that closes over a large object keeps that object alive until the callback is removed. If a component registers `window.addEventListener('resize', handler)` and never calls `removeEventListener`, the handler — and everything it references, including possibly a detached DOM tree — lives as long as the page.\n\n**2. Shared context retention.** In V8, closures created in the same scope share one Context object. If one closure references a huge buffer and another tiny closure is kept long-term, the tiny one can keep the buffer alive even though it never touches it. Engines have improved, but the safe habit is: do not create long-lived closures in scopes that also hold large temporary data; null out big locals (`bigData = null`) once you are done.\n\n**3. Unbounded caches in closures.** A memoizer's `Map` grows forever if inputs are unbounded (user IDs, URLs). Use an LRU cap, a TTL, or a `WeakMap` keyed by objects so entries disappear when the key is garbage-collected.\n\n**4. Timers and promises that never settle.** A forgotten `setInterval` runs forever and its closure is a GC root. Clear intervals, and use `AbortController` to cancel listeners and fetches as a group: `addEventListener('x', fn, { signal })` removes the listener when `controller.abort()` is called.\n\nTo *find* such leaks, take heap snapshots in Chrome DevTools or Node (`--inspect`) and look at the **retainers** of objects that should be gone — closures appear as `(closure)` entries and their captured variables under `context`. The Garbage Collection chapter covers heap snapshots in detail."
+    },
+    {
+      "type": "callout",
+      "variant": "warning",
+      "content": "**Common mistakes**\n\n- **Expecting a closure to snapshot a value.** It captures the *variable*. Use `let` in loops, or copy the value into a new binding.\n- **Passing a method as a callback** (`setTimeout(obj.method)`) and losing `this`. Use an arrow wrapper or `bind`.\n- **Using an arrow function as an object method** that needs `this` — arrows never get the object.\n- **Thinking JS has pass-by-reference.** Mutation is shared; reassignment is not. A `swap` helper cannot work.\n- **Reading a `var` before assignment** and getting `undefined` silently — or relying on `typeof` to probe a `let` in the TDZ (it throws).\n- **Mutating arguments** inside \"utility\" functions (`arr.sort()` on a caller's array). Prefer `toSorted` or a copy.\n- **`reduce` without an initial value** — throws on empty arrays.\n- **Memoizing an impure function** or using an unbounded cache in a long-running process.\n- **Never removing listeners or intervals**, keeping closures and their data alive forever."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Interview checklist.** When asked \"what does this print?\" for closure or `this` puzzles:\n\n(1) **Count the bindings**: is the variable `var` (one per function) or `let` (one per block/iteration)?\n(2) **Find when the closure runs** vs. when the variable last changed — callbacks usually run after the loop.\n(3) **For `this`**: is it an arrow? If not, look only at the *call site*: `new` → `call/apply/bind` → `obj.` → plain call.\n(4) **For argument passing**: is the function mutating the object (shared) or reassigning the parameter (local)?\n(5) **For hoisting**: function declarations are usable early; `var` reads as `undefined`; `let/const/class` throw in the TDZ."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "Functions in JavaScript are **first-class values**: they can be stored, passed, returned, and given properties. Parameters are the names in the definition; arguments are the values at the call site. Defaults apply only for `undefined`, and `fn.length` counts parameters before the first default or rest.",
+        "JavaScript is **always pass-by-value**; for objects the value is a reference (**call-by-sharing**). Mutating a parameter object is visible to the caller, reassigning the parameter is not, and a `swap` function cannot work. Java and Python behave the same; C++ `&` and C# `ref` are true pass-by-reference.",
+        "**Lexical scope** resolves names by where code is written; **dynamic scope** (Bash, Emacs Lisp) by the runtime call stack. JS is lexical: lookup walks the scope chain outward from block to global and throws `ReferenceError` if nothing matches. Only `this` behaves dynamically.",
+        "`var` is function-scoped and hoisted as `undefined`. `let`/`const`/`class` are block-scoped and hoisted **uninitialised** into the **Temporal Dead Zone**: any access before the declaration runs, even `typeof`, throws. Function declarations are hoisted with their body. `const` fixes the binding, not the object.",
+        "A **closure** is a function plus a live link to the environment it was created in. It captures **variables, not values**; each call creates a fresh environment; captured variables are private. Engines move captured variables to the heap so they outlive the call.",
+        "The **loop bug**: callbacks created in a `for (var ...)` loop share one variable and all see its final value. `for (let ...)` creates a new binding per iteration. Go fixed the same bug in Go 1.22; Java avoids it by only capturing effectively final locals.",
+        "Practical closure patterns: **private state** (factory functions), **memoization** (cache in the closure, only for pure functions, bound the cache), **partial application** (`bind` or a `partial` helper), **currying** (`f(a)(b)(c)`, relies on `fn.length`), debounce, once, and middleware.",
+        "`this` precedence for regular functions: **new** → **explicit** (`call`/`apply`/`bind`; bind is permanent) → **implicit** (`obj.method()`) → **default** (`undefined` in strict mode). **Arrow functions** have lexical `this` that `call`/`bind` cannot change and cannot be used with `new`.",
+        "**Higher-order functions** (`map`, `filter`, `reduce`) take or return functions. **Pure functions** depend only on inputs and have no side effects, making them testable, cacheable, and safe to parallelise; keep side effects at the edges. Always give `reduce` an initial value.",
+        "Closures cause **memory leaks** when long-lived callbacks (listeners, intervals, caches, subscriptions) retain large data. Remove listeners (or use `AbortController` signals), clear intervals, bound caches or use `WeakMap`, and inspect closure retainers in heap snapshots."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "What does this print? `function f(o) { o = { v: 2 }; } const a = { v: 1 }; f(a); console.log(a.v);`",
+      "type": "mcq",
+      "options": [
+        "2",
+        "1",
+        "undefined",
+        "It throws a TypeError"
+      ],
+      "correct": 1,
+      "explanation": "JavaScript passes the reference by value. Reassigning the parameter `o` only rebinds the local copy; the caller's `a` still points to the original object, so `a.v` is 1. Had `f` done `o.v = 2`, the caller would see 2."
+    },
+    {
+      "id": "q2",
+      "question": "Which statement about lexical scope is correct?",
+      "type": "mcq",
+      "options": [
+        "A function sees the local variables of whichever function called it",
+        "Name resolution depends on the order in which functions are called at runtime",
+        "A function sees variables of the scopes it is textually nested in, regardless of the caller",
+        "Lexical scope applies only to variables declared with const"
+      ],
+      "correct": 2,
+      "explanation": "Lexical (static) scope is determined by where code is written. The first two options describe dynamic scope, used by Bash and Emacs Lisp. Lexical scope applies to all bindings in JavaScript, not only const."
+    },
+    {
+      "id": "q3",
+      "question": "What happens when this runs? `console.log(typeof x); let x = 5;`",
+      "type": "mcq",
+      "options": [
+        "It throws ReferenceError because x is in the Temporal Dead Zone",
+        "It prints \"undefined\" because typeof is safe for any name",
+        "It prints \"number\" because let is hoisted with its value",
+        "It prints \"object\""
+      ],
+      "correct": 0,
+      "explanation": "`let` bindings are hoisted but uninitialised until the declaration runs. Any access in the TDZ throws, including `typeof`. `typeof` only returns \"undefined\" safely for names that are not declared at all."
+    },
+    {
+      "id": "q4",
+      "question": "`for (var i = 0; i < 3; i++) setTimeout(() => console.log(i));` prints 3, 3, 3. What is the root cause?",
+      "type": "mcq",
+      "options": [
+        "setTimeout copies the value of i when the loop ends",
+        "Arrow functions cannot capture loop variables",
+        "The event loop runs callbacks in reverse order",
+        "var creates one function-scoped binding shared by every callback, and the callbacks run after the loop ends"
+      ],
+      "correct": 3,
+      "explanation": "Closures capture variables, not values. With `var` there is only one `i`, which is 3 by the time the callbacks run. `for (let i ...)` creates a fresh binding per iteration, producing 0, 1, 2."
+    },
+    {
+      "id": "q5",
+      "question": "Two counters are created with `const a = makeCounter(); const b = makeCounter();` where `makeCounter` returns a closure over a local `let count = 0`. After `a.inc(); a.inc(); b.inc();`, what are the counts?",
+      "type": "mcq",
+      "options": [
+        "a = 3, b = 3",
+        "a = 2, b = 1",
+        "a = 1, b = 1",
+        "a = 2, b = 2"
+      ],
+      "correct": 1,
+      "explanation": "Each call to `makeCounter` creates a new environment with its own `count`. Closures from different calls never share state, so a reaches 2 and b reaches 1."
+    },
+    {
+      "id": "q6",
+      "question": "A function is defined as `function hi() { return this.name; }` and called as `const g = hi.bind({ name: \"A\" }); g.call({ name: \"B\" });`. What is returned?",
+      "type": "mcq",
+      "options": [
+        "\"B\", because call overrides bind",
+        "undefined, because bind and call cancel out",
+        "\"A\", because a bound function's this cannot be changed by call",
+        "It throws TypeError"
+      ],
+      "correct": 2,
+      "explanation": "A function created by `bind` has a permanently fixed `this`. Later `call`/`apply`/`bind` cannot override it; only `new` can."
+    },
+    {
+      "id": "q7",
+      "question": "Why does `setTimeout(obj.method, 100)` often break code that uses `this` inside `method`?",
+      "type": "mcq",
+      "options": [
+        "The method is called without a receiver, so default binding applies (undefined in strict mode)",
+        "setTimeout always binds this to the global object in every mode",
+        "Methods cannot be passed as arguments in JavaScript",
+        "The method is copied and loses access to its closure variables"
+      ],
+      "correct": 0,
+      "explanation": "Implicit binding depends on the call site having `obj.` in front. Passing `obj.method` passes just the function, which is later called plainly. Closures are unaffected; only `this` is lost. Fix with `() => obj.method()` or `obj.method.bind(obj)`."
+    },
+    {
+      "id": "q8",
+      "question": "Which statement about arrow functions is true?",
+      "type": "mcq",
+      "options": [
+        "Their this is set by the object they are called on",
+        "Calling arrow.call(obj) sets this to obj",
+        "They can be used as constructors with new",
+        "They take this from the enclosing scope and have no own arguments object"
+      ],
+      "correct": 3,
+      "explanation": "Arrow functions resolve `this` (and `arguments`) lexically from the surrounding scope. `call`, `apply`, and `bind` cannot change their `this`, and using `new` with an arrow throws TypeError."
+    },
+    {
+      "id": "q9",
+      "question": "Which function is pure?",
+      "type": "mcq",
+      "options": [
+        "`(arr) => arr.sort()`",
+        "`(items) => items.reduce((s, x) => s + x.price, 0)`",
+        "`(id) => fetch(\"/users/\" + id)`",
+        "`(n) => n + Math.random()`"
+      ],
+      "correct": 1,
+      "explanation": "Summing prices depends only on the input and changes nothing. `sort()` mutates the caller's array, `fetch` performs I/O, and `Math.random()` makes the output non-deterministic, so those three are impure."
+    },
+    {
+      "id": "q10",
+      "question": "A single-page app registers `window.addEventListener(\"resize\", handler)` on every route change, where `handler` closes over a large data table. Memory grows steadily. What is the best fix?",
+      "type": "mcq",
+      "options": [
+        "Call the garbage collector manually after every route change",
+        "Replace the closure with a var-scoped function",
+        "Remove the listener when the view is torn down, e.g. removeEventListener or an AbortController signal",
+        "Convert the handler into an arrow function"
+      ],
+      "correct": 2,
+      "explanation": "The window keeps each registered listener alive, and each listener's closure keeps its data table reachable, so the GC cannot reclaim them. Removing the listener (or aborting its signal) breaks that chain. Arrow vs regular functions and var make no difference, and JS cannot force a collection that would free reachable objects."
+    }
+  ]
+}

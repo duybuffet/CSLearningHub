@@ -1,0 +1,283 @@
+{
+  "id": "phase5_cpu-scheduling",
+  "title": "CPU Scheduling",
+  "phase": 5,
+  "week": 19,
+  "icon": "os",
+  "tagline": "How the kernel decides which thread runs next, from FCFS and Round Robin to Linux's EEVDF, real-time classes, and multicore load balancing",
+  "readTime": "~25 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "At any instant, a laptop has hundreds of threads that *could* run and perhaps eight or sixteen cores to run them on. A server might have thousands of runnable threads across a few dozen cores. The **CPU scheduler** is the kernel component that decides, every few milliseconds on every core, *which thread runs next and for how long*. Its decisions are invisible when they're good. When they're bad, you see them as a stuttering UI, a p99 latency spike, a batch job that never finishes, or (on one famous occasion) a spacecraft on Mars rebooting itself over and over.\n\nThere's no single \"best\" policy, because the goals conflict. Finishing jobs quickly on average (turnaround) favours short jobs. Keeping interactive programs snappy (response time) favours whoever just woke up. Treating everyone equally (fairness) ignores both. Meeting hard deadlines (real-time) trumps all three. Every algorithm in this chapter picks a different point in that trade-off space.\n\nWe'll start with the textbook algorithms (FCFS, SJF, SRTF, Round Robin, Priority) and work through each one on the same workload with Gantt-style timelines, so you can see exactly where the averages come from. Then we move to what real kernels do: the **Multi-Level Feedback Queue** idea behind Windows and macOS schedulers, Linux's **Completely Fair Scheduler** and its 2023 replacement **EEVDF**, the real-time classes `SCHED_FIFO`, `SCHED_RR`, and `SCHED_DEADLINE`, and the problems that only appear with many cores: load balancing, affinity, NUMA, and container CPU quotas.\n\nFinally we connect it to your code: why `nice` changes CPU share by about 10% per step, why **priority inversion** nearly cost NASA a mission, and why sizing a thread pool to the number of cores, rather than \"more threads = more speed\", is one of the most effective performance decisions you can make."
+    },
+    {
+      "type": "analogy",
+      "title": "The Emergency Room",
+      "content": "A hospital emergency room has a few doctors (cores) and a waiting room full of patients (runnable threads). How do you decide who's seen next?\n\n- **First come, first served**: fair in a naive sense, but a patient needing a six-hour operation at the front means a sprained ankle waits six hours. That is the **convoy effect**.\n- **Shortest job first**: see quick cases first, and average waiting time drops dramatically. But you have to *predict* how long each case takes, and a steady stream of quick cases means the long case is never seen. That is **starvation**.\n- **Round robin**: every patient gets ten minutes with a doctor, then goes to the back of the line. Nobody waits forever and everyone gets *some* attention quickly, but constant hand-offs waste time (context switches).\n- **Triage (priority)**: heart attacks jump the queue. That's essential, but a low-priority patient can wait indefinitely unless their priority rises the longer they wait (**aging**).\n- **Real-time**: the trauma surgeon is reserved for incoming ambulances with guaranteed response times, regardless of who's waiting.\n\nNow add the twist that makes real schedulers hard: **priority inversion**. A critical patient needs the only CT scanner, but a low-priority patient is in it. Before the scan finishes, a stream of medium-priority patients pulls away the staff running the scanner. The critical patient now waits behind people less urgent than themselves. The fix is to temporarily treat whoever holds the scanner as being as urgent as the most urgent person waiting for it (**priority inheritance**)."
+    },
+    {
+      "type": "explanation",
+      "title": "What the Scheduler Decides, and When",
+      "content": "A thread alternates between **CPU bursts** (computing) and **I/O waits** (blocked on disk, network, a lock, a timer). **CPU-bound** threads (video encoding, compression, a tight JavaScript loop) have long bursts. **I/O-bound** threads (a web server, an editor waiting for keystrokes) have short bursts and spend most of their time blocked. Good schedulers treat the two differently: give I/O-bound threads the CPU quickly when they wake, since they'll use it briefly and block again, and let CPU-bound threads soak up what's left.\n\nThe scheduler runs at specific moments:\n1. **The running thread blocks**: a `read()` with no data, a contended mutex, `sleep()`. The CPU is now free, so pick someone else.\n2. **The running thread exits.**\n3. **A timer interrupt fires**: the periodic tick (100–1000 Hz, `CONFIG_HZ`) or a high-resolution timer set for the end of the current slice. If the thread has used its share, it is **preempted**.\n4. **A thread wakes up**: I/O completed, a lock was released. If the woken thread should run before the current one (higher priority, or more \"owed\" CPU), the kernel can preempt immediately.\n5. **The thread yields or changes priority** (`sched_yield()`, `nice`, `sched_setattr`).\n\nThe **dispatcher** then performs the **context switch**: save the old thread's registers, switch the kernel stack, switch page tables if it's a different process, restore the new thread's registers, and return to user mode. The direct cost is on the order of a microsecond or a few. The **indirect cost** is bigger: the new thread starts with caches, TLB, and branch predictors full of someone else's data. This is why schedulers resist switching *too* often, and why time slices are milliseconds, not microseconds.\n\nOn Linux, \"thread\" and \"process\" are both **tasks** to the scheduler. It schedules threads, not processes, so a process with 64 busy threads competes as 64 entities unless cgroups group them (more on that later)."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "stateDiagram-v2\n    [*] --> Ready: created / woken\n    Ready --> Running: scheduler picks it - dispatch\n    Running --> Ready: preempted - slice used up or better task woke\n    Running --> Ready: sched_yield\n    Running --> Blocked: waits for I/O, lock, sleep\n    Blocked --> Ready: event arrives - wakeup\n    Running --> [*]: exit",
+      "caption": "The scheduler only chooses among **Ready** threads. Blocked threads don't consume CPU, which is why a thousand idle connections cost nothing. Preemption (a timer interrupt or a wakeup) moves a running thread back to Ready without its cooperation."
+    },
+    {
+      "type": "explanation",
+      "title": "Goals, Metrics, and Preemption",
+      "content": "Scheduling textbooks measure policies with a handful of metrics. Know their exact definitions, because interview questions and worked examples depend on them:\n\n| Metric | Definition | Who cares |\n|---|---|---|\n| **Turnaround time** | completion time − arrival time | batch jobs, CI pipelines |\n| **Waiting time** | turnaround − CPU burst (time spent ready but not running) | everyone |\n| **Response time** | first time on CPU − arrival time | interactive apps, UIs, request handlers |\n| **Throughput** | jobs completed per unit time | servers, batch systems |\n| **CPU utilisation** | fraction of time the CPU is busy | capacity planning |\n| **Fairness** | how evenly CPU is shared (by weight) among competitors | multi-tenant systems |\n| **Deadline / tail latency** | did it finish by time T? what's the p99? | real-time, SLO-bound services |\n\nThey conflict. Minimising average turnaround favours short jobs, but that hurts fairness and can starve long ones. Minimising response time means frequent switching, which costs throughput. Real systems care about **tail latency** (p99, p99.9) more than averages: one request stuck behind a CPU hog for 200 ms matters more than a 1 ms improvement in the mean.\n\n**Cooperative vs preemptive.** In **cooperative** (non-preemptive) scheduling, a thread runs until it blocks, exits, or voluntarily yields. Classic Mac OS (≤ 9) and Windows 3.x worked this way, and one misbehaving program could freeze the machine. In **preemptive** scheduling, the kernel uses timer interrupts to take the CPU away at any point. Every mainstream OS kernel today is preemptive for user threads.\n\nBut cooperative scheduling is alive and well **inside your runtime**. The JavaScript event loop is cooperative: a callback runs to completion, and a `while(true)` blocks everything. Python's `asyncio` and Rust's async executors also switch only at `await` points. Go was cooperative at function-call boundaries until **Go 1.14 (2020)** added asynchronous preemption using signals, because tight loops could stall garbage collection and other goroutines. The lesson is the same at every layer: without preemption, latency is only as good as the worst-behaved task."
+    },
+    {
+      "type": "explanation",
+      "title": "The Classic Algorithms, Worked Step by Step",
+      "content": "One workload, four policies, one CPU, context-switch cost ignored. Times are in milliseconds:\n\n| Job | Arrival | CPU burst |\n|---|---|---|\n| P1 | 0 | 8 |\n| P2 | 1 | 4 |\n| P3 | 2 | 9 |\n| P4 | 3 | 5 |\n\n**FCFS (First-Come, First-Served)**: run jobs in arrival order, never preempt.\nTimeline: `P1 0–8 | P2 8–12 | P3 12–21 | P4 21–26`\nWaiting: P1 = 0, P2 = 8−1 = 7, P3 = 12−2 = 10, P4 = 21−3 = 18 → **average wait 8.75**, average turnaround 15.25. Simple, but short P2 and P4 sit behind long jobs (the convoy effect).\n\n**SJF (Shortest Job First, non-preemptive)**: when the CPU frees up, pick the ready job with the shortest burst.\nAt t=0 only P1 exists, so it runs 0–8. At t=8, P2 (4), P3 (9), and P4 (5) are ready, so the order is P2, P4, P3.\nTimeline: `P1 0–8 | P2 8–12 | P4 12–17 | P3 17–26`\nWaiting: P1 = 0, P2 = 7, P4 = 12−3 = 9, P3 = 17−2 = 15 → **average wait 7.75**, average turnaround 14.25.\n\n**SRTF (Shortest Remaining Time First, preemptive SJF)**: whenever a job arrives, run whichever job has the least *remaining* time.\nt=0 P1 starts. t=1 P2 arrives with 4 < P1's remaining 7, so P2 preempts and runs 1–5. At t=5 the remaining times are P1 = 7, P3 = 9, P4 = 5, so P4 runs 5–10, then P1 10–17, then P3 17–26.\nTimeline: `P1 0–1 | P2 1–5 | P4 5–10 | P1 10–17 | P3 17–26`\nWaiting: P1 = 17−0−8 = 9, P2 = 0, P3 = 15, P4 = 2 → **average wait 6.5**, average turnaround 13.0. SRTF is **provably optimal for average waiting time**, but it needs to know the future, and long jobs can starve.\n\n**Round Robin (quantum = 4)**: FIFO queue. Each job runs for at most 4, then goes to the back. New arrivals join the queue before the preempted job.\nTimeline: `P1 0–4 | P2 4–8 | P3 8–12 | P4 12–16 | P1 16–20 | P3 20–24 | P4 24–25 | P3 25–26`\nCompletion: P1 20, P2 8, P3 26, P4 25 → waiting P1 = 12, P2 = 3, P3 = 15, P4 = 17 → **average wait 11.75**, average turnaround 18.25. That's the worst so far, but **average response time is 4.5** (P1 0, P2 3, P3 6, P4 9), versus 8.75 for FCFS. RR trades turnaround for responsiveness and guarantees that no job waits more than (n−1) × quantum for its next turn.\n\n**Choosing the quantum**: too small and context switches dominate (a 0.1 ms switch with a 1 ms quantum wastes about 9% of the CPU). Too large and RR degenerates into FCFS. A common rule of thumb is that about 80% of CPU bursts should finish within one quantum.\n\n**Predicting bursts**: since real SJF can't see the future, schedulers estimate the next burst with an **exponential average**, τₙ₊₁ = α·tₙ + (1−α)·τₙ, which weights recent behaviour more heavily (α = 0.5 is typical in textbooks)."
+    },
+    {
+      "type": "code_example",
+      "language": "python",
+      "label": "Example",
+      "code": "# Tiny CPU-scheduling simulator: FCFS, SJF, SRTF, Round Robin on one CPU.\n# Ignores context-switch cost. Ties broken by arrival order.\nfrom collections import deque\n\nJOBS = [  # (name, arrival, burst)\n    (\"P1\", 0, 8),\n    (\"P2\", 1, 4),\n    (\"P3\", 2, 9),\n    (\"P4\", 3, 5),\n]\n\ndef simulate(policy, quantum=4):\n    t, timeline = 0, []                         # timeline: (start, end, name)\n    left = {n: b for n, a, b in JOBS}\n    arrive = {n: a for n, a, b in JOBS}\n    first_run, finish = {}, {}\n    queue, pending = deque(), deque(sorted(JOBS, key=lambda j: j[1]))\n\n    def admit(now):\n        while pending and pending[0][1] <= now:\n            queue.append(pending.popleft()[0])\n\n    admit(0)\n    current = None\n    while len(finish) < len(JOBS):\n        if not queue and current is None:       # CPU idle until next arrival\n            t = pending[0][1]; admit(t); continue\n        if policy in (\"FCFS\", \"RR\"):\n            if current is None: current = queue.popleft()\n        elif policy == \"SJF\":                   # non-preemptive: choose only when CPU frees\n            if current is None:\n                current = min(queue, key=lambda n: left[n]); queue.remove(current)\n        elif policy == \"SRTF\":                  # preemptive: re-choose every time unit\n            if current is not None: queue.appendleft(current)\n            current = min(queue, key=lambda n: left[n]); queue.remove(current)\n\n        run = {\"FCFS\": left[current], \"SJF\": left[current],\n               \"RR\": min(quantum, left[current]), \"SRTF\": 1}[policy]\n        first_run.setdefault(current, t)\n        if timeline and timeline[-1][2] == current and timeline[-1][1] == t:\n            timeline[-1] = (timeline[-1][0], t + run, current)  # merge slices\n        else:\n            timeline.append((t, t + run, current))\n        t += run; left[current] -= run\n        admit(t)                                # arrivals join the queue before the preempted job\n        if left[current] == 0:\n            finish[current] = t; current = None\n        elif policy == \"RR\":\n            queue.append(current); current = None\n\n    print(f\"\\n{policy}{f' (q={quantum})' if policy == 'RR' else ''}\")\n    print(\"  Gantt: \" + \" | \".join(f\"{n} {s}-{e}\" for s, e, n in timeline))\n    tat = {n: finish[n] - arrive[n] for n in finish}\n    wait = {n: tat[n] - b for n, a, b in JOBS}\n    resp = {n: first_run[n] - arrive[n] for n in finish}\n    for n, a, b in JOBS:\n        print(f\"  {n}: finish={finish[n]:2} turnaround={tat[n]:2} wait={wait[n]:2} response={resp[n]:2}\")\n    avg = lambda d: sum(d.values()) / len(d)\n    print(f\"  avg turnaround={avg(tat):.2f}  avg wait={avg(wait):.2f}  avg response={avg(resp):.2f}\")\n\nfor p in (\"FCFS\", \"SJF\", \"SRTF\", \"RR\"):\n    simulate(p)",
+      "explanation": "A complete single-CPU simulator for the four policies. Run it and it prints the exact timelines and averages used in the worked examples above: FCFS average wait **8.75**, SJF **7.75**, SRTF **6.50**, RR (q=4) **11.75**, with average response times 8.75 / 7.75 / 4.25 / 4.50. Try changing `quantum` to 1 or 100 and watch RR's response time and turnaround move in opposite directions, or add a long job arriving at t=0 to see the convoy effect get worse under FCFS. The one subtle rule worth noticing is in RR: jobs that arrive during a slice join the queue **before** the job that was just preempted. Textbooks vary on this tie-break, and it changes the timeline."
+    },
+    {
+      "type": "explanation",
+      "title": "Priority Scheduling, Starvation, and Aging",
+      "content": "**Priority scheduling** runs the highest-priority ready job. Many systems use smaller numbers for higher priority. SJF is just priority scheduling with priority = predicted burst length. A non-preemptive example where all jobs arrive at t=0 (1 = highest):\n\n| Job | Burst | Priority |\n|---|---|---|\n| P1 | 10 | 3 |\n| P2 | 1 | 1 |\n| P3 | 2 | 4 |\n| P4 | 1 | 5 |\n| P5 | 5 | 2 |\n\nOrder by priority: `P2 0–1 | P5 1–6 | P1 6–16 | P3 16–18 | P4 18–19`. Waits: P2 = 0, P5 = 1, P1 = 6, P3 = 16, P4 = 18 → average **8.2**.\n\nThe danger is **starvation**. If high-priority work keeps arriving, P4 never runs. (An often-repeated story says that when MIT's IBM 7094 was shut down in 1973, they found a low-priority job submitted in 1967 that had never run.) The standard cure is **aging**: gradually raise a job's priority the longer it waits (e.g., +1 priority level every second of waiting), so every job eventually becomes the most important one in the system.\n\nPriorities come in two kinds:\n- **Static**: set by the user or administrator (`nice`, real-time priorities, Windows priority classes).\n- **Dynamic**: adjusted by the OS based on behaviour. Windows boosts a thread's priority when it wakes from I/O or when its window comes to the foreground, then decays it back. macOS maps app-declared **QoS classes** (user-interactive, user-initiated, utility, background) onto priorities and, on Apple Silicon, onto performance vs efficiency cores.\n\nUnix `nice` values run from **−20 (highest priority) to +19 (lowest)**, default 0. Only root (or `CAP_SYS_NICE`) can lower a niceness below its current value. On Linux, nice is not an absolute priority. It sets a **weight** in the fair scheduler, so a nice +19 process still gets *some* CPU, just very little when anyone else wants it."
+    },
+    {
+      "type": "explanation",
+      "title": "Multi-Level Feedback Queue: Learning What Each Thread Is",
+      "content": "SJF and SRTF need burst lengths nobody knows. The **Multi-Level Feedback Queue (MLFQ)**, first described by Corbató for CTSS in 1962 (part of his 1990 Turing Award citation), *learns* them from behaviour. The rules, as presented in *Operating Systems: Three Easy Pieces*:\n\n1. There are several queues, each with a priority. **Higher-priority queues always run first.**\n2. Jobs within the same queue run **round robin**.\n3. A **new job starts in the top queue**: assume it's short and interactive until proven otherwise.\n4. Once a job **uses up its time allotment** at a level (in total, however many times it gave up the CPU along the way), it **moves down one queue**.\n5. **Priority boost**: every period S (say, one second), move *all* jobs back to the top queue.\n\nWhat this achieves:\n- **Interactive and I/O-bound jobs stay near the top.** They run briefly, block, and never exhaust their allotment, so they get excellent response time.\n- **CPU-bound jobs sink** to the lower queues, which typically have *longer* quanta (fewer switches, better throughput for batch work).\n- **Rule 4 prevents gaming.** Early MLFQ versions demoted only jobs that used a *whole slice at once*, so a program could call `sleep(0)` just before its slice ended and stay at the top forever. Counting total CPU used at a level closes that hole.\n- **Rule 5 prevents starvation** and lets a job whose behaviour changed (a batch job that became interactive) climb back up.\n\nMLFQ variants are the basis of the Solaris, BSD (4.4BSD, FreeBSD's ULE), and Windows NT-family schedulers. Windows uses 32 priority levels with boosts and decay, and macOS/XNU uses multilevel queues with priority decay and QoS. The tuning knobs (number of queues, quantum per level, boost period) are hard to get right in general, which is part of why Linux took a different path with fair-share scheduling."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    N[\"New job\"] --> Q0\n    Q0[\"Queue 0 - highest priority, quantum 10 ms\"] -->|\"used full allotment\"| Q1\n    Q1[\"Queue 1 - quantum 20 ms\"] -->|\"used full allotment\"| Q2\n    Q2[\"Queue 2 - lowest priority, quantum 40 ms\"] -->|\"still CPU-bound\"| Q2\n    Q0 -->|\"blocks on I/O early\"| Q0\n    Q1 -->|\"blocks on I/O early\"| Q1\n    B[\"Priority boost every S seconds\"] -.->|\"all jobs back to the top\"| Q0\n    CPU[\"CPU always serves the highest non-empty queue\"]\n    Q0 --> CPU\n    Q1 --> CPU\n    Q2 --> CPU",
+      "caption": "MLFQ infers job type from behaviour. Interactive jobs that block early keep high priority. CPU hogs sink to low-priority queues with longer quanta. A periodic boost prevents starvation and lets jobs whose behaviour changed climb back up."
+    },
+    {
+      "type": "explanation",
+      "title": "Linux CFS: Fairness by Virtual Runtime (2007–2023)",
+      "content": "For 16 years (Linux 2.6.23 in 2007 until 6.6 in 2023), normal Linux threads were scheduled by Ingo Molnár's **Completely Fair Scheduler (CFS)**. Its model is an ideal multitasking CPU that runs all *n* runnable tasks simultaneously, each at 1/n speed. Real hardware can't do that, so CFS tracks how far each task has fallen behind that ideal and runs whoever is furthest behind.\n\nThe key quantity is **virtual runtime** (`vruntime`):\n\n`vruntime += actual_runtime × (1024 / weight)`\n\nThe **weight** comes from the nice value: nice 0 = **1024**, and each nice step changes the weight by about **1.25×**: nice 5 = 335, nice 10 = 110, nice 19 = 15, nice −5 = 3121, nice −20 = 88761. A heavy (high-priority) task's `vruntime` grows slowly, so it gets picked more often. The 1.25× factor means **each nice level shifts CPU share by roughly 10%** between two competing tasks.\n\nMechanics:\n- Runnable tasks live in a **red-black tree ordered by `vruntime`**. The scheduler always picks the **leftmost** (smallest `vruntime`) task, cached for O(1) access. Inserts and removals are O(log n).\n- There's no fixed quantum. CFS aimed to run every task once within a **target latency** (`sched_latency`, 6 ms scaled by CPU count), giving each a slice proportional to its weight, but never less than a **minimum granularity** (0.75 ms, scaled similarly) to avoid thrashing.\n- A task that slept for a long time doesn't get a huge burst of \"owed\" CPU on waking. Its `vruntime` is clamped to roughly the queue's minimum (minus a small sleeper credit), so it runs soon, which gives good interactivity, but it can't monopolise the CPU.\n- **Group scheduling** applies fairness hierarchically: first between cgroups (containers, systemd services, or desktop sessions via *autogroup*), then between tasks inside each group. A `make -j64` in one terminal doesn't get 64× the CPU of your browser.\n\nCFS's weakness was **latency control**. It guaranteed fair *shares* but had no direct way to say \"this task needs to run *soon*, though not for long.\" Over the years that was patched with a pile of heuristics (wakeup preemption granularity, sleeper credits, buddy hints) that were hard to reason about and tune."
+    },
+    {
+      "type": "explanation",
+      "title": "EEVDF: The Linux Scheduler Since 6.6",
+      "content": "In **Linux 6.6 (October 2023)**, Peter Zijlstra replaced CFS's task-selection logic with **EEVDF: Earliest Eligible Virtual Deadline First**, an algorithm from a 1995 paper by Ion Stoica and Hussein Abdel-Wahab. Weights, nice values, `vruntime`, cgroup hierarchies, and the `SCHED_OTHER` policy name all stayed. What changed is *how the next task is chosen*.\n\nEEVDF tracks two things per task:\n1. **Lag**: the difference between the CPU time the task *should* have received (its weighted fair share) and what it actually got. A task is **eligible** only if its lag ≥ 0, meaning it is owed time or is exactly even. Tasks that have run ahead of their share must wait, so nobody can monopolise the CPU.\n2. **Virtual deadline**: `eligible time + requested slice / weight`. Each task requests a time slice (by default a base slice of 0.75 ms, scaled by CPU count to about 3 ms on machines with 8+ CPUs). A shorter slice means an earlier deadline.\n\n**Rule: among eligible tasks, run the one with the earliest virtual deadline.** An augmented red-black tree makes this O(log n).\n\nWhy this is better:\n- **Fairness and latency are decoupled.** Weight (nice) decides *how much* CPU you get. Slice length decides *how soon* you get it. A latency-sensitive task (audio, a UI thread, a request handler) can ask for a short slice and get scheduled sooner and more often, without getting more total CPU. Since Linux 6.12, a task can set its own slice through `sched_setattr()` (the `sched_runtime` field).\n- **Fewer heuristics.** Lag naturally handles sleepers and newly woken tasks. Linux 6.12 completed the transition with \"delayed dequeue,\" which keeps a sleeping task with negative lag from escaping its debt by sleeping and waking.\n- **Behaviour is easier to predict** for both kernel developers and users.\n\nTwo more 2024 milestones matter in 2026: **`sched_ext`** (Linux 6.12) lets you load an entire scheduling policy as a **BPF program** at runtime (Meta runs it in production, and the Valve-sponsored `scx_lavd` targets gaming latency), and **PREEMPT_RT**, the real-time patch set, was merged into mainline in 6.12 after about 20 years out of tree. If you read older material saying \"Linux uses CFS,\" it's describing kernels before 6.6. Most distributions shipping in 2025–26 (Ubuntu 24.04 with 6.8, RHEL 10 with 6.12, Debian 13 with 6.12) run EEVDF."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    W[\"Timer tick, wakeup, or current task blocks\"] --> L[\"Compute each runnable task's lag vs. its weighted fair share\"]\n    L --> E{\"lag >= 0 ?\"}\n    E -->|\"No - got more than its share\"| X[\"Not eligible - must wait\"]\n    E -->|\"Yes - owed CPU\"| D[\"Virtual deadline = eligible time + slice / weight\"]\n    D --> P[\"Pick the eligible task with the earliest virtual deadline\"]\n    P --> R[\"Run it for up to its slice\"]\n    R --> U[\"Advance its vruntime by runtime x 1024 / weight\"]\n    U --> W",
+      "caption": "EEVDF in one loop. **Eligibility** (non-negative lag) enforces fairness. **Earliest virtual deadline** among eligible tasks controls latency, so a task asking for short slices runs sooner without receiving more total CPU than its weight allows."
+    },
+    {
+      "type": "code_example",
+      "language": "python",
+      "label": "Example",
+      "code": "# Linux only. Two CPU-bound processes forced onto ONE core: how does nice split the CPU?\nimport os, time, multiprocessing as mp\n\ndef spin(niceness, seconds, out):\n    os.sched_setaffinity(0, {0})       # pin to CPU 0 so they must compete\n    os.nice(niceness)                  # raise niceness = lower weight\n    end, n = time.time() + seconds, 0\n    while time.time() < end:\n        n += 1\n    out.put((niceness, n))\n\nif __name__ == \"__main__\":\n    q = mp.Queue()\n    procs = [mp.Process(target=spin, args=(nv, 3, q)) for nv in (0, 5)]\n    for p in procs: p.start()\n    for p in procs: p.join()\n    res = dict(q.get() for _ in procs)\n    total = sum(res.values())\n    for nv, n in sorted(res.items()):\n        print(f\"nice {nv}: {n:>11,} loops  ({100 * n / total:.0f}% of the core)\")\n    print(f\"ratio ≈ {res[0] / res[5]:.2f}   (kernel weights 1024 / 335 = {1024/335:.2f})\")",
+      "explanation": "Two identical CPU-bound processes pinned to the same core, one at nice 0 and one at nice 5. Run in a Linux container, it printed `nice 0: 23,798,673 loops (75% of the core)`, `nice 5: 7,835,184 loops (25% of the core)`, `ratio ≈ 3.04`, almost exactly the kernel's weight ratio **1024 / 335 = 3.06**. That's what \"fair share by weight\" means: five nice steps (each ~1.25×) give about 3× less CPU, not \"lower priority, so it never runs.\" Without the `sched_setaffinity` pinning, each process would get its own core and the nice values would make **no visible difference**. Nice only matters when tasks compete for the same CPU. (`os.sched_setaffinity` is Linux-only; on macOS this script fails.)"
+    },
+    {
+      "type": "explanation",
+      "title": "Real-Time Scheduling: SCHED_FIFO, SCHED_RR, SCHED_DEADLINE",
+      "content": "Linux has a strict hierarchy of **scheduling classes**. A class runs only if every class above it has nothing runnable:\n\n1. **stop** (internal: CPU hotplug and migration)\n2. **`SCHED_DEADLINE`**\n3. **`SCHED_FIFO` / `SCHED_RR`** (real-time, static priority 1–99)\n4. **`SCHED_OTHER` / `SCHED_BATCH`** (normal tasks, EEVDF; `sched_ext` plugs in at this level)\n5. **`SCHED_IDLE`** (runs only when nothing else wants the CPU)\n\n**`SCHED_FIFO`**: fixed priority 1–99. The highest-priority runnable FIFO task runs **until it blocks, yields, or a higher-priority RT task wakes**. There is no time slice. A FIFO task in an infinite loop owns that core.\n\n**`SCHED_RR`**: like FIFO, but tasks at the *same* priority take turns with a quantum (100 ms by default, `/proc/sys/kernel/sched_rr_timeslice_ms`).\n\n**`SCHED_DEADLINE`** (Linux 3.14, 2014): instead of a priority, a task declares **(runtime, deadline, period)**, for example \"I need 2 ms of CPU every 10 ms, finished within 5 ms of each period's start.\" The kernel runs **Earliest Deadline First** with a **Constant Bandwidth Server** that enforces the reservation, and performs **admission control**: it refuses new deadline tasks if the total requested bandwidth would exceed capacity. It's used for audio, robotics, and industrial control.\n\nSafety valves: by default real-time tasks may use at most **950 ms of every 1 s** (`sched_rt_runtime_us = 950000`), leaving 5% for normal tasks so a runaway RT thread can't completely lock you out of the machine. Newer kernels implement this guarantee with a deadline-class \"fair server\" for normal tasks. Setting RT policies requires root or `CAP_SYS_NICE` (and inside containers, an RT budget for the cgroup). Without it, `chrt` fails with \"Operation not permitted.\"\n\n\"Real-time\" means **bounded latency, not speed**. For hard guarantees you also need a kernel that can preempt almost anywhere (PREEMPT_RT, mainline since 6.12, turns most spinlocks into sleeping, priority-inheriting locks and runs interrupt handlers as threads), plus locked memory (`mlockall`) to avoid page faults, isolated cores (`isolcpus`, `nohz_full`), and pinned IRQs. Worst-case latency on a tuned PREEMPT_RT system is typically in the tens of microseconds."
+    },
+    {
+      "type": "explanation",
+      "title": "Multicore Scheduling: Load Balancing, Affinity, NUMA, and Quotas",
+      "content": "With many cores, a single global run queue would become a lock-contention bottleneck. Linux keeps a **run queue per CPU** and moves tasks between them:\n\n- **Load balancing** runs periodically and when a CPU goes idle (*idle balancing*: an idle CPU tries to **pull** work). It works up a hierarchy of **scheduling domains** matching the hardware: SMT siblings on one core, cores sharing a last-level cache, the whole socket, then NUMA nodes. Migrations within a cache domain are cheap. Moving across sockets is expensive and is done more reluctantly.\n- **Wake-up placement**: when a thread wakes, the kernel prefers an idle CPU that shares a cache with the waker or with where the thread last ran (`select_idle_sibling`), so its data is likely still warm.\n- **Affinity**: *soft affinity* is the scheduler's preference to keep a task where its cache is warm. *Hard affinity* is a mask you set: `sched_setaffinity()`, `taskset -c 2,3 cmd`, or cpusets in cgroups. It's used to isolate latency-critical threads and keep noisy neighbours away.\n- **NUMA**: on multi-socket servers (and chiplet CPUs with several memory domains), memory attached to another node is noticeably slower, often 1.5–2× the latency. Linux's **automatic NUMA balancing** samples memory accesses and migrates pages or tasks so they end up together. `numactl --cpunodebind=0 --membind=0` pins both explicitly, which is common for databases.\n- **Heterogeneous cores**: Apple M-series, ARM big.LITTLE, and Intel's P-cores and E-cores have cores of different speeds. The scheduler must consider capacity and energy (Linux *Energy Aware Scheduling*, Intel Thread Director hints, macOS QoS) as well as load. A thread on an E-core may run at half speed, which can confuse benchmarks.\n\n**Containers and CPU quotas** are where this bites most backend engineers. A Kubernetes CPU *limit* becomes a cgroup v2 `cpu.max` such as `150000 100000`: 150 ms of CPU time per 100 ms period, i.e., 1.5 CPUs. That's *bandwidth*, not cores. A process with 8 busy threads on a 32-core node can burn its whole 150 ms of quota in the first ~19 ms of the period, then **all its threads are throttled for the remaining ~81 ms**. The result is p99 latency spikes even at low average CPU. Check `cpu.stat` (`nr_throttled`, `throttled_usec`). Many teams set CPU *requests* (`cpu.weight`, proportional shares) and drop CPU limits for latency-sensitive services.\n\nRuntimes have to discover this budget. `nproc` honours affinity but **ignores quotas**. In a container with `--cpus=1.5` on a 4-core VM, `nproc` printed 4. Node 22's `os.availableParallelism()` (libuv 1.51) honours both and printed 1, while `os.cpus().length` still said 4. The JVM has been container-aware since JDK 10, and **Go 1.25 (2025)** finally made `GOMAXPROCS` respect cgroup CPU limits by default."
+    },
+    {
+      "type": "explanation",
+      "title": "Priority Inversion and the Mars Pathfinder Bug",
+      "content": "**Priority inversion** happens when a high-priority task waits for a lock held by a low-priority task, and a medium-priority task (which needs no lock at all) preempts the low-priority holder. Now the high-priority task effectively runs at *below* medium priority, for an unbounded time.\n\n**Mars Pathfinder, July 1997.** Days after landing, the lander began suffering total system resets, losing data each time. Its VxWorks real-time OS ran:\n- a **high-priority** information-bus management task (`bc_dist`),\n- a **medium-priority** communications task (long-running),\n- a **low-priority** meteorological data task (ASI/MET), which occasionally took the mutex protecting the shared information bus.\n\nWhen the meteorological task held the mutex and the communications task preempted it, the bus task blocked on the mutex long enough that a **watchdog** noticed the bus cycle hadn't completed and **reset the whole computer**, a textbook inversion. JPL engineers reproduced it on an identical ground testbed with full tracing turned on. The fix was already in the OS: the mutex had been created with **priority inheritance turned off**. They uploaded a patch that changed one global variable to enable it.\n\n**Solutions:**\n- **Priority inheritance**: while a low-priority task holds a lock that a higher-priority task wants, the holder temporarily **inherits the waiter's priority**, so the medium task can't preempt it. It drops back on release. Linux implements this with `rt_mutex`, PI futexes, and `pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT)`. PREEMPT_RT uses it for kernel locks.\n- **Priority ceiling**: each lock has a ceiling equal to the highest priority of any task that uses it, and a task holding it runs at the ceiling. It is more predictable and also prevents some deadlocks.\n- **Design**: keep critical sections short, don't share locks across very different priorities, or use lock-free message passing.\n\nWith fair scheduling (EEVDF) inversion is softer, because nobody is starved outright, but it still shows up. A low-weight background thread holding a lock that your request threads need will hand out CPU at its own weight. That's a classic cause of mysterious latency when people `nice` a \"background\" worker that shares locks or a connection pool with the foreground."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant L as Low - weather task\n    participant M as Medium - comms task\n    participant H as High - bus task\n    participant X as Bus mutex\n    L->>X: lock - acquired\n    H->>X: lock - BLOCKED, L holds it\n    M->>M: wakes and preempts L, runs a long time\n    Note over H: High waits on Low, Low waits on Medium\n    Note over H: Watchdog fires and the system resets\n    L->>L: with priority inheritance, L runs at High priority instead\n    L->>X: unlock - priority drops back\n    X-->>H: lock acquired, High proceeds",
+      "caption": "Priority inversion on Mars Pathfinder. The medium task preempts the low-priority lock holder, so the high-priority task waits indefinitely and a watchdog resets the system. Priority inheritance lets the holder run at the waiter's priority, so it finishes the critical section quickly."
+    },
+    {
+      "type": "code_example",
+      "language": "bash",
+      "label": "Example",
+      "code": "# Inspect and steer the Linux scheduler (outputs from a Linux container)\n\n$ chrt -p $$                       # policy and RT priority of this shell\npid 1's current scheduling policy: SCHED_OTHER\npid 1's current scheduling priority: 0\n\n$ chrt -m                          # valid priority ranges per policy\nSCHED_OTHER min/max priority    : 0/0\nSCHED_FIFO min/max priority     : 1/99\nSCHED_RR min/max priority       : 1/99\nSCHED_BATCH min/max priority    : 0/0\nSCHED_IDLE min/max priority     : 0/0\nSCHED_DEADLINE min/max priority : 0/0\n\n$ nice -n 10 ps -o pid,cls,rtprio,ni,pri,psr,comm   # CLS=TS is SCHED_OTHER, PSR = current CPU\n  PID CLS RTPRIO  NI PRI PSR COMMAND\n   12  TS      -  10   9   2 ps\n$ renice -n 5 -p 4242              # change a running process's niceness\n\n$ taskset -pc $$                   # CPU affinity mask\npid 1's current affinity list: 0-3\n$ taskset -c 0,1 ./server          # start pinned to CPUs 0-1\n\n$ sudo chrt -f 50 ./audio-engine   # SCHED_FIFO priority 50 (needs root / CAP_SYS_NICE)\n$ sudo chrt -d --sched-runtime 2000000 --sched-deadline 5000000 \\\n       --sched-period 10000000 0 ./control-loop    # SCHED_DEADLINE: 2 ms every 10 ms\n\n$ grep ctxt /proc/self/status      # voluntary = blocked; nonvoluntary = preempted\nvoluntary_ctxt_switches:    26\nnonvoluntary_ctxt_switches: 78\n\n$ cat /sys/fs/cgroup/cpu.max       # container quota: 150 ms per 100 ms = 1.5 CPUs\n150000 100000\n$ grep throttled /sys/fs/cgroup/cpu.stat\nnr_throttled 0\nthrottled_usec 0",
+      "explanation": "Your day-to-day scheduler toolkit. `chrt` reads and sets policies, `nice`/`renice` set weights, and `taskset` sets affinity. `/proc/<pid>/status` context-switch counters are a quick diagnostic: lots of **nonvoluntary** switches means the thread wants more CPU than it gets (contention or quota), while lots of **voluntary** switches means it mostly waits on I/O or locks. In containers, always check `cpu.max` and `cpu.stat`: a rising `nr_throttled` explains latency spikes that CPU-usage graphs hide. For deeper analysis use `perf sched latency`, `perf sched timehist`, or `runqlat` from bcc/bpftrace, which shows a histogram of how long threads waited in the run queue."
+    },
+    {
+      "type": "explanation",
+      "title": "What This Means for Your Application",
+      "content": "Scheduling theory turns into very concrete advice:\n\n**Size CPU-bound pools to the cores you actually have.** For pure computation (image processing, compression, hashing, `worker_threads` doing math), use about as many threads as **available** cores, and in containers that means the quota, not the host's core count. More threads don't add CPU. They add context switches, cache thrashing, and memory, and they make *every* task finish later because everyone time-slices together.\n\n**I/O-bound pools can be larger,** since threads spend most of their time blocked. A classic estimate (from *Java Concurrency in Practice*) is threads ≈ cores × (1 + wait time / compute time). A request handler that waits 90 ms on a database for every 10 ms of CPU can keep about 10 threads per core busy. Past that point, the bottleneck becomes the database's own connection limit.\n\n**Oversubscription hurts tail latency first.** With N cores and 4N runnable CPU-bound threads, total throughput stays roughly the same, but each task's completion time stretches toward the time the *last* one finishes (see the measurement below). For request-serving systems, that's p99 latency, the number your users feel.\n\n**Mind the hidden thread pools.** One container might run a web framework pool, a database driver pool, libuv's 4 threads, a JVM GC with threads equal to host cores, and an ML library that spawns one OpenMP thread per core. Together that's dozens of threads fighting over 2 CPUs of quota. Set `OMP_NUM_THREADS`, `GOMAXPROCS`, JVM `-XX:ActiveProcessorCount`, and `UV_THREADPOOL_SIZE` deliberately.\n\n**Use the right primitive for priority.** `nice` the batch job, not the request path. Put background work in a separate cgroup with a lower `cpu.weight`. Don't share locks between low- and high-priority work. Don't use `SCHED_FIFO` for \"make it faster\": a spinning FIFO thread can lock up a core.\n\n**Don't spin.** Busy-wait loops (`while (!ready) {}`) burn the quantum and push other tasks off the core. Block on a condition variable, futex, or event. Spin only for nanoseconds-scale waits in tuned low-latency code with dedicated cores."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Oversubscription: 4x more CPU-bound threads than cores vs. a pool sized to the cores.\nconst { Worker, isMainThread, parentPort } = require('worker_threads');\nconst os = require('os');\n\nif (!isMainThread) {\n  parentPort.on('message', (n) => {          // a fixed chunk of pure CPU work\n    let x = 0;\n    for (let i = 0; i < n; i++) x = (x + i * i) % 1_000_003;\n    parentPort.postMessage(x);\n  });\n} else {\n  const CORES = os.availableParallelism();   // respects CPU affinity on Linux\n  const TASKS = CORES * 4;\n  const WORK = 5_000_000;\n\n  async function run(poolSize) {\n    const workers = Array.from({ length: poolSize }, () => new Worker(__filename));\n    const start = performance.now();\n    const done = [];\n    let next = 0;\n    await Promise.all(workers.map((w) => new Promise((resolve) => {\n      const feed = () => {\n        if (next >= TASKS) return resolve();\n        next++;\n        w.once('message', () => { done.push(performance.now() - start); feed(); });\n        w.postMessage(WORK);\n      };\n      feed();\n    })));\n    workers.forEach((w) => w.terminate());\n    const total = Math.max(...done);\n    const mean = done.reduce((a, b) => a + b, 0) / done.length;\n    console.log(`${String(poolSize).padStart(3)} threads: makespan ${total.toFixed(0)} ms, ` +\n                `mean task completion ${mean.toFixed(0)} ms`);\n  }\n\n  (async () => {\n    console.log(`${CORES} cores, ${TASKS} equal CPU-bound tasks`);\n    await run(CORES);        // pool = cores: tasks finish in waves\n    await run(TASKS);        // one thread per task: everyone time-slices, everyone finishes late\n  })();\n}",
+      "explanation": "The same 8 equal CPU-bound tasks on 2 cores (Linux container, `--cpuset-cpus=0,1`, Node 22). A pool of **2 threads** produced a makespan of about 3.1 s and a mean task completion of **about 1.9 s**, because tasks finish in waves. **8 threads**, one per task, produced a makespan of about 4.0 s and a mean completion of **about 3.6 s**, because every task time-slices with every other one, so they all finish near the end. Total work was identical, and oversubscription made the average task nearly **2× later** and the whole batch slower too (extra thread start-up, context switches, cache contention). `os.availableParallelism()` is the right sizing input: it respects CPU affinity and, in recent Node versions, cgroup CPU quotas."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Mistakes",
+      "content": "- **\"More threads = more speed\" for CPU work.** Beyond the core count, you get worse latency and often worse throughput.\n- **Sizing pools from the host's core count inside a container.** `os.cpus().length`, `nproc`, and older runtimes report host cores. A 2-CPU-quota pod on a 64-core node that spawns 64 workers gets throttled constantly.\n- **Confusing the metrics.** Turnaround is completion − arrival. Waiting is turnaround − burst. Response is first run − arrival. Mixing them up is the most common error in scheduling exam answers.\n- **Assuming nice makes a process \"run later.\"** On Linux, nice sets a weight. A niced process still gets CPU proportional to its weight, and if it holds a lock others need, it slows them down too.\n- **Using real-time priorities casually.** `SCHED_FIFO` without blocking points can monopolise a core. RT is for bounded latency in carefully designed code, not for \"high priority please.\"\n- **Believing old CFS-era tuning guides.** `sched_latency_ns`, `sched_min_granularity_ns`, and `sched_wakeup_granularity_ns` were replaced by `base_slice_ns` when EEVDF arrived in 6.6.\n- **Benchmarking without controlling for scheduling.** Frequency scaling, P-core vs E-core placement, SMT siblings, and noisy neighbours can swing results by 2×. Pin, warm up, and repeat.\n- **Busy-waiting in user space.** It wastes the slice and starves the thread you're waiting for, especially on a single core or under a quota."
+    },
+    {
+      "type": "callout",
+      "variant": "info",
+      "content": "**Interview cheat-sheet.** SRTF minimises *average waiting time* (optimal, but needs burst prediction and can starve long jobs). RR bounds *response time* at (n−1)·q and never starves anyone. MLFQ approximates SJF without knowing burst lengths, by demoting jobs that use their whole allotment. Linux normal tasks: CFS (2.6.23–6.5, pick smallest `vruntime`), then **EEVDF from 6.6** (pick the eligible task with the earliest virtual deadline). Nice step ≈ 1.25× weight ≈ 10% CPU share. Priority inversion: low holds a lock, medium preempts low, high waits. Fix with priority inheritance (Mars Pathfinder, 1997)."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Metrics**: turnaround = completion − arrival. Waiting = turnaround − burst. Response = first run − arrival. Throughput, utilisation, fairness, and tail latency compete with each other, so no policy optimises all of them.",
+        "**FCFS** is simple but suffers the convoy effect. **SJF/SRTF** minimise average waiting time (SRTF is optimal) but need burst predictions and can starve long jobs. **Round Robin** bounds response time and never starves, at the cost of turnaround and context switches. Quantum size trades responsiveness against overhead.",
+        "**Priority scheduling** needs **aging** to prevent starvation. **MLFQ** learns job types: new jobs start high, jobs that use up their allotment sink, and periodic boosts prevent starvation. It is the basis of the BSD, Windows, and macOS schedulers.",
+        "**Linux CFS** (2007–2023) ran the task with the smallest weighted `vruntime` from a red-black tree. **EEVDF** (Linux 6.6+) keeps weights and `vruntime` but picks the **eligible** task (lag ≥ 0) with the **earliest virtual deadline**, decoupling CPU share (weight) from latency (slice length).",
+        "**nice** ranges from −20 to 19. Each step changes weight by about 1.25×, about 10% CPU share between competitors (nice 0 = 1024, nice 5 = 335, so roughly 3:1). Nice only matters when tasks compete for the same CPU.",
+        "**Real-time classes** outrank normal tasks: `SCHED_FIFO` (run until block or yield), `SCHED_RR` (FIFO plus a quantum within the same priority), `SCHED_DEADLINE` (runtime/deadline/period with EDF and admission control). RT tasks are throttled to 95% of each second by default. PREEMPT_RT has been mainline since 6.12.",
+        "**Multicore**: per-CPU run queues, load balancing across cache and NUMA domains, cache-aware wake-up placement, and hard affinity via `taskset`/cpusets. In containers, `cpu.max` quotas throttle *all* threads once the budget is spent, a major source of p99 spikes. Check `cpu.stat` `nr_throttled`.",
+        "**Priority inversion**: a medium task preempts a low-priority lock holder while a high-priority task waits (Mars Pathfinder, 1997). The fix is **priority inheritance** (or priority ceiling): the holder temporarily runs at the waiter's priority.",
+        "**For apps**: size CPU-bound pools to *available* cores (respect quotas: `os.availableParallelism()`, Go 1.25+ `GOMAXPROCS`). Size I/O-bound pools by cores × (1 + wait/compute). Oversubscription mainly hurts tail latency. Avoid busy-waiting and casual real-time priorities."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Jobs arrive at t=0: A (burst 6), B (burst 2), C (burst 4). Using non-preemptive SJF on one CPU, what is the average waiting time?",
+      "type": "mcq",
+      "options": [
+        "2.67",
+        "3.33",
+        "4.0",
+        "6.0"
+      ],
+      "correct": 0,
+      "explanation": "SJF runs B (0–2), C (2–6), then A (6–12). Waits: B = 0, C = 2, A = 6, giving 8 / 3 ≈ 2.67. FCFS in the order A, B, C would give (0 + 6 + 8) / 3 ≈ 4.67."
+    },
+    {
+      "id": "q2",
+      "question": "Which metric does Round Robin improve compared to FCFS, typically at the expense of average turnaround time?",
+      "type": "mcq",
+      "options": [
+        "Response time: every job gets the CPU within (n−1) × quantum",
+        "Throughput, because context switches are free",
+        "CPU utilisation, because RR never idles",
+        "Average turnaround time for equal-length jobs"
+      ],
+      "correct": 0,
+      "explanation": "RR gives every ready job a turn quickly, so response time is bounded. For equal-length jobs RR actually makes turnaround *worse* than FCFS, because all jobs finish near the end, and context switches add overhead."
+    },
+    {
+      "id": "q3",
+      "question": "What does the 'priority boost' rule in MLFQ (periodically moving all jobs to the top queue) primarily prevent?",
+      "type": "mcq",
+      "options": [
+        "Context-switch overhead",
+        "The convoy effect in the top queue",
+        "Priority inversion on mutexes",
+        "Starvation of CPU-bound jobs stuck in low queues, and jobs being stuck low after their behaviour changes"
+      ],
+      "correct": 3,
+      "explanation": "Without the boost, a stream of interactive jobs in high queues could starve long-running jobs forever. The boost also lets a job that became interactive regain high priority. Rule 4 (counting total allotment used) is what prevents gaming."
+    },
+    {
+      "id": "q4",
+      "question": "Two CPU-bound processes compete for one core under Linux's fair scheduler: one at nice 0 (weight 1024) and one at nice 5 (weight 335). Roughly how is the CPU split?",
+      "type": "mcq",
+      "options": [
+        "50% / 50%, because nice only affects I/O priority",
+        "About 75% / 25%",
+        "100% / 0%: the nice 5 process runs only when the other blocks",
+        "About 55% / 45%, because each nice level is 1%"
+      ],
+      "correct": 1,
+      "explanation": "CPU share is proportional to weight: 1024 / (1024 + 335) ≈ 75%. Each nice level changes weight by about 1.25×, so five levels give about 3×. A nice 5 task still runs; nice is a weight, not a strict priority."
+    },
+    {
+      "id": "q5",
+      "question": "What did Linux 6.6 change about scheduling normal (`SCHED_OTHER`) tasks?",
+      "type": "mcq",
+      "options": [
+        "It replaced CFS's pick-the-smallest-vruntime logic with EEVDF: pick the eligible task (lag ≥ 0) with the earliest virtual deadline",
+        "It removed nice values and replaced them with real-time priorities",
+        "It switched Linux to a single global run queue",
+        "It made all normal tasks use SCHED_RR with a 100 ms quantum"
+      ],
+      "correct": 0,
+      "explanation": "EEVDF keeps weights, vruntime, and cgroup fairness, but chooses among eligible tasks by virtual deadline (eligible time + slice / weight). That lets latency (slice length) be controlled separately from CPU share (weight)."
+    },
+    {
+      "id": "q6",
+      "question": "A `SCHED_FIFO` priority-50 thread enters an infinite loop with no blocking calls. What happens on that core?",
+      "type": "mcq",
+      "options": [
+        "The kernel preempts it after a 100 ms quantum, like SCHED_RR",
+        "EEVDF gives it a fair share like any other task",
+        "It keeps the core, and only higher-priority RT/deadline tasks can preempt it. Normal tasks get CPU there only through the RT throttling budget (5% by default)",
+        "The kernel converts it to SCHED_IDLE automatically"
+      ],
+      "correct": 2,
+      "explanation": "SCHED_FIFO has no time slice. It runs until it blocks, yields, or a higher-priority RT task wakes. RT throttling (`sched_rt_runtime_us` = 950000 of 1000000) is a safety net that leaves normal tasks a small share."
+    },
+    {
+      "id": "q7",
+      "question": "In the Mars Pathfinder incident, why did the high-priority bus task miss its deadline?",
+      "type": "mcq",
+      "options": [
+        "The high-priority task had a bug that caused an infinite loop",
+        "The scheduler used FCFS instead of priorities",
+        "The spacecraft's CPU was overheating and throttling",
+        "It was blocked on a mutex held by a low-priority task, which a medium-priority task kept preempting. Priority inheritance was disabled on that mutex"
+      ],
+      "correct": 3,
+      "explanation": "That's classic priority inversion. The watchdog reset the system when the bus cycle didn't complete. JPL fixed it by uploading a patch that enabled priority inheritance, so the lock holder would run at the waiter's priority."
+    },
+    {
+      "id": "q8",
+      "question": "A pod has a CPU limit of 2 (cgroup `cpu.max` = `200000 100000`) on a 32-core node. It runs 16 busy threads. What is the most likely symptom?",
+      "type": "mcq",
+      "options": [
+        "The threads are spread across 32 cores and finish 16× faster",
+        "All threads burn the 200 ms of quota early in each 100 ms period, then are throttled until the next period, causing latency spikes. `cpu.stat` shows `nr_throttled` rising",
+        "The kernel kills the pod for using more than 2 cores",
+        "Nothing: quotas only apply to memory"
+      ],
+      "correct": 1,
+      "explanation": "`cpu.max` is a bandwidth limit (CPU time per period), not a core count. 16 threads consume 200 ms of CPU in about 12.5 ms of wall time, then all of them wait. Size the thread pools to the quota, or reconsider the limit."
+    },
+    {
+      "id": "q9",
+      "question": "Why does oversubscribing CPU-bound work (e.g., 32 compute threads on 8 cores) usually hurt even though total work is the same?",
+      "type": "mcq",
+      "options": [
+        "The kernel refuses to run more threads than cores",
+        "Each thread gets a dedicated core, causing memory bandwidth to double",
+        "All threads time-slice together, so each task's completion is pushed toward the end, and the extra context switches and cache thrashing add overhead. Tail latency suffers most",
+        "Threads beyond the core count are scheduled with SCHED_IDLE"
+      ],
+      "correct": 2,
+      "explanation": "With a pool sized to the cores, tasks finish in waves, so many complete early. With one thread per task, the scheduler shares the cores among all of them and they finish late together, plus overhead. The measured example showed mean completion nearly doubling."
+    },
+    {
+      "id": "q10",
+      "question": "Which statement about SRTF (Shortest Remaining Time First) is correct?",
+      "type": "mcq",
+      "options": [
+        "It is non-preemptive and suffers no starvation",
+        "It is the policy Linux uses for normal tasks",
+        "It maximises fairness between CPU-bound tasks",
+        "It minimises average waiting time for a known set of jobs, but needs to know or predict burst lengths and can starve long jobs"
+      ],
+      "correct": 3,
+      "explanation": "SRTF is provably optimal for average waiting time (6.5 in the worked example versus 8.75 for FCFS) because it always runs the job closest to finishing. Real systems can't know burst lengths, and long jobs can wait indefinitely if short ones keep arriving."
+    }
+  ]
+}

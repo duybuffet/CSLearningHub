@@ -24,7 +24,14 @@
     {
       "type": "explanation",
       "title": "REST: Resources, Verbs, and Statelessness",
-      "content": "**REST** (Representational State Transfer) was described by Roy Fielding in his 2000 PhD dissertation, derived from architectural principles he observed while co-authoring HTTP/1.1. REST is not a protocol or a standard — it is a set of **architectural constraints** that, when respected together, produce systems with desirable properties like scalability, visibility, and independent evolvability.\n\nThe core idea is that everything the server manages is a **resource** with a stable URL. Resources are nouns, not verbs: `/users/42`, `/orders/99`, `/products/catalog`. Operations are expressed through **HTTP methods**:\n- `GET /users/42` — retrieve user 42, **safe and idempotent** (no side effects, same result every time)\n- `POST /users` — create a new user, **not idempotent** (calling it twice creates two users)\n- `PUT /users/42` — replace user 42 entirely, **idempotent** (sending the same PUT twice has the same end state)\n- `PATCH /users/42` — partially update user 42, **idempotent** when implemented correctly\n- `DELETE /users/42` — delete user 42, **idempotent** (deleting an already-deleted resource still leaves it deleted)\n\n**Statelessness** is the most important REST constraint for scalability. Each request must carry all the information needed to process it — no server-side session state between requests. The server does not remember that you called `GET /users/42` five seconds ago. This means any server instance in a load-balanced pool can handle any request, and you can add or remove servers without worrying about session affinity.\n\n**Cacheability** follows from statelessness. Because `GET` requests have no side effects and their results depend only on the URL and headers, HTTP intermediaries — browsers, CDNs, reverse proxies — can cache them. A `Cache-Control: max-age=300` header on `GET /products` means the CDN serves it for five minutes without touching your database. This is REST's killer feature for read-heavy public APIs.\n\n**HATEOAS** (Hypermedia as the Engine of Application State) is the most often violated and least often missed REST constraint. Strictly interpreted, responses should include links to related actions, so clients can navigate the API without hardcoded URLs. Most production APIs call themselves 'RESTful' while ignoring HATEOAS entirely. Pragmatically, this is fine for most use cases."
+      "content": "**REST** (Representational State Transfer) was described by Roy Fielding in his 2000 PhD dissertation, derived from architectural principles he observed while co-authoring HTTP/1.1. REST is not a protocol or a standard — it is a set of **architectural constraints** that, when respected together, produce systems with desirable properties like scalability, visibility, and independent evolvability. Fielding lists six: **client–server**, **stateless**, **cacheable**, **uniform interface** (resource identifiers, manipulation through representations, self-descriptive messages, and hypermedia/HATEOAS), **layered system** (clients cannot tell whether they talk to the origin or a proxy/CDN), and the optional **code on demand**.\n\nThe core idea is that everything the server manages is a **resource** with a stable URL. Resources are nouns, not verbs: `/users/42`, `/orders/99`, `/products/catalog`. Operations are expressed through **HTTP methods**:\n- `GET /users/42` — retrieve user 42, **safe and idempotent** (no side effects, same result every time)\n- `POST /users` — create a new user, **not idempotent** (calling it twice creates two users)\n- `PUT /users/42` — replace user 42 entirely, **idempotent** (sending the same PUT twice has the same end state)\n- `PATCH /users/42` — partially update user 42, **not guaranteed idempotent** (RFC 5789). A JSON Merge Patch like `{\"name\":\"Ana\"}` happens to be idempotent; a patch such as \"append to `tags`\" or \"increment `loginCount`\" is not\n- `DELETE /users/42` — delete user 42, **idempotent** (deleting an already-deleted resource still leaves it deleted — the *state* is the same even if the second call returns `404`)\n\nIdempotency is about the **effect on server state**, not the response: repeating `DELETE` may return `204` then `404`, and that is still idempotent. `GET`, `HEAD`, `OPTIONS`, `PUT`, and `DELETE` are idempotent by definition (RFC 9110); `POST` and `PATCH` are not, which is why retrying them safely needs an **idempotency key** (shown below).\n\n**Statelessness** is the most important REST constraint for scalability. Each request must carry all the information needed to process it — no server-side session state between requests. The server does not remember that you called `GET /users/42` five seconds ago. This means any server instance in a load-balanced pool can handle any request, and you can add or remove servers without worrying about session affinity.\n\n**Cacheability** follows from statelessness. Because `GET` requests have no side effects and their results depend only on the URL and headers, HTTP intermediaries — browsers, CDNs, reverse proxies — can cache them. A `Cache-Control: max-age=300` header on `GET /products` means the CDN serves it for five minutes without touching your database. This is REST's killer feature for read-heavy public APIs.\n\n**HATEOAS** (Hypermedia as the Engine of Application State) is the most often violated and least often missed REST constraint. Strictly interpreted, responses should include links to related actions, so clients can navigate the API without hardcoded URLs. Most production APIs call themselves 'RESTful' while ignoring HATEOAS entirely. Pragmatically, this is fine for most use cases."
+    },
+    {
+      "type": "code_example",
+      "title": "Making POST Safe to Retry with an Idempotency-Key",
+      "language": "javascript",
+      "code": "// Idempotency-Key for POST — making a non-idempotent create safe to retry\nconst { createHash, randomUUID } = require('node:crypto');\n\nconst store = new Map(); // key -> { fingerprint, status: 'pending' | 'done', response }\nlet orders = 0;\n\nfunction fingerprint(body) {\n  return createHash('sha256').update(JSON.stringify(body)).digest('hex');\n}\n\nasync function handlePostOrders(headers, body) {\n  const key = headers['idempotency-key'];\n  if (!key) return { status: 400, body: { error: 'Idempotency-Key header required' } };\n\n  const fp = fingerprint(body);\n  const seen = store.get(key);\n  if (seen) {\n    if (seen.fingerprint !== fp) return { status: 422, body: { error: 'Key reused with a different body' } };\n    if (seen.status === 'pending') return { status: 409, body: { error: 'Original request still in progress' } };\n    return seen.response; // replay the stored response — no second order\n  }\n\n  // Claim the key BEFORE doing the work (in production: INSERT ... ON CONFLICT DO NOTHING,\n  // or Redis SET key value NX EX 86400) so two concurrent retries cannot both proceed.\n  store.set(key, { fingerprint: fp, status: 'pending' });\n  const response = { status: 201, body: { orderId: ++orders, amount: body.amount } };\n  store.set(key, { fingerprint: fp, status: 'done', response });\n  return response;\n}\n\n(async () => {\n  const key = randomUUID(); // generated ONCE per logical operation, reused on every retry\n  const first = await handlePostOrders({ 'idempotency-key': key }, { amount: 50 });\n  const retry = await handlePostOrders({ 'idempotency-key': key }, { amount: 50 });\n  console.log(first.status, first.body); // 201 { orderId: 1, amount: 50 }\n  console.log(retry.status, retry.body); // 201 { orderId: 1, amount: 50 }  (replayed)\n  console.log('orders created:', orders); // 1\n  const misuse = await handlePostOrders({ 'idempotency-key': key }, { amount: 99 });\n  console.log(misuse.status); // 422\n})();\n",
+      "explanation": "POST is not idempotent, but networks force retries (a timeout does not tell you whether the order was created). The client generates one key per logical operation and sends it on every retry; the server **claims the key atomically before doing the work**, stores the response, and replays it for duplicates. Rejecting a reused key with a different body (422) and an in-flight duplicate (409) closes the two classic holes. Stripe, Adyen, and the IETF `Idempotency-Key` header draft all follow this shape; production stores the keys in a database table or Redis with a TTL (e.g. 24h)."
     },
     {
       "type": "explanation",
@@ -39,7 +46,7 @@
     {
       "type": "explanation",
       "title": "GraphQL: A Query Language for Your API",
-      "content": "**GraphQL** is a query language and runtime created by Facebook engineers in 2012 and open-sourced in 2015. It addresses over/under-fetching by inverting the data-shaping responsibility: instead of the server deciding what each endpoint returns, the **client declares exactly what it needs** in a structured query, and the server's resolver graph assembles it.\n\nEvery GraphQL API has a single endpoint (typically `/graphql`) and a **schema** that defines the types and relationships the server can serve. The schema is strongly typed — every field has a declared type, and the type system is enforced at both parse time and runtime. A schema is the binding contract between client and server, written in the **Schema Definition Language (SDL)**:\n\n```\ntype User {\n  id: ID!\n  name: String!\n  email: String!\n  orders: [Order!]!\n}\n\ntype Order {\n  id: ID!\n  total: Float!\n  status: String!\n}\n\ntype Query {\n  user(id: ID!): User\n  orders(userId: ID!, first: Int, after: String): OrderConnection!\n}\n```\n\nA client query specifies the exact fields it wants:\n\n```\nquery GetUserProfile($id: ID!) {\n  user(id: $id) {\n    name\n    orders {\n      id\n      total\n    }\n  }\n}\n```\n\nThe server resolves each field via a **resolver function** — a function that knows how to fetch data for a specific type and field. Resolvers are composed into a tree that mirrors the query shape. The result is a single HTTP round-trip returning only the requested fields, regardless of how many backend services or database tables are involved.\n\n**Mutations** in GraphQL are write operations (create, update, delete). Unlike queries (which can run in parallel), mutations run **sequentially** to preserve order.\n\n**Subscriptions** are the GraphQL mechanism for real-time updates. They maintain a persistent connection (typically over WebSocket) and push data to clients when server-side events occur."
+      "content": "**GraphQL** is a query language and runtime created by Facebook engineers in 2012 and open-sourced in 2015. It addresses over/under-fetching by inverting the data-shaping responsibility: instead of the server deciding what each endpoint returns, the **client declares exactly what it needs** in a structured query, and the server's resolver graph assembles it.\n\nEvery GraphQL API has a single endpoint (typically `/graphql`) and a **schema** that defines the types and relationships the server can serve. The schema is strongly typed — every field has a declared type, and the type system is enforced at both parse time and runtime. A schema is the binding contract between client and server, written in the **Schema Definition Language (SDL)**:\n\n```\ntype User {\n  id: ID!\n  name: String!\n  email: String!\n  orders: [Order!]!\n}\n\ntype Order {\n  id: ID!\n  total: Float!\n  status: String!\n}\n\ntype Query {\n  user(id: ID!): User\n  orders(userId: ID!, first: Int, after: String): OrderConnection!\n}\n```\n\nA client query specifies the exact fields it wants:\n\n```\nquery GetUserProfile($id: ID!) {\n  user(id: $id) {\n    name\n    orders {\n      id\n      total\n    }\n  }\n}\n```\n\nThe server resolves each field via a **resolver function** — a function that knows how to fetch data for a specific type and field. Resolvers are composed into a tree that mirrors the query shape. The result is a single HTTP round-trip returning only the requested fields, regardless of how many backend services or database tables are involved.\n\n**Mutations** in GraphQL are write operations (create, update, delete). The spec allows the top-level fields of a query to be resolved in parallel, but requires the top-level fields of a mutation to execute **serially**, in the order written.\n\n**Subscriptions** are the GraphQL mechanism for real-time updates. They maintain a persistent connection (typically over WebSocket) and push data to clients when server-side events occur."
     },
     {
       "type": "explanation",
@@ -54,7 +61,7 @@
     {
       "type": "explanation",
       "title": "gRPC: Binary, Streaming, and Strong Contracts",
-      "content": "**gRPC** (gRPC Remote Procedure Calls) is a high-performance RPC framework created by Google and open-sourced in 2016. It is built on two technologies that differentiate it sharply from REST and GraphQL: **Protocol Buffers** (Protobuf) as the interface definition and serialisation format, and **HTTP/2** as the transport.\n\n**Protocol Buffers** are a binary, language-neutral, schema-first serialisation format. You define your API in a `.proto` file, and the Protobuf compiler (`protoc`) generates type-safe client and server stubs in any of 12+ supported languages. The schema is the source of truth — the wire format and the code are both derived from it, eliminating the drift between documentation and implementation that plagues REST APIs.\n\nProtobuf encodes data by **field number**, not field name. The binary message for `{ id: 42, name: 'Ana' }` where `id` is field 1 and `name` is field 2 looks like: `[field 1, varint, 42][field 2, length-delimited, 3, Ana]`. Field names are not on the wire at all. This makes messages dramatically smaller — typically **3–10x smaller** than equivalent JSON — and faster to parse because there is no text-to-number conversion.\n\n**HTTP/2** provides the transport-layer features that make gRPC efficient:\n- **Multiplexing**: multiple RPC calls share a single TCP connection with no head-of-line blocking\n- **Binary framing**: HTTP/2 is a binary protocol; no text parsing overhead\n- **Header compression**: HPACK compression reduces metadata overhead, especially important for frequent small RPC calls\n- **Flow control**: per-stream flow control prevents fast producers from overwhelming slow consumers\n\n**gRPC supports four communication patterns**:\n1. **Unary RPC**: client sends one request, server returns one response. Like a REST call. `GetUser(id) -> User`\n2. **Server streaming RPC**: client sends one request, server returns a stream of responses. Ideal for live feeds, log tailing. `ListOrders(userId) -> stream Order`\n3. **Client streaming RPC**: client sends a stream of requests, server returns one response. Useful for large uploads, bulk inserts. `UploadChunks(stream Chunk) -> UploadResult`\n4. **Bidirectional streaming RPC**: both sides stream independently over one connection. Ideal for real-time collaboration, chat, game state sync.\n\n**gRPC's limitation for browsers**: the Fetch API (used by all browsers) does not expose the HTTP/2 framing control that gRPC requires. The workaround is **gRPC-Web**, a slightly different framing protocol that works through a proxy (like Envoy), which translates between gRPC-Web and native gRPC. This extra hop adds complexity and is why gRPC is predominantly used for server-to-server communication."
+      "content": "**gRPC** (gRPC Remote Procedure Calls) is a high-performance RPC framework created by Google and open-sourced in 2016. It is built on two technologies that differentiate it sharply from REST and GraphQL: **Protocol Buffers** (Protobuf) as the interface definition and serialisation format, and **HTTP/2** as the transport.\n\n**Protocol Buffers** are a binary, language-neutral, schema-first serialisation format. You define your API in a `.proto` file, and the Protobuf compiler (`protoc`) generates type-safe client and server stubs in any of 12+ supported languages. The schema is the source of truth — the wire format and the code are both derived from it, eliminating the drift between documentation and implementation that plagues REST APIs.\n\nProtobuf encodes data by **field number**, not field name. The binary message for `{ id: 42, name: 'Ana' }` where `id` is field 1 and `name` is field 2 looks like: `[field 1, varint, 42][field 2, length-delimited, 3, Ana]`. Field names are not on the wire at all. This makes messages dramatically smaller — typically **3–10x smaller** than equivalent JSON — and faster to parse because there is no text-to-number conversion.\n\n**HTTP/2** provides the transport-layer features that make gRPC efficient:\n- **Multiplexing**: many concurrent RPCs share one TCP connection as independent streams, removing HTTP/1.1's request-level head-of-line blocking (a lost TCP packet still stalls every stream on that connection — HTTP/3/QUIC is what removes that)\n- **Binary framing**: HTTP/2 is a binary protocol; no text parsing overhead\n- **Header compression**: HPACK compression reduces metadata overhead, especially important for frequent small RPC calls\n- **Flow control**: per-stream flow control prevents fast producers from overwhelming slow consumers\n\n**gRPC supports four communication patterns**:\n1. **Unary RPC**: client sends one request, server returns one response. Like a REST call. `GetUser(id) -> User`\n2. **Server streaming RPC**: client sends one request, server returns a stream of responses. Ideal for live feeds, log tailing. `ListOrders(userId) -> stream Order`\n3. **Client streaming RPC**: client sends a stream of requests, server returns one response. Useful for large uploads, bulk inserts. `UploadChunks(stream Chunk) -> UploadResult`\n4. **Bidirectional streaming RPC**: both sides stream independently over one connection. Ideal for real-time collaboration, chat, game state sync.\n\n**gRPC's limitation for browsers**: the Fetch API does not give JavaScript control over HTTP/2 framing or access to HTTP trailers, both of which gRPC relies on (the status code travels in trailers). The workaround is **gRPC-Web**, a slightly different framing protocol that works through a proxy (like Envoy), which translates between gRPC-Web and native gRPC. This extra hop adds complexity and is why gRPC is predominantly used for server-to-server communication. (The **Connect** protocol from Buf is a popular alternative that serves the same Protobuf services to browsers over plain HTTP without a translating proxy.)"
     },
     {
       "type": "diagram",
@@ -71,7 +78,7 @@
     {
       "type": "explanation",
       "title": "API Versioning: Strategies for Each Style",
-      "content": "**Versioning** is the mechanism by which you evolve an API without breaking existing clients. Each style has conventions shaped by its fundamental structure.\n\n**REST versioning** has two mainstream approaches:\n\n*URL path versioning* (`/v1/users`, `/v2/users`) is the most common in the industry. The version is visible, bookmarkable, and easy to route at the infrastructure level. Breaking changes — removing a field, changing a field type, restructuring a resource — go into a new major version. Old versions remain available until clients migrate. The downside is version proliferation: a single breaking change to one resource technically requires bumping all endpoints.\n\n*Header versioning* (`Accept: application/vnd.myapi.v2+json` or `API-Version: 2024-06`) keeps URLs stable and is favoured by Stripe, GitHub, and Heroku. Stripe uses a date-based API version (e.g. `Stripe-Version: 2024-06-20`) tied to changelogs — your integration is pinned to the version it was built against, and new behaviour only applies if you opt in. This is elegant but requires discipline: routing on headers is harder at the CDN/load-balancer level.\n\n*Additive-only changes* — adding an optional field, a new endpoint, a new enum value — are **backward-compatible** and do not require a version bump in either approach. The risk: adding a field to a union type in a language like Go or TypeScript might break exhaustive switch statements in clients.\n\n**GraphQL versioning** takes a different philosophy: the community consensus is that GraphQL schemas should **never be versioned**. Instead, they evolve continuously:\n- Add new fields freely; clients ignore fields they do not request\n- Mark removed fields as `@deprecated(reason: \"Use newField instead\")` and keep them live through a deprecation cycle\n- Never remove a non-deprecated field; never change a field's type\n- Use **schema introspection** (`__schema`) to allow tools to discover changes automatically\n\n**Protobuf/gRPC versioning** is enforced at the binary encoding level. The rule is simple but critical: **field numbers are forever**. Once `id = 1` and `name = 2` are deployed, they can never change meaning. You can:\n- Add new fields with new field numbers — old clients ignore unknown fields, new clients read them\n- Mark deprecated fields as `reserved 3; reserved \"old_field_name\"` to prevent accidental reuse\n- Never delete a field number without reserving it — deletion looks like an add to old clients, and they will misinterpret the bytes"
+      "content": "**Versioning** is the mechanism by which you evolve an API without breaking existing clients. Each style has conventions shaped by its fundamental structure.\n\n**REST versioning** has two mainstream approaches:\n\n*URL path versioning* (`/v1/users`, `/v2/users`) is the most common in the industry. The version is visible, bookmarkable, and easy to route at the infrastructure level. Breaking changes — removing a field, changing a field type, restructuring a resource — go into a new major version. Old versions remain available until clients migrate. The downside is version proliferation: a single breaking change to one resource technically requires bumping all endpoints.\n\n*Header versioning* (`Accept: application/vnd.myapi.v2+json` or `API-Version: 2024-06`) keeps URLs stable and is favoured by Stripe, GitHub, and Heroku. Stripe uses a date-based API version (e.g. `Stripe-Version: 2024-06-20`) tied to changelogs — your integration is pinned to the version it was built against, and new behaviour only applies if you opt in. This is elegant but requires discipline: routing on headers is harder at the CDN/load-balancer level.\n\n*Additive-only changes* — adding an optional field, a new endpoint, a new enum value — are **backward-compatible** and do not require a version bump in either approach. The risk: adding a new **enum value** or union member can still break clients that use exhaustive `switch` statements or strict deserializers — document that clients must tolerate unknown values.\n\n**GraphQL versioning** takes a different philosophy: the community consensus is that GraphQL schemas should **never be versioned**. Instead, they evolve continuously:\n- Add new fields freely; clients ignore fields they do not request\n- Mark removed fields as `@deprecated(reason: \"Use newField instead\")` and keep them live through a deprecation cycle\n- Never remove a non-deprecated field; never change a field's type\n- Use **schema introspection** (`__schema`) to allow tools to discover changes automatically\n\n**Protobuf/gRPC versioning** is enforced at the binary encoding level. The rule is simple but critical: **field numbers are forever**. Once `id = 1` and `name = 2` are deployed, they can never change meaning. You can:\n- Add new fields with new field numbers — old clients ignore unknown fields, new clients read them\n- Mark deprecated fields as `reserved 3; reserved \"old_field_name\"` to prevent accidental reuse\n- Deleting a field is safe for old clients (they just stop seeing it), but always `reserve` its number and name — if someone later reuses the number with a different type, old clients will misinterpret the bytes"
     },
     {
       "type": "explanation",
@@ -81,7 +88,7 @@
     {
       "type": "explanation",
       "title": "Error Design: HTTP Status Codes, GraphQL Errors, and gRPC Status Codes",
-      "content": "How an API communicates failure is as important as how it communicates success. Each style has its conventions.\n\n**REST error design** leverages HTTP status codes, which carry semantic meaning understood by every HTTP intermediary:\n- `400 Bad Request` — the client sent invalid input (validation error)\n- `401 Unauthorized` — unauthenticated (confusingly named)\n- `403 Forbidden` — authenticated but not authorised for this resource\n- `404 Not Found` — resource does not exist\n- `409 Conflict` — concurrent modification conflict (e.g., optimistic locking failure)\n- `422 Unprocessable Entity` — syntactically valid but semantically invalid input\n- `429 Too Many Requests` — rate limit exceeded\n- `500 Internal Server Error` — server bug\n- `503 Service Unavailable` — dependency down or circuit-breaker open\n\nBeyond the status code, the body should contain a machine-readable error object. RFC 9457 (Problem Details for HTTP APIs) defines a standard format: `{ type, title, status, detail, instance }`. Many teams use a simpler proprietary format, but consistency within a single API is non-negotiable.\n\n**GraphQL error design** is unusual: GraphQL always returns HTTP 200, even for errors. Errors appear in the `errors` array of the response alongside partial `data`. This allows partial success — a query that resolves five fields but fails on one returns the five successful fields and an error entry for the failed one. The HTTP 200 breaks monitoring based on HTTP status codes; you must parse the body to determine success. For transport-level errors (authentication, rate limits), some implementations do use HTTP 4xx/5xx, but it varies by framework.\n\n**gRPC status codes** are a defined enumeration separate from HTTP codes: `OK` (0), `INVALID_ARGUMENT` (3), `NOT_FOUND` (5), `ALREADY_EXISTS` (6), `PERMISSION_DENIED` (7), `RESOURCE_EXHAUSTED` (8, for rate limits), `INTERNAL` (13), `UNAVAILABLE` (14). These map semantically to HTTP status codes but are transmitted as HTTP/2 trailers, not headers. Client libraries expose them as language-native exceptions or error values."
+      "content": "How an API communicates failure is as important as how it communicates success. Each style has its conventions.\n\n**REST error design** leverages HTTP status codes, which carry semantic meaning understood by every HTTP intermediary:\n- `400 Bad Request` — the client sent invalid input (validation error)\n- `401 Unauthorized` — unauthenticated (confusingly named)\n- `403 Forbidden` — authenticated but not authorised for this resource\n- `404 Not Found` — resource does not exist\n- `409 Conflict` — concurrent modification conflict (e.g., optimistic locking failure)\n- `422 Unprocessable Content` (formerly \"Unprocessable Entity\") — syntactically valid but semantically invalid input\n- `429 Too Many Requests` — rate limit exceeded\n- `500 Internal Server Error` — server bug\n- `503 Service Unavailable` — dependency down or circuit-breaker open\n\nBeyond the status code, the body should contain a machine-readable error object. RFC 9457 (Problem Details for HTTP APIs) defines a standard format: `{ type, title, status, detail, instance }`. Many teams use a simpler proprietary format, but consistency within a single API is non-negotiable.\n\n**GraphQL error design** is unusual: field-level errors are returned with HTTP 200. Errors appear in the `errors` array of the response alongside partial `data`. This allows partial success — a query that resolves five fields but fails on one returns the five successful fields and an error entry for the failed one. The HTTP 200 breaks monitoring based on HTTP status codes; you must parse the body to determine success. For request-level failures (unparseable query, validation errors, auth, rate limits) the **GraphQL over HTTP** spec — with the `application/graphql-response+json` media type — uses 4xx/5xx status codes; older servers using `application/json` often still return 200 for everything, so check what your server does.\n\n**gRPC status codes** are a defined enumeration separate from HTTP codes: `OK` (0), `INVALID_ARGUMENT` (3), `NOT_FOUND` (5), `ALREADY_EXISTS` (6), `PERMISSION_DENIED` (7), `RESOURCE_EXHAUSTED` (8, for rate limits), `INTERNAL` (13), `UNAVAILABLE` (14). These map semantically to HTTP status codes but are transmitted as HTTP/2 trailers, not headers. Client libraries expose them as language-native exceptions or error values."
     },
     {
       "type": "code_example",
@@ -108,12 +115,13 @@
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**Interview and design review traps to know cold:**\n- 'GraphQL always returns HTTP 200' — this breaks status-code-based alerting. You must check the `errors` array in the body.\n- 'gRPC is not suited for browser clients without a proxy' — gRPC-Web exists but adds complexity; do not promise native gRPC in browser without a plan.\n- 'REST PUT vs PATCH': PUT replaces the entire resource; PATCH applies a partial update. Mixing these causes bugs when clients omit optional fields.\n- 'Cursor pagination is not random-access' — you cannot jump to page 47 with a cursor. If the product needs jump-to-page, you may need offset or a hybrid.\n- 'GraphQL N+1 is not automatic' — DataLoader must be explicitly wired up per relationship. It does not happen by default in any framework.\n- 'Never reuse a Protobuf field number' — the binary encoding uses field numbers, not names. Reusing a number with a different type causes silent data corruption in deployed clients."
+      "content": "**Interview and design review traps to know cold:**\n- 'GraphQL returns HTTP 200 for field errors' — this breaks status-code-based alerting. You must check the `errors` array in the body (servers following the GraphQL-over-HTTP spec do return 4xx for invalid requests).\n- 'PATCH is idempotent' — not by definition. GET/PUT/DELETE are; POST and PATCH need an `Idempotency-Key` to be retried safely.\n- 'gRPC is not suited for browser clients without a proxy' — gRPC-Web exists but adds complexity; do not promise native gRPC in browser without a plan.\n- 'REST PUT vs PATCH': PUT replaces the entire resource; PATCH applies a partial update. Mixing these causes bugs when clients omit optional fields.\n- 'Cursor pagination is not random-access' — you cannot jump to page 47 with a cursor. If the product needs jump-to-page, you may need offset or a hybrid.\n- 'GraphQL does not batch for you' — in resolver-based servers (Apollo Server, graphql-js, graphql-java) DataLoader must be explicitly wired up per relationship; only query-compiling engines (e.g. Hasura, PostGraphile) avoid N+1 by turning the whole query into SQL.\n- 'Never reuse a Protobuf field number' — the binary encoding uses field numbers, not names. Reusing a number with a different type causes silent data corruption in deployed clients."
     },
     {
       "type": "key_takeaways",
       "items": [
         "**REST** maps resources to URLs and operations to HTTP verbs, is stateless and cacheable by default — the dominant public API style, but prone to over/under-fetching as client data needs diverge.",
+        "**Idempotency**: GET, PUT and DELETE are idempotent (same server state when repeated, even if the response differs); POST and PATCH are not — make them retry-safe with a client-generated **Idempotency-Key** that the server claims atomically and replays.",
         "**GraphQL** lets clients declare exactly the data they need in a single request, solving over/under-fetching at the cost of caching complexity, N+1 query risk, and a more sophisticated server layer.",
         "**gRPC** uses binary Protobuf over HTTP/2 — dramatically smaller payloads, strong typing, and native streaming support — best for internal service-to-service calls where both sides are controlled.",
         "**API versioning** strategy differs by style: URL path or header versioning for REST, continuous schema evolution with deprecation for GraphQL, reserved field numbers for Protobuf — the universal rule is never break existing clients silently.",
@@ -133,12 +141,12 @@
       "question": "What is the core problem that GraphQL was designed to solve compared to REST?",
       "type": "mcq",
       "options": [
-        "REST cannot support authentication tokens",
         "Over-fetching and under-fetching — clients getting too much or too little data per request",
+        "REST cannot support authentication tokens",
         "REST is too slow because it uses TCP",
         "REST does not support real-time data"
       ],
-      "correct": 1,
+      "correct": 0,
       "explanation": "REST endpoints return fixed shapes, forcing clients to either receive fields they do not need (over-fetching) or make multiple requests to assemble a view (under-fetching). GraphQL lets clients specify exactly the fields they want in a single query."
     },
     {
@@ -147,11 +155,11 @@
       "type": "mcq",
       "options": [
         "gRPC does not support authentication",
-        "gRPC responses are not JSON and cannot be parsed by JavaScript",
         "Browsers cannot speak raw HTTP/2 gRPC framing without a translation proxy",
+        "gRPC responses are not JSON and cannot be parsed by JavaScript",
         "gRPC only supports GET requests"
       ],
-      "correct": 2,
+      "correct": 1,
       "explanation": "Browsers expose the Fetch API, which does not give direct control over HTTP/2 framing needed for gRPC. A proxy like gRPC-Web or Envoy is required to translate, adding complexity. gRPC shines for server-to-server calls where both sides are controlled."
     },
     {
@@ -161,11 +169,11 @@
       "options": [
         "POST",
         "PATCH",
-        "DELETE",
-        "GET"
+        "GET",
+        "DELETE"
       ],
-      "correct": 3,
-      "explanation": "GET is both safe (no side effects) and idempotent (calling it multiple times produces the same result). DELETE is idempotent but not safe. POST is neither. PATCH is idempotent when correctly implemented but not safe."
+      "correct": 2,
+      "explanation": "GET is both safe (no side effects) and idempotent (repeating it leaves server state unchanged). DELETE is idempotent but not safe. POST is neither. PATCH is not guaranteed idempotent (RFC 5789) — it depends on the patch semantics — and it is never safe."
     },
     {
       "id": "q4",
@@ -173,11 +181,11 @@
       "type": "mcq",
       "options": [
         "GraphQL requires N+1 network round-trips for N resources; solved by persisted queries",
-        "Naive resolvers issue one DB query per item in a list (N queries for N items); solved by DataLoader batching",
+        "The GraphQL endpoint can only handle N+1 concurrent connections; solved by connection pooling",
         "GraphQL limits responses to N+1 fields per query; solved by schema stitching",
-        "The GraphQL endpoint can only handle N+1 concurrent connections; solved by connection pooling"
+        "Naive resolvers issue one DB query per item in a list (N queries for N items); solved by DataLoader batching"
       ],
-      "correct": 1,
+      "correct": 3,
       "explanation": "If a list resolver returns 100 users and each user's orders resolver fires a separate DB query, that is 101 queries (1 + 100). DataLoader collects individual resolver calls within one event-loop tick and issues a single batched query, then distributes results back."
     },
     {
@@ -185,12 +193,12 @@
       "question": "Why is cursor-based pagination preferred over offset-based pagination for large, frequently-updated datasets?",
       "type": "mcq",
       "options": [
-        "Cursors are always faster because they avoid the database entirely",
-        "Offset pagination requires the client to know the total record count",
         "Offset pagination shifts rows when new records are inserted, causing duplicates or skipped items between pages",
+        "Offset pagination requires the client to know the total record count",
+        "Cursors are always faster because they avoid the database entirely",
         "Cursor pagination works only with GraphQL's Relay Connection spec"
       ],
-      "correct": 2,
+      "correct": 0,
       "explanation": "With offset pagination, inserting a new record at position 5 while a client fetches page 2 shifts every subsequent record by one — the client sees a duplicate or misses an item. Cursors point to a stable record position (sort key + ID) that does not shift with insertions or deletions."
     },
     {
@@ -208,16 +216,16 @@
     },
     {
       "id": "q7",
-      "question": "Why do GraphQL APIs typically return HTTP 200 even when errors occur?",
+      "question": "Why do GraphQL servers typically return HTTP 200 even when some fields fail to resolve?",
       "type": "mcq",
       "options": [
         "GraphQL requires HTTP 200 to enable response body caching",
-        "GraphQL supports partial success — some fields may resolve successfully while others fail, all returned in one response",
         "HTTP error codes are reserved for network-level failures in GraphQL",
+        "GraphQL supports partial success — some fields may resolve successfully while others fail, all returned in one response",
         "Returning errors in the body is more secure than using HTTP status codes"
       ],
-      "correct": 1,
-      "explanation": "GraphQL supports partial success: a query resolving five fields may succeed on four and fail on one. The response includes successful data AND an errors array. Forcing HTTP 4xx/5xx would prevent partial data from reaching the client. This does mean standard HTTP-status-based monitoring must be augmented to check the errors array."
+      "correct": 2,
+      "explanation": "GraphQL supports partial success: a query resolving five fields may succeed on four and fail on one. The response includes the successful data AND an errors array, so a 4xx/5xx status would misrepresent a partly successful response. Request-level failures (e.g. a query that does not parse or validate) are different — the GraphQL-over-HTTP spec returns 4xx for those. Either way, HTTP-status-based monitoring must be augmented to check the errors array."
     },
     {
       "id": "q8",
@@ -226,10 +234,10 @@
       "options": [
         "REST — call each service endpoint separately and merge client-side",
         "gRPC — use bidirectional streaming to fetch all three simultaneously",
-        "GraphQL — one query whose resolver graph fans out to all three services internally",
-        "REST with polling every 5 seconds to reduce latency"
+        "REST with polling every 5 seconds to reduce latency",
+        "GraphQL — one query whose resolver graph fans out to all three services internally"
       ],
-      "correct": 2,
+      "correct": 3,
       "explanation": "GraphQL's resolver graph can fan out to multiple backend services and aggregate the results into a single response for the client. The mobile app makes one HTTP request; the GraphQL layer handles all three downstream calls internally, returning a single exactly-shaped payload."
     },
     {
@@ -237,13 +245,13 @@
       "question": "Why are GET requests in REST easily cached by CDNs, while GraphQL queries generally are not?",
       "type": "mcq",
       "options": [
+        "GraphQL queries are usually sent as POST bodies to a single URL — HTTP caches key on method and URL and do not cache POST responses by default",
         "REST responses are always smaller and therefore more cache-friendly",
-        "GraphQL queries are sent as POST bodies — HTTP caches key on URL alone, not request body",
         "GraphQL uses HTTP/2 which explicitly disables CDN caching",
         "REST automatically sets Cache-Control headers; GraphQL does not"
       ],
-      "correct": 1,
-      "explanation": "HTTP caches (CDNs, browser cache, Varnish) key on the request URL. REST GET /users/42 is uniquely cacheable. All GraphQL queries share the same URL (/graphql) with different query bodies — the cache cannot distinguish them by URL, so it cannot cache by default. Persisted queries (GET /graphql?queryId=hash) restore cacheability."
+      "correct": 0,
+      "explanation": "HTTP caches (CDNs, browser cache, Varnish) key on the request method and URL (plus any Vary headers) and do not cache POST by default. REST GET /users/42 is uniquely cacheable. GraphQL queries typically share POST /graphql with different bodies, so the cache cannot distinguish them. Persisted queries sent as GET /graphql?queryId=hash restore cacheability."
     },
     {
       "id": "q10",
@@ -251,11 +259,11 @@
       "type": "mcq",
       "options": [
         "Unary RPC — single request, single response, repeated by polling",
-        "Client streaming RPC — client pushes a stream of symbol subscriptions",
         "Server streaming RPC — client sends one request, server pushes price updates as a stream",
+        "Client streaming RPC — client pushes a stream of symbol subscriptions",
         "Bidirectional streaming — both sides stream simultaneously"
       ],
-      "correct": 2,
+      "correct": 1,
       "explanation": "Server streaming allows the server to push multiple messages over time in response to a single client request — ideal for live feeds, log tailing, or any scenario where the server continuously produces data. The client sends one request (subscribe to AAPL), and the server streams price updates indefinitely without the client polling."
     }
   ]

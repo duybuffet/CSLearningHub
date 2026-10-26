@@ -9,7 +9,7 @@
   "sections": [
     {
       "type": "intro",
-      "content": "Every non-trivial object lives through a lifecycle. An `Order` is created, then paid, then shipped, then delivered. A TCP socket starts closed, moves through SYN_SENT and ESTABLISHED, and eventually settles in TIME_WAIT. A media player is either stopped, playing, or paused. The naive way to handle these lifecycles is with a single `status` field and a forest of `if`/`switch` blocks: every method begins with `if (this.status === 'pending') { ... } else if (this.status === 'paid') { ... }`. This seems harmless for two states. But systems grow. At five states and ten methods, the switch-case soup contains fifty branches — and adding a sixth state means editing every method, risking regressions in logic you did not intend to touch.\n\nThe **State pattern** is the GoF (Gang of Four) answer: move each state's behaviour into its own **State class**. The **Context** (your `Order`, your `TrafficLight`, your `TcpConnection`) holds a reference to the *current* state object and delegates every action to it. When a transition fires, the Context swaps its state reference. The same method call — `order.ship()` — now produces completely different behaviour depending on which state object is currently installed. The Context stays clean and stable; only the installed state changes.\n\nThis chapter builds the pattern from first principles: the problem statement with before/after code, the full participant structure, a class diagram and state machine diagram, real JavaScript implementations with edge cases, the difference between State and its close cousin Strategy, when to use a library instead of rolling your own, and the misconceptions that trip up even experienced engineers."
+      "content": "Every non-trivial object lives through a lifecycle. An `Order` is created, then paid, then shipped, then delivered. A TCP connection starts CLOSED, moves through SYN_SENT and ESTABLISHED, and passes through TIME_WAIT on its way back to CLOSED — the very example the GoF book used to introduce this pattern (`TCPConnection` with `TCPEstablished`, `TCPListen` and `TCPClosed` state classes). A media player is either stopped, playing, or paused. The naive way to handle these lifecycles is with a single `status` field and a forest of `if`/`switch` blocks: every method begins with `if (this.status === 'pending') { ... } else if (this.status === 'paid') { ... }`. This seems harmless for two states. But systems grow. At five states and ten methods, the switch-case soup contains fifty branches — and adding a sixth state means editing every method, risking regressions in logic you did not intend to touch.\n\nThe **State pattern** is the GoF (Gang of Four) answer: move each state's behaviour into its own **State class**. The **Context** (your `Order`, your `TrafficLight`, your `TcpConnection`) holds a reference to the *current* state object and delegates every action to it. When a transition fires, the Context swaps its state reference. The same method call — `order.ship()` — now produces completely different behaviour depending on which state object is currently installed. The Context stays clean and stable; only the installed state changes.\n\nThis chapter builds the pattern from first principles: the problem statement with before/after code, the full participant structure, a class diagram and state machine diagram, real JavaScript implementations with edge cases, the difference between State and its close cousin Strategy, when to use a library instead of rolling your own, and the misconceptions that trip up even experienced engineers."
     },
     {
       "type": "diagram",
@@ -39,12 +39,12 @@
     {
       "type": "explanation",
       "title": "State Transition Diagrams: Making the Machine Explicit",
-      "content": "One of the biggest wins of the State pattern is that it forces you to draw — and then encode — the exact transition graph before you write a line of logic. A state machine has:\n\n- **States** — the finite set of configurations the object can be in (Pending, Paid, Shipped, Cancelled)\n- **Events** — the operations that can be invoked (pay, ship, cancel)\n- **Transitions** — which event in which state leads to which next state\n- **Guard conditions** (optional) — predicates that must be true for a transition to fire (e.g., `ship()` from Paid is guarded by `stock > 0`)\n- **Actions** (optional) — side effects executed on entry to a state (send confirmation email) or on a specific transition (deduct inventory)\n\nDrawing this diagram *before* coding reveals illegal transitions immediately. In the Order machine: `ship()` from `Pending` is illegal (no payment yet). `pay()` from `Shipped` is a no-op. `cancel()` from `Shipped` is either a no-op or triggers a return-shipping workflow — a business decision that must be made explicit.\n\nThe State pattern enforces this clarity because each ConcreteState *must* implement *every* method. You cannot accidentally leave a transition undefined; you are forced to write the handler and make the decision: transition, warn, throw, or no-op."
+      "content": "One of the biggest wins of the State pattern is that it forces you to draw — and then encode — the exact transition graph before you write a line of logic. A state machine has:\n\n- **States** — the finite set of configurations the object can be in (Pending, Paid, Shipped, Cancelled)\n- **Events** — the operations that can be invoked (pay, ship, cancel)\n- **Transitions** — which event in which state leads to which next state\n- **Guard conditions** (optional) — predicates that must be true for a transition to fire (e.g., `ship()` from Paid is guarded by `stock > 0`)\n- **Actions** (optional) — side effects executed on entry to a state (send confirmation email) or on a specific transition (deduct inventory)\n\nDrawing this diagram *before* coding reveals illegal transitions immediately. In the Order machine: `ship()` from `Pending` is illegal (no payment yet). `pay()` from `Shipped` is a no-op. `cancel()` from `Shipped` is either a no-op or triggers a return-shipping workflow — a business decision that must be made explicit.\n\nThe State pattern pushes you toward this clarity because each ConcreteState has to answer *every* event. With a TypeScript interface the compiler forces it; in plain JavaScript a missing method only fails at runtime (`state.ship is not a function`), so a common trick is a base state class whose default handlers throw `InvalidTransitionError` — each subclass overrides only the events it accepts. Either way you make the decision explicitly: transition, warn, throw, or no-op."
     },
     {
       "type": "diagram",
       "mermaid": "stateDiagram-v2\n    [*] --> Pending : new Order()\n    Pending --> Paid : pay()\n    Pending --> Cancelled : cancel()\n    Paid --> Shipped : ship()\n    Paid --> Cancelled : cancel()\n    Shipped --> [*] : delivered\n    Cancelled --> [*]",
-      "caption": "The Order state machine as a Mealy diagram. Arrows show valid transitions; the label on each arrow is the triggering event. Any event not shown (e.g., ship() from Pending) is handled as an invalid-operation guard inside PendingState."
+      "caption": "The Order state machine as a UML state diagram. Arrows show valid transitions; the label on each arrow is the triggering event. Any event not shown (e.g., ship() from Pending) is handled as an invalid-operation guard inside PendingState."
     },
     {
       "type": "code_example",
@@ -78,17 +78,17 @@
       "language": "javascript",
       "label": "Example",
       "code": "// ── State pattern with singleton states, guards, and entry actions ─\n\n// Singleton instances — allocated once, reused across all Orders\nconst States = {};\n\nclass PendingState {\n  pay(order) {\n    order.setState(States.Paid);\n  }\n  ship(order)   { console.warn('Guard: pay first.'); }\n  cancel(order) { order.setState(States.Cancelled); }\n  onEnter(order) { console.log(`[Order ${order.id}] Created — awaiting payment.`); }\n  name() { return 'Pending'; }\n}\n\nclass PaidState {\n  pay(order)  { console.warn('Guard: already paid.'); }\n  ship(order) {\n    if (order.stock <= 0) {\n      console.warn('[Paid] Guard: out of stock — cannot ship.');\n      return;\n    }\n    order.stock--;\n    order.setState(States.Shipped);\n  }\n  cancel(order) { order.setState(States.Cancelled); }\n  onEnter(order) {\n    console.log(`[Order ${order.id}] Paid — sending payment confirmation...`);\n    // emailService.send(order.customerEmail, 'payment-confirmation');\n  }\n  name() { return 'Paid'; }\n}\n\nclass ShippedState {\n  pay(order)    { console.warn('Guard: already paid.'); }\n  ship(order)   { console.warn('Guard: already shipped.'); }\n  cancel(order) { console.warn('Guard: cannot cancel — in transit.'); }\n  onEnter(order) {\n    console.log(`[Order ${order.id}] Shipped — sending tracking notification...`);\n  }\n  name() { return 'Shipped'; }\n}\n\nclass CancelledState {\n  pay(order)    { console.warn('Guard: order cancelled.'); }\n  ship(order)   { console.warn('Guard: order cancelled.'); }\n  cancel(order) { console.warn('Guard: already cancelled.'); }\n  onEnter(order) {\n    console.log(`[Order ${order.id}] Cancelled — issuing refund if applicable.`);\n  }\n  name() { return 'Cancelled'; }\n}\n\n// Initialise singletons\nStates.Pending   = new PendingState();\nStates.Paid      = new PaidState();\nStates.Shipped   = new ShippedState();\nStates.Cancelled = new CancelledState();\n\n// ── Context with entry action support ─────────────────────────────\nclass Order {\n  constructor(id, stock = 5) {\n    this.id = id;\n    this.stock = stock;\n    this._state = States.Pending;\n    if (this._state.onEnter) this._state.onEnter(this);\n  }\n\n  setState(newState) {\n    this._state = newState;\n    if (this._state.onEnter) this._state.onEnter(this);\n  }\n\n  pay()    { this._state.pay(this); }\n  ship()   { this._state.ship(this); }\n  cancel() { this._state.cancel(this); }\n  status() { return this._state.name(); }\n}\n\n// ── Demo ──────────────────────────────────────────────────────────\nconst o = new Order('ORD-42', 1);\no.pay();    // Paid — confirmation email\no.ship();   // Shipped — tracking notification; stock: 1->0\n\nconst o2 = new Order('ORD-43', 0);\no2.pay();\no2.ship();  // Guard: out of stock — cannot ship\nconsole.log(o2.status()); // Paid (guard prevented transition)",
-      "explanation": "Singleton states avoid allocation on every transition — critical when orders are processed at high throughput. The onEnter hook centralises side effects (email, logging) so they fire for every transition into a state, not just specific ones. The stock guard in PaidState.ship() demonstrates how guard conditions prevent illegal transitions without throwing exceptions."
+      "explanation": "Singleton states avoid allocating a new object on every transition (rarely a bottleneck in JS) and, more usefully, let you compare states by identity (`order._state === States.Paid`). The onEnter hook centralises side effects (email, logging) so they fire for every transition into a state, not just specific ones. The stock guard in PaidState.ship() demonstrates how guard conditions prevent illegal transitions without throwing exceptions."
     },
     {
       "type": "explanation",
       "title": "TypeScript: Typing the Pattern Correctly",
-      "content": "TypeScript adds valuable compile-time safety to the State pattern. Define the state interface explicitly and let the compiler verify all ConcreteStates are complete:\n\n```typescript\ninterface OrderState {\n  pay(ctx: Order): void;\n  ship(ctx: Order): void;\n  cancel(ctx: Order): void;\n  onEnter?(ctx: Order): void;\n  name(): string;\n}\n\nclass Order {\n  private _state: OrderState;\n\n  constructor() { this._state = new PendingState(); }\n\n  setState(state: OrderState): void {\n    this._state = state;\n    this._state.onEnter?.(this);\n  }\n\n  pay():    void { this._state.pay(this); }\n  ship():   void { this._state.ship(this); }\n  cancel(): void { this._state.cancel(this); }\n  status(): string { return this._state.name(); }\n}\n```\n\nWith this structure, if you add a `refund()` method to the `OrderState` interface, the TypeScript compiler immediately flags every ConcreteState that has not implemented it. This is the open/closed principle enforced by the type system: the interface is *closed* (stable), and new states are *open* (add a class without editing existing ones).\n\nFor the state enum itself, prefer a **discriminated union** if you want to make the full set of states explicit at the type level:\n\n```typescript\ntype OrderStateKind = 'pending' | 'paid' | 'shipped' | 'cancelled';\n```\n\nThis also lets you serialize state to a database, pass it over a REST API, or match it in a `switch` where exhaustiveness checking gives you a compiler error if you forget a case."
+      "content": "TypeScript adds valuable compile-time safety to the State pattern. Define the state interface explicitly and let the compiler verify all ConcreteStates are complete:\n\n```typescript\ninterface OrderState {\n  pay(ctx: Order): void;\n  ship(ctx: Order): void;\n  cancel(ctx: Order): void;\n  onEnter?(ctx: Order): void;\n  name(): string;\n}\n\nclass Order {\n  private _state: OrderState;\n\n  constructor() { this._state = new PendingState(); }\n\n  setState(state: OrderState): void {\n    this._state = state;\n    this._state.onEnter?.(this);\n  }\n\n  pay():    void { this._state.pay(this); }\n  ship():   void { this._state.ship(this); }\n  cancel(): void { this._state.cancel(this); }\n  status(): string { return this._state.name(); }\n}\n```\n\nWith this structure, if you add a `refund()` method to the `OrderState` interface, the TypeScript compiler immediately flags every ConcreteState that has not implemented it. This exposes the pattern's asymmetry: adding a new *state* is cheap (one class, plus edits to the states that transition into it), while adding a new *event* touches every state class — the compiler simply guarantees you do not miss one.\n\nFor the persisted status, use a **union of string literals** — or, better, a **discriminated union** that ties per-state data to the state, so impossible combinations cannot be represented:\n\n```typescript\ntype OrderStateKind = 'pending' | 'paid' | 'shipped' | 'cancelled';\n\ntype OrderStatus =\n  | { kind: 'pending' }\n  | { kind: 'paid'; paidAt: Date }\n  | { kind: 'shipped'; paidAt: Date; trackingId: string }\n  | { kind: 'cancelled'; reason: string };\n```\n\nThis serializes cleanly to a database or REST API, and a `switch (status.kind)` gets exhaustiveness checking — the compiler errors if you forget a case, and inside `case 'shipped'` it knows `trackingId` exists."
     },
     {
       "type": "explanation",
       "title": "When to Reach for XState Instead",
-      "content": "The hand-rolled State pattern is excellent for machines with 3–6 states and straightforward transitions. But real applications hit scaling walls:\n\n**Parallel states** — a `Delivery` can be simultaneously tracking GPS and managing driver assignment. These are orthogonal sub-machines that run in parallel. Hand-rolling this is extremely complex; XState models it natively.\n\n**Hierarchical states (nested)** — a `Loading` state might have sub-states `ConnectingToServer`, `TransferringData`, `DecompressingResponse`. Hierarchical state machines (HSMs) let child states inherit transitions from parent states. Without a library, you implement this with nested state objects and brittle delegation chains.\n\n**History states** — when leaving a complex nested state, you often want to return to the same sub-state you were in. XState has a `history` pseudo-state for this. By hand, you need to persist the last sub-state explicitly.\n\n**Guards as pure functions** — XState makes guards first-class: `{ target: 'shipped', guard: ({ context }) => context.stock > 0 }`. They are separated from state behaviour and can be composed and tested independently.\n\n**Devtools and visualization** — XState's visualizer renders the state machine diagram from the code definition. The diagram *is* the code. This is invaluable for communicating machine logic to non-engineers.\n\n**Serialization** — XState machines can snapshot their current state to a plain object and restore it. Perfect for persisting order state to a database or resuming a wizard form.\n\nThe rule of thumb: if you are drawing a diagram with more than 6 states, or you need parallel regions, hierarchy, or devtools — reach for XState (JavaScript/TypeScript) or a similar library (Statecharts.io, Robot, Zag.js). Hand-roll only when you want zero dependencies and have a well-bounded, simple machine."
+      "content": "The hand-rolled State pattern is excellent for machines with 3–6 states and straightforward transitions. But real applications hit scaling walls:\n\n**Parallel states** — a `Delivery` can be simultaneously tracking GPS and managing driver assignment. These are orthogonal sub-machines that run in parallel. Hand-rolling this is extremely complex; XState models it natively.\n\n**Hierarchical states (nested)** — a `Loading` state might have sub-states `ConnectingToServer`, `TransferringData`, `DecompressingResponse`. Hierarchical state machines (HSMs) let child states inherit transitions from parent states. Without a library, you implement this with nested state objects and brittle delegation chains.\n\n**History states** — when leaving a complex nested state, you often want to return to the same sub-state you were in. XState has a `history` pseudo-state for this. By hand, you need to persist the last sub-state explicitly.\n\n**Guards as pure functions** — XState makes guards first-class: `{ target: 'shipped', guard: ({ context }) => context.stock > 0 }`. They are separated from state behaviour and can be composed and tested independently.\n\n**Devtools and visualization** — XState's visualizer renders the state machine diagram from the code definition. The diagram *is* the code. This is invaluable for communicating machine logic to non-engineers.\n\n**Serialization** — XState machines can snapshot their current state to a plain object and restore it. Perfect for persisting order state to a database or resuming a wizard form.\n\nThe rule of thumb: if you are drawing a diagram with more than 6 states, or you need parallel regions, hierarchy, or devtools — reach for XState (JavaScript/TypeScript) or a lighter alternative such as Robot or Zag.js (statecharts.dev is a good reference on the concepts). Hand-roll only when you want zero dependencies and have a well-bounded, simple machine."
     },
     {
       "type": "diagram",
@@ -98,18 +98,18 @@
     {
       "type": "callout",
       "variant": "info",
-      "content": "**Real-world examples of the State pattern in production systems:**\n\n- **TCP/IP socket lifecycle** (RFC 793): CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED → FIN_WAIT_1 → TIME_WAIT → CLOSED. This is arguably the most famous finite state machine in computer science — 11 states with 15+ transitions. Linux implements it explicitly in `net/ipv4/tcp.c`.\n- **React `useReducer`**: the reducer function is a state machine — `(state, action) => nextState`. The `status` field inside the state object maps to ConcreteState classes; dispatched action types map to events. Redux Toolkit's `createAsyncThunk` uses `pending`, `fulfilled`, `rejected` status strings — textbook State pattern terminology.\n- **XState** powers UI workflows in major applications including Microsoft Office Online (document editing workflows), Stately (state machine design tool), and numerous form wizard implementations.\n- **Game AI** state machines: idle → patrol → chase → attack → flee. Unity's Animator Controller is a visual state machine editor that compiles to a State pattern.\n- **Order Management Systems** (Shopify, commercetools, BigCommerce): every order has an explicit status lifecycle. commercetools's API exposes state transitions as first-class REST resources — you POST to `/orders/{id}/transitions` to advance the state machine."
+      "content": "**Real-world state machines (not all written as GoF State classes):**\n\n- **TCP connection lifecycle** (RFC 793, now RFC 9293): CLOSED → LISTEN → SYN_RECEIVED → ESTABLISHED → FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT → CLOSED. Arguably the most famous finite state machine in networking — 11 states. GoF used it as the State pattern's motivating example; Linux implements it as a state field (`sk->sk_state`, states listed in `include/net/tcp_states.h`) with switch-based handling rather than state objects.\n- **React `useReducer` / Redux**: the reducer `(state, action) => nextState` is a state machine in data form — typically with a `status: 'idle' | 'loading' | 'succeeded' | 'failed'` field. Redux Toolkit's `createAsyncThunk` dispatches `pending` / `fulfilled` / `rejected` lifecycle actions named after promise states.\n- **XState / Stately**: statechart library plus visual editor, common for multi-step forms, checkout flows, media players and UI components (Zag.js builds headless components on the same idea).\n- **Game AI** state machines: idle → patrol → chase → attack → flee. Unity's Animator Controller is a visual state machine, and `StateMachineBehaviour` scripts give each state `OnStateEnter`/`OnStateExit` hooks — entry and exit actions.\n- **Order management systems** (Shopify, commercetools, BigCommerce): every order has an explicit status lifecycle. commercetools lets you model custom workflows as `State` resources with allowed transitions, advanced with a `transitionState` update action."
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**When to use the State pattern:**\n- An object's behaviour changes substantially based on an internal `status` field\n- You have 3+ states with non-trivial logic in each\n- You need auditable, explicit transitions (for logging, debugging, or compliance)\n- You need to add new states without modifying existing ones (open/closed principle)\n- You want to test each state's behaviour in isolation\n\n**When NOT to use the State pattern:**\n- A simple boolean flag (`isOpen`, `isLoading`) controls trivial behaviour — do not create two state classes for on/off\n- Only one or two methods behave differently; `if` is cleaner than a full pattern\n- The transitions are entirely external (e.g., a theme toggle chosen by the user) — Strategy is the right pattern\n- You need parallel states, hierarchy, or serialization — use XState rather than extending the hand-rolled pattern\n\n**Common misconceptions:**\n- 'State means Redux state or React state' — no. The State *pattern* is specifically about the GoF behavioural pattern where an object delegates method calls to swappable state objects.\n- 'Each state class needs to import all other state classes' — only in the State-driven model. The hybrid return-based model avoids all cross-imports.\n- 'State is only for OOP' — functional state machines (reducers, pattern-matching on a union type) are equally valid implementations of the same concept."
+      "content": "**When to use the State pattern:**\n- An object's behaviour changes substantially based on an internal `status` field\n- You have 3+ states with non-trivial logic in each\n- You need auditable, explicit transitions (for logging, debugging, or compliance)\n- You expect to add states over time (each new state is a new class; only the states that transition into it change)\n- You want to test each state's behaviour in isolation\n\n**When NOT to use the State pattern:**\n- A simple boolean flag (`isOpen`, `isLoading`) controls trivial behaviour — do not create two state classes for on/off\n- Only one or two methods behave differently; `if` is cleaner than a full pattern\n- The transitions are entirely external (e.g., a theme toggle chosen by the user) — Strategy is the right pattern\n- You need parallel states, hierarchy, or serialization — use XState rather than extending the hand-rolled pattern\n\n**Common misconceptions:**\n- 'State means Redux state or React state' — no. The State *pattern* is specifically about the GoF behavioural pattern where an object delegates method calls to swappable state objects.\n- 'Each state class needs to import all other state classes' — only in the State-driven model. The hybrid return-based model avoids all cross-imports.\n- 'State is only for OOP' — functional state machines (reducers, pattern-matching on a union type) are equally valid implementations of the same concept."
     },
     {
       "type": "key_takeaways",
       "items": [
         "**Core idea:** Move each state's behaviour into its own ConcreteState class. The Context holds a reference to the current state and forwards all calls to it — `pay() { this._state.pay(this); }`. Swapping the state object changes all behaviour at once.",
-        "**Eliminates shotgun surgery:** Adding a new state means adding one class. No existing state class or Context method needs to change — the open/closed principle is fully satisfied.",
+        "**Eliminates switch soup:** Adding a new state means one new class plus edits only to the states that transition into it — no status checks in every method. The asymmetry: adding a new *event* touches every state class.",
         "**State vs Strategy:** Strategy provides interchangeable algorithms with no awareness of each other. State creates a directed graph of lifecycle phases that transition to each other — states know about sibling states.",
         "**Transitions can be State-driven** (ConcreteState calls `ctx.setState(new NextState())`) or **Context-driven** (a central transition table maps event+currentState → nextState). State-driven is the GoF canonical form; Context-driven scales better for large machines.",
         "**Entry and exit actions** centralise side effects (email, logging, events) per state rather than per transition — fire once whenever a state is entered, regardless of which transition triggered it.",
@@ -118,7 +118,10 @@
       ]
     }
   ],
-  "visualizer": { "type": "none", "caption": "" },
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
   "quiz": [
     {
       "id": "q1",
@@ -126,11 +129,11 @@
       "type": "mcq",
       "options": [
         "Objects having too many public methods exposed to clients.",
-        "A growing if/switch thicket where every method branches on the same status field — making it impossible to add a new state without editing all methods.",
         "Preventing multiple objects from sharing the same state simultaneously.",
+        "A growing if/switch thicket where every method branches on the same status field — making it impossible to add a new state without editing all methods.",
         "Ensuring database transactions are rolled back when an error occurs."
       ],
-      "correct": 1,
+      "correct": 2,
       "explanation": "The naive approach puts status-based if/switch in every method. Adding a new state requires editing all methods — shotgun surgery. State moves each state's logic into its own class so new states are additions, not modifications."
     },
     {
@@ -138,12 +141,12 @@
       "question": "In the GoF State pattern, how does the Context's pay() method typically look?",
       "type": "mcq",
       "options": [
-        "A 20-line switch statement covering all possible statuses.",
-        "An async method that queries a database for the current state.",
         "A single delegation line: this._state.pay(this).",
+        "An async method that queries a database for the current state.",
+        "A 20-line switch statement covering all possible statuses.",
         "A static factory method that returns a new Order in the paid state."
       ],
-      "correct": 2,
+      "correct": 0,
       "explanation": "After applying the State pattern, every Context method becomes a one-line delegation to the current state object. All the branching logic moves into ConcreteState classes."
     },
     {
@@ -152,11 +155,11 @@
       "type": "mcq",
       "options": [
         "So the state can access private fields of the Context that are otherwise inaccessible.",
-        "So the state can call ctx.setState(nextState) to trigger a transition from within the state object.",
+        "To satisfy the interface requirement — the parameter is never actually used.",
         "So multiple Context instances can share the same ConcreteState without confusion.",
-        "To satisfy the interface requirement — the parameter is never actually used."
+        "So the state can call ctx.setState(nextState) to trigger a transition from within the state object."
       ],
-      "correct": 1,
+      "correct": 3,
       "explanation": "In the State-driven (GoF canonical) model, the ConcreteState calls ctx.setState(new NextState()) to advance the machine. Without the Context reference, the state can only act — it cannot transition."
     },
     {
@@ -178,11 +181,11 @@
       "type": "mcq",
       "options": [
         "A guard condition that must be true before a transition fires.",
-        "A side effect (email, log, event) executed every time a particular state is entered, regardless of which transition triggered it.",
         "The constructor logic run when a new ConcreteState object is instantiated.",
+        "A side effect (email, log, event) executed every time a particular state is entered, regardless of which transition triggered it.",
         "A method that returns the previous state to allow undo functionality."
       ],
-      "correct": 1,
+      "correct": 2,
       "explanation": "Entry actions fire on every arrival into a state. Placing 'send confirmation email' in ShippedState.onEnter() means it fires whether you arrived from PaidState or any other transition — no duplication across multiple transition handlers."
     },
     {
@@ -190,25 +193,25 @@
       "question": "Why are singleton ConcreteState instances (one object shared across all Contexts) often a safe optimisation?",
       "type": "mcq",
       "options": [
-        "Singletons prevent race conditions in multi-threaded environments automatically.",
         "ConcreteState objects typically carry no instance-specific data — all domain data lives in the Context — so a single shared instance is safe and avoids allocation overhead.",
+        "Singletons prevent race conditions in multi-threaded environments automatically.",
         "JavaScript garbage collection cannot collect state objects unless they are singletons.",
-        "Singleton states allow the Context to compare states using === for transition detection."
+        "Singleton states let each Order keep a private copy of the state's data."
       ],
-      "correct": 1,
-      "explanation": "State objects represent a configuration, not data. All the order data (id, total, customerId) stays in the Context. Since ConcreteStates are stateless, one instance serves all orders, eliminating allocation on every transition."
+      "correct": 0,
+      "explanation": "State objects represent a configuration, not data. All the order data (id, total, customerId) stays in the Context. Since ConcreteStates are stateless, one instance can serve all orders (GoF notes they can be shared as Flyweights). Per-order data inside a shared state object would leak between orders, so a shared state object must never hold per-order data."
     },
     {
       "id": "q7",
       "question": "In the 'Context-driven' variant of the State pattern, where does the transition logic live?",
       "type": "mcq",
       "options": [
-        "Inside each ConcreteState's action methods, which call ctx.setState() directly.",
-        "In the client code that calls the Context's methods.",
         "In a central transition table or map held by the Context, keyed on (currentState, event) → nextState.",
+        "In the client code that calls the Context's methods.",
+        "Inside each ConcreteState's action methods, which call ctx.setState() directly.",
         "In the State interface as default method implementations."
       ],
-      "correct": 2,
+      "correct": 0,
       "explanation": "Context-driven implementations keep a transition table in the Context — { pendingState: { pay: paidState, cancel: cancelledState }, ... }. ConcreteStates only execute behaviour; the Context determines the next state from the table."
     },
     {
@@ -230,11 +233,11 @@
       "type": "mcq",
       "options": [
         "A sorting library that supports bubble sort and quick sort interchangeably.",
-        "A pub/sub event bus that notifies multiple subscribers of changes.",
         "The TCP/IP socket lifecycle (CLOSED → LISTEN → ESTABLISHED → TIME_WAIT) implemented in the operating system networking stack.",
+        "A pub/sub event bus that notifies multiple subscribers of changes.",
         "A factory method that returns different database adapters based on configuration."
       ],
-      "correct": 2,
+      "correct": 1,
       "explanation": "TCP socket states are the canonical real-world State pattern example. Each state (LISTEN, ESTABLISHED, etc.) handles segments differently; illegal operations in a given state are handled per-state. Redux reducers with status fields and game AI FSMs are also textbook examples."
     },
     {
@@ -243,11 +246,11 @@
       "type": "mcq",
       "options": [
         "useReducer implements the Observer pattern — components observe state changes.",
-        "The reducer function is effectively a state machine: (currentState, action) => nextState. Dispatched action types are events, and the returned object is the new state — equivalent to a State pattern without explicit ConcreteState classes.",
+        "useReducer implements the Command pattern — each dispatched action is a Command object.",
         "useReducer has no relationship to State — it is purely for performance optimisation.",
-        "useReducer implements the Command pattern — each dispatched action is a Command object."
+        "The reducer function is effectively a state machine: (currentState, action) => nextState. Dispatched action types are events, and the returned object is the new state — equivalent to a State pattern without explicit ConcreteState classes."
       ],
-      "correct": 1,
+      "correct": 3,
       "explanation": "useReducer is a functional state machine. The reducer maps (state, event) → nextState, exactly as a State machine transition function. Redux Toolkit's createAsyncThunk uses 'pending'/'fulfilled'/'rejected' status strings — the ConcreteState name equivalents in a data-driven implementation."
     }
   ]

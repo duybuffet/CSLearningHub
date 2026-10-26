@@ -28,20 +28,20 @@
     },
     {
       "type": "diagram",
-      "mermaid": "sequenceDiagram\n    participant C as OrderService (Client)\n    participant T as PaymentProcessor (Target)\n    participant A as StripeAdapter\n    participant E as StripeSDK (Adaptee)\n    C->>A: charge(100, \"USD\", \"Pro Plan\")\n    Note over A: translate parameters\n    A->>E: createCharge({ amount: 100, currency: \"USD\", description: \"Pro Plan\" })\n    E-->>A: { id: \"ch_123\", status: \"succeeded\" }\n    Note over A: translate return value\n    A-->>C: void (or mapped result)",
+      "mermaid": "sequenceDiagram\n    participant C as OrderService (Client)\n    participant T as PaymentProcessor (Target)\n    participant A as StripeAdapter\n    participant E as StripeSDK (Adaptee)\n    C->>A: charge(100, \"USD\", \"Pro Plan\")\n    Note over A: translate params, dollars to cents\n    A->>E: createCharge({ amount: 10000, currency: \"usd\", description: \"Pro Plan\" })\n    E-->>A: { id: \"ch_123\", status: \"succeeded\" }\n    Note over A: translate return value\n    A-->>C: void (or mapped result)",
       "caption": "The call flows from Client through the Adapter to the Adaptee. The Adapter translates parameters going in and return values coming out. The Client sees only the Target interface throughout."
     },
     {
       "type": "explanation",
       "title": "Object Adapter vs. Class Adapter",
-      "content": "There are two structural variants of the Adapter pattern, and they differ in how the Adapter relates to the Adaptee:\n\n**Object Adapter** uses **composition**: the Adapter class holds a reference to an instance of the Adaptee. This is the dominant variant in modern code, especially in languages like JavaScript, TypeScript, Java, and Go that do not support multiple inheritance. Composition is preferred for several strong reasons:\n- You can swap the Adaptee at runtime (pass a different instance to the constructor)\n- You can adapt an entire class hierarchy — not just the specific Adaptee subclass\n- It is easier to test: inject a fake Adaptee in unit tests\n- It avoids the fragile base-class problem inherent in deep inheritance\n\n**Class Adapter** uses **inheritance from both Target and Adaptee simultaneously**. The Adapter extends the Adaptee (to gain its implementation) and implements the Target Interface (to satisfy the Client). This requires multiple inheritance, which is not available in JavaScript or TypeScript. Languages like C++ support it, but even there, composition is generally preferred.\n\nIn practice: **always reach for the Object Adapter (composition)** unless you have a very specific reason not to. The rest of this chapter focuses exclusively on Object Adapters.\n\n**A subtle point about constructor injection:** the Adaptee can be passed in through the constructor (most flexible, supports testing), created inside the constructor (simpler but harder to test), or even lazy-initialised. Constructor injection is the cleanest approach because it makes the dependency explicit and easy to replace."
+      "content": "There are two structural variants of the Adapter pattern, and they differ in how the Adapter relates to the Adaptee:\n\n**Object Adapter** uses **composition**: the Adapter class holds a reference to an instance of the Adaptee. This is the dominant variant in modern code, especially in languages like JavaScript, TypeScript, Java, and Go that do not support multiple inheritance. Composition is preferred for several strong reasons:\n- You can swap the Adaptee at runtime (pass a different instance to the constructor)\n- You can adapt an entire class hierarchy — not just the specific Adaptee subclass\n- It is easier to test: inject a fake Adaptee in unit tests\n- It avoids the fragile base-class problem inherent in deep inheritance\n\n**Class Adapter** uses **inheritance**: the Adapter *extends the Adaptee* (to gain its implementation) and also conforms to the Target (to satisfy the Client). In GoF's C++ that meant multiple inheritance. When the Target is an *interface*, TypeScript, Java and C# can do it too — `class StripeAdapter extends StripeSDK implements PaymentProcessor`. Only when the Target is itself a class do you need true multiple class inheritance, which JS/TS/Java lack. Even where it is possible, it locks the adapter to one concrete Adaptee class and exposes all of the Adaptee's public methods through the adapter — so composition is generally preferred.\n\nIn practice: **always reach for the Object Adapter (composition)** unless you have a very specific reason not to. The rest of this chapter focuses exclusively on Object Adapters.\n\n**A subtle point about constructor injection:** the Adaptee can be passed in through the constructor (most flexible, supports testing), created inside the constructor (simpler but harder to test), or even lazy-initialised. Constructor injection is the cleanest approach because it makes the dependency explicit and easy to replace."
     },
     {
       "type": "code_example",
       "language": "typescript",
       "label": "Example",
-      "code": "// ── Step 1: Define the Target Interface ────────────────────────\n// This is what your system already expects. Written once, never changes.\ninterface PaymentProcessor {\n  charge(amount: number, currency: string, note: string): Promise<void>;\n}\n\n// ── Step 2: Adaptee #1 — Stripe SDK (third-party, cannot modify) ─\nclass StripeSDK {\n  async createCharge(opts: {\n    amount: number;\n    currency: string;\n    description: string;\n    idempotencyKey?: string;\n  }): Promise<{ id: string; status: string }> {\n    // Real SDK would make an HTTP call\n    console.log(`[Stripe] Charging ${opts.amount} ${opts.currency}: ${opts.description}`);\n    return { id: 'ch_stripe_123', status: 'succeeded' };\n  }\n}\n\n// ── Step 3: Adaptee #2 — Legacy PayPal client (old internal module) ─\nclass LegacyPayPalClient {\n  async sendPayment(\n    total: number,\n    curr: string,\n    memo: string\n  ): Promise<{ transactionId: string }> {\n    console.log(`[PayPal] Sending ${total} ${curr} — memo: ${memo}`);\n    return { transactionId: 'pp_456' };\n  }\n}\n\n// ── Step 4: Adapter for Stripe ──────────────────────────────────\n// Implements Target, wraps Adaptee via composition\nclass StripeAdapter implements PaymentProcessor {\n  private readonly stripe: StripeSDK;\n\n  constructor(stripe: StripeSDK) {\n    this.stripe = stripe;\n  }\n\n  async charge(amount: number, currency: string, note: string): Promise<void> {\n    // Translation: Target call → Adaptee call\n    const result = await this.stripe.createCharge({\n      amount,\n      currency,\n      description: note,\n      idempotencyKey: `idem_${Date.now()}`,\n    });\n    console.log(`StripeAdapter: done, id=${result.id}, status=${result.status}`);\n  }\n}\n\n// ── Step 5: Adapter for Legacy PayPal ───────────────────────────\nclass PayPalAdapter implements PaymentProcessor {\n  private readonly paypal: LegacyPayPalClient;\n\n  constructor(paypal: LegacyPayPalClient) {\n    this.paypal = paypal;\n  }\n\n  async charge(amount: number, currency: string, note: string): Promise<void> {\n    // Translation: different parameter order, different method name\n    const result = await this.paypal.sendPayment(amount, currency, note);\n    console.log(`PayPalAdapter: done, transactionId=${result.transactionId}`);\n  }\n}\n\n// ── Step 6: Client — knows only the Target Interface ───────────\nclass OrderService {\n  constructor(private readonly processor: PaymentProcessor) {}\n\n  async placeOrder(amount: number, currency: string, item: string): Promise<void> {\n    console.log(`Placing order for ${item}...`);\n    await this.processor.charge(amount, currency, `Order: ${item}`);\n    console.log('Order complete!\\n');\n  }\n}\n\n// ── Wire it up — zero changes to OrderService either way ─────────\nasync function main() {\n  const stripeOrder = new OrderService(new StripeAdapter(new StripeSDK()));\n  await stripeOrder.placeOrder(49.99, 'USD', 'Pro Subscription');\n  // Placing order for Pro Subscription...\n  // [Stripe] Charging 49.99 USD: Order: Pro Subscription\n  // StripeAdapter: done, id=ch_stripe_123, status=succeeded\n  // Order complete!\n\n  const paypalOrder = new OrderService(new PayPalAdapter(new LegacyPayPalClient()));\n  await paypalOrder.placeOrder(29.00, 'EUR', 'Ebook Bundle');\n  // Placing order for Ebook Bundle...\n  // [PayPal] Sending 29 EUR — memo: Order: Ebook Bundle\n  // PayPalAdapter: done, transactionId=pp_456\n  // Order complete!\n}\nmain();",
-      "explanation": "Notice that `OrderService` is entirely unchanged between the Stripe and PayPal scenarios — only the injected adapter differs. Each adapter is a thin translator: it maps parameter names, reorders arguments, and discards or maps the return value. No business logic lives in either adapter."
+      "code": "// ── Step 1: Define the Target Interface ────────────────────────\n// This is what your system already expects. Written once, never changes.\ninterface PaymentProcessor {\n  charge(amount: number, currency: string, note: string): Promise<void>;\n}\n\n// ── Step 2: Adaptee #1 — Stripe SDK (third-party, cannot modify) ─\nclass StripeSDK {\n  async createCharge(opts: {\n    amount: number;\n    currency: string;\n    description: string;\n    idempotencyKey?: string;\n  }): Promise<{ id: string; status: string }> {\n    // Real SDK would make an HTTP call\n    console.log(`[Stripe] Charging ${opts.amount} ${opts.currency}: ${opts.description}`);\n    return { id: 'ch_stripe_123', status: 'succeeded' };\n  }\n}\n\n// ── Step 3: Adaptee #2 — Legacy PayPal client (old internal module) ─\nclass LegacyPayPalClient {\n  async sendPayment(\n    total: number,\n    curr: string,\n    memo: string\n  ): Promise<{ transactionId: string }> {\n    console.log(`[PayPal] Sending ${total} ${curr} — memo: ${memo}`);\n    return { transactionId: 'pp_456' };\n  }\n}\n\n// ── Step 4: Adapter for Stripe ──────────────────────────────────\n// Implements Target, wraps Adaptee via composition\nclass StripeAdapter implements PaymentProcessor {\n  private readonly stripe: StripeSDK;\n\n  constructor(stripe: StripeSDK) {\n    this.stripe = stripe;\n  }\n\n  async charge(amount: number, currency: string, note: string): Promise<void> {\n    // Translation: Target call → Adaptee call.\n    // Stripe wants integer minor units (cents) and lowercase ISO currency codes.\n    const result = await this.stripe.createCharge({\n      amount: Math.round(amount * 100),\n      currency: currency.toLowerCase(),\n      description: note,\n      // Production: use a key that is STABLE per order (e.g. the order ID) so a\n      // retried request is not charged twice — a timestamp would not be.\n      idempotencyKey: `order_${note}`,\n    });\n    console.log(`StripeAdapter: done, id=${result.id}, status=${result.status}`);\n  }\n}\n\n// ── Step 5: Adapter for Legacy PayPal ───────────────────────────\nclass PayPalAdapter implements PaymentProcessor {\n  private readonly paypal: LegacyPayPalClient;\n\n  constructor(paypal: LegacyPayPalClient) {\n    this.paypal = paypal;\n  }\n\n  async charge(amount: number, currency: string, note: string): Promise<void> {\n    // Translation: different parameter order, different method name\n    const result = await this.paypal.sendPayment(amount, currency, note);\n    console.log(`PayPalAdapter: done, transactionId=${result.transactionId}`);\n  }\n}\n\n// ── Step 6: Client — knows only the Target Interface ───────────\nclass OrderService {\n  constructor(private readonly processor: PaymentProcessor) {}\n\n  async placeOrder(amount: number, currency: string, item: string): Promise<void> {\n    console.log(`Placing order for ${item}...`);\n    await this.processor.charge(amount, currency, `Order: ${item}`);\n    console.log('Order complete!\\n');\n  }\n}\n\n// ── Wire it up — zero changes to OrderService either way ─────────\nasync function main() {\n  const stripeOrder = new OrderService(new StripeAdapter(new StripeSDK()));\n  await stripeOrder.placeOrder(49.99, 'USD', 'Pro Subscription');\n  // Placing order for Pro Subscription...\n  // [Stripe] Charging 4999 usd: Order: Pro Subscription\n  // StripeAdapter: done, id=ch_stripe_123, status=succeeded\n  // Order complete!\n\n  const paypalOrder = new OrderService(new PayPalAdapter(new LegacyPayPalClient()));\n  await paypalOrder.placeOrder(29.00, 'EUR', 'Ebook Bundle');\n  // Placing order for Ebook Bundle...\n  // [PayPal] Sending 29 EUR — memo: Order: Ebook Bundle\n  // PayPalAdapter: done, transactionId=pp_456\n  // Order complete!\n}\nmain();",
+      "explanation": "Notice that `OrderService` is entirely unchanged between the Stripe and PayPal scenarios — only the injected adapter differs. Each adapter is a thin translator: it maps parameter names, converts units (dollars to integer cents for Stripe), and discards or maps the return value. No business logic lives in either adapter."
     },
     {
       "type": "explanation",
@@ -62,13 +62,13 @@
       "type": "code_example",
       "language": "typescript",
       "label": "Example",
-      "code": "// ── Concrete test double — no mocking library needed ───────────\ninterface Logger {\n  log(message: string): void;\n  warn(message: string): void;\n  error(message: string, err?: unknown): void;\n}\n\nclass ConsoleLogger implements Logger {\n  log(message: string) { console.log(message); }\n  warn(message: string) { console.warn(message); }\n  error(message: string, err?: unknown) { console.error(message, err); }\n}\n\n// Imagine your system uses a structured logging library with a different API:\nclass WinstonLoggerSDK {\n  info(data: { msg: string; level: string }) { /* winston API */ }\n  warning(data: { msg: string }) { /* winston API */ }\n  err(data: { msg: string; stack?: string }) { /* winston API */ }\n}\n\n// Adapter makes the Winston SDK compatible with your Logger interface:\nclass WinstonAdapter implements Logger {\n  constructor(private readonly winston: WinstonLoggerSDK) {}\n\n  log(message: string): void {\n    this.winston.info({ msg: message, level: 'info' });\n  }\n\n  warn(message: string): void {\n    this.winston.warning({ msg: message });\n  }\n\n  error(message: string, err?: unknown): void {\n    const stack = err instanceof Error ? err.stack : undefined;\n    this.winston.err({ msg: message, stack });\n  }\n}\n\n// ── Fake logger for tests — zero dependencies ───────────────────\nclass InMemoryLogger implements Logger {\n  readonly logs: string[] = [];\n  readonly warnings: string[] = [];\n  readonly errors: string[] = [];\n\n  log(message: string) { this.logs.push(message); }\n  warn(message: string) { this.warnings.push(message); }\n  error(message: string) { this.errors.push(message); }\n}\n\n// Any service that depends on Logger can be tested with InMemoryLogger:\nclass UserRegistrationService {\n  constructor(private readonly logger: Logger) {}\n\n  register(email: string) {\n    if (!email.includes('@')) {\n      this.logger.error(`Invalid email: ${email}`);\n      throw new Error('Invalid email');\n    }\n    this.logger.log(`User registered: ${email}`);\n  }\n}\n\n// Test:\nconst fakeLogger = new InMemoryLogger();\nconst svc = new UserRegistrationService(fakeLogger);\nsvc.register('alice@example.com');\nconsole.log(fakeLogger.logs); // ['User registered: alice@example.com']\n\n// Production:\nconst prodLogger = new WinstonAdapter(new WinstonLoggerSDK());\nconst prodSvc = new UserRegistrationService(prodLogger);",
-      "explanation": "Two adapters of the same Logger interface: `WinstonAdapter` for production (translates to Winston's unusual API) and `InMemoryLogger` for tests (stores calls in arrays for assertions). The service never changes between environments. This is the Adapter pattern's testability dividend at work."
+      "code": "// ── Concrete test double — no mocking library needed ───────────\ninterface Logger {\n  log(message: string): void;\n  warn(message: string): void;\n  error(message: string, err?: unknown): void;\n}\n\nclass ConsoleLogger implements Logger {\n  log(message: string) { console.log(message); }\n  warn(message: string) { console.warn(message); }\n  error(message: string, err?: unknown) { console.error(message, err); }\n}\n\n// Imagine a legacy in-house logging SDK with a different API:\nclass LegacyLogSDK {\n  info(data: { msg: string; level: string }) { /* legacy API */ }\n  warning(data: { msg: string }) { /* legacy API */ }\n  err(data: { msg: string; stack?: string }) { /* legacy API */ }\n}\n\n// Adapter makes the legacy SDK compatible with your Logger interface:\nclass LegacyLogAdapter implements Logger {\n  constructor(private readonly sdk: LegacyLogSDK) {}\n\n  log(message: string): void {\n    this.sdk.info({ msg: message, level: 'info' });\n  }\n\n  warn(message: string): void {\n    this.sdk.warning({ msg: message });\n  }\n\n  error(message: string, err?: unknown): void {\n    const stack = err instanceof Error ? err.stack : undefined;\n    this.sdk.err({ msg: message, stack });\n  }\n}\n\n// ── Fake logger for tests — a test double, not an adapter ───────────────────\nclass InMemoryLogger implements Logger {\n  readonly logs: string[] = [];\n  readonly warnings: string[] = [];\n  readonly errors: string[] = [];\n\n  log(message: string) { this.logs.push(message); }\n  warn(message: string) { this.warnings.push(message); }\n  error(message: string) { this.errors.push(message); }\n}\n\n// Any service that depends on Logger can be tested with InMemoryLogger:\nclass UserRegistrationService {\n  constructor(private readonly logger: Logger) {}\n\n  register(email: string) {\n    if (!email.includes('@')) {\n      this.logger.error(`Invalid email: ${email}`);\n      throw new Error('Invalid email');\n    }\n    this.logger.log(`User registered: ${email}`);\n  }\n}\n\n// Test:\nconst fakeLogger = new InMemoryLogger();\nconst svc = new UserRegistrationService(fakeLogger);\nsvc.register('alice@example.com');\nconsole.log(fakeLogger.logs); // ['User registered: alice@example.com']\n\n// Production:\nconst prodLogger = new LegacyLogAdapter(new LegacyLogSDK());\nconst prodSvc = new UserRegistrationService(prodLogger);",
+      "explanation": "`LegacyLogAdapter` is the adapter: it implements your `Logger` interface and translates each call into the legacy SDK's `info`/`warning`/`err` shape. `InMemoryLogger` is *not* an adapter — it wraps nothing — it is a test double, made trivial by the same `Logger` interface the adapter introduced. The service never changes between environments: that shared interface (the \"port\") is the Adapter pattern's testability dividend."
     },
     {
       "type": "diagram",
       "mermaid": "flowchart LR\n    A[\"OrderService\"] --> B[\"PaymentProcessor\\n(interface)\"]\n    B --> C[\"StripeAdapter\\n(production)\"]\n    B --> D[\"PayPalAdapter\\n(production)\"]\n    B --> E[\"FakeProcessor\\n(tests)\"]\n    C --> F[\"StripeSDK\"]\n    D --> G[\"LegacyPayPalClient\"]\n    E --> H[\"InMemory\\nrecorder\"]",
-      "caption": "The same interface fans out into real adapters for production and a fake adapter for tests. OrderService is completely agnostic to which concrete implementation it receives."
+      "caption": "The same interface fans out into real adapters for production and a fake implementation for tests. OrderService is completely agnostic to which concrete implementation it receives."
     },
     {
       "type": "explanation",
@@ -83,7 +83,7 @@
     {
       "type": "explanation",
       "title": "The Adapter Pattern in Real Frameworks and Libraries",
-      "content": "Once you know what an Adapter looks like, you see it everywhere in production software:\n\n**ORMs (TypeORM, Sequelize, Prisma):** These are adapters at architectural scale. Your application code talks to a clean `Repository` or `Model` interface. The ORM internally translates those calls into raw SQL for the specific database dialect (PostgreSQL, MySQL, SQLite). Switching databases means swapping the ORM adapter, not rewriting your business logic.\n\n**Node.js stream adapters:** Node's `stream.Writable`, `stream.Readable`, and `stream.Transform` are adapter-friendly abstractions. Libraries provide adapters that make blob storage APIs, HTTP responses, and file descriptors all appear as the same streaming interface.\n\n**React's `useRef` and DOM adapters:** The synthetic event system in React is an adapter: it wraps browser-native DOM events behind a normalised `SyntheticEvent` interface so the same React component code works across browsers with their inconsistent native event APIs.\n\n**Axios interceptors and `fetch` wrappers:** Teams often write an `HttpClient` interface with a `get(url, options)` / `post(url, body, options)` contract, then write adapters for Axios, the native `fetch` API, or a test double. Switching HTTP libraries means only the adapter changes.\n\n**Testing library `@testing-library/user-event`:** This library adapts complex user gesture sequences (click, type, tab) into the `userEvent` API — itself an adapter layer over raw DOM event dispatching.\n\n**`Array.from()`:** JavaScript's `Array.from()` is a functional adapter. It takes any iterable or array-like object (Set, Map, NodeList, generator, string) and adapts it to a plain `Array`. The caller gets a standard array regardless of what was passed in.\n\n**Express middleware adapters:** Third-party packages frequently ship as adapters between their library's API and Express's `(req, res, next)` middleware interface. `passport.initialize()`, for example, adapts Passport's authentication strategies to Express's request pipeline."
+      "content": "Once you know what an Adapter looks like, you see it everywhere in production software:\n\n**ORM and database drivers (TypeORM, Sequelize, Prisma, Knex):** An ORM does far more than adapt, but its per-database *dialect/driver* layer is a set of adapters: one stable internal interface, translated to each driver's API and SQL dialect. Prisma even names them — *driver adapters* such as `@prisma/adapter-pg` and `@prisma/adapter-neon` plug different Postgres drivers into the same client.\n\n**Node.js `util.promisify` and stream converters:** `util.promisify(fs.readFile)` adapts a callback-style API `(err, data) => …` to the Promise interface your `async` code expects — a textbook adapter. `Readable.from(iterable)`, `Readable.toWeb()` and `Readable.fromWeb()` adapt between iterables, Node streams and WHATWG Web Streams.\n\n**React's SyntheticEvent:** The synthetic event system in React is an adapter: it wraps browser-native DOM events behind a normalised `SyntheticEvent` interface so the same React component code works across browsers with their inconsistent native event APIs.\n\n**Axios interceptors and `fetch` wrappers:** Teams often write an `HttpClient` interface with a `get(url, options)` / `post(url, body, options)` contract, then write adapters for Axios, the native `fetch` API, or a test double. Switching HTTP libraries means only the adapter changes.\n\n**`Array.from()`:** JavaScript's `Array.from()` is a functional adapter. It takes any iterable or array-like object (Set, Map, NodeList, generator, string) and adapts it to a plain `Array`. The caller gets a standard array regardless of what was passed in.\n\n**Express middleware adapters:** Third-party packages frequently ship as adapters between their library's API and Express's `(req, res, next)` middleware interface. `passport.initialize()`, for example, adapts Passport's authentication strategies to Express's request pipeline."
     },
     {
       "type": "code_example",
@@ -93,6 +93,11 @@
       "explanation": "This HttpClient adapter layer is a pattern used by many large React and Node.js codebases. AxiosAdapter and FetchAdapter allow switching HTTP libraries without touching any service code. FakeHttpClient gives tests full control over responses and lets you assert exactly what URLs were called and with what bodies — without a single network request."
     },
     {
+      "type": "explanation",
+      "title": "Ports and Adapters (Hexagonal Architecture)",
+      "content": "Scale the pattern up to a whole application and you get **Ports and Adapters** (Alistair Cockburn's *Hexagonal Architecture*, 2005), a staple of system-design interviews.\n\n- A **port** is an interface owned by your domain, written in domain language: `PaymentProcessor`, `UserRepository`, `Clock`, `EmailSender`.\n- An **adapter** implements a port for one concrete technology: `StripeAdapter`, `PostgresUserRepository`, `SesEmailSender`. Driving adapters (HTTP controllers, CLI, queue consumers) call *into* the domain; driven adapters (DB, payment, email) are called *by* it.\n- The dependency arrow always points **inward**: adapters import the domain's port, never the other way round. That is the Dependency Inversion Principle applied at architectural scale.\n\nThe payoff is the same as for one adapter, multiplied: the domain can be unit-tested with in-memory fakes for every port, and swapping Stripe for Adyen or Postgres for DynamoDB touches one adapter. The cost is extra interfaces — worth it for long-lived domains with real integration churn, overkill for a CRUD app that will only ever talk to one database."
+    },
+    {
       "type": "callout",
       "variant": "info",
       "content": "**Historical context:** The Adapter (also called Wrapper) pattern was formally catalogued in the 1994 Gang of Four book *Design Patterns: Elements of Reusable Object-Oriented Software* by Gamma, Helm, Johnson, and Vlissides. It is one of the original 23 patterns and has remained continuously relevant because the underlying problem — integrating systems with incompatible interfaces — never goes away. Every generation of software developers rediscovers it independently before naming it. If you have ever written a class that wraps a third-party library to match your own method signatures, you have already implemented an adapter."
@@ -100,27 +105,31 @@
     {
       "type": "explanation",
       "title": "When to Use the Adapter Pattern",
-      "content": "Use the Adapter pattern when **all three** of the following conditions hold simultaneously:\n\n**1. You have an existing interface that existing code depends on.** This could be an explicit TypeScript/Java interface, a documented API contract, or simply a method signature that appears in dozens of call sites. The point is that the interface is established and changing it would require widespread edits.\n\n**2. You have a class or module with the functionality you need, but its interface does not match.** This is the Adaptee — a third-party SDK, a legacy module, an external service's API. It does what you need functionally, but it speaks a different API language.\n\n**3. You cannot (or should not) modify either the client code or the Adaptee.** If you own both sides, the simpler solution is to align them directly. If you own the Adaptee but not the Target, you might add a compatibility method. Adapters become necessary when both sides are fixed constraints.\n\nCommon scenarios that almost always call for an Adapter:\n- **Third-party SDK integration** — payment providers, email services, cloud storage, mapping APIs\n- **Legacy system integration** — wrapping an old module behind a modern interface\n- **Microservice integration** — adapting a service's response schema to your domain model\n- **Test doubles** — creating fake implementations of external dependencies\n- **Multi-provider support** — when you need to switch between providers (Stripe vs. PayPal) based on configuration\n- **Gradual migration** — wrapping an old implementation behind a new interface while you migrate call sites one at a time"
+      "content": "Use the Adapter pattern when **all three** of the following conditions hold simultaneously:\n\n**1. You have an existing interface that existing code depends on.** This could be an explicit TypeScript/Java interface, a documented API contract, or simply a method signature that appears in dozens of call sites. The point is that the interface is established and changing it would require widespread edits.\n\n**2. You have a class or module with the functionality you need, but its interface does not match.** This is the Adaptee — a third-party SDK, a legacy module, an external service's API. It does what you need functionally, but it speaks a different API language.\n\n**3. You cannot (or should not) modify either the client code or the Adaptee.** If you own both sides, the simpler solution is to align them directly. If you own the Adaptee but not the Target, you might add a compatibility method. Adapters become necessary when both sides are fixed constraints.\n\nCommon scenarios that almost always call for an Adapter:\n- **Third-party SDK integration** — payment providers, email services, cloud storage, mapping APIs\n- **Legacy system integration** — wrapping an old module behind a modern interface\n- **Microservice integration** — adapting a service's response schema to your domain model\n- **Testability seams** — the Target interface you introduce for an adapter is also where fakes plug in\n- **Multi-provider support** — when you need to switch between providers (Stripe vs. PayPal) based on configuration\n- **Gradual migration** — wrapping an old implementation behind a new interface while you migrate call sites one at a time"
     },
     {
       "type": "callout",
       "variant": "tip",
-      "content": "**When NOT to use the Adapter:** If you control both the client and the dependency, just align the interfaces directly — the adapter adds an extra class, an extra layer of indirection, and an extra file to maintain. If the interfaces are only slightly different (a single parameter rename), a one-line translation at the call site is cheaper than a full adapter class. Avoid adapters that contain significant business logic — that logic belongs in a service layer. Finally, do not chain adapters (`Client → Adapter1 → Adapter2 → Adaptee`) to avoid touching client code at the cost of an inscrutable translation chain; at that point, refactoring the target interface is a better investment.\n\n**In the wild — quick reference:**\n- **ORMs**: TypeORM, Sequelize, Prisma (adapters over raw database drivers)\n- **HTTP**: Axios adapters, fetch wrappers, superagent\n- **React**: Synthetic event system adapting browser events\n- **Node.js**: Stream adapters (`stream.Writable`, `stream.Transform`)\n- **JS builtins**: `Array.from()`, `Promise.resolve()`, `Object.entries()`\n- **Testing**: Jest mocks, Sinon stubs, custom test doubles all follow the adapter shape\n- **Cloud**: AWS SDK v2 → v3 migration wrappers, Firebase compat libraries"
+      "content": "**When NOT to use the Adapter:** If you control both the client and the dependency, just align the interfaces directly — the adapter adds an extra class, an extra layer of indirection, and an extra file to maintain. If the interfaces are only slightly different (a single parameter rename), a one-line translation at the call site is cheaper than a full adapter class. Avoid adapters that contain significant business logic — that logic belongs in a service layer. Finally, do not chain adapters (`Client → Adapter1 → Adapter2 → Adaptee`) to avoid touching client code at the cost of an inscrutable translation chain; at that point, refactoring the target interface is a better investment.\n\n**In the wild — quick reference:**\n- **Databases**: ORM dialect/driver layers, Prisma driver adapters (`@prisma/adapter-pg`)\n- **HTTP**: Axios adapters, fetch wrappers, superagent\n- **React**: Synthetic event system adapting browser events\n- **Node.js**: `util.promisify` (callback → Promise), `Readable.toWeb()` / `fromWeb()`\n- **JS builtins**: `Array.from()` (array-like/iterable → Array), `Promise.resolve(thenable)`\n- **Cloud**: AWS SDK v2 → v3 migration wrappers, Firebase compat libraries"
     },
     {
       "type": "key_takeaways",
       "items": [
         "The **Adapter pattern** makes two incompatible interfaces work together by introducing a wrapper class that implements the Target Interface and internally delegates to the Adaptee — neither side is modified.",
         "The four participants are **Client** (caller), **Target Interface** (what the client expects), **Adapter** (the translator), and **Adaptee** (the incompatible class being wrapped).",
-        "Always use an **Object Adapter** (composition) over a Class Adapter (multiple inheritance): `Adapter implements Target` + `Adapter wraps Adaptee`. Composition allows runtime swapping and easy testing.",
+        "Prefer an **Object Adapter** (composition) over a Class Adapter (inheritance from the Adaptee, e.g. `extends Adaptee implements Target`): `Adapter implements Target` + `Adapter wraps Adaptee`. Composition allows runtime swapping, works with any Adaptee subclass, and does not leak the Adaptee's API.",
         "Adapters should contain **translation only** — parameter mapping, return-value mapping, and error translation. Business logic belongs in a service layer, not the adapter.",
         "The Adapter pattern dramatically improves **testability**: because clients depend on the Target Interface, any concrete class implementing that interface — including simple in-memory fakes — can be injected in tests, eliminating the need to hit real external services.",
         "The key distinction from related patterns: **Decorator** adds behaviour with the same interface; **Proxy** controls access with the same interface; **Facade** simplifies a complex subsystem with a new interface; **Adapter** makes an incompatible interface compatible with an existing one.",
-        "The pattern is ubiquitous in production code: ORMs, HTTP clients, React's event system, stream adapters, and virtually every integration with a third-party SDK follows the Adapter structure."
+        "The pattern is ubiquitous in production code: ORMs, HTTP clients, React's event system, stream adapters, and virtually every integration with a third-party SDK follows the Adapter structure.",
+        "**Ports and Adapters (Hexagonal)** is the pattern at architectural scale: the domain owns interfaces (ports), each technology gets an adapter, and dependencies point inward — so the domain is testable with fakes and integrations are swappable."
       ]
     }
   ],
-  "visualizer": { "type": "none", "caption": "" },
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
   "quiz": [
     {
       "id": "q1",
@@ -128,11 +137,11 @@
       "type": "mcq",
       "options": [
         "Adapter extends both Target and Adaptee via multiple inheritance",
-        "Adapter implements the Target Interface and wraps the Adaptee via composition",
         "Adapter extends the Adaptee and the Client extends the Target",
+        "Adapter implements the Target Interface and wraps the Adaptee via composition",
         "Adapter and Adaptee both implement the Target Interface independently"
       ],
-      "correct": 1,
+      "correct": 2,
       "explanation": "The Object Adapter implements the Target Interface (so the Client can use it polymorphically) and holds a reference to the Adaptee via composition (so it can delegate and translate calls). This is the canonical structure."
     },
     {
@@ -141,11 +150,11 @@
       "type": "mcq",
       "options": [
         "Target Interface",
-        "Client",
+        "Adaptee",
         "Adapter",
-        "Adaptee"
+        "Client"
       ],
-      "correct": 3,
+      "correct": 1,
       "explanation": "The Adaptee is the incompatible class you want to use — it has the functionality you need but a different interface. The new SDK (makePayment) is the Adaptee. OrderService is the Client, PaymentProcessor is the Target Interface."
     },
     {
@@ -155,11 +164,11 @@
       "options": [
         "Object adapters execute faster because they avoid virtual dispatch",
         "Class adapters cannot implement interfaces, only abstract classes",
-        "Composition allows swapping the Adaptee at runtime and supports the entire Adaptee class hierarchy, not just one subclass",
-        "JavaScript garbage-collects composed objects faster than inherited ones"
+        "JavaScript garbage-collects composed objects faster than inherited ones",
+        "Composition allows swapping the Adaptee at runtime and supports the entire Adaptee class hierarchy, not just one subclass"
       ],
-      "correct": 2,
-      "explanation": "Composition decouples the Adapter from a specific Adaptee class — you can inject any conforming instance, including subclasses and fakes. Class adapters lock you to one concrete Adaptee class via inheritance and require multiple inheritance, which many languages do not support."
+      "correct": 3,
+      "explanation": "Composition decouples the Adapter from a specific Adaptee class — you can inject any conforming instance, including subclasses and fakes. A class adapter inherits from one concrete Adaptee class (and exposes its whole public API); if the Target is also a class it needs multiple inheritance, which JS/TS/Java do not have."
     },
     {
       "id": "q4",
@@ -167,11 +176,11 @@
       "type": "mcq",
       "options": [
         "Open/Closed Principle — adapters must be closed to modification",
-        "Single Responsibility Principle — adapters should only translate, not contain business logic",
         "Liskov Substitution Principle — adapters must be substitutable for the Target",
+        "Single Responsibility Principle — adapters should only translate, not contain business logic",
         "Interface Segregation Principle — adapters must implement all interface methods"
       ],
-      "correct": 1,
+      "correct": 2,
       "explanation": "Adapters have one responsibility: translate between interfaces. Adding discount logic gives the adapter two reasons to change (translation changes AND business rule changes), violating the Single Responsibility Principle. Business logic belongs in a service layer."
     },
     {
@@ -179,12 +188,12 @@
       "question": "You write a class that wraps a complex subsystem of 12 classes behind a single simplified interface you invented — there is no pre-existing interface to match. Which pattern is this?",
       "type": "mcq",
       "options": [
-        "Adapter",
-        "Decorator",
         "Facade",
+        "Decorator",
+        "Adapter",
         "Proxy"
       ],
-      "correct": 2,
+      "correct": 0,
       "explanation": "A Facade provides a simplified interface over a complex subsystem. Unlike the Adapter, it invents a new interface rather than matching a pre-existing one. The Adapter must implement a specific interface that existing clients already depend on."
     },
     {
@@ -194,10 +203,10 @@
       "options": [
         "It auto-generates mock classes at compile time",
         "It eliminates the need for dependency injection",
-        "Because OrderService depends on an interface, a simple FakePaymentProcessor can be injected in tests without hitting real payment APIs",
-        "Adapters cache external calls so tests run against cached data"
+        "Adapters cache external calls so tests run against cached data",
+        "Because OrderService depends on an interface, a simple FakePaymentProcessor can be injected in tests without hitting real payment APIs"
       ],
-      "correct": 2,
+      "correct": 3,
       "explanation": "Since OrderService depends on the PaymentProcessor interface (not a concrete Stripe class), any class implementing that interface — including a simple in-memory fake — can be injected. Tests get full control without network calls, credentials, or test accounts."
     },
     {
@@ -231,25 +240,25 @@
       "question": "Which of the following real-world examples best illustrates the Adapter pattern?",
       "type": "mcq",
       "options": [
-        "A Redux store that centralises all application state",
         "An ORM that wraps raw database driver calls behind a clean model interface",
+        "A Redux store that centralises all application state",
         "A React component that uses useState for local form state",
         "A binary search algorithm that runs in O(log n)"
       ],
-      "correct": 1,
-      "explanation": "An ORM (TypeORM, Sequelize, Prisma) implements a clean model interface that your code depends on, while internally translating calls to raw SQL for the specific database driver — exactly the Adapter structure: Target Interface + Adapter + Adaptee."
+      "correct": 0,
+      "explanation": "An ORM's dialect/driver layer exposes one stable interface that your code depends on while translating each call into a specific driver's API and SQL dialect — the Target + Adapter + Adaptee structure (Prisma literally calls these driver adapters). The other options are state management, local state and an algorithm."
     },
     {
       "id": "q10",
       "question": "Three things belong inside an adapter class. Which of these does NOT belong?",
       "type": "mcq",
       "options": [
-        "Parameter translation (renaming, restructuring, unit conversion)",
-        "Return-value translation (mapping SDK response to domain type)",
         "Loyalty point calculation based on order amount",
+        "Return-value translation (mapping SDK response to domain type)",
+        "Parameter translation (renaming, restructuring, unit conversion)",
         "Error translation (catching StripeCardError, re-throwing PaymentDeclinedError)"
       ],
-      "correct": 2,
+      "correct": 0,
       "explanation": "Adapters should only translate: parameters in, return values out, and errors across the boundary. Loyalty point calculation is business logic and belongs in a domain service layer, not the adapter."
     }
   ]

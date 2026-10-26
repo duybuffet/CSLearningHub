@@ -1,0 +1,279 @@
+{
+  "id": "phase5_file-systems",
+  "title": "File Systems",
+  "phase": 5,
+  "week": 19,
+  "icon": "database",
+  "tagline": "How a block device becomes named files: inodes, links, extents, the page cache, fsync, journaling vs copy-on-write, and SSD realities",
+  "readTime": "~25 min",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "A disk, whether a spinning platter or an NVMe SSD, is a huge numbered array of fixed-size blocks. It knows nothing about names, folders, owners, or where one file ends and the next begins. The **file system** turns that array into the abstraction every program relies on: named files holding byte streams, directories in a tree, permissions, timestamps, and a promise that what you wrote will still be there after a reboot (with some important fine print).\n\nThat fine print is where engineers get burned. `write()` returning success does **not** mean your data is on disk. It means it's in RAM, in the **page cache**, and the kernel will write it out \"soon.\" Renaming a file over another is atomic; writing a file in place is not. Deleting a file that a process still has open doesn't free any space. A hard link and a symlink look identical in a file manager and behave completely differently. And on an SSD, the drive itself runs a hidden log-structured file system underneath yours.\n\nThis chapter goes from the on-disk structures up to the system-call semantics you use every day. We cover **inodes and directory entries**, hard vs symbolic links, how blocks are allocated (contiguous, linked/FAT, indexed, **extents**) and how free space is tracked, the per-process **file descriptor table** and the system-wide open-file table, the page cache and write-back, **`fsync`/`fdatasync`** and the **write-temp-then-rename** pattern for crash-safe updates, crash consistency through **journaling** (ext4's three modes) and **copy-on-write** (Btrfs, ZFS, APFS), the log-structured idea, the **VFS** layer that makes everything look like a file, mounting, permissions and ACLs, and what SSDs change (TRIM, write amplification).\n\nWhether you're debugging \"disk full but `du` says otherwise,\" writing a config file that must never be half-written, or picking a file system for a database server, these are the mechanics underneath."
+    },
+    {
+      "type": "analogy",
+      "title": "The Library Catalogue",
+      "content": "Think of a big library.\n\n- The **shelves** are the disk's **blocks**, numbered storage slots that hold pages of content.\n- Each book has an **accession record** in the back office: the **inode**. It says who owns the book, when it was last changed, how long it is, and exactly which shelf slots hold its pages. The record has a number, but **no title**.\n- The **card catalogue** drawers are **directories**. Each card says \"*The Hobbit* → record #4711.\" A card is a **directory entry**: just a name pointing at a record number.\n- Two cards in different drawers can point at the same record #4711: that's a **hard link**. Same book, two names. The book is only pulped when the *last* card is removed (and nobody is still reading it).\n- A **symbolic link** is a card that says \"see the card *Fantasy/The Hobbit*.\" If someone removes that card, yours leads nowhere.\n- The **free-shelf ledger** (bitmap) tracks empty slots. A smart librarian shelves a long book in **one contiguous run** (an **extent**) rather than scattering its pages around the building.\n- The **returns cart** is the **page cache**. Returned pages sit on the cart for a while before being re-shelved (write-back). If the building floods before re-shelving (a power failure), the cart's contents are gone, unless you insisted they be shelved immediately (`fsync`).\n- The **logbook at the front desk** is the **journal**: before rearranging the catalogue, the librarian writes down what they're about to do, so a half-finished rearrangement can be completed or undone after an interruption."
+    },
+    {
+      "type": "explanation",
+      "title": "Files, Directories, Inodes, and Directory Entries",
+      "content": "To a program, a **file** is a named, growable **sequence of bytes** with metadata. Unix deliberately imposes no record structure. A **directory** is a special file whose contents are a list of **(name → inode number)** entries.\n\nThe **inode** (index node) is the file's real identity. On ext4 it is 256 bytes by default and holds:\n- **type and permission bits** (regular file, directory, symlink, device, socket, FIFO; `rwx` for user/group/other; setuid/setgid/sticky)\n- **owner** UID and GID\n- **size** in bytes and the number of blocks actually allocated (these differ for sparse files)\n- **timestamps**: `atime` (last access), `mtime` (content modified), `ctime` (inode changed, *not* \"created\"), and on ext4/Btrfs/XFS/APFS a birth time\n- **link count**: how many directory entries point at this inode\n- **where the data lives**: block pointers or, on ext4, the root of an extent tree\n\nWhat the inode does **not** contain is the file's **name**. Names live only in directory entries. An ext4 entry stores an inode number, a file type hint, the name length, and the name itself (up to 255 bytes). Large directories are indexed with a hashed B-tree (*htree*), so lookups stay fast with millions of entries.\n\n**Path resolution**: to open `/home/ana/notes.txt`, the kernel starts at the root directory's inode (inode 2 on ext4), looks up `home` in its entries to get an inode number, loads that inode, checks you have search (`x`) permission, looks up `ana`, and so on, one component at a time. It follows symlinks (Linux gives up after 40 with `ELOOP`) and crosses mount points along the way. A **dentry cache** keeps recently resolved path components in RAM, so the second `open()` of the same path rarely touches the disk.\n\nSome consequences:\n- **Renaming a file within a file system is cheap and atomic**: it rewrites directory entries, not data.\n- **Inodes can run out before space does.** ext4 fixes the inode count at `mkfs` time. Millions of tiny files (mail spools, `node_modules`, cache directories) can exhaust inodes with gigabytes still free. `df -i` shows it. XFS and Btrfs allocate inodes dynamically.\n- **`ctime` isn't creation time**, and `chmod` updates it. Use the birth time (`stat -c %w`) where it is supported."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    A[\"open /home/ana/notes.txt\"] --> B[\"Root dir inode 2\"]\n    B -->|\"look up 'home' in entries\"| C[\"Dir inode 1310721\"]\n    C -->|\"check x permission, look up 'ana'\"| D[\"Dir inode 1311045\"]\n    D -->|\"look up 'notes.txt'\"| E[\"File inode 1311102\"]\n    E --> F[\"Metadata: mode, owner, size, times, link count\"]\n    E --> G[\"Extent tree: logical block to physical block runs\"]\n    G --> H[\"Data blocks on disk\"]\n    DC[\"Dentry cache - recently resolved names\"] -.->|\"skip disk lookups\"| C",
+      "caption": "Path resolution walks one directory per component. Directory entries map names to inode numbers, and the inode holds the metadata and the location of the data. The dentry cache keeps hot path components in RAM."
+    },
+    {
+      "type": "explanation",
+      "title": "Hard Links vs Symbolic Links",
+      "content": "**A hard link is just another directory entry pointing at the same inode.** `ln original.txt hard.txt` adds a name and increments the inode's link count. Neither name is the \"real\" one: they are perfectly equal. Editing through either name changes the same data. Deleting one name (`rm` calls `unlink()`) removes that entry and decrements the count. **The data is freed only when the link count reaches 0 *and* no process has the file open.**\n\nHard-link rules:\n- **Same file system only.** Inode numbers are only meaningful within one file system.\n- **No hard links to directories** (except the automatic `.` and `..`), since they could create cycles that break tree traversal and `fsck`. That's why a directory's link count is 2 + its number of subdirectories: its own name, its `.`, and each child's `..`.\n- Typical uses: backup tools like `rsync --link-dest` and Time Machine-style snapshots, which share unchanged files between snapshots; package stores like pnpm, which hard-link packages from a global store into each project's `node_modules`.\n\n**A symbolic (soft) link is a separate small file whose content is a path.** `ln -s original.txt soft.txt` creates a new inode of type symlink containing the text `original.txt`. On ext4, targets shorter than 60 bytes are stored inside the inode itself (a \"fast symlink\", which uses 0 data blocks). The kernel substitutes the path during resolution.\n\nSymlink properties:\n- **Can cross file systems** and **can point to directories**.\n- **Can dangle**: delete or rename the target and the symlink points at nothing (`ENOENT` when followed).\n- **Relative targets resolve relative to the symlink's own directory**, not your current directory. This is a classic deployment bug when a symlink is moved.\n- Permissions on the symlink itself are ignored; the target's permissions apply.\n- Used for `current -> releases/2026-10-26` deploy switches (swap atomically with `ln -sfn` to a temp name plus `rename`), `/usr/bin/python3 -> python3.13`, and `node_modules/.bin` entries.\n\n**Deleted but still open**: because space is freed only when the last open fd closes, a process holding a deleted 50 GB log file keeps that space allocated. `df` says the disk is full while `du` can't find the files. Find them with `lsof +L1` (open files with link count < 1), and free the space by restarting or signalling the process, or by truncating through `/proc/<pid>/fd/N`."
+    },
+    {
+      "type": "code_example",
+      "language": "bash",
+      "label": "Example",
+      "code": "$ echo \"hello\" > original.txt\n$ ln original.txt hard.txt          # hard link: new name, same inode\n$ ln -s original.txt soft.txt       # symlink: new inode containing a path\n\n$ ls -li original.txt hard.txt soft.txt\n2913582 -rw-r--r--  2 root root  6 Oct 26 03:48 hard.txt\n2913582 -rw-r--r--  2 root root  6 Oct 26 03:48 original.txt\n2913585 lrwxrwxrwx  1 root root 12 Oct 26 03:48 soft.txt -> original.txt\n#  ^ inode number      ^ link count = 2 for the shared inode\n\n$ stat -c \"%n inode=%i links=%h size=%s blocks=%b\" original.txt soft.txt\noriginal.txt inode=2913582 links=2 size=6 blocks=8\nsoft.txt inode=2913585 links=1 size=12 blocks=0     # 12 = strlen(\"original.txt\"); fast symlink, 0 blocks\n\n$ rm original.txt                   # removes ONE name; the inode survives\n$ cat hard.txt\nhello\n$ cat soft.txt\ncat: can't open 'soft.txt': No such file or directory     # dangling symlink\n$ stat -c \"%n links=%h\" hard.txt\nhard.txt links=1\n\n$ mkdir d d/sub1 d/sub2; stat -c \"%n links=%h\" d\nd links=4                           # \"d\" in parent + \"d/.\" + \"sub1/..\" + \"sub2/..\"\n\n$ df -i /                           # inode usage can hit 100% before space does\nFilesystem      Inodes   IUsed    IFree IUse% Mounted on\noverlay        3907584 1159825  2747759   30% /",
+      "explanation": "Captured on Linux (busybox `ls`, abridged). The hard link shares inode `2913582`, so the link count is 2, and removing `original.txt` only removes one name, so `hard.txt` still reads \"hello\". The symlink has its own inode, its size is the length of the path it stores, and it dangles once the target name is gone. A directory's link count is 2 + its number of subdirectories. On macOS, use `stat -f \"%N inode=%i links=%l\"` instead of `stat -c`."
+    },
+    {
+      "type": "explanation",
+      "title": "File Descriptors and the Open File Table",
+      "content": "`open()` returns a small integer, a **file descriptor** (fd). Behind that integer are **three levels of kernel tables**, and knowing which level holds what explains many surprising behaviours:\n\n1. **Per-process file descriptor table**: fd number → pointer to an open file description, plus the per-fd `FD_CLOEXEC` flag. fds 0, 1, and 2 are stdin, stdout, and stderr. `open()` always returns the **lowest free number**, which is how shells implement `2>&1` and redirection (close, then dup into a specific slot).\n2. **System-wide open file table** (Linux `struct file`, called an *open file description* by POSIX): the **current offset**, the access mode (read/write), status flags (`O_APPEND`, `O_NONBLOCK`), and a reference count. Each `open()` call creates a new one.\n3. **The inode (in-memory vnode)**: the file itself, with its size, permissions, data location, and lock state. It is shared by everyone with the file open.\n\nWho shares what:\n- **Two separate `open()` calls** on the same file give two descriptions, so each has an **independent offset**.\n- **`dup()`/`dup2()`** create a new fd pointing at the **same description**, so they share an offset. Reading through one advances the other.\n- **`fork()`** copies the fd table, so parent and child **share descriptions and offsets**. That's why parent and child writing to the same inherited stdout don't overwrite each other: they advance a shared offset.\n- **`O_APPEND`**: each `write()` atomically moves to the current end of file first, which is why multiple processes can append to one log file safely (each `write()` call lands intact for typical small writes to local file systems).\n\nEverything goes through fds: regular files, directories, pipes, sockets, `epoll` instances, `eventfd`, timers, even process handles (`pidfd`). Each process has a limit (`ulimit -n`, often a soft limit of 1024 by default), and hitting it gives **`EMFILE: too many open files`**, a classic production incident for servers that leak sockets or open a file per request without closing it. Inspect with `ls -l /proc/<pid>/fd` or `lsof -p <pid>`. Use `O_CLOEXEC` (the default in Node.js, Python 3.4+, and Go) so fds don't leak into child processes started with `exec`."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    subgraph PA[\"Process A - fd table\"]\n        A3[\"fd 3\"]\n        A4[\"fd 4 = dup of fd 3\"]\n    end\n    subgraph PB[\"Process B - fd table\"]\n        B3[\"fd 3\"]\n    end\n    subgraph OFT[\"System-wide open file table\"]\n        D1[\"Description 1: offset 6, O_RDONLY\"]\n        D2[\"Description 2: offset 0, O_WRONLY + O_APPEND\"]\n    end\n    I[\"Inode 1311102: size, mode, blocks\"]\n    A3 --> D1\n    A4 --> D1\n    B3 --> D2\n    D1 --> I\n    D2 --> I",
+      "caption": "Three levels of tables. `dup()` and `fork()` share an open file description, and therefore its offset. Separate `open()` calls get separate descriptions with independent offsets. All of them point at the one inode."
+    },
+    {
+      "type": "code_example",
+      "language": "python",
+      "label": "Example",
+      "code": "# fd -> open file description (holds the offset) -> inode.  Who shares what?\nimport os, tempfile\n\npath = os.path.join(tempfile.mkdtemp(), \"demo.txt\")\nwith open(path, \"w\") as f:\n    f.write(\"ABCDEFGHIJ\")\n\na = os.open(path, os.O_RDONLY)\nb = os.open(path, os.O_RDONLY)      # second open(): NEW open file description\nc = os.dup(a)                       # dup(): new fd, SAME open file description as a\nprint(\"fds:\", a, b, c)\n\nprint(\"read a :\", os.read(a, 3))    # b'ABC'  -> offset of a's description is now 3\nprint(\"read b :\", os.read(b, 3))    # b'ABC'  -> b has its own offset\nprint(\"read c :\", os.read(c, 3))    # b'DEF'  -> c shares a's offset!\n\npid = os.fork()                     # child inherits copies of the fd table entries,\nif pid == 0:                        # pointing at the SAME open file descriptions\n    os.read(a, 2)                   # child consumes \"GH\" through the shared description\n    os._exit(0)\nos.waitpid(pid, 0)\nprint(\"parent a after child read:\", os.read(a, 2))   # b'IJ'\n\nprint(\"same inode?\", os.fstat(a).st_ino == os.fstat(b).st_ino)  # True\nfor fd in (a, b, c):\n    os.close(fd)",
+      "explanation": "Run on both macOS and Linux with identical output: `fds: 3 4 5`, then `read a : b'ABC'`, `read b : b'ABC'`, `read c : b'DEF'`, `parent a after child read: b'IJ'`, and `same inode? True`. `b` came from a second `open()`, so it has its own offset and reads `ABC` again. `c` is a `dup()` of `a`, so they share one description and `c` continues at `DEF`. After `fork()`, the child's read of `GH` through its copy of fd `a` moved the **parent's** offset too, because both fd tables point at the same open file description. This is exactly why a forked worker that `lseek`s a shared fd can confuse its parent, and why you usually open files *after* forking."
+    },
+    {
+      "type": "explanation",
+      "title": "Allocating Blocks: Contiguous, Linked, Indexed, Extents",
+      "content": "How does a file system record which blocks belong to a file? Four classic designs:\n\n| Method | How it works | Pros | Cons | Used by |\n|---|---|---|---|---|\n| **Contiguous** | (start, length) per file | Fastest sequential and random reads; tiny metadata | External fragmentation; files can't grow easily | ISO 9660 (CD-ROMs), some real-time systems |\n| **Linked** | Each block (or a table entry) points to the next | No external fragmentation; easy growth | Random access is O(n); one bad pointer loses the rest of the chain | **FAT**: the chain lives in the File Allocation Table |\n| **Indexed** | Inode holds block pointers, with indirect blocks for large files | Fast random access | Metadata grows with file size; one pointer per block | ext2/ext3, classic Unix |\n| **Extents** | List of (logical start, physical start, length) runs | Compact for large contiguous files; fast | Fragmented files need many extents (stored in a tree) | **ext4, XFS, Btrfs, NTFS, APFS** |\n\n**Indexed allocation in numbers.** ext2/ext3 inodes have 12 direct pointers, 1 single-indirect, 1 double-indirect, and 1 triple-indirect. With 4 KiB blocks and 4-byte pointers, an indirect block holds 1024 pointers, so a file can address (12 + 1024 + 1024² + 1024³) × 4 KiB ≈ **4 TiB**. Small files need no indirect blocks at all, which is fast for the common case, but a 1 GiB file needs 262,144 individual pointers.\n\n**Extents fix that.** An ext4 extent describes up to 32,768 contiguous blocks (**128 MiB** with 4 KiB blocks), so a contiguous 1 GiB file needs just **8 extents**. Four fit directly in the inode; beyond that, ext4 builds a small **extent tree**. XFS extents can be much longer.\n\n**FAT** deserves a note because it's still everywhere (USB sticks, SD cards, EFI system partitions): the table is an array with one entry per cluster, each holding the next cluster number (or end-of-chain). FAT32 limits files to **4 GiB**, which is why cameras and large USB drives use **exFAT**.\n\n**Delayed allocation** (ext4, XFS, Btrfs) waits to choose physical blocks until data is written back from the page cache, when the final size is better known. That produces larger, more contiguous extents. (It also made the \"zero-length file after crash\" problem worse, as you'll see in the durability section.)\n\n**Free-space management** is the mirror problem: finding free blocks quickly.\n- **Bitmaps**: 1 bit per block. One 4 KiB bitmap block covers 32,768 blocks (128 MiB). ext4 divides the disk into **block groups**, each with its own block bitmap, inode bitmap, and inode table, to keep a file's inode near its data.\n- **Free lists**: a linked list of free blocks (early Unix). Simple, but scattered.\n- **B-trees of free extents**: XFS keeps two B+ trees per allocation group, one indexed by start block and one by length, so \"find a free run of 500 blocks near X\" is fast.\n- **Space maps**: ZFS records allocations and frees as an append-only log per region and condenses it periodically.\n\nFile systems slow down and fragment as they fill. Keep general-purpose volumes below about 80–90% full. ext4 reserves 5% for root by default so the system can still log and recover when users fill the disk."
+    },
+    {
+      "type": "explanation",
+      "title": "The Page Cache and Write-Back",
+      "content": "Linux (like every modern OS) keeps file data in RAM in the **page cache**, a unified cache shared by `read()`/`write()`, `mmap`, and executables. \"Free\" memory that `free -h` reports under `buff/cache` is mostly page cache, and it's reclaimed instantly when programs need memory.\n\n**Reads**: if the pages are cached (a **hit**), `read()` is a memory copy. That costs microseconds instead of the ~10–100 µs of an NVMe read or ~5–10 ms of a disk seek. On a **miss**, the kernel issues I/O and the thread sleeps. **Readahead** detects sequential access and fetches the following blocks before they're asked for.\n\n**Writes**: `write()` copies your bytes into the page cache, marks those pages **dirty**, and **returns immediately**. The data is *not* on disk yet. Kernel flusher threads write dirty pages back later, triggered by these Linux defaults:\n\n| Sysctl | Default | Meaning |\n|---|---|---|\n| `vm.dirty_expire_centisecs` | 3000 (30 s) | Dirty data older than this gets written back |\n| `vm.dirty_writeback_centisecs` | 500 (5 s) | How often flusher threads wake up |\n| `vm.dirty_background_ratio` | 10% | Start background write-back above this much dirty memory |\n| `vm.dirty_ratio` | 20% | Writers are throttled (blocked inside `write()`) above this |\n\nOn ext4 the journal also commits metadata every 5 seconds (`commit=5`). So after a power cut, **up to ~30 seconds of \"successful\" writes can simply be gone** unless the application asked for durability.\n\nWrite-back is why `cp` of a large file \"finishes\" instantly and then `umount` or ejecting a USB stick takes a minute. It's also why a burst of writes can suddenly stall a process: it hit `dirty_ratio` and is now paying for everyone's write-back. Databases often bypass the cache with **`O_DIRECT`** (DMA straight between their own buffers and the device) because they manage their own buffer pools and want predictable I/O."
+    },
+    {
+      "type": "code_example",
+      "language": "bash",
+      "label": "Example",
+      "code": "# Watch write-back happen (Linux)\n$ grep -E '^(Dirty|Writeback):' /proc/meminfo\nDirty:               144 kB\nWriteback:             0 kB\n\n$ dd if=/dev/zero of=big.bin bs=1M count=200      # \"fast\": only copies into the page cache\n209715200 bytes (200.0MB) copied, 1.008670 seconds, 198.3MB/s\n$ grep -E '^Dirty:' /proc/meminfo\nDirty:            205092 kB                       # ~200 MB of dirty pages waiting in RAM\n\n$ sync                                            # force write-back of everything\n$ grep -E '^Dirty:' /proc/meminfo\nDirty:                 0 kB\n\n$ dd if=/dev/zero of=big2.bin bs=1M count=200 conv=fsync   # wait for the disk before exiting\n209715200 bytes (200.0MB) copied, 2.474985 seconds, 80.8MB/s   # the real device speed\n\n$ sysctl vm.dirty_background_ratio vm.dirty_ratio vm.dirty_expire_centisecs\nvm.dirty_background_ratio = 10\nvm.dirty_ratio = 20\nvm.dirty_expire_centisecs = 3000\n\n$ free -h                                         # buff/cache = mostly page cache, reclaimable\n$ echo 3 | sudo tee /proc/sys/vm/drop_caches      # benchmark cold reads (never in production)",
+      "explanation": "Measured in a Linux VM. The first `dd` reported ~198 MB/s, but that's RAM speed: afterwards about 200 MB sat in `Dirty` pages that hadn't reached the disk. `conv=fsync` makes `dd` call `fsync()` before exiting, and the \"same\" write takes 2.5× longer, because now the number reflects the device. Any benchmark that doesn't `fsync` (or use `O_DIRECT`) measures your page cache, not your storage."
+    },
+    {
+      "type": "explanation",
+      "title": "fsync, fdatasync, and the Atomic-Replace Pattern",
+      "content": "When an application needs data to survive a crash or power loss, it must ask explicitly:\n\n- **`fsync(fd)`**: write the file's dirty data *and* metadata (size, block map, timestamps) to stable storage, and tell the device to flush its volatile write cache. It returns only when that's done, which takes milliseconds on consumer SSDs and much less on drives with power-loss protection.\n- **`fdatasync(fd)`**: like `fsync` but skips metadata that isn't needed to read the data back, such as `mtime`. It still writes a size change. It's cheaper for append-heavy logs and is what many databases use for their write-ahead log.\n- **`O_SYNC` / `O_DSYNC`** open flags: every `write()` behaves as if followed by `fsync` / `fdatasync`.\n- **`sync()` / `syncfs()`**: flush everything (or one file system). Heavy-handed.\n\n**The directory is a file too.** Creating or renaming a file changes a *directory*. `fsync` on the file makes its contents durable, but the new name is only durable after you **`fsync` the parent directory** (open it read-only and `fsync` that fd).\n\n**Updating a file safely: write to a temp file, `fsync`, `rename`, `fsync` the directory.** Overwriting a file in place (`open(O_TRUNC)` then `write`) leaves a window where a crash yields an empty or half-written file. Instead:\n1. Write the new content to a temporary file **in the same directory** (`rename` only works atomically within one file system).\n2. `fsync` the temp file, so the data is durable *before* it becomes visible.\n3. `rename(tmp, target)`. POSIX guarantees that this **atomically replaces** the target: every reader sees either the old file or the new one, never a mixture.\n4. `fsync` the directory to persist the rename.\n\nThis pattern is how editors save files, how package managers and `git` update refs, and what libraries like `write-file-atomic` (npm) implement.\n\n**Lessons from history:**\n- **ext4, 2009**: with delayed allocation, applications that did write-temp-then-rename *without* `fsync` lost data. After a crash the rename was durable but the data wasn't yet allocated, leaving zero-length files (KDE config files were the famous casualty). ext4 added the `auto_da_alloc` heuristic to flush data on rename-over-existing, but the lesson stands: **`fsync` before `rename`**.\n- **\"fsyncgate\", 2018**: PostgreSQL discovered that on Linux, if write-back fails with an I/O error, the error is reported to one `fsync` call and the dirty pages may then be marked clean, so **retrying `fsync` can \"succeed\" while data is lost**. PostgreSQL now treats an `fsync` failure as fatal and recovers from its WAL. Never ignore or retry a failed `fsync`.\n- **macOS**: `fsync()` pushes data to the drive but doesn't force the drive to empty its own cache. For real durability, use `fcntl(fd, F_FULLFSYNC)`, which SQLite and PostgreSQL (`wal_sync_method = fsync_writethrough`) use on macOS."
+    },
+    {
+      "type": "code_example",
+      "language": "javascript",
+      "label": "Example",
+      "code": "// Crash-safe \"replace this file\" — readers see the old version or the new one, never half.\nconst fs = require('fs');\nconst path = require('path');\n\nfunction writeFileAtomic(target, data) {\n  const dir = path.dirname(target);\n  const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.tmp`);\n  const fd = fs.openSync(tmp, 'w', 0o644);  // same directory => same file system\n  try {\n    fs.writeFileSync(fd, data);\n    fs.fsyncSync(fd);                     // 1. new bytes are durable BEFORE they become visible\n  } finally {\n    fs.closeSync(fd);\n  }\n  try {\n    fs.renameSync(tmp, target);           // 2. atomic swap of the directory entry\n  } catch (err) {\n    fs.rmSync(tmp, { force: true });\n    throw err;\n  }\n  const dfd = fs.openSync(dir, 'r');      // 3. persist the rename itself (POSIX: fsync the dir)\n  try { fs.fsyncSync(dfd); } finally { fs.closeSync(dfd); }\n}\n\nconst file = path.join(require('os').tmpdir(), 'config.json');\nwriteFileAtomic(file, JSON.stringify({ version: 1 }));\nwriteFileAtomic(file, JSON.stringify({ version: 2 }));\nconsole.log(fs.readFileSync(file, 'utf8'));   // {\"version\":2}\nfs.unlinkSync(file);",
+      "explanation": "The crash-safe replace pattern in Node (Linux and macOS; Windows can't `fsync` a directory handle this way). Readers never see a half-written `config.json`: the old version stays visible until the atomic `renameSync`, and both the new data and the rename are `fsync`ed. Prints `{\"version\":2}`. Two details matter: the temp file lives in the **same directory** (cross-file-system renames fail with `EXDEV`), and the name includes the PID so concurrent writers don't trample each other's temp files. For real projects, `write-file-atomic` implements the same idea with retries and ownership handling. Remember the macOS caveat above: `fs.fsyncSync` is only as strong as the platform's `fsync`."
+    },
+    {
+      "type": "explanation",
+      "title": "Crash Consistency with Journaling",
+      "content": "A single logical operation, like appending a block to a file, touches several on-disk structures: the data block, the block bitmap, and the inode (size and extent). Disks write them one at a time, in an order the drive may change. A crash in between leaves the file system **inconsistent**: a block marked used that nothing points to (a leak), or an inode pointing to a block still marked free (soon to be handed to another file, which means corruption). Older file systems ran **`fsck`** after every unclean shutdown, scanning *all* metadata, which takes hours on multi-terabyte disks.\n\n**Journaling** (write-ahead logging, the same idea databases use) fixes this:\n1. **Journal write**: write the intended changes (new copies of the affected metadata blocks) to a reserved circular **journal** area.\n2. **Commit**: write a commit record (checksummed on ext4) once all journal blocks are on disk. *Now the transaction is durable.*\n3. **Checkpoint**: write the blocks to their real locations, whenever convenient.\n4. **Free**: mark that journal space reusable.\n\nAfter a crash, recovery **replays committed transactions** and **discards uncommitted ones**. That takes seconds, regardless of disk size.\n\n**ext4's three data modes** (mount option `data=`) choose what is journaled:\n- **`data=journal`**: data *and* metadata go through the journal. It is the strongest, but every data block is written **twice**, roughly halving write throughput.\n- **`data=ordered`** (**default**): only metadata is journaled, but ext4 forces a file's **data blocks to disk before committing the metadata** that points to them. After a crash you might lose recent writes, but files never contain stale garbage from other files.\n- **`data=writeback`**: metadata only, no ordering. It is fastest, but after a crash a file's metadata can point at blocks whose new data never arrived, exposing old contents.\n\nXFS (the default on RHEL), NTFS, and APFS's predecessor HFS+ journal metadata only. Note what journaling does **not** promise: that your last few seconds of writes survived. It promises the *file system structure* is consistent. Your *data's* durability is still up to `fsync`."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "sequenceDiagram\n    participant App\n    participant PC as Page cache\n    participant FS as ext4 + JBD2\n    participant J as Journal on disk\n    participant D as Final locations\n    App->>PC: write() - pages marked dirty\n    App->>FS: fsync() - or the 5 s commit timer fires\n    FS->>D: 1. data blocks written first - ordered mode\n    FS->>J: 2. metadata blocks - inode, bitmap - into journal\n    FS->>J: 3. commit record with checksum\n    J-->>App: fsync returns - transaction durable\n    FS->>D: 4. checkpoint metadata to final locations later\n    Note over J,D: Crash before step 3 - replay skips it. After step 3 - replay redoes it.",
+      "caption": "ext4 in the default `data=ordered` mode. Data reaches its final location before the metadata transaction commits, so after a crash, recovery either replays a complete transaction or ignores an incomplete one. Metadata is never left half-updated, and files never point at stale data."
+    },
+    {
+      "type": "explanation",
+      "title": "Copy-on-Write and Log-Structured File Systems",
+      "content": "Journaling writes changes twice (journal, then home). **Copy-on-write (COW)** file systems avoid in-place updates entirely: **never overwrite live data**. To modify a block, write a *new* copy elsewhere. Then the parent block that points to it must change too, so write a new copy of the parent, and so on **up to the root** of the tree. Finally, **atomically switch the root pointer** (ZFS's *uberblock*, Btrfs's superblock). Until that single update, the old tree is fully intact. After it, the new tree is. There is no inconsistent intermediate state, so no `fsck` and no journal are needed for structural consistency.\n\nThat design gives you features almost for free:\n- **Snapshots**: keep the old root pointer. A snapshot costs nothing up front and grows only as data diverges. This is how Time Machine (APFS), `zfs snapshot`, Btrfs/snapper rollbacks, and many backup systems work.\n- **Clones and reflinks**: two files share blocks until one is modified. `cp --reflink` on Btrfs/XFS and `cp -c` on APFS copy a 10 GB file instantly.\n- **Checksums**: since every pointer is rewritten anyway, it can carry a checksum of the child. ZFS and Btrfs checksum **data and metadata**, detect silent corruption (\"bit rot\"), and with redundancy (mirrors, RAID-Z) **repair it automatically**. APFS checksums metadata only.\n- **Send/receive**: compute the differences between two snapshots and replicate them efficiently (`zfs send`, `btrfs send`).\n\nThe main implementations: **ZFS** (Sun, 2005; now OpenZFS on Linux and FreeBSD) with pooled storage, RAID-Z, the ARC cache, and an intent log (ZIL) for fast synchronous writes. **Btrfs** is the default on Fedora Workstation (since 33) and openSUSE (its RAID5/6 modes are still not recommended). **APFS** has been Apple's file system since 2017. Windows has **ReFS**.\n\nThe costs: random overwrites of large files (database tables, VM images) **fragment** badly, because every update moves the block. Small writes amplify into rewriting a path of metadata blocks, and the file system needs free space to make progress. Common practice is to disable COW for database and VM directories on Btrfs (`chattr +C`), or tune ZFS `recordsize` to match the database page size.\n\n**Log-structured file systems** take the idea to its extreme. The **Sprite LFS** (Rosenblum and Ousterhout, 1991) treats the *entire disk as an append-only log*: buffer all changes (data and inodes) in memory, write them out as large sequential **segments**, and track inode locations with an *inode map*. Writes become purely sequential, which is ideal for disks and flash. The price is a **cleaner** (garbage collector) that compacts partially dead segments. **F2FS** (Samsung, Linux 3.8, 2012) is a log-structured design for flash used on many Android phones. The same principle reappears in LSM-tree databases (RocksDB, Cassandra) and, as the next sections show, inside every SSD."
+    },
+    {
+      "type": "diagram",
+      "mermaid": "flowchart TD\n    R1[\"Old root - still valid\"] --> A1[\"Inner node A\"]\n    R1 --> B1[\"Inner node B\"]\n    B1 --> L1[\"Leaf: block 7 old data\"]\n    B1 --> L2[\"Leaf: block 8\"]\n    R2[\"New root - written last, one atomic switch\"] --> A1\n    R2 --> B2[\"New copy of node B\"]\n    B2 --> L3[\"New leaf: block 7 new data\"]\n    B2 --> L2\n    S[\"Snapshot = keep the old root\"] -.-> R1",
+      "caption": "A copy-on-write update to block 7. The new leaf and a new copy of each ancestor are written elsewhere, unchanged subtrees (A, block 8) are shared, and the root pointer switches atomically. Keeping the old root is a snapshot."
+    },
+    {
+      "type": "explanation",
+      "title": "The VFS Layer, Mounting, and Permissions",
+      "content": "**The Virtual File System (VFS)** is the kernel layer that makes ext4, XFS, Btrfs, NFS, FUSE, tmpfs, procfs, and sysfs all respond to the same `open`/`read`/`write`/`stat` calls. It defines common objects: the **superblock** (a mounted file system), the **inode** (a file), the **dentry** (a cached path component), and the **file** (an open file description). Each file system supplies function tables (`file_operations`, `inode_operations`) that VFS calls into. This is what makes \"everything is a file\" real: `/proc/self/status` is generated by kernel code on each read, `/sys/class/net/eth0/mtu` is a kernel variable, and `/dev/nvme0n1` is a block device. They all use `read()`.\n\n**Mounting** attaches a file system's root directory onto a directory (the **mount point**) in the existing tree, hiding whatever was there. `mount /dev/nvme0n1p2 /data`, `/etc/fstab` or systemd mount units for boot-time mounts, and `findmnt` to see the tree. Useful options: `ro`, `noatime` (skip access-time updates; Linux defaults to `relatime`, which updates atime at most once a day or when it's older than mtime), `nosuid`, `nodev`, `noexec` (hardening for `/tmp` and removable media). Containers lean on three more mount features:\n- **Mount namespaces**: each container has its own mount table, so `/` means something different inside.\n- **Bind mounts**: make a directory appear at a second location (`docker run -v /host/dir:/app`).\n- **OverlayFS**: stack read-only image layers under a writable upper layer. A modified file is *copied up* first. Run `cat /proc/mounts` in a Docker container and the root is `overlay`.\n\n**Permissions.** Each inode has an owner, a group, and three `rwx` triplets for user, group, and other (e.g., `0644` = `rw-r--r--`). The kernel checks **only the first matching class**: if you're the owner, only the owner bits count, even if \"other\" is more permissive. **On directories the bits mean something different:**\n- `r` = list the names in it\n- `w` = create, delete, or rename entries in it. **Deleting a file needs write permission on the directory, not on the file.**\n- `x` = traverse it (look up names). Without `x` you can't reach anything inside, even with the full path.\n\nSpecial bits: **setuid** (4000) runs an executable as its owner (e.g., `passwd`), **setgid** (2000) on a directory makes new files inherit its group, and the **sticky bit** (1000) on a directory like `/tmp` (`1777`) means only a file's owner can delete it. **`umask`** (often `022`) removes bits from newly created files, so they default to `644` and directories to `755`. Root bypasses permission checks (via `CAP_DAC_OVERRIDE`) but not, for example, the immutable attribute (`chattr +i`).\n\nWhen owner/group/other isn't expressive enough, **POSIX ACLs** add per-user and per-group entries: `setfacl -m u:alice:rw report.csv`, view with `getfacl`. `ls -l` shows a `+` after the mode. NFSv4, Windows (NTFS), and macOS use richer ACLs with explicit allow and deny entries and inheritance. On top of all this, Linux security modules (SELinux, AppArmor) can deny access even when the mode bits allow it, which is a frequent \"permission denied but the permissions look fine\" mystery."
+    },
+    {
+      "type": "explanation",
+      "title": "SSDs: Flash Translation, TRIM, and Write Amplification",
+      "content": "Flash memory changes the rules that file systems were designed around:\n- NAND flash is written in **pages** (typically 4–16 KiB) but erased only in much larger **erase blocks** (often several MiB, hundreds of pages). **A page can't be overwritten in place.** It must be erased first, along with its whole block.\n- Each block survives a limited number of erase cycles (from thousands for TLC down to hundreds for QLC).\n\nSo every SSD contains a **Flash Translation Layer (FTL)**, effectively a log-structured file system in firmware. It maps logical block addresses (what the OS sees) to physical pages, **writes every update to a fresh page**, marks the old page stale, and runs **garbage collection** in the background: pick a block with many stale pages, copy its remaining valid pages elsewhere, erase it. It also spreads wear evenly across blocks (**wear leveling**).\n\n**Write amplification** = bytes written to NAND ÷ bytes the host wrote. Garbage collection that copies valid pages adds extra writes, so WA rises with **small random writes**, a **nearly full drive** (fewer free blocks, so more copying), and **no TRIM**. High WA means slower writes and faster wear. Drives are rated in **TBW** (terabytes written) or **DWPD** (drive writes per day).\n\n**TRIM** (ATA; *UNMAP* in SCSI, *Deallocate* in NVMe) is how the file system tells the drive \"these logical blocks are free now.\" Without it, the SSD can't tell a deleted file's blocks from live data and keeps copying them during GC. On Linux you can:\n- run **`fstrim`** periodically. Most distros enable a weekly `fstrim.timer`, and this is the usual recommendation.\n- mount with **`discard`** for continuous TRIM. That has historically hurt latency on some drives. Btrfs defaults to an asynchronous, batched `discard=async` on SSDs.\n\nOther practical consequences:\n- **Don't defragment SSDs.** Random reads are nearly as fast as sequential ones, and defragmentation only adds wear. The FTL's physical layout doesn't match logical addresses anyway.\n- **Align partitions** (to 1 MiB, which modern tools do by default) so file-system blocks don't straddle flash pages.\n- **Leave free space** (over-provisioning) for heavy write workloads, to keep GC efficient.\n- **Consumer SSDs have volatile write caches.** Without power-loss protection, data acknowledged by the drive but still in its DRAM cache can vanish on power loss. That's exactly why `fsync` issues a cache-flush command, and why enterprise drives with capacitors make `fsync` much faster.\n- Newer **zoned** devices (ZNS NVMe, host-managed SMR disks) expose the append-only nature directly and let a log-structured or zoned-aware file system (F2FS, Btrfs) do the work instead of the FTL."
+    },
+    {
+      "type": "explanation",
+      "title": "Common Mistakes",
+      "content": "- **Treating `write()` success as durability.** It means \"copied into the page cache.\" Call `fsync`/`fdatasync`, or open with `O_DSYNC`, for anything that must survive a crash.\n- **Overwriting important files in place.** Use write-temp, `fsync`, `rename`, `fsync` the directory. Don't skip the `fsync` before the `rename`.\n- **Creating the temp file in `/tmp`** and renaming it into `/data`. Different file systems give `EXDEV`, or the library silently falls back to a non-atomic copy.\n- **Retrying a failed `fsync`.** The error may have been consumed, and the second call can \"succeed\" with data lost. Treat it as fatal for that data.\n- **\"Disk full\" debugging with `du` alone.** Deleted-but-open files (`lsof +L1`), inode exhaustion (`df -i`), ext4's 5% root reservation, and snapshots holding old blocks (ZFS/Btrfs) all hide space from `du`.\n- **Leaking file descriptors** until `EMFILE`. Always close in `finally`, use `with` or `using`, and raise `ulimit -n` for servers deliberately.\n- **Assuming `chmod` on a file controls deletion.** Deletion is governed by write permission on the *directory* (and the sticky bit).\n- **Relative symlinks that break when moved**, and hard links that can't cross file systems or point at directories.\n- **Benchmarking storage without `fsync` or `O_DIRECT`**, which measures RAM. Also benchmarking a COW file system with a database workload without tuning (`recordsize`, `nodatacow`).\n- **Running a database on NFS or a network file system without checking its locking and fsync semantics.** Many don't give the guarantees databases assume."
+    },
+    {
+      "type": "callout",
+      "variant": "tip",
+      "content": "**Field guide**: `stat file` (inode, links, times), `ls -li` (inode numbers), `df -h` and `df -i` (space and inodes), `du -sh * | sort -h` (what's big), `lsof +L1` (deleted-but-open), `ls -l /proc/<pid>/fd` (a process's fds), `findmnt` and `cat /proc/mounts` (what's mounted where, with which options), `getfacl` (ACLs), `sudo fstrim -av` (TRIM now), `iostat -x 1` (device utilisation and latency), `grep -E 'Dirty|Writeback' /proc/meminfo` (pending write-back), `filefrag -v file` (extents of a file on ext4/XFS), and `strace -e trace=%file,fsync,fdatasync,rename` (does your app really `fsync`?)."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "A file is an **inode** (type, permissions, owner, size, timestamps, link count, block/extent map) plus one or more **directory entries** (name → inode number). Names live only in directories, so rename is cheap and atomic. `df -i` shows inode exhaustion, and `ctime` is change time, not creation time.",
+        "**Hard link** = another name for the same inode: same file system only, no directories, data freed when the link count hits 0 *and* no fd is open. **Symlink** = a separate inode containing a path: it can cross file systems and point to directories, and it can dangle.",
+        "**fd → open file description → inode**: separate `open()` calls have independent offsets, while `dup()` and `fork()` share one description and offset. `O_APPEND` makes each write atomically seek to the end. `EMFILE` means you hit `ulimit -n`. Use `O_CLOEXEC`.",
+        "**Block allocation**: contiguous (fast but fragments), linked/FAT (O(n) random access, 4 GiB limit in FAT32), indexed (ext2/3 direct and indirect pointers), **extents** (ext4, XFS, Btrfs, NTFS, APFS: up to 128 MiB per ext4 extent). Free space is tracked with bitmaps (ext4 block groups), B-trees (XFS), or space maps (ZFS).",
+        "`write()` lands in the **page cache** as dirty pages. Linux writes them back after about 30 s (`dirty_expire_centisecs`) or under memory pressure, so unsynced data can be lost on power failure. Benchmarks without `fsync` measure RAM.",
+        "**Durability**: `fsync` (data + metadata + device cache flush), `fdatasync` (skips non-essential metadata), and `fsync` the **directory** after create or rename. Safe replace: **write temp in the same dir → `fsync` → `rename` → `fsync` dir**. Never retry a failed `fsync`. On macOS, use `F_FULLFSYNC` for real durability.",
+        "**Journaling** writes changes to a log, commits, then checkpoints, so recovery replays committed transactions in seconds. ext4 modes: `data=journal` (data written twice), **`data=ordered` (default: data before metadata commit)**, `data=writeback` (fastest, can expose stale data).",
+        "**Copy-on-write** (ZFS, Btrfs, APFS) never overwrites live blocks: it writes new copies up to the root, then switches the root atomically. That gives free snapshots, clones, and (ZFS/Btrfs) data checksums with self-healing, at the cost of fragmentation for random-overwrite workloads. **Log-structured** designs (LFS, F2FS, SSD FTLs) append everything and garbage-collect.",
+        "**VFS** gives every file system (ext4, NFS, FUSE, procfs, overlayfs) the same syscall interface. **Mounting** grafts file systems into one tree, and containers use mount namespaces, bind mounts, and overlayfs. **Permissions**: first matching class only, directory `w` controls deletion, `x` controls traversal, sticky bit on `/tmp`, POSIX ACLs for finer control.",
+        "**SSDs** can't overwrite in place: the FTL remaps writes and garbage-collects erase blocks, causing **write amplification** (worse with small random writes, full drives, and no TRIM). Run periodic **`fstrim`**, don't defragment, leave free space, and remember consumer drives need `fsync`'s cache flush for durability."
+      ]
+    }
+  ],
+  "visualizer": {
+    "type": "none",
+    "caption": ""
+  },
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Which piece of information is NOT stored in a Unix/ext4 inode?",
+      "type": "mcq",
+      "options": [
+        "The file's size and link count",
+        "The file's name",
+        "The owner UID/GID and permission bits",
+        "The locations of the file's data blocks or extents"
+      ],
+      "correct": 1,
+      "explanation": "Names live only in directory entries, which map name → inode number. That's what makes hard links (several names for one inode) and cheap atomic renames possible."
+    },
+    {
+      "id": "q2",
+      "question": "You run `ln data.csv backup.csv` (a hard link), then `rm data.csv`. What happens?",
+      "type": "mcq",
+      "options": [
+        "backup.csv becomes a dangling link",
+        "The data is freed immediately because the original was deleted",
+        "backup.csv still has the full contents. The inode's link count drops from 2 to 1, and data is freed only at 0 links with no open fds",
+        "rm fails because the file has another link"
+      ],
+      "correct": 2,
+      "explanation": "Hard links are equal names for the same inode, with no 'original'. Removing one name just decrements the link count. Dangling only happens with symbolic links, whose content is a path."
+    },
+    {
+      "id": "q3",
+      "question": "A process opens a file twice with two separate `open()` calls (fd 3 and fd 4), reads 10 bytes from fd 3, then reads from fd 4. Where does the fd 4 read start?",
+      "type": "mcq",
+      "options": [
+        "At byte 0, because each open() creates its own open file description with an independent offset",
+        "At byte 10, because both fds share the inode's offset",
+        "At the end of the file",
+        "It fails with EBUSY because the file is already open"
+      ],
+      "correct": 0,
+      "explanation": "The offset lives in the open file description (Linux's `struct file`), not in the inode. Separate opens give separate descriptions. Only `dup()` and `fork()` make fds share a description, and therefore an offset."
+    },
+    {
+      "id": "q4",
+      "question": "Why does a contiguous 1 GiB file on ext4 need far less mapping metadata than on ext2/ext3?",
+      "type": "mcq",
+      "options": [
+        "ext4 compresses files automatically",
+        "ext4 uses 64 KiB blocks by default",
+        "ext4 stores small files inside the directory entry",
+        "ext4 uses extents: each extent maps a run of up to 32,768 blocks (128 MiB at 4 KiB), so about 8 extents replace about 262,144 individual block pointers"
+      ],
+      "correct": 3,
+      "explanation": "Indexed allocation (ext2/3) needs one pointer per block, plus indirect blocks. Extents describe (logical start, physical start, length) runs, which is compact for large contiguous files."
+    },
+    {
+      "id": "q5",
+      "question": "A program calls `write()` on a regular file, and it returns success. The machine loses power 5 seconds later. What is guaranteed about that data on Linux by default?",
+      "type": "mcq",
+      "options": [
+        "Nothing: it may still have been only dirty pages in the page cache, since write-back happens later (e.g., after about 30 s) unless fsync/O_DSYNC was used",
+        "It is on disk, because write() blocks until the device acknowledges",
+        "It is in the journal, so recovery will replay it",
+        "It is on disk if the file system is ext4"
+      ],
+      "correct": 0,
+      "explanation": "`write()` copies into the page cache and returns. Journaling protects file-system *structure*, not unsynced data. Durability requires `fsync`, `fdatasync`, or a synchronous open flag."
+    },
+    {
+      "id": "q6",
+      "question": "What is the correct crash-safe sequence for replacing `config.json` with new contents?",
+      "type": "mcq",
+      "options": [
+        "Open config.json with O_TRUNC, write the new content, close",
+        "Write config.json.tmp in /tmp, rename it over config.json",
+        "Write config.json.tmp in the same directory, fsync it, rename it over config.json, then fsync the directory",
+        "Write the new content, then call sync() once a day"
+      ],
+      "correct": 2,
+      "explanation": "rename() atomically replaces the target, but only within one file system (hence the same directory). fsync before rename ensures the data is durable before it becomes visible, and fsync on the directory persists the rename itself. O_TRUNC leaves a window where the file is empty."
+    },
+    {
+      "id": "q7",
+      "question": "In ext4's default `data=ordered` mode, what is journaled and what ordering is enforced?",
+      "type": "mcq",
+      "options": [
+        "Both data and metadata are journaled, so data is written twice",
+        "Nothing is journaled. ordered refers to the elevator I/O scheduler",
+        "Only data is journaled. Metadata is written in place",
+        "Only metadata is journaled, but a file's data blocks are forced to disk before the metadata transaction that references them commits"
+      ],
+      "correct": 3,
+      "explanation": "That ordering prevents files from pointing at blocks containing stale data after a crash, without the cost of writing data twice (`data=journal`). `data=writeback` drops the ordering for speed."
+    },
+    {
+      "id": "q8",
+      "question": "Why can ZFS and Btrfs take an instant snapshot of a multi-terabyte file system?",
+      "type": "mcq",
+      "options": [
+        "They copy all blocks to a hidden area very quickly using DMA",
+        "As copy-on-write file systems, they never overwrite live blocks. A snapshot just keeps a reference to the current root, and blocks are shared until modified",
+        "They pause all writes until a background copy finishes",
+        "Snapshots only record file names, not contents"
+      ],
+      "correct": 1,
+      "explanation": "COW writes modified blocks (and their ancestors) to new locations and atomically switches the root. Keeping the old root preserves the entire old tree at no up-front cost. Space grows only as the live data diverges."
+    },
+    {
+      "id": "q9",
+      "question": "`df` shows a volume 100% full, but `du -sh /` adds up to far less. What is a common cause?",
+      "type": "mcq",
+      "options": [
+        "The page cache is counted as disk usage",
+        "Symlinks count their target's size twice",
+        "A process still holds open a large deleted file (e.g., a rotated log). Its space isn't freed until the fd is closed. `lsof +L1` finds it",
+        "TRIM has not been run, so deleted files still count"
+      ],
+      "correct": 2,
+      "explanation": "`du` walks directory entries, and a deleted file has none. `df` reports allocated blocks, which stay allocated while any fd references the inode. Snapshots and ext4's 5% root reservation are other causes."
+    },
+    {
+      "id": "q10",
+      "question": "What does TRIM (NVMe Deallocate) do for an SSD?",
+      "type": "mcq",
+      "options": [
+        "It tells the drive which logical blocks the file system no longer uses, so garbage collection doesn't copy dead data, reducing write amplification",
+        "It defragments the drive so files become physically contiguous",
+        "It securely erases deleted files immediately",
+        "It turns off the drive's volatile write cache"
+      ],
+      "correct": 0,
+      "explanation": "Without TRIM, the FTL can't tell deleted data from live data and keeps relocating it during GC. Periodic `fstrim` (often a weekly timer) is the usual Linux setup. Defragmenting an SSD adds wear for no benefit."
+    }
+  ]
+}
