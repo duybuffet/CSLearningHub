@@ -1,0 +1,239 @@
+{
+  "sourceHash": "d46b1dbcf1aa",
+  "title": "Normalization & Data Modeling",
+  "tagline": "Thiết kế schema sao cho mỗi sự kiện chỉ nằm ở một chỗ, từ ER diagram và functional dependency qua BCNF đến migration và mô hình hóa document.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Một schema sống lâu hơn đoạn code đầu tiên dùng nó. Service bị viết lại, framework thay đổi, team thay người, nhưng các bảng và dữ liệu trong đó vẫn ở lại, thường là cả thập kỷ hoặc hơn. Một data model tốt khiến việc viết code đúng trở nên dễ dàng: mỗi sự kiện (fact) chỉ nằm ở một chỗ, database từ chối các trạng thái bất khả, và tính năng mới lắp vào mà không cần viết lại. Một data model tồi buộc mọi engineer, mãi mãi, phải nhớ cập nhật cùng một sự kiện ở ba nơi, và rồi sẽ có lúc ai đó quên.\n\n**Data modeling** là kỹ năng biến một mô tả lộn xộn về nghiệp vụ (\"sinh viên đăng ký các khóa học, mỗi khóa do một giảng viên dạy...\") thành các entity, relationship và constraint. **Normalization** là bộ công cụ hình thức để kiểm tra mô hình đó: bạn viết ra các **functional dependency** (sự kiện nào quyết định sự kiện nào) và tách bảng cho đến khi mọi dependency đều được một key thực thi. Các normal form (1NF, 2NF, 3NF, BCNF) không phải thủ tục quan liêu. Mỗi dạng loại bỏ một lớp **anomaly** cụ thể, nơi một lệnh INSERT, UPDATE hay DELETE bình thường làm hỏng hoặc mất thông tin.\n\nChương này đi theo **một ví dụ xuyên suốt**, một bảng tính đăng ký học của trường đại học, từ một bảng chưa chuẩn hóa cho tới BCNF, rồi đi vào khía cạnh thực tế của việc mô hình hóa:\n- ER modeling, cardinality và junction table cho quan hệ many-to-many,\n- các loại key: candidate, primary, foreign, và surrogate so với natural,\n- khi nào và làm thế nào để **denormalize** có chủ đích (luồng đọc nhiều, analytics, cache, star schema),\n- soft delete, cột JSONB so với bảng, và **expand/contract migration** không downtime,\n- document database thay đổi trade-off thế nào với **embed hay reference**.\n\nChương ACID & Indexes có một trang tóm tắt về các normal form. Chương này là bản đầy đủ, với từng bước được làm chi tiết trên cùng một bộ dữ liệu."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng lặp mô hình hóa. Normalize trước để mô hình đúng, rồi denormalize từng luồng cụ thể khi có bằng chứng. Đừng bao giờ nhảy thẳng tới một thiết kế đã denormalize."
+    },
+    {
+      "type": "analogy",
+      "title": "Một sự kiện, một chỗ",
+      "content": "Hãy hình dung một công ty mà team nào cũng giữ một bảng tính địa chỉ khách hàng riêng. Sales có một bảng, billing có một bảng, shipping có một bảng. Một khách hàng chuyển nhà và báo cho sales. Sales cập nhật bảng của mình. Billing vẫn gửi hóa đơn tới địa chỉ cũ, và shipping cũng gửi bưu kiện tới đó. Không có lần sửa nào sai cả. Chính *thiết kế* đã bảo đảm sự bất nhất, vì một sự kiện (khách hàng sống ở đâu) bị lưu ở ba nơi.\n\nCách sửa không phải là \"nhắc mọi người cập nhật cả ba bảng\". Cách sửa là một cuốn sổ địa chỉ duy nhất mà mọi người *tham chiếu* tới bằng customer ID. Khi đó đổi địa chỉ chỉ là một lần sửa, và mọi team đều thấy ngay lập tức.\n\nNormalization là nguyên tắc đó được áp dụng một cách chặt chẽ: **mỗi sự kiện được lưu đúng một lần, cạnh thứ mà nó mô tả, và mọi thứ khác trỏ tới nó.** Các normal form cho bạn một checklist để tìm những sự kiện bị lưu sai chỗ: tên khóa học lặp lại trên mọi dòng đăng ký, hay tên khoa bị chép vào mọi khóa học.\n\nDenormalization là việc bạn tỉnh táo lựa chọn giữ một *bản sao* địa chỉ trong bảng của shipping, vì shipping in 10,000 nhãn mỗi giờ và không thể chờ tra cứu. Đó có thể là quyết định đúng, nhưng giờ phải có người chịu trách nhiệm giữ bản sao đồng bộ."
+    },
+    {
+      "type": "explanation",
+      "title": "ER modeling: entity, relationship và cardinality",
+      "content": "**Entity-Relationship (ER) modeling** (Peter Chen, 1976) mô tả một miền nghiệp vụ trước khi có bất kỳ bảng nào:\n- Một **entity** là một thứ có định danh độc lập mà bạn lưu sự kiện về nó: Student, Course, Department, Instructor.\n- Một **attribute** là một sự kiện về entity: `student_name`, `course_title`.\n- Một **relationship** là mối liên kết giữa các entity: một sinh viên *đăng ký* một khóa học, và một khoa *mở* các khóa học. Relationship có thể mang attribute của riêng nó. `grade` không thuộc về sinh viên cũng không thuộc về khóa học, mà chỉ thuộc về lần đăng ký.\n\n**Cardinality** cho biết bao nhiêu instance có thể tham gia ở mỗi phía. **Optionality** (mức tham gia) cho biết việc tham gia có bắt buộc hay không:\n- **One-to-one (1:1)**: user ↔ user_settings. Cài đặt bằng một foreign key đồng thời là UNIQUE (thường PK của bảng con chính là PK của bảng cha). Hãy tự hỏi vì sao nó không phải là một bảng. Các lý do hợp lệ là dữ liệu tùy chọn hoặc thưa, quy tắc truy cập hay bảo mật khác nhau, hoặc một dòng quá rộng.\n- **One-to-many (1:N)**: department → courses. Đặt foreign key ở phía **many** (`course.dept_code`). `NOT NULL` trên FK nghĩa là \"mọi khóa học phải thuộc về một khoa\" (tham gia bắt buộc).\n- **Many-to-many (M:N)**: students ↔ courses. Một bảng quan hệ không thể chứa một list trong một ô, nên bạn thêm một **junction table** (còn gọi là bảng associative, bridge hay join): `enrollment(student_id, course_code, ...)` với một foreign key tới mỗi phía và một composite primary key (hoặc một surrogate key cộng với UNIQUE constraint trên cặp đó). Junction table thường là một entity thực sự với attribute riêng (grade, enrolled_at, status). Hãy đặt tên nó theo khái niệm nghiệp vụ (`enrollment`, `membership`, `order_line`), đừng đặt `student_course`.\n\nTrong **crow's-foot notation**, ký pháp mà hầu hết công cụ ER dùng, một đường kết thúc bằng hình “chân quạ” ba nhánh nghĩa là *many*, một vạch nghĩa là *one*, và một vòng tròn nghĩa là *tùy chọn (zero)*. `erDiagram` của Mermaid vẽ được ký pháp này, nhưng ứng dụng này vẽ schema bằng class diagram, dùng multiplicity `\"1\" -- \"0..*\"`, mang cùng thông tin.\n\nNhững câu hỏi mô hình hóa nên hỏi chuyên gia nghiệp vụ, vì câu trả lời sẽ trở thành constraint:\n- Một khóa học có thể tồn tại mà không có giảng viên không? (tùy chọn hay bắt buộc)\n- Một giảng viên có thể dạy nhiều hơn một khóa không? (1:N hay M:N)\n- Một sinh viên có thể học cùng một khóa hai lần không, ví dụ sau khi trượt? (điều này thay đổi key của junction table)\n- Khi một giảng viên nghỉ việc, các lần đăng ký cũ sẽ ra sao? (hành vi ON DELETE, lịch sử)"
+    },
+    {
+      "type": "diagram",
+      "caption": "Mô hình đăng ký học cuối cùng. Enrollment là junction table giải quyết quan hệ many-to-many giữa sinh viên và khóa học, đồng thời mang điểm số. Mỗi giảng viên dạy đúng một khóa, và một khóa có thể có nhiều giảng viên (nhiều lớp)."
+    },
+    {
+      "type": "explanation",
+      "title": "Key: candidate, primary, foreign, surrogate và natural",
+      "content": "Một **superkey** là bất kỳ tập cột nào có giá trị định danh duy nhất một dòng. Một **candidate key** là một superkey *tối thiểu*: bỏ đi bất kỳ cột nào là nó không còn duy nhất nữa. Một bảng có thể có nhiều candidate key. Trong `student`, cả `student_id` và `email` đều là candidate key.\n- **Primary key** là candidate key bạn chọn làm định danh chính. Nó `NOT NULL`, duy nhất, và là thứ mà foreign key tham chiếu tới.\n- Các candidate key còn lại là **alternate key**. Hãy thực thi chúng bằng `UNIQUE NOT NULL`. Một candidate key không được khai báo unique là một bug đang chờ một bản ghi trùng.\n- Một **composite key** gồm nhiều cột, như `(student_id, course_code)` trong junction table.\n- Một **foreign key** là một cột (hoặc tập cột) mà giá trị phải tồn tại như một key trong bảng được tham chiếu. Nó là dạng relationship được database thực thi. Hãy chọn hành động `ON DELETE` có chủ đích: `RESTRICT`/`NO ACTION` (mặc định, chặn việc xóa), `CASCADE` (xóa luôn bảng con, phù hợp với dữ liệu sở hữu như số điện thoại), hoặc `SET NULL`. Hãy đánh index các cột foreign key ở phía bảng con. PostgreSQL không tự làm việc này, và không có index thì mỗi lần xóa ở bảng cha đều phải quét bảng con.\n\n**Natural key và surrogate key.** **Natural key** đến từ nghiệp vụ: `dept_code = 'CS'`, mã quốc gia ISO, ISBN. **Surrogate key** là một định danh được sinh ra, không mang ý nghĩa: một số nguyên identity hoặc một UUID.\n- Natural key dễ đọc và tiết kiệm một lần join, nhưng thế giới thực sẽ thay đổi chúng. Người ta đổi email và tên, các mã định danh nhà nước \"duy nhất\" vẫn có trùng lặp và bị ràng buộc bởi quy định về quyền riêng tư, và các công ty đổi thương hiệu mã sản phẩm. Đổi một primary key nghĩa là phải cập nhật mọi foreign key trỏ tới nó.\n- Surrogate key không bao giờ cần đổi, và chúng gọn (8 byte với `bigint`). Thực hành phổ biến: **dùng surrogate primary key, nhưng vẫn đặt UNIQUE constraint trên natural key**. Không có nó, database sẽ vui vẻ lưu cùng một sinh viên hai lần dưới hai id.\n- Các mã ngắn, ổn định, được chuẩn hóa (`dept_code`, đơn vị tiền tệ `USD`) hoàn toàn có thể làm natural primary key tốt.\n\n**Chọn kiểu surrogate năm 2026:**\n- `bigint GENERATED ALWAYS AS IDENTITY` (chuẩn SQL, nên dùng thay cho `serial` cũ) gọn và nhanh. Lộ nó ra URL sẽ làm lộ quy mô (\"order 10,523\") và mời gọi việc dò quét (enumeration), nên hãy kết hợp với kiểm tra phân quyền hoặc một public id riêng.\n- **UUIDv4** là ngẫu nhiên, nên có thể sinh ở bất cứ đâu mà không cần phối hợp, nhưng các lần insert ngẫu nhiên rải khắp B-tree và làm giảm cache locality trên bảng lớn.\n- **UUIDv7** (RFC 9562, 2024) bắt đầu bằng một timestamp mili giây, nên giá trị gần như được sắp theo thời gian và thân thiện với index. PostgreSQL 18 có sẵn hàm `uuidv7()`. Ở các phiên bản cũ hơn, hãy sinh nó trong ứng dụng hoặc bằng một extension. Đây là lựa chọn mặc định tốt khi id phải được sinh ở phía client hoặc giữa nhiều service. Lưu ý nó làm lộ thời điểm tạo."
+    },
+    {
+      "type": "explanation",
+      "title": "Functional dependency: quy tắc đằng sau các normal form",
+      "content": "Một **functional dependency (FD)** `X → Y` nghĩa là: hai dòng bất kỳ giống nhau ở X thì phải giống nhau ở Y. Nói cách khác, X *quyết định* Y. FD đến từ **quy tắc nghiệp vụ**, không phải từ việc nhìn dữ liệu mẫu. Ba dòng tình cờ có chung một giá trị chẳng chứng minh được gì, nhưng \"mỗi khóa học có đúng một tên\" là một quy tắc.\n\nVới miền đăng ký học, các quy tắc cho ra những FD sau:\n1. `student_id → student_name`\n2. `course_code → course_title, dept_code`\n3. `dept_code → dept_name`\n4. `student_id, course_code → instructor, grade` (một sinh viên học một khóa một lần, ở một lớp)\n5. `instructor → course_code` (mỗi giảng viên dạy đúng một khóa, và một khóa có thể có nhiều giảng viên)\n\n**Armstrong's axioms** cho phép bạn suy ra FD mới từ các FD này:\n- **reflexivity**: nếu Y ⊆ X thì X → Y,\n- **augmentation**: nếu X → Y thì XZ → YZ,\n- **transitivity**: nếu X → Y và Y → Z thì X → Z.\n\nVí dụ, 2 và 3 kết hợp lại cho ra `course_code → dept_name` nhờ transitivity.\n\n**Attribute closure** X⁺ là tập mọi thứ mà X quyết định. Bạn tính nó bằng cách áp dụng lặp lại các FD cho đến khi không thêm được gì mới. **X là superkey khi và chỉ khi X⁺ chứa mọi attribute.** Ở đây `{student_id, course_code}⁺` là cả 8 attribute, nên nó là một key. Khó thấy hơn, `{student_id, instructor}⁺` cũng là tất cả: instructor cho ra course_code, rồi FD 4 được áp dụng. Vậy bảng có **hai candidate key**, một chi tiết sẽ quan trọng khi bàn về BCNF sau này.\n\nTừ vựng mà các normal form dùng:\n- Một **prime attribute** là một phần của *một* candidate key nào đó (ở đây: student_id, course_code, instructor).\n- Một **partial dependency** là một attribute không phải prime phụ thuộc vào *một phần* của composite key (`student_id → student_name`).\n- Một **transitive dependency** là một attribute không phải prime phụ thuộc vào một attribute không phải prime khác (`course_code → dept_code → dept_name`).\n- Một **determinant** là vế trái của một FD."
+    },
+    {
+      "type": "explanation",
+      "title": "Ví dụ xuyên suốt và các anomaly của nó",
+      "content": "Bảng tính gốc của phòng đào tạo, **chưa chuẩn hóa (UNF)**: một dòng cho mỗi sinh viên, với một list số điện thoại và một nhóm lặp các lần đăng ký nhồi vào trong ô.\n\n| student_id | student_name | phones | enrollments |\n|---|---|---|---|\n| 1 | Ana | 555-0101, 555-0102 | CS101 (Intro to Programming, CS, Computer Science, Dr. Lee, A); MA201 (Linear Algebra, MA, Mathematics, Dr. Kim, B) |\n| 2 | Ben | 555-0200 | CS101 (Intro to Programming, CS, Computer Science, Dr. Park, B+) |\n\nNgay cả khi đã làm phẳng thành mỗi dòng một lần đăng ký (xem phần tiếp theo), bảng tính vẫn mắc ba **anomaly** kinh điển:\n- **Update anomaly.** Khoa \"Computer Science\" được đổi tên thành \"Computing\". Tên khoa được lưu trên *mọi* dòng đăng ký của CS, nên việc đổi tên phải chạm tới tất cả. Sót một dòng (một batch thất bại, một lần insert đồng thời dùng tên cũ) là database giờ chứa hai tên khác nhau cho khoa CS. Dữ liệu tự mâu thuẫn với chính nó.\n- **Insertion anomaly.** Trường mở khóa CS301 và thuê Dr. Ito dạy, nhưng chưa có sinh viên nào đăng ký. Không có chỗ nào để ghi rằng CS301 tên là \"Algorithms\" hay Dr. Ito dạy nó, vì mọi dòng đều cần một student_id làm một phần key.\n- **Deletion anomaly.** Ana bỏ MA201. Xóa dòng đăng ký của cô ấy cũng xóa luôn bản ghi duy nhất cho biết MA201 là \"Linear Algebra\", thuộc khoa Mathematics, và do Dr. Kim dạy. Bạn mất cả các sự kiện về những thứ khác.\n\nMỗi anomaly là triệu chứng của cùng một căn bệnh: **một sự kiện được lưu trong một dòng mà key của dòng đó không quyết định nó.** Tên khoa phụ thuộc vào dept_code, nhưng lại được lưu trong một bảng có key là (student_id, course_code). Các normal form tìm ra những sự kiện đặt sai chỗ này một cách có hệ thống."
+    },
+    {
+      "type": "explanation",
+      "title": "First Normal Form và Second Normal Form",
+      "content": "**First Normal Form (1NF): giá trị nguyên tử, không có nhóm lặp, có key.** Mỗi ô chứa một giá trị thuộc kiểu của cột, không có nhóm cột kiểu \"phone1, phone2, phone3\", và mọi dòng đều định danh được duy nhất. Tách list số điện thoại ra bảng riêng, và cho mỗi lần đăng ký một dòng riêng:\n\n**enrollment (1NF)**, key (student_id, course_code)\n| student_id | course_code | student_name | course_title | dept_code | dept_name | instructor | grade |\n|---|---|---|---|---|---|---|---|\n| 1 | CS101 | Ana | Intro to Programming | CS | Computer Science | Dr. Lee | A |\n| 1 | MA201 | Ana | Linear Algebra | MA | Mathematics | Dr. Kim | B |\n| 2 | CS101 | Ben | Intro to Programming | CS | Computer Science | Dr. Park | B+ |\n\n**student_phone (1NF)**, key (student_id, phone): (1, 555-0101), (1, 555-0102), (2, 555-0200)\n\nGiờ thì câu hỏi \"sinh viên nào có số 555-0200?\" là một tra cứu bằng có index thay vì tìm chuỗi con, và thêm số điện thoại thứ ba không cần đổi schema. \"Nguyên tử\" là về cách bạn *query* giá trị. Một `date` hay một `email` đầy đủ là nguyên tử dù nó có nhiều phần. Một list phân cách bằng dấu phẩy mà bạn phải tìm bên trong thì không. Array và JSONB của PostgreSQL làm mờ ranh giới này; xem phần JSONB để biết khi nào điều đó chấp nhận được.\n\n**Second Normal Form (2NF): không có partial dependency.** Mọi attribute không phải prime phải phụ thuộc vào *toàn bộ* mỗi candidate key, chứ không chỉ một phần. Bảng 1NF vi phạm điều này:\n- `student_name` chỉ phụ thuộc vào `student_id`,\n- `course_title`, `dept_code` và `dept_name` chỉ phụ thuộc vào `course_code`.\n\nChuyển mỗi partial dependency vào một bảng có key là phần mà nó phụ thuộc (cột key in đậm):\n- student(**student_id**, student_name)\n- course(**course_code**, course_title, dept_code, dept_name)\n- enrollment(**student_id, course_code**, instructor, grade)\n\nTên sinh viên giờ chỉ được lưu một lần, và một khóa học có thể tồn tại mà không có lần đăng ký nào, sửa được insertion anomaly cho khóa học. Một bảng có key chỉ gồm một cột thì tự động đạt 2NF, vì không có \"phần\" nào của key để phụ thuộc vào."
+    },
+    {
+      "type": "explanation",
+      "title": "Third Normal Form và Boyce-Codd Normal Form",
+      "content": "**Third Normal Form (3NF): không có transitive dependency.** Về hình thức, với mọi FD không tầm thường X → A, hoặc X là superkey, hoặc A là prime attribute. Nói nôm na: *mọi cột không phải key đều nói về key, toàn bộ key, và không gì khác ngoài key.*\n\n`course(course_code, course_title, dept_code, dept_name)` vi phạm 3NF: `dept_name` phụ thuộc vào `dept_code`, vốn không phải key của `course`. Đây chính là update anomaly trong ví dụ đổi tên. Tách nó ra:\n- department(**dept_code**, dept_name)\n- course(**course_code**, course_title, dept_code → department)\n\nĐổi tên một khoa giờ chỉ là UPDATE một dòng. Các bảng còn lại (student, enrollment) đã đạt 3NF. Trong enrollment, `instructor → course_code` có vế trái không phải superkey, nhưng course_code là *prime* (một phần của key), nên 3NF cho phép.\n\n**Boyce-Codd Normal Form (BCNF): mọi determinant đều là superkey.** BCNF bỏ đi “lối thoát” \"hoặc A là prime\" của 3NF. Nó chỉ khác 3NF khi bảng có **các composite candidate key chồng lấn nhau**, đúng như bảng enrollment của chúng ta: các key là {student_id, course_code} và {student_id, instructor}, và `instructor → course_code` có determinant không phải superkey. Anomaly còn lại: \"Dr. Park dạy CS101\" được lưu trên mọi dòng đăng ký của Dr. Park. Bạn không thể ghi nhận khóa học của một giảng viên mới cho đến khi có sinh viên đăng ký, và một lần update có thể khiến Dr. Park dạy hai khóa.\n\nPhép tách BCNF:\n- teaching(**instructor**, course_code)\n- enrollment(**student_id, instructor**, grade)\n\nPhép tách này là **lossless**: cột chung `instructor` là key của `teaching`, nên join hai bảng trả lại đúng các dòng ban đầu và không có dòng thừa nào. (Nói chung, tách R thành R1 và R2 là lossless khi R1 ∩ R2 là key của R1 hoặc của R2.)\n\nNhưng nó **không bảo toàn dependency**. Quy tắc \"một sinh viên học mỗi khóa tối đa một lần\", `{student_id, course_code} → instructor`, giờ trải trên hai bảng, và key của không bảng nào thực thi được nó. Ana có thể đăng ký CS101 với cả Dr. Lee lẫn Dr. Park. Đây là trade-off kinh điển trong sách giáo khoa:\n- **3NF luôn đạt được một cách lossless mà vẫn bảo toàn mọi dependency.**\n- **BCNF luôn lossless, nhưng đôi khi mất dependency.**\n\nCách giải quyết thực tế, được dùng trong schema bên dưới, là cho instructor một bảng riêng (sự kiện BCNF), giữ `course_code` trên enrollment với `PRIMARY KEY (student_id, course_code)`, và thêm một **composite foreign key** `(instructor_id, course_code) → instructor` để bản sao không bao giờ có thể sai lệch. Khi đó mọi quy tắc đều được một constraint thực thi.\n\n**Vượt ra ngoài BCNF**: 4NF loại bỏ multi-valued dependency (các list độc lập, như kỹ năng và ngôn ngữ của một người, bị lưu trong một bảng và buộc thành tích Descartes). 5NF xử lý join dependency. Bạn hiếm khi cần gọi đúng tên chúng, nhưng \"hai list độc lập trong một bảng\" là một dấu hiệu thiết kế tồi có thật."
+    },
+    {
+      "type": "diagram",
+      "caption": "Ví dụ xuyên suốt được tách từng bước. Mỗi mũi tên chuyển một functional dependency đặt sai chỗ vào một bảng mà determinant của nó là key."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Đây là thuật toán sách giáo khoa trong khoảng 40 dòng. `closure` áp dụng lặp lại các FD cho đến khi không thêm được gì mới, và một tập attribute là superkey khi closure của nó bao phủ cả relation. Nó xác nhận bảng 1NF có hai candidate key, liệt kê mọi dependency đặt sai chỗ, và cho thấy bảng enrollment ở 3NF là bảng duy nhất vẫn vi phạm BCNF, do `instructor -> course_code`. Chạy nó bằng `node`. Output khớp với các comment.",
+      "label": "Trình kiểm tra FD"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mọi quy tắc nghiệp vụ giờ đều là constraint: số điện thoại là các dòng (1NF), tên nằm cùng key của chúng (2NF/3NF), sự kiện giảng-viên-dạy-khóa-nào nằm trong `instructor` (BCNF), và composite foreign key cùng primary key `(student_id, course_code)` thực thi dependency mà một phép tách BCNF thuần túy sẽ làm mất. Hai lệnh INSERT bị từ chối và thông báo lỗi của chúng là kết quả thật khi chạy script trên PostgreSQL. Phép join cuối cùng dựng lại góc nhìn bảng tính ban đầu khi cần, từ dữ liệu giờ đã không thể tự mâu thuẫn nữa.",
+      "label": "Schema cuối cùng"
+    },
+    {
+      "type": "explanation",
+      "title": "Khi nào nên denormalize, và star schema",
+      "content": "Normalization tối ưu cho **tính đúng đắn khi ghi**: một sự kiện, một chỗ. Việc đọc phải trả giá bằng join. Trên một hệ thống OLTP có index tốt, join năm bảng để lấy một order thường chỉ tốn dưới một mili giây, nên **mặc định hãy normalize và chỉ denormalize khi có bằng chứng**, như một `EXPLAIN ANALYZE`, một ngân sách latency, hay một hot path trong profiler.\n\nCác lý do chính đáng để denormalize:\n- **Hot path đọc nhiều.** Danh sách sản phẩm hiển thị `review_count` và `avg_rating`. Tính chúng bằng `count(*)` trên hàng triệu review mỗi lần xem trang là lãng phí, nên hãy lưu chúng trên `product` và cập nhật khi có review được ghi (trong cùng transaction, bằng trigger, hoặc bất đồng bộ nếu chấp nhận được dữ liệu hơi cũ).\n- **Snapshot bất biến, thực ra không phải denormalization.** `order_line.unit_price` sao chép giá sản phẩm *tại thời điểm mua*. Đó là một sự kiện khác với giá hiện tại của sản phẩm, và nó không được thay đổi khi catalog thay đổi. Địa chỉ giao hàng trên một order cũng vậy.\n- **Analytics.** Data warehouse cố ý dùng các bảng rộng, đã denormalize, vì scan trên columnar storage thì rẻ còn join qua hàng tỷ dòng thì không.\n- **Caching và search.** Các entry Redis, document Elasticsearch/OpenSearch và cache response của API là các *projection* đã denormalize từ nguồn sự thật đã normalize.\n- **Materialized view** (`CREATE MATERIALIZED VIEW ...; REFRESH MATERIALIZED VIEW CONCURRENTLY ...`) để database tự quản lý bản sao đã denormalize. `CONCURRENTLY` yêu cầu một unique index trên view.\n\nQuy tắc để denormalize an toàn:\n- Có đúng **một nguồn sự thật**, và mọi bản sao đều được suy ra từ nó.\n- Mỗi bản sao có một **cơ chế đồng bộ** được gọi tên rõ (cùng transaction, trigger, sự kiện CDC/outbox, rebuild theo lịch) và một giới hạn độ cũ đã biết.\n- Có một **job đối soát**, hoặc bản sao có thể được dựng lại từ nguồn, vì các bản sao *chắc chắn sẽ* bị lệch.\n\n**Star schema (tóm tắt).** Data warehouse phân tích tổ chức dữ liệu thành một **fact table** trung tâm (mỗi dòng là một sự kiện hoặc một phép đo, như `fact_sales(date_key, product_key, store_key, quantity, revenue)`) bao quanh bởi các **dimension table** (`dim_date`, `dim_product`, `dim_store`) chứa các attribute mô tả. Dimension được cố ý denormalize: `dim_product` lặp lại tên danh mục và thương hiệu, để query chỉ join mỗi dimension một lần rồi lọc và nhóm thoải mái. Normalize các dimension thành các bảng con cho ra *snowflake schema*. Slowly changing dimension, columnar storage và ETL so với ELT được trình bày trong chương **OLTP vs OLAP & Warehousing**. Điểm mấu chốt ở đây: schema OLTP được normalize để ghi đúng, schema OLAP được denormalize để scan nhanh, và một pipeline nối hai bên lại."
+    },
+    {
+      "type": "explanation",
+      "title": "Soft delete: hữu ích, nhưng không miễn phí",
+      "content": "**Soft delete** đánh dấu một dòng là đã xóa (`deleted_at timestamptz`, NULL nghĩa là còn sống) thay vì xóa hẳn nó. Các team dùng nó cho undo/khôi phục, audit trail, và để phòng xóa nhầm.\n\nChi phí là có thật và thường bị phát hiện muộn:\n- **Mọi query đều phải lọc nó.** Quên `WHERE deleted_at IS NULL` ở một chỗ là dữ liệu đã xóa xuất hiện lại trong một báo cáo, một kết quả tìm kiếm hay một API response. Giảm thiểu bằng view (`live_account`), default scope của ORM, hoặc row-level security policy, và biến luồng đã lọc thành mặc định.\n- **Unique constraint bị hỏng.** Một `UNIQUE (email)` thông thường ngăn người dùng đã bị xóa đăng ký lại. Hãy dùng **partial unique index**: `CREATE UNIQUE INDEX ... ON account (email) WHERE deleted_at IS NULL`.\n- **Foreign key không hiểu nó.** Một order còn sống có thể tham chiếu tới một khách hàng đã bị soft delete, và `ON DELETE CASCADE` không bao giờ kích hoạt. Cascade một soft delete trở thành logic ứng dụng.\n- **Bloat.** Bảng và index cứ phình mãi với các dòng đã-chết-nhưng-vẫn-còn. Partial index (`WHERE deleted_at IS NULL`) giữ cho các index nóng nhỏ gọn.\n- **Luật quyền riêng tư.** Quyền được xóa của GDPR (và các luật tương tự) nhìn chung yêu cầu thực sự xóa hoặc ẩn danh hóa không thể đảo ngược dữ liệu cá nhân. Chỉ soft delete thì không đáp ứng được, nên bạn vẫn cần một job hard delete hoặc ẩn danh hóa với thời hạn lưu giữ.\n\nCác lựa chọn thay thế giữ cho bảng chính sạch sẽ:\n- một **archive table**: chuyển dòng sang khi xóa (`WITH d AS (DELETE ... RETURNING *) INSERT INTO account_archive SELECT * FROM d`),\n- một **audit/history table** được trigger điền vào, hoặc một temporal table (system-versioned),\n- một **event log** nếu bạn vốn đã dùng event sourcing.\n\nHãy dùng soft delete khi người dùng thực sự cần khôi phục. Nếu không, hãy ưu tiên hard delete cộng với archive."
+    },
+    {
+      "type": "explanation",
+      "title": "Cột JSONB so với bảng",
+      "content": "`jsonb` của PostgreSQL lưu JSON ở dạng nhị phân đã phân rã, có thể đánh index và query (`->`, `->>`, `@>`, jsonpath). Rất dễ bị cám dỗ nhét mọi thứ vào một cột `data jsonb` và bỏ qua bước mô hình hóa. Làm vậy là đánh đổi gần hết những gì database làm giúp bạn.\n\n**Những trường hợp dùng JSONB tốt:**\n- **Attribute thưa hoặc biến đổi**: thông số sản phẩm khác nhau theo danh mục (áo thun có size và chất liệu, laptop có RAM và cổng kết nối), tùy chọn người dùng, feature flag.\n- **Dữ liệu bạn lưu và trả về nguyên khối nhưng hiếm khi query bên trong**: payload webhook, response API của bên thứ ba, snapshot audit.\n- **Schema thực sự do người khác sở hữu**: metadata tích hợp, custom field do khách hàng định nghĩa.\n\n**Giữ ở dạng cột và bảng khi:**\n- bạn thường xuyên **lọc, join, sắp xếp hoặc tổng hợp** trên nó,\n- nó cần **constraint**: NOT NULL, foreign key, CHECK, tính duy nhất. Bạn không thể đặt foreign key lên một field JSON,\n- nó có **kiểu dữ liệu** quan trọng (tiền, timestamp). `->>` trả về text, nên mọi phép so sánh số đều cần cast, và cast sẽ lỗi nếu có một dòng lưu `\"lots\"`,\n- nó được **cập nhật độc lập và thường xuyên**. Cập nhật một key sẽ ghi lại toàn bộ giá trị jsonb (và phần lưu trữ TOAST của nó với document lớn), và các writer đồng thời ghi vào các key khác nhau của cùng một dòng vẫn xung đột trên dòng đó.\n\nPlanner cũng không có thống kê theo từng key cho JSONB, nên ước lượng số dòng cho `attributes->>'color' = 'black'` chỉ là đoán. Một expression index (`CREATE INDEX ON product ((attributes->>'color'))`) cho nó cả thống kê lẫn tốc độ.\n\n**Pattern hybrid** là thứ mà hầu hết schema trưởng thành rốt cuộc sẽ dùng: các field cốt lõi, được query, có constraint là cột thật, cộng một cột `attributes jsonb` cho phần đuôi dài, đánh index bằng **GIN**. `jsonb_path_ops` nhỏ hơn và nhanh hơn cho query containment `@>` và jsonpath, trong khi `jsonb_ops` mặc định còn hỗ trợ các toán tử kiểm tra key tồn tại (`?`, `?|`, `?&`). Khi một key JSON trở nên quan trọng (nó bắt đầu xuất hiện trong mệnh đề WHERE khắp nơi), hãy nâng nó thành cột bằng một expand/contract migration."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Partial unique index là thứ cho phép `ana@example.com` đăng ký lại sau khi tài khoản đầu tiên của cô ấy bị soft delete, còn view cung cấp cho query một luồng mặc định chỉ lấy dòng còn sống. Trong `product`, giá vẫn là một cột có kiểu và có constraint, còn thông số riêng theo danh mục nằm trong `attributes`. Containment `@>` có thể dùng GIN index. Phép trích `->>` trả về text, do đó cần cast `::int`. Mọi output đều được tạo ra bằng cách chạy script trên PostgreSQL.",
+      "label": "Soft delete & JSONB"
+    },
+    {
+      "type": "explanation",
+      "title": "Schema migration không downtime: expand và contract",
+      "content": "Trong một hệ thống có nhiều instance ứng dụng và deploy cuốn chiếu (rolling deploy), code cũ và code mới chạy **cùng lúc** trên cùng một database. Một migration đổi tên cột sẽ làm hỏng mọi instance cũ ngay khi nó commit. Cách sửa là **expand/contract** (còn gọi là parallel change). Tách mọi thay đổi phá vỡ tương thích thành các bước tương thích ngược, mỗi bước tự deploy được và tự đảo ngược được.\n\nVí dụ: đổi tên `student.student_name` thành `full_name`.\n1. **Expand**: `ALTER TABLE student ADD COLUMN full_name text;` (nullable, không default, tức thì). Code cũ bỏ qua nó.\n2. **Dual-write**: deploy code ghi vào cả hai cột và vẫn đọc cột cũ.\n3. **Backfill** theo từng batch nhỏ (`UPDATE ... WHERE id BETWEEN $1 AND $2`, commit từng batch) để không bao giờ giữ lock lâu hay tạo ra một transaction khổng lồ.\n4. **Chuyển việc đọc** sang `full_name`. Xác minh bằng metric hoặc một bước kiểm tra tính nhất quán, rồi thực thi `NOT NULL`.\n5. **Ngừng ghi** vào cột cũ. Deploy.\n6. **Contract**: `ALTER TABLE student DROP COLUMN student_name;` khi không còn code nào đang chạy tham chiếu tới nó.\n\nNhững chi tiết riêng của PostgreSQL quyết định một migration là tức thì hay gây sự cố:\n- `ADD COLUMN ... DEFAULT <constant>` chỉ thay đổi metadata từ PostgreSQL 11. Một default *volatile* (`DEFAULT random()`, hoặc `clock_timestamp()`) vẫn ghi lại toàn bộ bảng.\n- `SET NOT NULL` thường quét toàn bộ bảng dưới một exclusive lock. Thay vào đó, hãy thêm `CHECK (full_name IS NOT NULL) NOT VALID`, rồi `VALIDATE CONSTRAINT` (chỉ lấy lock SHARE UPDATE EXCLUSIVE, nên đọc và ghi vẫn tiếp tục), rồi `SET NOT NULL`. PostgreSQL 12+ dùng CHECK đã được validate để bỏ qua bước quét.\n- Foreign key theo cùng pattern: `ADD CONSTRAINT ... FOREIGN KEY ... NOT VALID`, rồi `VALIDATE CONSTRAINT`.\n- Tạo index bằng `CREATE INDEX CONCURRENTLY` (nó không chạy được bên trong transaction block, và nếu thất bại sẽ để lại một index INVALID cần drop).\n- Đặt `lock_timeout` (ví dụ `SET lock_timeout = '5s'`) trước khi chạy DDL. Một `ALTER TABLE` đang chờ lock ACCESS EXCLUSIVE phía sau một query dài sẽ chặn *mọi* query sau đó trên bảng, nên tốt hơn là thất bại nhanh rồi retry.\n- Đổi kiểu của một cột thường ghi lại toàn bộ bảng. Hãy dùng expand/contract với một cột mới thay thế.\n\nCông cụ: Flyway, Liquibase, Alembic, Prisma Migrate, migration của Rails/Django hoặc Atlas để quản lý version migration; pgroll và Reshape tự động hóa expand/contract cho PostgreSQL; gh-ost và pt-online-schema-change rebuild bảng online cho MySQL. Dù dùng công cụ nào, hãy review mỗi migration về **mức lock và hành vi ghi lại bảng**, chứ không chỉ SQL của nó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Expand/contract migration. Phiên bản ứng dụng cũ và mới có thể chạy song song ở mọi bước, đó là điều khiến rolling deploy không downtime trở nên khả thi."
+    },
+    {
+      "type": "explanation",
+      "title": "Document database: embed hay reference",
+      "content": "Document store (MongoDB, Couchbase, Firestore, mô hình item của DynamoDB) đảo ngược cách làm mặc định. Mô hình hóa quan hệ bắt đầu từ *dữ liệu* rồi normalize. Mô hình hóa document bắt đầu từ các **access pattern** và định hình mỗi document để trả lời một query trong một lần đọc. Quyết định trung tâm cho mỗi relationship là **embed** (lồng con vào trong document cha) hay **reference** (lưu con riêng và giữ id của nó).\n\n| Embed khi... | Reference khi... |\n|---|---|\n| Dữ liệu được đọc cùng nhau (một order và các line item của nó) | Con được đọc hoặc cập nhật riêng |\n| Con thuộc sở hữu của cha và không có định danh ở nơi khác | Con được nhiều cha dùng chung (một tác giả trên nhiều bài viết) |\n| Quan hệ là one-to-few và **có giới hạn** | Quan hệ là one-to-many và **không giới hạn** (comment, event, follower) |\n| Bạn muốn cập nhật atomic trên một document | Con thay đổi thường xuyên và sẽ khiến một document cha lớn bị ghi lại |\n\nGiới hạn cứng và các kiểu thất bại:\n- Document MongoDB bị giới hạn ở **16 MB**, và document lớn đọc và ghi lại chậm từ lâu trước khi chạm ngưỡng đó. Một array nhúng cứ phình mãi (mọi comment trên một bài viết viral) là lỗi kinh điển.\n- Embed một entity **dùng chung** sẽ nhân bản nó, mang lại đúng cái update anomaly mà normalization đã loại bỏ. Nếu tên một tác giả được nhúng trong 10,000 bài viết, đổi tên sẽ chạm tới 10,000 document.\n- **Extended reference** là giải pháp trung gian: lưu id được tham chiếu cộng với vài field bạn cần hiển thị (`author: {_id, name}`), và chấp nhận rằng các bản sao đó cần được đồng bộ.\n\nVí dụ đăng ký học của chúng ta ở dạng document có thể nhúng số điện thoại vào document student (thuộc sở hữu, có giới hạn, đọc cùng nhau), và reference khóa học bằng `course_code` từ một collection `enrollments` (many-to-many, dùng chung, được query từ cả hai hướng).\n\nDocument database hiện đại hỗ trợ ACID transaction trên nhiều document (MongoDB từ 4.0 trên replica set và 4.2 trên sharded cluster), nhưng chúng chậm hơn và data model được thiết kế để hiếm khi cần tới. **Single-table design của DynamoDB** còn đi xa hơn: bạn liệt kê mọi access pattern từ đầu và thiết kế partition key và sort key (cùng secondary index) sao cho mỗi pattern là một lần tra key hoặc một range query. Cách này rất nhanh ở quy mô lớn, nhưng cứng nhắc khi xuất hiện access pattern mới.\n\nTrade-off bên dưới vẫn là cái mà cả chương này đã bàn. Embed chính là denormalization: đọc nhanh hơn trên luồng đã thiết kế, đổi lại phải giữ các bản sao nhất quán."
+    },
+    {
+      "type": "explanation",
+      "title": "Lỗi và hiểu lầm thường gặp",
+      "content": "- **Suy ra FD từ dữ liệu mẫu.** Ba dòng mà khóa nào cũng có một giảng viên không chứng minh được `course → instructor`. Hãy hỏi quy tắc nghiệp vụ, và hỏi về tương lai (\"liệu một khóa có bao giờ có hai lớp không?\").\n- **Surrogate key mà không có UNIQUE trên natural key.** `id` là duy nhất, nhưng không gì ngăn hai dòng có cùng email hay ISBN. Hãy giữ các candidate key là duy nhất.\n- **List phân cách bằng dấu phẩy trong một cột** (`tags = 'a,b,c'`). Bạn mất index, foreign key và khả năng đếm đúng. Hãy dùng một bảng con, hoặc array/JSONB gốc với GIN index nếu bạn thực sự không bao giờ cần constraint.\n- **Bẫy EAV.** `entity_attribute_value(entity_id, attribute, value text)` trông linh hoạt, nhưng nó đánh mất kiểu dữ liệu, constraint và khả năng viết query tử tế. JSONB hoặc cột thật gần như luôn tốt hơn.\n- **Thiếu index trên foreign key.** PostgreSQL đánh index primary key được tham chiếu, không phải cột tham chiếu. Khi đó việc xóa ở bảng cha và join sẽ quét bảng con.\n- **Polymorphic foreign key** (`commentable_type, commentable_id`), thứ mà không database nào thực thi được. Hãy ưu tiên các FK nullable riêng biệt với một CHECK đảm bảo đúng một cái được đặt, hoặc một junction table riêng cho mỗi loại cha.\n- **Denormalize trước khi đo**, hoặc không gọi tên cơ chế đồng bộ và người chịu trách nhiệm.\n- **\"NoSQL nghĩa là không cần mô hình hóa.\"** Mô hình hóa document còn *nhạy cảm hơn* với thiết kế, vì schema mã hóa chính các access pattern của bạn.\n- **Migration phá vỡ tương thích** (đổi tên hay đổi kiểu trong một bước) trong lúc rolling deploy. Hãy expand, migrate, rồi mới contract.\n- **Normalize quá mức những giá trị là snapshot.** Giá và địa chỉ giao hàng của một order *không được* thay đổi theo những thay đổi sau này của sản phẩm hay profile người dùng."
+    },
+    {
+      "type": "callout",
+      "title": "Các normal form trong một hơi thở",
+      "content": "**1NF**: mỗi ô một giá trị, không có nhóm lặp, có key. **2NF**: không cột không-phải-key nào phụ thuộc vào chỉ *một phần* của composite key. **3NF**: không cột không-phải-key nào phụ thuộc vào một cột không-phải-key khác. **BCNF**: vế trái của mọi functional dependency đều là superkey. Mẹo nhớ cho 3NF: *mọi attribute không phải key đều phụ thuộc vào key, toàn bộ key, và không gì khác ngoài key.* Nếu interviewer hỏi \"bảng này đã normalize chưa?\", hãy liệt kê các functional dependency trước, rồi đối chiếu từng determinant với các key."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Mô hình hóa trước, rồi normalize:** xác định entity, relationship, cardinality và optionality, và biến mọi quy tắc nghiệp vụ thành key, foreign key, UNIQUE hoặc CHECK constraint.",
+        "Quan hệ **many-to-many** trở thành một **junction table** với foreign key tới mỗi phía và key trên cặp đó. Nó thường mang attribute riêng (grade, quantity, role) và xứng đáng có một cái tên nghiệp vụ.",
+        "**Key:** candidate key là tập cột duy nhất tối thiểu. Chọn một cái làm primary và thực thi các cái còn lại bằng UNIQUE NOT NULL. Ưu tiên surrogate key (bigint identity hoặc UUIDv7) cộng với natural key UNIQUE. Tự đánh index các cột foreign key.",
+        "**Functional dependency** (X → Y) đến từ quy tắc nghiệp vụ. X là superkey khi closure X⁺ của nó chứa mọi attribute. Một bảng có thể có nhiều candidate key chồng lấn nhau.",
+        "Các **anomaly** (update, insert, delete) đều bắt nguồn từ việc lưu một sự kiện trong một bảng mà key không quyết định nó. Normalization chuyển mỗi sự kiện về cạnh determinant của nó.",
+        "**1NF** giá trị nguyên tử, **2NF** không phụ thuộc vào một phần key, **3NF** không có transitive dependency qua cột không phải key, **BCNF** mọi determinant đều là superkey. 3NF luôn đạt được mà vẫn bảo toàn mọi dependency. BCNF luôn lossless, nhưng có thể mất dependency.",
+        "**Denormalize có chủ đích:** đo trước, giữ một nguồn sự thật, gọi tên cơ chế đồng bộ và giới hạn độ cũ, và có khả năng dựng lại các bản sao. Snapshot giá và địa chỉ trên order là những sự kiện riêng, không phải denormalization.",
+        "**Soft delete** cần một bộ lọc trên mọi query (view hoặc RLS), partial unique index, logic cascade thủ công và một đường xóa thật để tuân thủ luật quyền riêng tư. **JSONB** hợp với dữ liệu thưa hoặc từ bên ngoài. Bất cứ thứ gì bạn lọc, join hay đặt constraint đều nên là cột.",
+        "**Migration không downtime** dùng expand → dual-write → backfill → chuyển việc đọc → contract. Trong PostgreSQL, dùng NOT VALID + VALIDATE, CREATE INDEX CONCURRENTLY, default là hằng số và một lock_timeout.",
+        "**Document database** mô hình hóa quanh access pattern: embed dữ liệu thuộc sở hữu, có giới hạn và được đọc cùng nhau; reference dữ liệu dùng chung hoặc không giới hạn. Embed chính là denormalization, với cùng những chi phí về tính nhất quán."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Trong bảng `enrollment(student_id, course_code, student_name, grade)` với key (student_id, course_code), `student_id → student_name` vi phạm normal form nào?",
+      "options": [
+        "1NF",
+        "2NF",
+        "Chỉ 3NF",
+        "Không vi phạm, vì student_name là nguyên tử"
+      ],
+      "explanation": "student_name là một attribute không phải prime chỉ phụ thuộc vào một phần của composite key, đó là partial dependency và là vi phạm đặc trưng của 2NF. Cách sửa là chuyển nó sang student(student_id, student_name)."
+    },
+    {
+      "id": "q2",
+      "question": "`course(course_code, course_title, dept_code, dept_name)` có key là course_code. Đổi tên một khoa phải cập nhật nhiều dòng. Vấn đề là gì, và cách sửa là gì?",
+      "options": [
+        "Vi phạm 1NF. Tách dept_name thành phần đầu và phần cuối",
+        "Một partial dependency. Thêm dept_code vào primary key",
+        "Thiếu index. Thêm index trên dept_name",
+        "Một transitive dependency course_code → dept_code → dept_name (3NF). Chuyển nó sang department(dept_code, dept_name)"
+      ],
+      "explanation": "dept_name phụ thuộc vào dept_code, một cột không phải key, nên đó là transitive dependency. Lưu nó trên mọi khóa học gây ra update anomaly. Tách ra một bảng department khiến việc đổi tên chỉ là update một dòng."
+    },
+    {
+      "id": "q3",
+      "question": "Một bảng đạt 3NF nhưng không đạt BCNF. Tình huống nào khiến điều này có thể xảy ra?",
+      "options": [
+        "Một attribute không phải key phụ thuộc vào một attribute không phải key khác",
+        "Bảng có các composite candidate key chồng lấn nhau, và có một FD với determinant không phải superkey và vế phải là prime attribute",
+        "Bảng lưu một list phân cách bằng dấu phẩy trong một cột",
+        "Bảng có primary key chỉ gồm một cột"
+      ],
+      "explanation": "3NF cho phép X → A khi A là prime (một phần của một candidate key nào đó). BCNF thì không. Khoảng cách đó chỉ có ý nghĩa khi có nhiều candidate key chồng lấn nhau, như {student, course} và {student, instructor} với instructor → course."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao một người thiết kế có thể dừng ở 3NF thay vì tách bảng tới BCNF?",
+      "options": [
+        "Phép tách BCNF có thể không bảo toàn một dependency, nên một quy tắc không còn thực thi được bằng key của một bảng duy nhất",
+        "Phép tách BCNF luôn lossy và làm mất dòng",
+        "BCNF cấm foreign key",
+        "BCNF yêu cầu mọi bảng phải có surrogate key"
+      ],
+      "explanation": "Mọi relation đều có thể tách thành BCNF một cách lossless, nhưng không phải lúc nào cũng bảo toàn dependency. Ví dụ, {student, course} → instructor rốt cuộc trải trên hai bảng. Phép tổng hợp 3NF luôn bảo toàn dependency, nên một số team giữ ở 3NF, hoặc thêm một composite foreign key để thực thi quy tắc bị mất."
+    },
+    {
+      "id": "q5",
+      "question": "Bạn dùng surrogate primary key `id bigint` trên `users`. Bạn gần như luôn nên thêm gì nữa?",
+      "options": [
+        "Một surrogate key thứ hai để dự phòng",
+        "Không gì cả, vì surrogate key đã đảm bảo tính duy nhất",
+        "Một constraint UNIQUE NOT NULL trên natural candidate key, như email",
+        "Một trigger sao chép id vào email"
+      ],
+      "explanation": "Surrogate key chỉ làm cho *id của dòng* là duy nhất. Không có UNIQUE constraint trên natural key, cùng một người dùng ngoài đời thực có thể bị insert hai lần dưới hai id khác nhau. Hãy giữ mọi candidate key được thực thi."
+    },
+    {
+      "id": "q6",
+      "question": "Quan hệ many-to-many giữa sinh viên và khóa học nên được biểu diễn thế nào trong một schema quan hệ?",
+      "options": [
+        "Một cột text trên student liệt kê các mã khóa học phân cách bằng dấu phẩy",
+        "Một foreign key từ course tới student",
+        "Nhân bản các cột của course sang bảng student",
+        "Một junction table với foreign key tới cả student và course, có key trên cặp đó (cộng các attribute như grade)"
+      ],
+      "explanation": "Ô trong bảng quan hệ chỉ chứa một giá trị, nên M:N cần một bảng associative (junction). Nó thực thi cả hai foreign key, ngăn cặp trùng lặp qua key của nó, và là nơi tự nhiên cho các attribute của relationship như grade hay enrolled_at."
+    },
+    {
+      "id": "q7",
+      "question": "Bảng `account` dùng soft delete (`deleted_at`). Người dùng đã xóa tài khoản không thể đăng ký lại bằng cùng email. Cách sửa đúng là gì?",
+      "options": [
+        "Bỏ yêu cầu duy nhất trên email",
+        "Thay UNIQUE(email) bằng một partial unique index `ON account (email) WHERE deleted_at IS NULL`",
+        "Thêm một hậu tố ngẫu nhiên vào email khi đăng ký",
+        "Hard delete mọi dòng mỗi đêm"
+      ],
+      "explanation": "Partial unique index chỉ thực thi tính duy nhất giữa các dòng còn sống, nên một dòng đã soft delete không còn chặn dòng mới nữa. Bỏ tính duy nhất cho phép tài khoản sống bị trùng, còn làm biến dạng email sẽ làm hỏng việc đăng nhập và tra cứu."
+    },
+    {
+      "id": "q8",
+      "question": "Dữ liệu nào phù hợp nhất cho một cột JSONB thay vì các cột quan hệ riêng biệt?",
+      "options": [
+        "Thông số sản phẩm theo danh mục (RAM cho laptop, size cho áo) chủ yếu để hiển thị và thỉnh thoảng được lọc bằng containment",
+        "customer_id của một order, thứ phải tham chiếu tới customers",
+        "Số dư tài khoản được cập nhật ở mọi giao dịch",
+        "Timestamp created_at dùng để sắp xếp mọi màn hình danh sách"
+      ],
+      "explanation": "JSONB hợp với attribute thưa, biến đổi, và GIN index hỗ trợ query containment trên chúng. Foreign key không thể trỏ vào field JSON, cập nhật thường xuyên sẽ ghi lại toàn bộ giá trị, còn các cột sắp xếp hay lọc cốt lõi cần kiểu dữ liệu, constraint và thống kê."
+    },
+    {
+      "id": "q9",
+      "question": "Trong một rolling deploy, bạn cần đổi tên một cột. Cách nào tránh làm hỏng các instance đang chạy?",
+      "options": [
+        "`ALTER TABLE ... RENAME COLUMN` trong cùng lần deploy với thay đổi code",
+        "Đổi tên cột vào ban đêm khi traffic thấp",
+        "Thêm cột mới, dual-write, backfill theo batch, chuyển việc đọc, ngừng ghi cột cũ, rồi drop nó",
+        "Tạo một bảng mới và hoán đổi tên bảng trong một transaction"
+      ],
+      "explanation": "Code cũ và code mới chạy cùng lúc trong rolling deploy. Expand/contract giữ cho mỗi bước tương thích ngược: code cũ tiếp tục chạy cho đến khi không còn instance nào tham chiếu tới cột cũ, và chỉ khi đó cột mới bị drop."
+    },
+    {
+      "id": "q10",
+      "question": "Trong một document database, khi nào KHÔNG nên embed các comment của một bài blog vào document của bài viết?",
+      "options": [
+        "Khi comment luôn được hiển thị cùng bài viết",
+        "Khi mỗi bài viết có tối đa ba comment",
+        "Khi comment cần được hiển thị theo thứ tự chèn",
+        "Khi số lượng comment không giới hạn và comment được query hoặc kiểm duyệt riêng"
+      ],
+      "explanation": "Array không giới hạn sẽ phình dần tới giới hạn kích thước document (16 MB trong MongoDB) và khiến mỗi lần ghi lại bài viết trở nên tốn kém. Comment được query độc lập (hàng đợi kiểm duyệt, lịch sử comment của một người dùng) cũng là lý do nên có một collection riêng tham chiếu tới id của bài viết."
+    }
+  ]
+}

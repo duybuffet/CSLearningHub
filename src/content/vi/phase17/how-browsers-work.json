@@ -1,0 +1,228 @@
+{
+  "sourceHash": "d75586e7b915",
+  "title": "Trình duyệt hoạt động thế nào",
+  "tagline": "Từ URL đến pixel: phân giải DNS, kết nối TCP, HTTP request, parse HTML và critical rendering path biến từng byte thành thứ bạn nhìn thấy trên màn hình.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mỗi lần bạn gõ một URL rồi nhấn Enter, trình duyệt lặng lẽ chạy một trong những pipeline tinh vi nhất của ngành phần mềm. Nó phân giải tên miền ra địa chỉ IP, thương lượng một kết nối an toàn, tải từng byte qua mạng, parse dần HTML và CSS thành các cây có cấu trúc, chạy JavaScript (thứ có thể viết lại toàn bộ tài liệu), tính chính xác hình học của mọi phần tử trên màn hình, rasterize ra pixel rồi composite các GPU layer. Thường thì toàn bộ chuỗi này xong trong chưa tới một giây, kể cả ở lần truy cập đầu tiên khi chưa có gì được cache.\n\nPipeline này không chỉ là kiến thức hàn lâm. **Mọi quyết định về hiệu năng front-end mà bạn đưa ra thực chất là quyết định xem bạn đang tăng tốc hay làm chậm bước nào trong pipeline này.** Vì sao `<script>` chặn việc render? Vì vị trí của bước parse so với bước chạy JavaScript. Vì sao inline critical CSS lại có ích? Vì nó bỏ được một round-trip mạng khỏi critical path. Vì sao HTTP/2 khiến domain sharding phản tác dụng? Vì nó multiplex các request, điều HTTP/1.1 không làm được. Nếu bạn hình dung được pipeline trong đầu, những câu trả lời này trở nên hiển nhiên, chứ không còn là những quy tắc làm theo mà không hiểu vì sao.\n\nChương này đi qua toàn bộ pipeline của trình duyệt, từ phím bấm đầu tiên đến lúc pixel được vẽ lên, đào sâu vào DNS, TCP/TLS, HTTP, parser HTML và CSS, JavaScript engine, render tree, layout, paint và compositing. Chúng ta sẽ xem chỗ nào hay hỏng, cách đo từng giai đoạn, và tối ưu nào thật sự đáng làm. Đến cuối chương, bạn sẽ có một mô hình tư duy giúp việc debug hiệu năng giống như đi theo bản đồ thay vì đoán mò."
+    },
+    {
+      "type": "diagram",
+      "caption": "Toàn bộ pipeline của trình duyệt. Các bước 6–9 chồng lên nhau và có thể chặn lẫn nhau. Sau frame đầu tiên, chuỗi Style → Layout → Paint → Composite chỉ chạy lại đến mức mà mỗi thay đổi cần — một animation transform/opacity chỉ chạm tới Composite."
+    },
+    {
+      "type": "analogy",
+      "title": "Trình duyệt như một đội thi công xây nhà theo bản vẽ",
+      "content": "Hãy hình dung trình duyệt là một đội thi công lớn được thuê để xây một ngôi nhà theo bản vẽ, nhưng bản vẽ được giao tới từng phần một.\n\n**DNS** là việc tìm xem kho nào đang giữ bản vẽ của bạn. Bạn có tên kho (tên miền), nhưng cần địa chỉ thực tế (IP) thì mới có người lái xe tới đó được.\n\n**TCP/TLS** là chiếc xe chở hàng bọc thép, an toàn, lái tới kho, xuất trình giấy tờ và nhận bản vẽ. Xe không được rời đi cho tới khi thủ tục an ninh (TLS handshake) hoàn tất.\n\n**Parse HTML** là anh đốc công đọc bản vẽ từng phòng một khi các trang lần lượt tới, rồi lập danh sách chi tiết mọi thứ cần có — tường, cửa, cửa sổ. Danh sách đó chính là DOM. Điểm mấu chốt: đốc công đọc bản vẽ *ngay khi chúng tới*, không đợi giao đủ hết các trang.\n\n**Parse CSS** là bản đặc tả nội thất: mỗi bức tường màu gì, mỗi khung cửa cao bao nhiêu. Khi bản đặc tả này chưa xong thì chưa thợ sơn nào được bắt tay vào làm — kể cả khi tường đã xây xong. Đó là lý do CSS là render-blocking.\n\n**JavaScript** là ông tổng thầu có thể bước vào bất cứ lúc nào và nói \"đập bức tường kia đi, thêm giếng trời, dời bếp sang chỗ khác\". Cả đội phải dừng việc đang làm và chờ ông ấy xong, vì bất kỳ thay đổi nào cũng có thể làm hỏng phần việc hiện tại của họ. Đó là lý do `<script>` chặn việc parse.\n\n**Layout** là người khảo sát đo đạc và đặt từng phần tử vào đúng chỗ — không phải ước chừng, mà là vị trí và kích thước chính xác đến từng pixel, có tính đến quan hệ giữa mọi phần tử với nhau.\n\n**Paint** là đội dán giấy tường, sơn và lát sàn — biến bản vẽ hình học thành các pixel có màu.\n\n**Composite** là người vận hành cần cẩu, xếp chồng các phần của tòa nhà đã được dựng riêng (các GPU layer) thành công trình hoàn chỉnh. Những thuộc tính được GPU tăng tốc như `transform` và `opacity` chỉ ảnh hưởng tới bước xếp chồng cuối cùng này, nên animate chúng rẻ hơn nhiều."
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 1: Phân giải DNS — đổi tên thành địa chỉ",
+      "content": "Domain Name System là một database phân tán, phân cấp, ánh xạ tên miền dễ đọc như `example.com` sang địa chỉ IP mà máy có thể định tuyến như `203.0.113.7`. Khi bạn gõ một URL, trình duyệt trước hết kiểm tra DNS cache của chính nó. Nếu tên đó chưa có trong cache (hoặc đã hết hạn), nó hỏi resolver của hệ điều hành, và resolver này cũng kiểm tra cache riêng. Nếu vẫn không thấy, resolver hỏi một **recursive resolver** — thường do ISP của bạn cung cấp, hoặc một dịch vụ công cộng như `8.8.8.8` (Google) hay `1.1.1.1` (Cloudflare).\n\nKhi cần, chính recursive resolver sẽ leo theo cây phân cấp DNS. Nó bắt đầu từ **root name server** (mười ba danh tính root server, từ `a` đến `m`, được phục vụ bởi hơn một nghìn instance anycast trên khắp thế giới). Root server ủy quyền xuống **TLD name server** (`.com`, `.org`, `.io`), rồi TLD ủy quyền tiếp xuống **authoritative name server** của tên miền cụ thể. Authoritative server trả về địa chỉ IP thật, và kết quả này được cache ở mọi tầng với một **TTL (Time to Live)** quy định nó được giữ trong cache bao lâu.\n\nVới một truy vấn DNS hoàn toàn mới, không có cache, round-trip này cộng thêm **20–120ms** latency trước khi trình duyệt kịp bắt đầu mở kết nối TCP. Đó là lý do `<link rel=\"dns-prefetch\">` và `<link rel=\"preconnect\">` có tác dụng lớn: chúng kích hoạt việc phân giải DNS (và tùy chọn cả TCP+TLS) cho các origin bên thứ ba ngay trong lúc trình duyệt còn đang parse HTML, nên khi resource thực sự được request thì các bước tra cứu đó đã xong.\n\n**DNS over HTTPS (DoH)** và **DNS over TLS (DoT)** là các phương án hiện đại giúp mã hóa truy vấn DNS, chống nghe lén và can thiệp. Chrome, Firefox và các hệ điều hành hiện đại đều hỗ trợ DoH sẵn. Về hiệu năng, chúng gần như không tốn thêm gì khi kết nối tới resolver đã được làm nóng; còn lợi ích về quyền riêng tư thì rất đáng kể.\n\nCác trình duyệt hiện đại còn truy vấn **bản ghi DNS HTTPS (SVCB)** song song với A/AAAA. Bản ghi này có thể thông báo rằng origin hỗ trợ HTTP/3 (`alpn=h3`) và công bố key cho Encrypted Client Hello — nhờ vậy trình duyệt có thể đi thẳng vào QUIC ngay ở lần truy cập đầu, thay vì phải đợi phát hiện HTTP/3 sau đó qua response header `Alt-Svc`."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một lần phân giải DNS đệ quy đầy đủ. Mỗi chặng cộng thêm latency. Nhờ cache ở mọi tầng, những lần truy cập sau chỉ còn một lần tra cứu cục bộ."
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 2–3: TCP handshake và thương lượng TLS",
+      "content": "Khi đã có địa chỉ IP, trình duyệt mở một **kết nối TCP**. TCP (Transmission Control Protocol) đảm bảo các byte được giao tin cậy và đúng thứ tự. Để thiết lập kết nối TCP cần một **three-way handshake**: client gửi `SYN`, server trả lời `SYN-ACK`, rồi client xác nhận bằng `ACK`. Việc này tốn trọn một **round-trip time (RTT)** — dưới 1ms trong mạng LAN, khoảng 10–30ms trong cùng một khu vực, 100–200ms giữa các châu lục, và hơn 500ms qua vệ tinh địa tĩnh.\n\nVới HTTPS (giờ đã là mặc định gần như tuyệt đối), một **TLS handshake** diễn ra ngay sau khi TCP được thiết lập. TLS 1.3 (mặc định trên mọi trình duyệt hiện đại; TLS 1.2 vẫn được chấp nhận) chỉ cần thêm một RTT cho kết nối mới — giảm từ hai RTT ở TLS 1.2. TLS 1.3 còn hỗ trợ **0-RTT resumption**: một client từng kết nối trước đó có thể gửi HTTP request đầu tiên kèm luôn với ClientHello, ngay sau TCP handshake, bỏ hẳn round trip của TLS cho người truy cập quay lại. Vì dữ liệu 0-RTT có thể bị kẻ tấn công **replay** (phát lại), server chỉ chấp nhận nó cho các request idempotent như `GET`.\n\nTrong TLS handshake, client và server:\n1. Thống nhất cipher suite và phiên bản TLS\n2. Server trình ra chứng chỉ X.509 của mình (được ký bởi một Certificate Authority đáng tin cậy)\n3. Client xác minh chuỗi chứng chỉ ngược lên tới một root đáng tin cậy\n4. Hai bên suy ra các khóa đối xứng dùng chung từ một phép trao đổi (EC)DHE tạm thời — năm 2026 thường là nhóm lai hậu lượng tử X25519MLKEM768\n5. Mọi dữ liệu sau đó được mã hóa bằng khóa đối xứng ấy\n\nVới người dùng mới truy cập một origin HTTPS mới qua kết nối latency cao, riêng TCP + TLS đã có thể cộng thêm **160–240ms** trước khi byte HTTP đầu tiên được gửi. Đó là lý do resource hint `preconnect` rất đáng giá — nó thực hiện toàn bộ chuỗi handshake này ngay trong giai đoạn parse HTML cho những origin bạn biết chắc sẽ cần.\n\n**HTTP/3 và QUIC** giải quyết chuyện này theo cách khác: QUIC chạy trên UDP và gộp TCP handshake với TLS handshake thành một round-trip duy nhất (hoặc không round-trip nào với session được resume), cắt một nửa latency thiết lập kết nối. Trình duyệt biết server hỗ trợ HTTP/3 qua response header `Alt-Svc` (nên lần truy cập *đầu tiên* thường vẫn là HTTP/2) hoặc qua bản ghi DNS HTTPS; nếu UDP bị chặn, chúng quay về HTTP/2 trên TCP."
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 4–5: HTTP request và response từ server",
+      "content": "Khi kết nối an toàn đã sẵn sàng, trình duyệt gửi một **HTTP request**. Một GET request điển hình gồm: method (`GET`), path (`/index.html`), phiên bản HTTP, và một loạt header — `Host`, `Accept`, `Accept-Encoding` (báo cho server biết trình duyệt hỗ trợ nén), `Cookie`, cùng các header do trình duyệt tự sinh như `User-Agent` và `Accept-Language`.\n\nServer xử lý request và trả về một **response**: status code (200 OK, 301 Redirect, 404 Not Found, 500 Server Error), các response header và body. Metric quan trọng đầu tiên ở đây là **TTFB (Time To First Byte)**. Theo nghĩa hẹp, nó là `responseStart − requestStart`: một round trip mạng cộng với thời gian server xử lý (query database, render template). Định nghĩa của web.dev / CrUX thì đo từ lúc bắt đầu điều hướng, nên còn tính cả redirect, DNS, TCP và TLS. Hướng dẫn của Google coi ≤ 800ms (tính theo điều hướng) là \"tốt\"; TTFB là chỉ số chẩn đoán, không phải một trong ba Core Web Vitals.\n\nTrong lúc server còn đang xử lý, nó có thể gửi một response tạm thời **`103 Early Hints`** liệt kê các header `Link: rel=preload` / `preconnect`, để trình duyệt bắt đầu tải CSS và font trước khi response `200` thật tới. (HTTP/2 Server Push, ý tưởng cũ hơn, đã bị gỡ khỏi Chrome năm 2022.)\n\nBody của response cho một trang HTML được **stream** — trình duyệt không đợi nhận đủ cả tài liệu. Ngay khi những chunk HTML đầu tiên tới, parser đã bắt đầu làm việc. Đó là lý do đặt nội dung quan trọng sớm trong tài liệu HTML lại có ích: trình duyệt có thể bắt đầu render trước khi tải xong toàn bộ tài liệu.\n\n**HTTP/1.1, HTTP/2 và HTTP/3** ảnh hưởng đáng kể tới cách các resource được tải sau HTML ban đầu:\n- HTTP/1.1 chỉ cho phép một request đang chạy trên mỗi kết nối (pipelining có trên giấy nhưng trình duyệt chưa bao giờ bật). Trình duyệt lách bằng cách mở tối đa sáu kết nối TCP song song cho mỗi origin.\n- HTTP/2 multiplex mọi request trên một kết nối TCP bằng các **stream đóng khung nhị phân (binary-framed)**. Mỗi resource có stream riêng với cửa sổ flow-control độc lập. Nhờ vậy giới hạn sáu kết nối nhân tạo và chi phí của nhiều lần TCP handshake đều biến mất.\n- HTTP/3 chạy trên **QUIC** (một giao thức transport dựa trên UDP, được thiết kế cùng với TLS 1.3). QUIC loại bỏ head-of-line blocking của TCP ở tầng transport — với HTTP/2, chỉ một gói TCP bị rơi là mọi stream đều bị đứng; với HTTP/3, chỉ stream QUIC bị ảnh hưởng mới phải dừng.\n\nMột tối ưu từng rất phổ biến — **domain sharding** (rải resource ra `cdn1.example.com`, `cdn2.example.com`, v.v.) — giúp có hơn sáu kết nối song song trên HTTP/1.1. Nhưng với HTTP/2, domain sharding lại gây hại thực sự: nó phá multiplexing vì chia stream ra nhiều kết nối, và khiến server không ưu tiên resource một cách tối ưu được."
+    },
+    {
+      "type": "diagram",
+      "caption": "Sự tiến hóa của các phiên bản HTTP. Multiplexing của HTTP/2 khiến các mẹo connection pooling không còn cần thiết. HTTP/3 loại bỏ head-of-line blocking ở tầng transport."
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 6–8: Parse HTML, CSS và JavaScript",
+      "content": "Khi byte từ mạng tới, **HTML parser** của trình duyệt bắt đầu tách luồng dữ liệu thành token — tag, attribute, text node và comment — rồi dựng nên **DOM (Document Object Model)**, một tree gồm các node biểu diễn cấu trúc tài liệu. DOM là bản biểu diễn sống của trang trong bộ nhớ, và JavaScript tương tác với chính nó.\n\nHTML parser có tính **incremental và chịu lỗi tốt**. Khác với parser XML sẽ thất bại khi gặp lỗi cú pháp, parser HTML tuân theo thuật toán parse của HTML5, vốn quy định chính xác cách xử lý markup sai — nên kể cả HTML lộn xộn cũng cho ra một DOM có thể đoán trước. Parser còn chạy song song một **speculative preload scanner**: trong lúc parser chính bị chặn để chờ một script tải xong và chạy, preload scanner nhìn trước luồng HTML để phát hiện và bắt đầu tải CSS, script và ảnh trước khi chúng được parse chính thức. Khả năng nhìn trước này là một lý do khiến việc đặt `<script>` ở cuối `<body>` từng ít quan trọng hơn developer tưởng — preload scanner vẫn tìm ra các resource phía sau bất kể thế nào.\n\nKhi parser gặp `<link rel=\"stylesheet\">`, nó giao URL đó cho tầng mạng và tiếp tục parse HTML — nhưng nó **không thể dựng render tree** cho tới khi CSSOM hoàn tất. Lý do: các thuộc tính CSS có thể ghi đè nhau theo thứ tự cascade, và trình duyệt phải biết style tính toán cuối cùng của mọi phần tử thì mới layout được. Vì vậy CSS là **render-blocking** nhưng không **parser-blocking** (HTML parser vẫn chạy tiếp). Có một ngoại lệ quan trọng: một `<script>` kiểu cổ điển đứng *sau* một stylesheet sẽ không chạy cho tới khi stylesheet đó tải xong (vì script có thể đọc computed style). Nên trên thực tế, CSS trong `<head>` cũng làm chậm mọi script đồng bộ theo sau nó — và do đó làm chậm cả parser.\n\nKhi parser gặp một thẻ `<script>` trơn (không có `defer` hay `async`), nó vừa **parser-blocking** vừa **render-blocking**: trình duyệt phải dừng lại, chờ script tải xong, chạy nó đồng bộ trên main thread, rồi mới parse tiếp. Đây là lý do lịch sử khiến developer đặt thẻ `<script>` ngay trước `</body>` — tới lúc đó toàn bộ HTML đã được parse xong.\n\n**CSS parser** dựng nên **CSSOM (CSS Object Model)** — một tree các quy tắc style đã được tính specificity và giải quyết cascade. Giống DOM, CSSOM là một đối tượng sống mà JavaScript truy cập được qua `document.styleSheets`. Muốn dựng CSSOM thì mọi file CSS phải được tải và parse xong hoàn toàn; chỉ một stylesheet chậm cũng có thể làm chậm cả render tree.\n\n**JavaScript engine** (V8 trong Chrome/Edge, SpiderMonkey trong Firefox, JavaScriptCore trong Safari) biên dịch và chạy JS trên main thread. Các engine hiện đại dùng **JIT (Just-In-Time) compilation** — chúng thông dịch code trước, xác định những đường chạy nóng (hot path), rồi biên dịch lại các đường đó thành mã máy native được tối ưu cho các kiểu dữ liệu đã quan sát được. V8 dùng pipeline nhiều tầng: Ignition (interpreter) → Sparkplug (baseline JIT) → Maglev → Turbofan (optimizing JIT). Với các hàm nóng, tầng tối ưu có thể nhanh hơn interpreter 10–100 lần."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một script parser-blocking làm HTML parser dừng lại. Lưu ý rằng parse CSS chạy song song — nhưng việc dựng render tree phải chờ cả DOM lẫn CSSOM."
+    },
+    {
+      "type": "explanation",
+      "title": "Chiến lược tải script: defer, async và module",
+      "content": "Các attribute `defer` và `async` trên thẻ `<script>` thay đổi tận gốc cách việc tải script tương tác với việc parse HTML:\n\n**Không có attribute (mặc định)**: HTML parser dừng ngay khi gặp thẻ. Trình duyệt tải script một cách đồng bộ, chạy nó, rồi mới parse tiếp. Script truy cập được mọi DOM node được định nghĩa trước nó trong HTML. Các script chạy theo đúng thứ tự trong tài liệu.\n\n**`defer`**: Trình duyệt bắt đầu tải script ngay lập tức, song song với việc parse HTML. Việc chạy script được hoãn tới khi HTML parser dựng xong DOM (ngay trước khi `DOMContentLoaded` được kích hoạt). Các script `defer` chạy theo thứ tự trong tài liệu, kể cả khi script thứ hai tải xong trước script thứ nhất. Đây là lựa chọn đúng cho gần như mọi script ứng dụng có tương tác với DOM.\n\n**`async`**: Giống `defer`, việc tải bắt đầu ngay và chạy song song. Khác `defer`, script chạy ngay khi tải xong — có thể trước hoặc sau khi parse HTML xong, và theo bất kỳ thứ tự nào so với các script `async` khác. Parser vẫn bị chặn trong lúc script chạy, nhưng chỉ trong khoảnh khắc ngắn script thực thi. Phù hợp nhất cho các script thực sự độc lập như analytics hay công cụ A/B testing, không phụ thuộc vào script khác hay cấu trúc DOM.\n\n**`type=\"module\"`**: ES module mặc định được defer (chúng hành xử như `defer`). Module script còn có scope riêng — các khai báo `var` ở top-level không rò ra `window`. Chúng hỗ trợ câu lệnh `import` cho các phụ thuộc tĩnh.\n\nQuy tắc thực tế: **dùng `defer` cho mọi thứ chạm vào DOM, `async` cho các script kiểu analytics thực sự độc lập, và `type=\"module\"` cho các entry point ES module hiện đại**. Tránh `<script>` trơn trong `<head>`, trừ các script inline quan trọng.\n\n**Hint `modulepreload`** là một kỹ thuật hiệu năng mới hơn: `<link rel=\"modulepreload\" href=\"/app.js\">` bảo trình duyệt tải, parse và biên dịch một module (và cả các phụ thuộc của nó, nếu có module graph) trước khi gặp thẻ `<script type=\"module\">`. Việc này có thể giảm đáng kể Time to Interactive cho các ứng dụng dùng nhiều module."
+    },
+    {
+      "type": "code_example",
+      "explanation": "API `PerformanceNavigationTiming` (truy cập qua `performance.getEntriesByType('navigation')[0]`) cung cấp timestamp chính xác cho từng giai đoạn của pipeline tải trang. Lấy hiệu của từng cặp timestamp, bạn sẽ có riêng thời gian của DNS, TCP, TLS, TTFB, parse DOM và load event. API `PerformanceObserver` là cách hiện đại để thu thập Core Web Vitals (LCP, CLS, INP) từ session của người dùng thật — hãy đăng ký với `type` + `buffered: true` để không bị mất những entry đã xảy ra trước khi script của bạn được tải.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 9: Dựng render tree",
+      "content": "Khi cả DOM và CSSOM đã hoàn tất, trình duyệt dựng **Render Tree** — một tree mới chỉ chứa những node thực sự hiển thị trên màn hình. Render tree được tạo bằng cách duyệt DOM và gắn computed style từ CSSOM vào từng node.\n\nNhững điểm phân biệt quan trọng khi dựng render tree:\n- Node có `display: none` bị **loại hoàn toàn** khỏi render tree (không chiếm chỗ và không được vẽ)\n- Node có `visibility: hidden` **vẫn có mặt** trong render tree (vẫn chiếm chỗ, chỉ là không được vẽ)\n- Các pseudo-element như `::before` và `::after` được **thêm vào** render tree dù chúng không tồn tại trong DOM\n- Các phần tử bên trong `<head>` (script, style, meta) bị loại ra\n\nMỗi node hiển thị trong render tree trở thành một **render object** (trong source của Blink/Chrome gọi là `LayoutObject`), chứa: computed style của node đó, một reference tới DOM node của nó, và thông tin hình học sẽ được điền vào trong bước Layout.\n\nRender tree đi thẳng vào bước layout, vốn duyệt tree theo kiểu đệ quy: trong normal flow, phần tử cha truyền chiều rộng khả dụng *xuống* cho các con, còn chiều cao kết quả của các con thì đi ngược *lên* để xác định kích thước của cha. Vì một thay đổi nằm sâu trong tree có thể lan ngược qua mọi tổ tiên và sang cả các anh em, DOM lớn và lồng sâu khiến mỗi lượt layout tốn kém hơn.\n\n(Các engine hiện đại không còn dựng một đối tượng \"render tree\" theo đúng nghĩa đen nữa — ví dụ Blink có một layout tree cùng các cấu trúc dữ liệu riêng cho paint và compositing — nhưng khái niệm \"DOM + computed style → các box sẽ được layout\" thì vẫn hoàn toàn đúng. Bước gắn computed style được gọi là **Style** hoặc **Recalculate Style** trong DevTools.)"
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 10: Layout — tính hình học chính xác",
+      "content": "**Layout** (trước đây Firefox gọi là **Reflow**) là giai đoạn trình duyệt tính chính xác vị trí và kích thước của mọi phần tử trong render tree. Đầu vào gồm: kích thước viewport, các thuộc tính box model của CSS (width, height, padding, border, margin) và cơ chế định vị (flow, flex, grid, absolute, sticky).\n\nLayout là một trong những bước tốn tính toán nhất. Chỉ một thay đổi thuộc tính CSS ảnh hưởng tới hình học — đổi `width`, thêm `padding`, bật tắt `display` — cũng có thể kích hoạt một **reflow** làm mất hiệu lực và phải tính lại những phần lớn của layout tree. **Layout thrashing** xảy ra khi JavaScript luân phiên đọc rồi ghi các thuộc tính ảnh hưởng tới layout trong một vòng lặp, buộc trình duyệt phải tính lại layout một cách đồng bộ ở mỗi lần ghi:\n\n```js\n// BAD: forces reflow on every iteration\nfor (const el of elements) {\n  el.style.width = el.offsetWidth + 10 + 'px'; // read offsetWidth → force reflow, then write\n}\n\n// GOOD: batch reads first, then writes\nconst widths = elements.map(el => el.offsetWidth); // one reflow\nfor (let i = 0; i < elements.length; i++) {\n  elements[i].style.width = widths[i] + 10 + 'px'; // writes only\n}\n```\n\nCác trình duyệt hiện đại triển khai **incremental layout**: chỉ những subtree bị đánh dấu dirty mới được layout lại. Nhưng nếu phần tử gốc thay đổi, toàn bộ tài liệu sẽ bị layout lại. **Flexbox** và **CSS Grid** có thuật toán layout riêng, nhìn chung hiệu quả, dù một flex container có nhiều item thay đổi liên tục vẫn có thể tốn kém.\n\n**Intrinsic sizing** (dùng `width: fit-content`, `min-content`, `max-content`) và **aspect-ratio** giúp trình duyệt giữ chỗ cho phần tử trước khi nội dung của nó tải xong, giảm layout shift — yếu tố then chốt của Core Web Vital **Cumulative Layout Shift (CLS)**."
+    },
+    {
+      "type": "explanation",
+      "title": "Bước 11–12: Paint và compositing",
+      "content": "**Paint** (rasterization) biến hình học của render tree thành dữ liệu pixel thực sự. Trình duyệt duyệt render tree và gọi các lệnh vẽ: tô hình chữ nhật, vẽ chữ, vẽ ảnh, vẽ viền. Nói chính xác thì bước **Paint** ghi các lệnh này vào *display list*; việc biến chúng thành pixel (**rasterization**) diễn ra sau đó, theo từng tile, trên các raster worker thread và thường là trên GPU. Chrome dùng **Skia** để vẽ; Firefox render bằng **WebRender**, một renderer chạy trên GPU.\n\nKhông phải phần tử nào cũng được vẽ trên cùng một layer. Trình duyệt nâng một số phần tử lên **compositing layer** riêng (GPU layer). Chúng không giống với *stacking context* của CSS — mọi composited layer đều là một stacking context, nhưng phần lớn stacking context không phải là layer riêng. Các điều kiện kích hoạt nâng layer điển hình (khác nhau tùy engine) là khi phần tử:\n- Có `will-change: transform` hoặc `will-change: opacity`\n- Dùng `transform: translateZ(0)` hoặc `transform: translate3d(0,0,0)` (mẹo kinh điển để ép lên GPU)\n- Là `<video>`, `<canvas>` hoặc `<iframe>`\n- Có `position: fixed` hoặc `position: sticky` (thường là vậy, để có thể scroll trên compositor)\n- Có CSS filter, mask hoặc clip-path\n\nMỗi compositing layer được rasterize độc lập và lưu trong bộ nhớ GPU dưới dạng **texture**. Sau đó **Compositor thread** (chạy tách biệt với main thread) ghép các texture này thành frame cuối cùng — áp dụng ma trận transform và giá trị opacity hoàn toàn trên GPU, không cần đến main thread.\n\n**Đây là điểm mấu chốt đằng sau hiệu năng animation CSS**: `transform` và `opacity` (và ở một số engine là cả `filter`) là những thuộc tính có thể animate mà không kích hoạt layout hay paint — chúng chỉ ảnh hưởng tới bước compositing. Animate `left`/`top` hay `width`/`height` thì cần layout, vốn chạy trên main thread và có thể làm rớt frame. Còn animate `transform: translateX()` thì chạy hoàn toàn trên compositor thread và vẫn mượt kể cả khi main thread đang bận chạy JavaScript.\n\nChuỗi đầy đủ cho mỗi frame của một animation là:\n1. JavaScript chạy (input handler, các callback của `requestAnimationFrame`)\n2. Tính lại style\n3. Layout (chỉ khi hình học thay đổi)\n4. Paint (chỉ khi diện mạo thay đổi)\n5. Composite: GPU ghép các texture thành frame\n\nĐể đạt 60fps, toàn bộ chuỗi này phải xong trong **16.67ms** mỗi frame. Ở 120Hz (màn hình ProMotion, nhiều thiết bị Android), ngân sách thu lại còn 8.33ms."
+    },
+    {
+      "type": "diagram",
+      "caption": "Trình duyệt bỏ qua các bước tốn kém khi có thể. Chỉ animate transform/opacity thì bỏ qua hẳn Layout và Paint, đi thẳng tới Composite — con đường rẻ nhất."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Layout thrashing là một trong những nguyên nhân phổ biến nhất gây giật khi scroll và animation chậm trên các trang nặng JavaScript. Đọc một thuộc tính ảnh hưởng tới layout như `offsetWidth`, `getBoundingClientRect()` hay `scrollTop` sau khi vừa ghi style sẽ buộc trình duyệt tính lại layout một cách đồng bộ để trả về giá trị chính xác. Cách sửa luôn giống nhau: gom mọi thao tác đọc lại trước mọi thao tác ghi. `requestAnimationFrame` đảm bảo các cập nhật hiển thị của bạn được đồng bộ với vòng lặp render của trình duyệt.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Critical rendering path và cách tối ưu",
+      "content": "**Critical Rendering Path (CRP)** là chuỗi bước tối thiểu cần có để render frame hiển thị đầu tiên: HTML → DOM, CSS → CSSOM, DOM + CSSOM → Render Tree → Layout → Paint → Composite. Bất kỳ resource nào phải được tải và xử lý xong thì chuỗi này mới hoàn tất được gọi là **critical resource**.\n\nTối ưu CRP nghĩa là:\n\n**1. Giảm thiểu CSS render-blocking.** CSS trong `<head>` là render-blocking theo thiết kế (để tránh FOUC — Flash of Unstyled Content, tức trang chớp lên khi chưa có style). Nhưng trước lần paint đầu tiên, bạn chỉ cần CSS cho phần nội dung above-the-fold. Hãy xác định critical CSS (những gì thấy được mà không cần scroll) và inline nó trong `<style>` ở `<head>`. Phần còn lại thì tải bất đồng bộ:\n\n```html\n<style>/* critical above-the-fold CSS here */</style>\n<link rel=\"preload\" href=\"/styles.css\" as=\"style\" onload=\"this.rel='stylesheet'\">\n```\n\n**2. Loại bỏ JavaScript parser-blocking.** Mỗi `<script>` trơn trong `<head>` là một độ trễ chắc chắn. Dùng `defer` cho mọi script phụ thuộc DOM. Dùng `async` cho analytics. Đừng bao giờ dùng `document.write()` — nó chèn markup đồng bộ vào parser, và một script được chèn theo cách này sẽ chặn việc parse trong lúc tải (Chrome thậm chí từ chối tải những script như vậy trên kết nối chậm).\n\n**3. Giảm số lượng và kích thước critical resource.** Ít byte phải truyền hơn = CRP nhanh hơn. Minify CSS và JS, nén bằng Brotli hoặc gzip, dùng HTTP/2 để bỏ chi phí của nhiều lần handshake.\n\n**4. Dùng resource hint một cách có chiến lược:**\n- `<link rel=\"dns-prefetch\" href=\"//cdn.example.com\">` — làm nóng DNS cho origin bên thứ ba (rẻ, ít rủi ro)\n- `<link rel=\"preconnect\" href=\"//api.example.com\">` — làm nóng DNS + TCP + TLS (tốn hơn, chỉ dùng cho origin sắp được dùng)\n- `<link rel=\"preload\" as=\"font\" href=\"/font.woff2\" crossorigin>` — ưu tiên tải một resource cụ thể trước khi parser phát hiện ra nó\n- `<link rel=\"prefetch\" href=\"/next-page.html\">` — tải với độ ưu tiên thấp một resource có khả năng sắp cần (lần điều hướng tiếp theo); **Speculation Rules API** của Chromium (`<script type=\"speculationrules\">`) còn có thể prerender trước trang có khả năng được mở tiếp, cho điều hướng gần như tức thì\n- `<img fetchpriority=\"high\">` cho ảnh LCP (và chỉ dùng `loading=\"lazy\"` cho ảnh nằm *dưới* fold) — cho trình duyệt biết ảnh nào quan trọng nhất\n\n**5. Hiểu First Contentful Paint (FCP) khác Largest Contentful Paint (LCP) thế nào.** FCP đánh dấu lúc có nội dung bất kỳ xuất hiện lần đầu. LCP đánh dấu lúc phần tử hiển thị lớn nhất (thường là ảnh hero hoặc tiêu đề) đã render xong. Core Web Vitals của Google dùng LCP làm tín hiệu chính về hiệu năng tải — mục tiêu dưới 2.5 giây. LCP chậm gần như luôn do: server chậm (TTFB), CSS/JS render-blocking, resource tải chậm (ảnh chưa tối ưu, không có CDN), hoặc client-side rendering khiến nội dung phải đợi JavaScript chạy xong."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mẹo `media='print'` giúp tải stylesheet mà không chặn render: trình duyệt vẫn tải nó (vì trang có thể được in) nhưng không chặn render, rồi handler `onload` chuyển `media` sang `all` để áp dụng. Pattern này có từ trước khi có `<link rel=preload as=style>` nhưng vẫn chạy được ở mọi nơi. Với dự án hiện đại, hãy ưu tiên cách dùng preload.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Sơ lược lịch sử các browser engine**: Bức tranh browser engine đã thu gọn lại đáng kể. Những năm 1990, Internet Explorer dùng Trident còn Netscape Navigator chạy engine riêng; người kế nhiệm mã nguồn mở của Netscape là Mozilla đã xây **Gecko** (phát hành từ năm 2000, sau này dùng trong Firefox). Apple fork KHTML (từ dự án KDE) để tạo WebKit cho Safari (2003), rồi Google fork WebKit để tạo Blink cho Chrome (2013); Microsoft chuyển Edge sang Blink năm 2020. Ngày nay, Blink (Chrome, Edge, Opera, Samsung Internet — khoảng ba phần tư lượng sử dụng web), WebKit (Safari — dưới một phần năm) và Gecko (Firefox — vài phần trăm) là ba engine còn hoạt động (tỷ lệ gần đúng). Trên iOS, mọi trình duyệt từng bắt buộc phải dùng WebKit cho tới khi Digital Markets Act của EU mở cửa cho các engine khác ở đó vào năm 2024. Cả ba đều triển khai cùng các chuẩn web, nhưng khác nhau ở chi tiết triển khai, đặc tính hiệu năng và tốc độ áp dụng tính năng mới. Cần nhớ rằng Chrome và Edge dùng chung Blink: một bug hay hành vi ở bên này thường cũng có ở bên kia."
+    },
+    {
+      "type": "callout",
+      "content": "**Các câu hỏi interview thường gặp và những hiểu lầm cần nắm đúng:**\n\n- `DOMContentLoaded` được kích hoạt khi HTML đã parse xong và các script `defer` đã chạy — không phải khi ảnh tải xong. Dùng nó để khởi tạo UI.\n- `window.load` được kích hoạt khi mọi resource (kể cả ảnh) đã tải xong. Thường là quá muộn cho phần lớn việc khởi tạo.\n- CSS là render-blocking, không phải parser-blocking. HTML parser vẫn chạy tiếp trong lúc CSS đang tải.\n- `<script>` trơn vừa parser-blocking VỪA render-blocking.\n- `transform` và `opacity` là những thuộc tính nên dùng để bỏ qua Layout và Paint khi animate (chỉ chạy trên compositor); hầu hết thuộc tính khác kích hoạt ít nhất một trong hai bước đó.\n- Thứ tự của rendering pipeline là **Style → Layout → Paint → Composite**, và mỗi thay đổi chỉ chạy lại từ giai đoạn sớm nhất mà nó ảnh hưởng.\n- Multiplexing của HTTP/2 khiến domain sharding trở nên *có hại* — nó phá multiplexing và tạo ra chi phí TLS không cần thiết.\n- LCP, CLS và INP là ba Core Web Vitals (INP thay FID từ tháng 3/2024; năm 2026 vẫn là bộ này). TTFB và FCP là chỉ số chẩn đoán, không phải Core Web Vitals. Hãy nhớ các ngưỡng: LCP < 2.5s, CLS < 0.1, INP < 200ms."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Toàn bộ pipeline của trình duyệt** gồm: tra cứu DNS → TCP handshake → thương lượng TLS → HTTP request → response từ server → parse HTML (DOM) → parse CSS (CSSOM) → chạy JavaScript → tính style / render tree → layout → paint → composite. Hiểu chuỗi này là giải thích được mọi tối ưu hiệu năng của trình duyệt.",
+        "**Render-blocking và parser-blocking**: CSS là render-blocking (chặn việc dựng render tree) nhưng không parser-blocking (HTML parser vẫn chạy tiếp). `<script>` trơn thì là cả hai. Dùng `defer` cho script phụ thuộc DOM, `async` cho script độc lập — cả hai đều tải song song với việc parse.",
+        "**DNS, TCP và TLS cộng thêm 100–400ms ở lần truy cập đầu** tới origin mới. Các resource hint `preconnect` và `dns-prefetch` làm nóng những bước này ngay trong lúc parse HTML, nên kết nối đã sẵn sàng khi resource thực sự được request.",
+        "**Multiplexing của HTTP/2** gửi mọi request trên một kết nối TCP bằng các stream. Điều này khiến mẹo domain sharding cũ của HTTP/1.1 trở nên có hại thực sự dưới HTTP/2, còn HTTP/3/QUIC loại bỏ hoàn toàn head-of-line blocking ở tầng transport.",
+        "**`transform` và `opacity` là những thuộc tính CSS duy nhất animate được mà không kích hoạt layout hay paint** — chúng chỉ ảnh hưởng tới bước compositor, vốn chạy trên compositor thread riêng (và GPU). Mọi thuộc tính animate được khác đều kích hoạt layout (hình học) hoặc paint (hiển thị) ở mỗi frame.",
+        "**Layout thrashing** (đọc và ghi DOM xen kẽ) buộc trình duyệt reflow đồng bộ. Luôn gom mọi thao tác đọc lại trước mọi thao tác ghi. Dùng `requestAnimationFrame` để lên lịch cập nhật hiển thị đồng bộ với vòng lặp render của trình duyệt.",
+        "**Performance API** (`PerformanceNavigationTiming`, `PerformanceObserver`) cung cấp timestamp chính xác cho DNS, TCP, TLS, TTFB, FCP, LCP, CLS và INP — hãy dùng chúng để đo trên người dùng thật. Mục tiêu Core Web Vital: LCP < 2.5s, CLS < 0.1, INP < 200ms."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Event nào của trình duyệt được kích hoạt khi tài liệu HTML đã parse xong hoàn toàn và mọi script `defer` đã chạy, nhưng TRƯỚC khi ảnh và stylesheet tải xong?",
+      "options": [
+        "window.onload",
+        "readystatechange với trạng thái 'loading'",
+        "DOMContentLoaded",
+        "visibilitychange"
+      ],
+      "explanation": "DOMContentLoaded được kích hoạt khi HTML parser dựng xong DOM và mọi script được defer đã chạy. window.onload được kích hoạt muộn hơn nhiều, chỉ sau khi mọi sub-resource gồm ảnh, stylesheet và iframe đã tải xong. DOMContentLoaded là event phù hợp cho code khởi tạo DOM."
+    },
+    {
+      "id": "q2",
+      "question": "Một thẻ `<script src=\"app.js\">` (không có attribute nào) trong `<head>` sẽ khiến trình duyệt:",
+      "options": [
+        "Tạm dừng parse HTML, tải script, chạy nó, rồi parse tiếp",
+        "Tải script song song và chạy nó sau khi DOM được dựng xong hoàn toàn",
+        "Hoãn việc chạy cho tới khi CSS tải xong hoàn toàn",
+        "Chạy script trong một Web Worker để tránh chặn"
+      ],
+      "explanation": "Thẻ script trơn không có attribute là parser-blocking: HTML parser dừng ngay khi gặp thẻ. Trình duyệt tải script, chạy nó đồng bộ trên main thread, rồi parse tiếp. Dùng `defer` để tải song song và chạy sau khi parse xong, vẫn giữ thứ tự trong tài liệu."
+    },
+    {
+      "id": "q3",
+      "question": "Phát biểu nào sau đây là ĐÚNG về cách stylesheet CSS ảnh hưởng tới pipeline của trình duyệt?",
+      "options": [
+        "CSS vừa parser-blocking vừa render-blocking",
+        "CSS là parser-blocking nhưng không render-blocking",
+        "CSS không chặn gì cả; trình duyệt render mà không cần đợi nó",
+        "CSS là render-blocking nhưng KHÔNG parser-blocking — HTML parser vẫn chạy tiếp trong lúc CSS đang tải"
+      ],
+      "explanation": "CSS trong <head> là render-blocking (trình duyệt không thể dựng render tree khi chưa có CSSOM) nhưng không parser-blocking (HTML parser vẫn tiếp tục dựng DOM trong lúc CSS đang tải). Thẻ <script> trơn thì vừa parser-blocking vừa render-blocking — đây là điểm khác biệt quan trọng."
+    },
+    {
+      "id": "q4",
+      "question": "TTFB (Time To First Byte) là gì, và TTFB cao thường cho thấy điều gì?",
+      "options": [
+        "Thời gian từ lúc bắt đầu điều hướng đến byte đầu tiên của response DNS; cho thấy DNS chậm",
+        "Thời gian từ lúc gửi HTTP request đến lúc nhận được byte đầu tiên của response; cho thấy server xử lý chậm hoặc latency mạng cao",
+        "Thời gian từ lúc tải trang đến lần chạy JavaScript đầu tiên; cho thấy script nặng",
+        "Thời gian từ lúc bắt đầu điều hướng đến byte CSS đầu tiên; cho thấy server stylesheet chậm"
+      ],
+      "explanation": "Trong Navigation Timing API, TTFB được đo bằng responseStart trừ requestStart. Nó bao gồm thời gian round-trip cộng với thời gian xử lý phía server (query database, render template). Hướng dẫn web.dev của Google coi TTFB từ 800ms trở xuống (đo từ lúc bắt đầu điều hướng, tức là có tính cả DNS/TCP/TLS) là \"tốt\". TTFB cao thường nghĩa là origin server chậm, không có CDN, hoặc query database tốn kém."
+    },
+    {
+      "id": "q5",
+      "question": "Attribute tải script nào đảm bảo script được tải song song với việc parse HTML VÀ chạy theo thứ tự trong tài liệu sau khi DOM được dựng xong hoàn toàn?",
+      "options": [
+        "defer",
+        "async",
+        "crossorigin",
+        "type='text/javascript'"
+      ],
+      "explanation": "defer tải script song song với việc parse HTML và chạy chúng theo thứ tự trong tài liệu ngay trước DOMContentLoaded, sau khi DOM đã hoàn tất. async cũng tải song song nhưng chạy ngay khi tải xong, theo thứ tự bất kỳ — không phù hợp với các script phụ thuộc lẫn nhau hoặc phụ thuộc vào cấu trúc DOM."
+    },
+    {
+      "id": "q6",
+      "question": "Vì sao animate `transform: translateX()` hiệu quả hơn animate `left` khi di chuyển một phần tử?",
+      "options": [
+        "transform tự động dùng tăng tốc phần cứng; left không hỗ trợ tăng tốc",
+        "Animation với left cần JavaScript; animation với transform dùng CSS thuần",
+        "transform chỉ cần bước Composite (compositor thread / GPU); thay đổi left kích hoạt Layout và Paint trên main thread ở mỗi frame",
+        "Giá trị transform được trình duyệt cache; giá trị left được tính lại mỗi frame"
+      ],
+      "explanation": "transform và opacity là những thuộc tính CSS duy nhất bỏ qua Layout và Paint khi animate — chúng chỉ ảnh hưởng tới bước Compositor, vốn chạy trên compositor thread (cùng GPU), độc lập với main thread. Thay đổi left hoặc top kích hoạt Layout (tính lại hình học) ở mỗi frame, việc này phải chạy trên main thread và tranh tài nguyên với việc chạy JavaScript."
+    },
+    {
+      "id": "q7",
+      "question": "Multiplexing của HTTP/2 mang lại lợi thế chính nào so với HTTP/1.1, và nó khiến cách làm nào trở nên phản tác dụng?",
+      "options": [
+        "HTTP/2 mặc định thêm mã hóa TLS; nó khiến các kết nối HTTP trở nên phản tác dụng",
+        "HTTP/2 giới thiệu server push, khiến cache phía client trở nên phản tác dụng",
+        "HTTP/2 nén body của response, khiến nén gzip trở nên phản tác dụng",
+        "HTTP/2 multiplex mọi request trên một kết nối TCP bằng các stream, khiến domain sharding trở nên phản tác dụng"
+      ],
+      "explanation": "HTTP/2 multiplex nhiều stream request/response trên một kết nối TCP duy nhất bằng binary framing. Với HTTP/1.1, trình duyệt mở 6 kết nối song song cho mỗi origin để lách giới hạn một request mỗi kết nối. Domain sharding (rải resource ra nhiều subdomain) nâng con số này lên 12+ kết nối. Với HTTP/2, domain sharding phá multiplexing và thêm chi phí TLS không cần thiết."
+    },
+    {
+      "id": "q8",
+      "question": "`<link rel=\"preconnect\" href=\"https://api.example.com\">` làm gì?",
+      "options": [
+        "Tải và cache ngay lập tức resource ở URL đó",
+        "Thực hiện tra cứu DNS, TCP handshake và thương lượng TLS tới origin đó trước khi bất kỳ resource nào từ nó được request",
+        "Bảo trình duyệt chỉ tải resource đó khi người dùng scroll tới nó",
+        "Prefetch trang tiếp theo mà người dùng có khả năng sẽ mở"
+      ],
+      "explanation": "preconnect kích hoạt trước toàn bộ quá trình thiết lập kết nối (DNS + TCP + TLS) tới một origin, làm nóng kết nối. Khi thực sự cần một resource từ origin đó, kết nối đã có sẵn, bỏ được 100-400ms latency. Hãy dùng nó cho những origin bạn biết chắc sắp cần (API server, CDN, nhà cung cấp font)."
+    },
+    {
+      "id": "q9",
+      "question": "Layout thrashing là gì, và cách đúng để tránh nó là gì?",
+      "options": [
+        "Áp dụng quá nhiều CSS transition cùng lúc; tránh bằng cách dùng will-change",
+        "Lồng quá nhiều phần tử DOM; tránh bằng cách làm phẳng DOM tree",
+        "Luân phiên đọc và ghi các thuộc tính DOM ảnh hưởng tới layout trong một vòng lặp, buộc reflow đồng bộ; tránh bằng cách gom mọi thao tác đọc lại trước khi ghi",
+        "Dùng JavaScript để đổi style thay vì dùng CSS class; tránh bằng cách dùng classList"
+      ],
+      "explanation": "Layout thrashing xảy ra khi code đọc một thuộc tính ảnh hưởng tới layout (như offsetWidth, getBoundingClientRect) sau khi vừa ghi style — trình duyệt phải layout đồng bộ để trả về giá trị chính xác. Trong vòng lặp, việc này gây ra một lần reflow cho mỗi vòng. Cách sửa: thu thập mọi số đo trước trong một lượt (một lần reflow), rồi ghi mọi thay đổi style trong lượt thứ hai."
+    },
+    {
+      "id": "q10",
+      "question": "BA chỉ số nào là Core Web Vitals của Google tính đến năm 2024, và mỗi chỉ số đo gì?",
+      "options": [
+        "LCP (hiệu năng tải của phần tử lớn nhất), CLS (độ ổn định hiển thị/layout shift), INP (độ phản hồi khi tương tác)",
+        "FCP (nội dung đầu tiên), TTI (time to interactive), TBT (total blocking time)",
+        "TTFB (thời gian phản hồi của server), FID (first input delay), Speed Index",
+        "Thời gian DNS, thời gian TCP và thời gian TLS"
+      ],
+      "explanation": "Ba Core Web Vitals là: LCP (Largest Contentful Paint, mục tiêu < 2.5s — đo lúc nội dung chính tải xong), CLS (Cumulative Layout Shift, mục tiêu < 0.1 — đo các layout shift bất ngờ) và INP (Interaction to Next Paint, mục tiêu < 200ms — đo độ phản hồi với thao tác của người dùng). FID đã bị khai tử vào tháng 3/2024 và được thay bằng INP."
+    }
+  ]
+}

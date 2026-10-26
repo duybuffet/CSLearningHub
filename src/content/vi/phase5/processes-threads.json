@@ -1,0 +1,238 @@
+{
+  "sourceHash": "ca5a4c2cdb78",
+  "title": "Process & Thread",
+  "tagline": "Hệ điều hành xoay xở với hàng triệu tác vụ cùng lúc như thế nào",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mỗi chương trình bạn chạy đều trở thành một **process** — một đơn vị thực thi \"sống\" thực sự, có bộ nhớ riêng, file handle riêng, các kết nối mạng đang mở và trạng thái CPU riêng. Khi bạn double-click vào biểu tượng trình duyệt, hệ điều hành không chỉ nạp code vào RAM rồi chạy; nó điều phối cả một công trình phức tạp: cấp phát không gian địa chỉ ảo, ánh xạ file thực thi vào bộ nhớ, tạo main thread, khởi tạo C runtime, và cuối cùng trao quyền điều khiển cho hàm `main()` của bạn. Process là đơn vị nền tảng của hệ điều hành cho **cô lập và quản lý tài nguyên**. Nếu một process crash và làm hỏng heap của chính nó, các process khác vẫn nguyên vẹn — vì mỗi process sống trong khu vườn có tường bao riêng.\n\nNhưng tạo một process mới thì tốn kém. Tạo process nghĩa là dựng một không gian địa chỉ mới cùng page table mới và nhân bản file-descriptor table — và mỗi lần chuyển đổi giữa các process sau đó đều thay đổi page table đang hoạt động, khiến cache và TLB \"nguội\" đối với process vừa vào. Để có concurrency chi tiết bên trong một chương trình, các hệ thống hiện đại dùng **thread** — các đơn vị thực thi nhẹ dùng chung một không gian địa chỉ. Thread cho phép một web server xử lý hàng nghìn request đồng thời trong cùng một process, hay cho một trò chơi điện tử chạy vật lý, rendering và âm thanh song song trên các core khác nhau.\n\nProcess và thread không chỉ là lý thuyết hệ điều hành — chúng giải thích trực tiếp vì sao Node.js được cấu trúc như hiện nay, vì sao Concurrent Mode của React tồn tại, vì sao GIL của Python gây tranh cãi, vì sao server của bạn có worker pool, và vì sao race condition nổi tiếng là khó debug. Chương này đi từ các nguyên lý cơ bản: về mặt kernel thì process thực sự là gì, scheduler giữ cho hàng trăm process cùng sống trên một nhúm core ra sao, điều gì xảy ra ở tầng register trong một lần context switch, và thread với process so sánh với nhau thế nào trên toàn bộ phổ cô lập, hiệu năng và an toàn.\n\nTa sẽ đi qua trọn vòng đời của cả hai abstraction, xem xét các thuật toán scheduling thật, tìm hiểu cơ chế giao tiếp giữa các process, và hiểu vì sao shared mutable state là căn nguyên của phần lớn bug concurrency — cùng những cấu trúc dữ liệu và pattern nào tồn tại để chế ngự nó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Khi một process được tạo, hệ điều hành cấp phát không gian địa chỉ ảo, ánh xạ file thực thi và tạo main thread — thread này sau đó chờ trong ready queue cho đến khi CPU scheduler đưa nó lên chạy."
+    },
+    {
+      "type": "analogy",
+      "title": "Bếp nhà hàng: phép so sánh hoàn hảo",
+      "content": "Hãy hình dung một **process** như cả một chi nhánh nhà hàng trong chuỗi. Nó có tòa nhà riêng (không gian địa chỉ ảo), thiết bị bếp riêng (bộ nhớ heap), kho thực phẩm riêng (file handle và các kết nối đang mở), và quầy thu ngân riêng (các register CPU được lưu lại khi context switch). Hai chi nhánh không dùng chung lò nướng — nếu bếp ở một chi nhánh bốc cháy, chi nhánh kia vẫn phục vụ khách bình thường. Đó là sự cô lập giữa các process.\n\nMột **thread** là một đầu bếp trong căn bếp đó. Nhiều đầu bếp dùng chung lò, tủ lạnh, bàn sơ chế và giá dao — đó là heap, code segment và file descriptor dùng chung. Họ có thể chuyền nguyên liệu cho nhau ngay lập tức mà không cần đi qua khu bốc dỡ hàng. Chính tốc độ đó là lý do thread tồn tại. Nhưng nếu một đầu bếp ẩu làm đổ khay nguyên liệu đã sơ chế trong lúc một đầu bếp khác đang thái dở, mọi thứ loạn cả lên — đó là **race condition**, và đó chính xác là lý do shared mutable state nguy hiểm.\n\nMột **context switch** giữa các thread giống như một đầu bếp lùi khỏi bếp và một người khác bước vào. Nó nhanh — chỉ cần thay vào danh sách việc riêng của đầu bếp mới (trạng thái register và stack pointer). Một **context switch giữa các process** thì giống như đóng hẳn bếp của một chi nhánh, khóa cửa lại, rồi mở bếp của một chi nhánh hoàn toàn khác — toàn bộ bản đồ bộ nhớ thay đổi, và cache CPU cùng TLB đều \"nguội\" với chi nhánh mới (nếu TLB không có entry được gắn tag thì thậm chí phải flush nó). Tốn kém hơn.\n\n**Scheduler của hệ điều hành** là quản lý bếp, người quyết định đầu bếp nào đứng bếp ngay lúc này. Có lúc họ xoay vòng đầu bếp mỗi 20 mili giây (preemption theo time slice). Có lúc một đầu bếp tự nguyện lùi ra vì đang chờ máy rửa bát chạy xong (blocking I/O). Người quản lý giữ cho ai cũng làm việc hiệu quả và bảo đảm không đầu bếp nào chiếm bếp cả ngày."
+    },
+    {
+      "type": "explanation",
+      "title": "Process là gì? Góc nhìn của kernel",
+      "content": "Từ góc nhìn của kernel, process là một cấu trúc dữ liệu gọi là **Process Control Block (PCB)** — trong Linux gọi là `task_struct`. Cấu trúc này là toàn bộ hiểu biết của hệ điều hành về một chương trình đang chạy. Nó chứa:\n\n- **PID (Process ID)**: một số nguyên duy nhất được gán lúc tạo, dùng trong mọi lời gọi hệ điều hành liên quan đến process này.\n- **Trạng thái process**: New, Ready, Running, Waiting hoặc Terminated — scheduler đọc giá trị này để quyết định làm gì với process.\n- **Program counter (PC)**: địa chỉ của lệnh kế tiếp cần thực thi — được lưu ở đây khi context switch.\n- **Các register CPU**: ảnh chụp đầy đủ của mọi register đa dụng, register cờ và trạng thái của bộ xử lý dấu phẩy động.\n- **Thông tin quản lý bộ nhớ**: con trỏ đến page table (bảng ánh xạ từ địa chỉ ảo sang các page RAM vật lý), giới hạn bộ nhớ và ranh giới các segment.\n- **Trạng thái I/O**: danh sách file descriptor đang mở, các thao tác I/O đang chờ, và những thiết bị mà process đang mở.\n- **Thông tin scheduling**: độ ưu tiên, tổng thời gian CPU đã dùng, và thời điểm time slice hiện tại hết hạn.\n- **Parent PID**: mọi process (trừ `init`, PID 1) đều có process cha — process đã gọi `fork()` để tạo ra nó.\n\nKhi hệ điều hành tạo process mới qua `fork()`, nó sao chép PCB của process cha, gán PID mới và thiết lập các page bộ nhớ copy-on-write (CoW). Ban đầu process con và cha dùng chung các page bộ nhớ vật lý; chỉ khi một trong hai ghi vào một page thì bản sao riêng mới được tạo ra. Tối ưu CoW này giúp `fork()` nhanh — bạn không thực sự sao chép hàng gigabyte RAM, chỉ sao chép các entry của page table.\n\nBước tiếp theo điển hình sau `fork()` là `exec()`, thay thế toàn bộ image bộ nhớ của process bằng một file thực thi mới. Pattern `fork-exec` này là cách Unix khởi chạy chương trình mới: `fork()` nhân bản process hiện tại, rồi `exec()` ghi đè bộ nhớ của process con bằng chương trình đích. Shell làm điều này mỗi lần bạn chạy một lệnh."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng đời đầy đủ của một process. Process dao động giữa Ready và Running cho đến khi nó block vì I/O (chuyển sang Waiting) hoặc time slice hết hạn (quay về Ready). Một process đã kết thúc vẫn lưu lại dưới dạng zombie cho đến khi process cha thu nhận exit status bằng wait()."
+    },
+    {
+      "type": "explanation",
+      "title": "Thread là gì? Stack, register và trạng thái dùng chung",
+      "content": "**Thread** là đơn vị thực thi nhỏ nhất có thể được lập lịch. Mỗi process có ít nhất một thread (main thread), nhưng có thể có nhiều. Các thread trong cùng một process dùng chung:\n\n- **Code segment** (các lệnh đã biên dịch)\n- **Heap** (các object được cấp phát động qua `malloc` / `new`)\n- **Biến toàn cục và biến static**\n- **File descriptor đang mở** và network socket\n- **Bảng signal handler**\n\nNhưng mỗi thread sở hữu riêng:\n\n- **Call stack** riêng — biến cục bộ, tham số hàm và địa chỉ trả về của mọi hàm đang nằm trên call stack\n- **Program counter** riêng — thread này đang thực thi lệnh nào ngay lúc này\n- **Ảnh chụp register** riêng — mọi register CPU, được lưu lại khi thread không chạy\n- **Thread-local storage (TLS)** riêng — một vùng nhỏ chứa dữ liệu theo từng thread, trông như biến toàn cục khi nhìn từ bên trong thread đó\n\nSự phân chia này giải thích cả sức mạnh lẫn mối nguy của thread. Dùng chung heap nghĩa là các thread có thể giao tiếp chỉ bằng cách ghi vào một biến dùng chung — không sao chép, không tốn chi phí serialization. Nhưng nó cũng có nghĩa là bất kỳ thread nào cũng có thể làm hỏng dữ liệu của thread khác nếu synchronization sai. Ngược lại, các process giao tiếp qua **inter-process communication (IPC)**: pipe, socket, các segment shared memory hoặc message queue — những cây cầu được thiết kế tường minh và do hệ điều hành kiểm soát.\n\n**User-space thread và kernel thread**: Các hệ điều hành hiện đại hiện thực thread ở tầng kernel — kernel lập lịch cho từng thread, không chỉ cho process. Các hệ thống cũ hơn dùng **thư viện thread ở user space** (green thread, coroutine) để ghép nhiều thread logic lên ít kernel thread hơn. Những ngôn ngữ như Go dùng mô hình lai: goroutine của Go nằm ở user space, nhưng Go runtime ghép chúng lên một pool kernel thread có số lượng bằng số core CPU."
+    },
+    {
+      "type": "explanation",
+      "title": "Thực tế trên Linux: task, clone(), zombie và orphan",
+      "content": "**Trên Linux, process và thread là cùng một loại object trong kernel.** Cả hai đều là *task* (`task_struct`); điểm khác biệt nằm ở chỗ chúng dùng chung những gì. `clone()` nhận các cờ như `CLONE_VM` (dùng chung không gian địa chỉ), `CLONE_FILES` (dùng chung file-descriptor table) và `CLONE_THREAD` (gia nhập cùng một thread group). `pthread_create()` gọi `clone()` với các cờ đó được bật; còn `fork()` về cơ bản là `clone()` không bật cờ nào. Đó là lý do `top -H` và `/proc/<pid>/task/` liệt kê từng thread với ID riêng (TID), trong khi `getpid()` trả về thread-group ID dùng chung cho mọi thread trong process.\n\n**Zombie và orphan** là câu hỏi nối tiếp kinh điển trong interview:\n- Khi một process kết thúc, kernel giải phóng bộ nhớ của nó nhưng giữ lại một entry nhỏ xíu (PID + exit status) cho đến khi process cha thu nhận bằng `wait()`/`waitpid()`. Trong khoảng thời gian đó nó là một **zombie** (trạng thái `Z` trong `ps`). Vài cái thì vô hại; hàng nghìn cái nghĩa là có một process cha không bao giờ dọn dẹp process con, điều rốt cuộc có thể làm cạn không gian PID.\n- Nếu process cha chết trước, process con trở thành **orphan** (mồ côi) và được gán lại cho PID 1 (hoặc một *subreaper* được chỉ định), thứ sẽ dọn dẹp nó khi nó kết thúc. Đó là lý do container cần một init process tử tế (`tini`, hoặc `docker run --init`): một ứng dụng chạy với vai trò PID 1 mà không bao giờ gọi `wait()` sẽ từ từ tích tụ zombie."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các thread dùng chung không gian địa chỉ của process nhưng mỗi thread sở hữu stack và ảnh chụp register CPU riêng. Heap được dùng chung — và vì vậy là nguồn gốc của race condition."
+    },
+    {
+      "type": "explanation",
+      "title": "Context switch: điều gì xảy ra trong CPU",
+      "content": "**Context switch** là cơ chế mà hệ điều hành dùng để tạm dừng một task và tiếp tục một task khác. Nó được kích hoạt bởi một **timer interrupt** (time slice đã hết) hoặc bởi process đang chạy tự nguyện nhường (gọi `sleep()`, `wait()`, hoặc block vì I/O). Đây là từng bước:\n\n**Bước 1 — Lưu trạng thái của task sắp rời đi**: Kernel lưu mọi register CPU — gồm program counter (đang ở đâu trong code), stack pointer (đỉnh call stack) và tất cả register đa dụng — vào PCB hoặc thread control block của task sắp rời đi.\n\n**Bước 2 — Chạy scheduler**: Thuật toán scheduler của hệ điều hành chọn task kế tiếp từ ready queue. Đây là một đoạn code kernel ngắn chạy ở chế độ đặc quyền.\n\n**Bước 3 — Khôi phục trạng thái của task sắp vào**: Các register đã lưu được nạp từ PCB của task sắp vào. Program counter được đặt về đúng chỗ task đó đã dừng. Việc thực thi tiếp tục như thể nó chưa từng dừng lại.\n\n**Với context switch giữa các process**, cần thêm hai bước:\n- **Chuyển bản đồ bộ nhớ**: Memory Management Unit (MMU) của CPU được trỏ sang page table của process mới, để địa chỉ ảo giờ phân giải sang RAM vật lý của process mới.\n- **Vô hiệu hóa các entry TLB cũ** (Translation Lookaside Buffer): TLB là cache nhanh chứa các lần dịch địa chỉ ảo sang vật lý gần đây. Sau khi chuyển process, các ánh xạ đã cache thuộc về process cũ và sai với process mới. Nếu không có entry được gắn tag, kernel phải flush TLB, nên vài trăm lần truy cập bộ nhớ đầu tiên sau khi switch đều là TLB miss.\n\n**Với context switch giữa các thread trong cùng một process**, hai bước bổ sung đó được bỏ qua. Không gian địa chỉ y hệt, nên con trỏ page table giữ nguyên và các entry TLB vẫn hợp lệ. Chỉ register, stack pointer và địa chỉ gốc của thread-local storage thay đổi.\n\n**Một lần switch tốn bao nhiêu?** Trên một máy Linux x86-64 hiện đại, chi phí *trực tiếp* — vào kernel, lưu và khôi phục register (kể cả trạng thái SIMD lớn), chạy scheduler — vào khoảng **1–5 µs**. Chi phí *gián tiếp* thường lấn át: task vừa vào thấy cache L1/L2 và TLB đầy dữ liệu của người khác và phải trả giá bằng các lần miss trong một khoảng thời gian sau đó. Switch giữa các thread cùng process tránh được việc đổi page table và giữ TLB còn ấm, nên rẻ hơn, nhưng trên phần cứng hiện đại khoảng chênh thường chỉ vài chục phần trăm, chứ không phải cả một bậc độ lớn. Cả hai đều đắt hơn rất nhiều so với chuyển đổi giữa các coroutine hay goroutine ở user space (vài chục đến vài trăm nano giây), vốn không bao giờ đi vào kernel.\n\n**Tối ưu hiện đại — PCID (Process-Context Identifiers)**: CPU x86-64 (từ khoảng 2010, được Linux dùng từ 4.14) cho phép kernel gắn tag cho các entry TLB bằng một ID không gian địa chỉ nhỏ — 12 bit do kernel gán, không phải PID — và ARM có cơ chế tương đương là ASID. Entry của nhiều process có thể cùng tồn tại, loại bỏ phần lớn các lần flush toàn bộ TLB khi context switch và thu hẹp khoảng chênh giữa switch process và switch thread."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Ví dụ này cho thấy parallelism thực sự: cả hai worker chạy đồng thời trên các core CPU khác nhau. Tổng thời gian thực xấp xỉ bằng thời gian chạy một tác vụ, chứ không phải hai — vì hệ điều hành lập lịch mỗi thread trên một core khác nhau. Hãy so sánh với `Promise.all([asyncA(), asyncB()])` trên event loop chính, vốn là concurrent (xen kẽ) nhưng chỉ có một thread. Với việc CPU-bound, `worker_threads` là công cụ đúng; với việc I/O-bound, concurrency của event loop thường là đủ.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Concurrency và parallelism: một phân biệt then chốt",
+      "content": "Hai thuật ngữ này thường bị nhầm lẫn, kể cả bởi các kỹ sư giàu kinh nghiệm. Hiểu đúng chúng rất quan trọng cho các quyết định thiết kế hệ thống.\n\n**Concurrency** là chuyện *cấu trúc*: chương trình của bạn được thiết kế để xử lý nhiều tác vụ cùng tiến triển, kể cả khi tại mỗi thời điểm chỉ có một tác vụ thực sự đang chạy. Concurrency là một tính chất của thiết kế chương trình. Một CPU một core chạy web server vẫn là concurrent — nó xen kẽ việc xử lý nhiều request bằng cách chuyển đổi nhanh giữa chúng. Không có hai request nào thực sự chạy tại cùng một thời điểm vật lý, nhưng request nào rồi cũng tiến triển.\n\n**Parallelism** là chuyện *thực thi*: các tác vụ thực sự chạy tại cùng một thời điểm vật lý trên các đơn vị phần cứng khác nhau. Một CPU bốn core tính phép nhân ma trận song song là đang thực thi đồng thời bốn phần của phép tính.\n\nMột hệ thống có thể:\n- **Concurrent nhưng không parallel**: event loop của Node.js trên một core — nhiều tác vụ async đang chạy dở, một thread thực thi\n- **Parallel nhưng không concurrent**: lệnh SIMD — một lệnh xử lý đồng thời nhiều dữ liệu, không cần xen kẽ\n- **Vừa concurrent vừa parallel**: một web server đa thread trên máy nhiều core — nhiều thread chạy đồng thời, mỗi thread xử lý các kết nối concurrent\n- **Không phải cả hai**: một script batch đơn thread chạy tuần tự, không có hành vi async nào\n\nSự nhầm lẫn thường đến từ `Promise.all()` của JavaScript. Nó *trông* như parallel nhưng thực ra là concurrent trên main thread. Hai network request tạo bằng `Promise.all` cùng lúc được gửi ra mạng (hệ điều hành xử lý phần I/O thực sự một cách bất đồng bộ), nhưng các callback JavaScript chạy lần lượt từng cái trên event loop. Parallelism thực sự trong Node.js đòi hỏi `worker_threads` hoặc child process.\n\nTrong Python, **Global Interpreter Lock (GIL)** khiến các thread Python là concurrent nhưng không parallel với việc CPU-bound — mỗi lần chỉ một thread được thực thi Python bytecode. Với tác vụ CPU-bound, lập trình viên Python dùng `multiprocessing` (các process riêng biệt của hệ điều hành, mỗi process có GIL riêng) thay vì `threading`. CPython 3.13 bổ sung một bản build *free-threaded* tùy chọn không có GIL (PEP 703) và 3.14 chính thức hỗ trợ nó, nhưng bản build mặc định vẫn có GIL."
+    },
+    {
+      "type": "explanation",
+      "title": "Thuật toán CPU scheduling: hệ điều hành quyết định ai chạy tiếp",
+      "content": "**Scheduler** là trái tim của đa nhiệm. Nó trả lời một câu hỏi — process hay thread ready nào được lên CPU tiếp theo? — hàng nghìn lần mỗi giây. Các thuật toán khác nhau đưa ra những trade-off khác nhau giữa throughput, fairness, latency và chống starvation.\n\n**First-Come, First-Served (FCFS)**: Thuật toán đơn giản nhất. Process chạy theo thứ tự đến. Không preempt — một khi process bắt đầu, nó chạy cho đến khi block hoặc kết thúc. Vấn đề kinh điển: một process CPU-bound chạy lâu chặn mọi process ngắn hơn phía sau nó (**convoy effect**).\n\n**Shortest Job First (SJF)**: Luôn chạy process có CPU burst còn lại ước tính nhỏ nhất. Tối ưu cho việc giảm thiểu thời gian chờ trung bình, nhưng đòi hỏi dự đoán tương lai. Hệ thống thật dùng **Shortest Remaining Time First (SRTF)** có preempt — nếu một process mới đến với burst ngắn hơn thời gian còn lại của process hiện tại, preempt ngay lập tức.\n\n**Round Robin (RR)**: Mỗi process nhận một **time quantum** cố định (kinh điển là 10–100 ms; slice của Linux hiện đại chỉ vài mili giây), rồi bị preempt và chuyển về cuối ready queue. Process nào rồi cũng được thời gian CPU — không có starvation. Việc chọn quantum rất quan trọng: quá nhỏ thì overhead context switch chiếm hết; quá lớn thì RR thoái hóa dần thành FCFS.\n\n**Priority Scheduling**: Mỗi process có một số chỉ độ ưu tiên; scheduler luôn chọn process ready có độ ưu tiên cao nhất. Độ ưu tiên tĩnh (đặt lúc tạo) đơn giản nhưng có thể gây **starvation** — process ưu tiên thấp không bao giờ được chạy nếu việc ưu tiên cao không bao giờ dừng. **Aging** giải quyết điều này bằng cách tăng dần độ ưu tiên của process theo thời gian nó chờ.\n\n**Multilevel Feedback Queue (MLFQ)**: Thuật toán được dùng trong phần lớn hệ thống thật. Nhiều queue với độ ưu tiên và time quantum khác nhau. Process mới bắt đầu ở queue ưu tiên cao nhất (quantum ngắn). Nếu nó dùng hết quantum mà không block, nó bị chuyển xuống queue ưu tiên thấp hơn (quantum dài hơn). Các process I/O-bound hay block thì ở lại trên đỉnh; process ngốn CPU dần chìm xuống đáy. Cơ chế này tự động phân biệt tác vụ tương tác (cần latency thấp) với tác vụ batch (cần throughput cao) mà không cần biết trước.\n\n**Linux: từ CFS đến EEVDF**: Từ 2007 (kernel 2.6.23) đến 2023, scheduler mặc định của Linux là **Completely Fair Scheduler (CFS)**. Thay vì time slice cố định, CFS theo dõi **virtual runtime** (`vruntime`) của mỗi task — thời gian CPU đã tiêu thụ, nhân theo trọng số của giá trị nice — và luôn chạy task có `vruntime` nhỏ nhất, được giữ trong một red-black tree (O(log n) cho mỗi quyết định). Các task tương tác hay block tích lũy được ít `vruntime` và nhanh chóng được lên CPU khi thức dậy. Từ **Linux 6.6 (cuối 2023)**, mặc định là **EEVDF** (Earliest Eligible Virtual Deadline First): nó giữ thời gian ảo có trọng số để bảo đảm công bằng nhưng chọn, trong số các task đang được nợ thời gian CPU (\"eligible\"), task có virtual deadline sớm nhất — mang lại cho các task nhạy cảm với latency một lợi thế có nguyên tắc hơn so với các heuristic của CFS. Chủ đề CPU Scheduling bàn sâu về các thuật toán này."
+    },
+    {
+      "type": "diagram",
+      "caption": "Multilevel Feedback Queue: các process ngốn CPU dần chìm xuống các queue ưu tiên thấp hơn với quantum dài hơn. Các process I/O-bound hay block thì ở lại queue cao nhất, nhận được latency thấp."
+    },
+    {
+      "type": "explanation",
+      "title": "Inter-Process Communication (IPC): các process bị cô lập nói chuyện với nhau thế nào",
+      "content": "Sự cô lập giữa các process rất có giá trị, nhưng các process thường cần phối hợp với nhau. Hệ điều hành cung cấp nhiều **cơ chế IPC**, mỗi cơ chế có trade-off riêng về hiệu năng, độ phức tạp và an toàn.\n\n**Pipe**: Cơ chế IPC lâu đời và đơn giản nhất. Pipe là một luồng byte một chiều có buffer trong kernel. Process ghi viết byte vào; process đọc lấy chúng ra. Các pipeline của shell (`ls | grep .js | wc -l`) chính là pipe. Anonymous pipe chỉ hoạt động giữa process cha và con. **Named pipe** (FIFO) có đường dẫn trên file system và có thể nối các process không liên quan đến nhau.\n\n**Signal**: Thông báo bất đồng bộ một chiều. `kill -9 PID` gửi `SIGKILL`; `Ctrl+C` gửi `SIGINT`. Signal là cách hệ điều hành nói \"có chuyện vừa xảy ra\" — chúng ngắt process đích và gọi signal handler của nó. Linux có 31 signal chuẩn, không mang dữ liệu, cộng với các real-time signal được xếp hàng (`SIGRTMIN`–`SIGRTMAX`) có thể mang một giá trị nhỏ qua `sigqueue()`.\n\n**Shared memory**: Cơ chế IPC nhanh nhất. Hai process ánh xạ cùng một page bộ nhớ vật lý vào không gian địa chỉ ảo của cả hai. Một bên ghi, bên kia đọc — không cần kernel can thiệp, không sao chép. Nhưng shared memory không có synchronization — các process phải dùng semaphore hoặc mutex để phối hợp truy cập. Đây là cách các hệ thống hiệu năng cao (database, bộ encode video) chia sẻ dữ liệu lớn giữa các process.\n\n**Socket**: Các process giao tiếp qua một API giống như mạng, kể cả trên cùng một máy (Unix domain socket cho IPC cục bộ, TCP/IP socket cho mạng). Socket là hai chiều, hỗ trợ cả byte stream (TCP) lẫn datagram (UDP), và hoạt động được giữa các máy. Web server, database và microservice thường dùng socket.\n\n**Message queue**: Kernel duy trì một hàng đợi các message. Một process enqueue, process khác dequeue. Khác với pipe, message là rời rạc (không phải byte stream), có trường type để lọc, và vẫn nằm trong queue kể cả khi bên đọc hiện không chạy. Hữu ích cho các pattern producer-consumer tách rời.\n\n**Memory-mapped file**: Một file được ánh xạ vào không gian địa chỉ ảo của process. Việc đọc và ghi bộ nhớ tự động đồng bộ với file. Nhiều process có thể ánh xạ cùng một file để có shared memory kèm khả năng lưu bền vững. Các database như LMDB được xây dựng hoàn toàn trên kỹ thuật này (SQLite có thể tùy chọn dùng nó cho việc đọc)."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Không có `Atomics.add`, phép tăng `counter[0]++` gồm ba bước: đọc, cộng 1, ghi. Hai thread có thể cùng đọc một giá trị cũ, cùng cộng 1, rồi cùng ghi một giá trị mới giống nhau — mất đi một lần tăng. Đây là **race condition**. `Atomics.add` khiến chu trình read-modify-write không thể chia cắt ở tầng CPU (dùng lệnh `LOCK XADD` trên x86). Với 2 worker, mỗi worker tăng 100,000 lần, kết quả đúng là 200,000. Không có atomic, bạn sẽ thường thấy con số nhỏ hơn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử — mô hình fork-exec**: System call `fork()` của Unix, ra đời đầu những năm 1970 tại Bell Labs, là một trong những quyết định thiết kế hệ điều hành có ảnh hưởng lớn nhất từng có. Thay vì một hàm `create_process()` riêng đòi hỏi chỉ định mọi tham số ngay từ đầu, Unix tái sử dụng process hiện tại: `fork()` tạo một bản sao, process con tự điều chỉnh môi trường của mình (chuyển hướng file descriptor, đổi thư mục, hạ đặc quyền), rồi `exec()` thay bộ nhớ của nó bằng chương trình mới. Khả năng kết hợp này là thứ khiến việc hiện thực chuyển hướng và pipeline trong shell trở nên đơn giản. Windows đi theo hướng ngược lại với `CreateProcess`, chỉ định chương trình và mọi tham số ngay lúc tạo. `fork()` có chi phí thực sự với các process rất lớn hoặc đa thread (page table phải được sao chép, và chỉ thread gọi hàm mới sống sót trong process con), nên các runtime hiện đại ngày càng khởi chạy chương trình bằng `posix_spawn()` hoặc `vfork()`/`clone()` của Linux thay thế."
+    },
+    {
+      "type": "explanation",
+      "title": "Race condition, mutex và deadlock",
+      "content": "Khi nhiều thread dùng chung mutable state, bạn bước vào lãnh địa của **các mối nguy trong lập trình concurrent**. Cơ bản nhất là **race condition**: tính đúng đắn của chương trình phụ thuộc vào thời điểm chính xác mà các thread thực thi — thời điểm do hệ điều hành kiểm soát, chứ không phải bạn.\n\nVí dụ kinh điển là một tài khoản ngân hàng:\n\n```\nThread 1: reads balance = 100\nThread 2: reads balance = 100\nThread 1: writes balance = 100 + 50 = 150\nThread 2: writes balance = 100 + 30 = 130  ← overwrites Thread 1's write!\nFinal balance: 130 instead of 180 — money vanished\n```\n\nLời giải là **mutual exclusion** — bảo đảm mỗi lần chỉ một thread thực thi critical section (chu trình read-modify-write). Hệ điều hành cung cấp nhiều synchronization primitive:\n\n**Mutex (Mutual Exclusion Lock)**: Một thread acquire mutex trước khi vào critical section và release nó sau đó. Nếu thread khác cố acquire một mutex đang bị giữ, nó bị block (chuyển sang trạng thái Waiting) cho đến khi mutex được release. Nhanh và đơn giản, nhưng chỉ dùng được cho truy cập độc quyền.\n\n**Semaphore**: Một synchronization primitive dựa trên bộ đếm. Binary semaphore trông giống mutex nhưng không có chủ sở hữu — thread nào cũng có thể signal nó — trong khi mutex phải được unlock bởi chính thread đã lock nó. Counting semaphore với giá trị N cho phép tối đa N thread chạy đồng thời — hữu ích để điều tiết (ví dụ một connection pool gồm 10 kết nối database). Do Dijkstra phát minh năm 1965.\n\n**Read-Write Lock (RWLock)**: Cho phép nhiều bên đọc đồng thời HOẶC một bên ghi độc quyền. Lý tưởng khi số lần đọc vượt xa số lần ghi (phần lớn các cache, kho cấu hình).\n\n**Monitor / Condition Variable**: Một cấu trúc cấp cao hơn, ghép một mutex với một wait queue. Một thread có thể một cách atomic vừa release mutex vừa ngủ cho đến khi thread khác báo rằng một điều kiện đã thay đổi (ví dụ 'queue không còn rỗng nữa'). Được dùng bên trong `synchronized` của Java và `std::condition_variable` của C++.\n\n**Deadlock** xảy ra khi hai hay nhiều thread mỗi bên giữ một tài nguyên mà bên kia cần, và tất cả chờ nhau mãi mãi. Ví dụ kinh điển: Thread 1 giữ Lock A và chờ Lock B; Thread 2 giữ Lock B và chờ Lock A. Deadlock đòi hỏi bốn điều kiện cùng lúc (điều kiện Coffman): mutual exclusion, hold-and-wait, no preemption và circular wait. Các chiến lược ngăn chặn gồm luôn acquire lock theo cùng một thứ tự toàn cục, hoặc dùng `try-lock` với timeout và backoff.\n\n**Livelock** tinh vi hơn: các thread tích cực spin và retry mà không tiến triển — như hai người trong hành lang cứ cùng lúc né sang cùng một phía. **Starvation** nghĩa là một thread liên tục bị các thread ưu tiên cao hơn giành mất tài nguyên."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mutex tuần tự hóa việc truy cập vào critical section. Thread 2 bị block cho đến khi Thread 1 release lock — ngăn chặn race condition."
+    },
+    {
+      "type": "explanation",
+      "title": "Event loop: concurrency với một thread",
+      "content": "Không phải hệ thống concurrent nào cũng dùng nhiều thread. **Concurrency hướng sự kiện** với một event loop đơn thread là kiến trúc đằng sau Node.js, nginx và JavaScript trên trình duyệt — và nó né được phần lớn các mối nguy concurrency chỉ đơn giản bằng cách không bao giờ có shared mutable state giữa các phép tính concurrent.\n\nEvent loop hoạt động như sau:\n\n1. **Call stack**: Code JavaScript chạy trên một call stack duy nhất. Mỗi lần chỉ một hàm được thực thi.\n2. **Web API / libuv**: Các thao tác bất đồng bộ (network I/O, disk I/O, timer) được giao cho hệ điều hành (qua libuv trong Node.js). Chúng chạy bên ngoài JavaScript — kernel của hệ điều hành xử lý phần I/O thực sự bằng các system call như `epoll` (Linux) hoặc `kqueue` (macOS).\n3. **Callback queue (task queue)**: Khi thao tác async hoàn tất, callback của nó được đẩy vào callback queue.\n4. **Tick của event loop**: Khi call stack rỗng, event loop lấy một callback ra khỏi queue và đẩy nó lên call stack. Stack chạy đến khi xong rồi mới lấy callback tiếp theo.\n\nĐiều này có nghĩa là các callback JavaScript không bao giờ thực sự chạy đồng thời — chúng xen kẽ nhau. Một thao tác đồng bộ chạy lâu (như sắp xếp một mảng một triệu phần tử) sẽ block event loop: không callback nào khác chạy được cho đến khi nó xong. Đó là lý do việc CPU-bound nên được chuyển sang `worker_threads`.\n\nCác callback của Promise và `queueMicrotask()` đi vào một **microtask queue** riêng — được định nghĩa bởi đặc tả JavaScript và HTML, không phải thứ Node.js tự thêm vào (Node bổ sung thêm queue `process.nextTick` có độ ưu tiên còn cao hơn). Microtask queue được xả sạch hoàn toàn sau mỗi task, trước task tiếp theo từ callback queue. Đó là lý do một callback của Promise đã resolve chạy trước callback `setTimeout` kế tiếp.\n\nMô hình event loop scale cực kỳ tốt cho workload I/O-bound: một server Node.js xử lý 10,000 kết nối đồng thời chỉ dùng một thread và overhead rất nhỏ cho mỗi kết nối, trong khi mô hình mỗi-kết-nối-một-thread sẽ cần 10,000 thread cùng bộ nhớ stack đi kèm (thường 1–8 MB mỗi thread)."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Event loop chạy code đồng bộ trước (1, 2), rồi xả toàn bộ microtask queue, rồi xử lý một macrotask (4). Bên trong lần xả, thứ tự là FIFO theo *thời điểm enqueue*: 3a và 3b được xếp hàng trong lúc chạy đồng bộ, còn `.then` nối tiếp (3c) chỉ được xếp hàng sau khi 3a xong — nên nó chạy sau 3b. Trình duyệt tuân theo đặc tả HTML ở đây, và Node.js (từ v11) cũng xả microtask sau mỗi callback theo cùng cách đó, dù các macrotask của nó được tổ chức thành các phase của libuv (xem chủ đề Async & Event Loop).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Những cái bẫy và hiểu lầm thường gặp trong interview:**\n\n- **'Thread luôn nhanh hơn process'**: Với việc song song CPU-bound, thread thắng (bộ nhớ dùng chung, context switch rẻ hơn). Nhưng khi cần cô lập lỗi hoặc khi GIL có hiệu lực (Python), process có thể là lựa chọn đúng.\n- **'async/await nghĩa là parallel'**: Trong JavaScript, `await` trả task hiện tại về cho event loop — đó là concurrency kiểu cooperative trên một thread, không phải parallelism. `await Promise.all([a(), b()])` chạy cả hai một cách concurrent (cả hai cùng đang chạy dở) nhưng không parallel (callback của chúng chạy lần lượt trên event loop).\n- **'Nhiều thread hơn = nhanh hơn cho việc CPU'**: Số thread tối ưu cho tác vụ CPU-bound xấp xỉ số core mà process được dùng (`os.availableParallelism()` trong Node.js — nó đếm CPU logic, nên tính cả các SMT sibling). Vượt quá đó, overhead context switch và cache thrashing làm giảm throughput.\n- **'Mutex ngăn được mọi bug concurrency'**: Mutex ngăn race condition nhưng lại kéo theo nguy cơ deadlock. Thêm nữa, lock quá tay sẽ tuần tự hóa quá nhiều, triệt tiêu parallelism. **Cấu trúc dữ liệu lock-free** (dùng `Atomics`/lệnh CAS) có thể nhanh hơn cấu trúc dựa trên mutex khi concurrency cao.\n- **'fork() sao chép toàn bộ bộ nhớ ngay lập tức'**: Không phải vậy — copy-on-write trì hoãn việc sao chép đến khi một page bị ghi. Nhưng một process cấp phát heap nặng mà ghi ngay sau fork (như nhiều ứng dụng Ruby on Rails) sẽ nhanh chóng phải trả chi phí sao chép."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern thực tế: thread pool, worker pool và goroutine",
+      "content": "Tạo thread thô rất tốn kém. Sinh một thread kéo theo các lời gọi kernel, dành chỗ cho một stack (thường 1–8 MB không gian địa chỉ ảo) và khởi tạo các cấu trúc runtime. Với một server xử lý hàng nghìn request mỗi giây, tạo rồi hủy một thread cho mỗi request sẽ là thảm họa.\n\n**Thread pool** giải quyết điều này: một số lượng worker thread cố định được tạo lúc khởi động. Các công việc đến được đặt vào một queue dùng chung. Worker thread lấy việc từ queue, xử lý, rồi quay lại lấy việc tiếp theo. Thread pool khấu hao chi phí tạo thread, giới hạn số thread tối đa ở tầng hệ điều hành, và ngăn bùng nổ thread khi tải cao. `ExecutorService` của Java, thread pool nội bộ của libuv trong Node.js (dùng cho disk I/O và DNS), và `ThreadPoolExecutor` của Python đều theo pattern này.\n\n**Process pool** là cùng ý tưởng ở tầng process. `multiprocessing.Pool` của Python tạo N worker process. Các công việc được serialize (pickle), gửi qua IPC đến một worker, thực thi, rồi kết quả được gửi trả về. Nặng hơn thread pool, nhưng vượt qua được GIL và cung cấp khả năng cô lập lỗi (một worker crash không kéo sập cả pool).\n\n**Goroutine** (Go) đi theo hướng khác. Thay vì ánh xạ mỗi goroutine sang một thread hệ điều hành, Go runtime duy trì một pool thread hệ điều hành (M thread) và ghép hàng nghìn hay hàng triệu goroutine (G goroutine) lên đó. Khi một goroutine block vì I/O, runtime \"đỗ\" nó lại và chạy một goroutine khác trên cùng thread hệ điều hành — không cần context switch của kernel. Đây là **M:N threading**. Kết quả: goroutine đủ rẻ (stack khởi đầu tối thiểu 2 KB, lớn dần theo nhu cầu) để sinh một cái cho mỗi request đến ngay cả ở quy mô lớn.\n\n**Async/await** trong Rust, Python và C# hiện thực một ý tưởng tương tự ở tầng ngôn ngữ bằng **biên dịch thành state machine**: một hàm `async` được biên dịch thành một state machine trong đó mỗi điểm `await` là một lần chuyển trạng thái. Một thread hệ điều hành duy nhất có thể điều khiển hàng nghìn state machine như vậy theo kiểu cooperative. Đây là mô hình concurrency tiết kiệm bộ nhớ nhất cho workload I/O-bound.\n\nChọn đúng mô hình:\n- **CPU-bound, dữ liệu dùng chung** → thread với mutex/atomic\n- **CPU-bound, cô lập** → process (hoặc goroutine với channel)\n- **I/O-bound, đơn giản** → async/await / event loop\n- **I/O-bound, quy mô lớn** → goroutine hoặc async runtime (Tokio trong Rust, asyncio trong Python)"
+    },
+    {
+      "type": "callout",
+      "content": "**Lịch sử tóm tắt**: Khái niệm process như một đơn vị cô lập xuất hiện vào cuối những năm 1960 cùng với các hệ điều hành Multics và Unix. OS/360 của IBM năm 1964 giới thiệu multiprogramming — giữ nhiều job trong bộ nhớ cùng lúc. **Preemptive multitasking** thực sự (hệ điều hành có thể ngắt bất kỳ process nào vào bất kỳ lúc nào) xuất hiện trên các máy mainframe thập niên 1960 và trở nên phổ biến trên máy tính cá nhân với Windows NT (1993) và Linux (1991). Mô hình thread được phổ biến nhờ POSIX Threads (pthreads), được chuẩn hóa năm 1995. Node.js (2009) chứng minh rằng concurrency kiểu event loop có thể vượt mặt các server mỗi-kết-nối-một-thread với workload I/O, định hình lại kiến trúc web server. Go (2009) giới thiệu goroutine như một mô hình M:N threading thực dụng, và async/await của Rust (2019) mang zero-cost abstraction đến thế giới async."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Process** là một đơn vị cô lập của hệ điều hành, có không gian địa chỉ ảo, file handle và trạng thái CPU riêng, được lưu trong Process Control Block (PCB). Các process giao tiếp qua những cơ chế IPC tường minh (pipe, socket, shared memory).",
+        "**Thread** là một đơn vị thực thi nhẹ, dùng chung code, heap và file descriptor của process nhưng sở hữu stack và ảnh chụp register CPU riêng. Switch giữa các thread trong một process rẻ hơn switch giữa các process vì page table và TLB vẫn hợp lệ; một lần context switch của kernel tốn trực tiếp khoảng 1–5 µs cộng thêm thời gian làm ấm cache/TLB — nhiều hơn hẳn so với chuyển đổi giữa các coroutine ở user space.",
+        "**Vòng đời process** — New → Ready → Running → Waiting → Terminated — được điều khiển bởi scheduler của hệ điều hành. Process chuyển sang Waiting khi block vì I/O và quay về Ready khi I/O hoàn tất.",
+        "**Các thuật toán scheduling** đánh đổi giữa những mục tiêu khác nhau: FCFS đơn giản nhưng dễ dính convoy effect; Round Robin công bằng; MLFQ thích ứng theo loại workload; Linux dùng CFS (`vruntime` có trọng số trong một red-black tree) từ 2007 và dùng EEVDF từ kernel 6.6.",
+        "**Concurrency** (nhiều tác vụ cùng tiến triển, có thể trên một core) khác với **parallelism** (các tác vụ chạy đồng thời trên nhiều core). Node.js là concurrent nhưng đơn thread; `worker_threads` cho phép parallelism thực sự.",
+        "**Race condition** xảy ra khi tính đúng đắn phụ thuộc vào thời điểm thực thi của các thread. Mutex, semaphore và atomic operation (như `Atomics.add`) là công cụ cho concurrency an toàn với shared state. Deadlock đòi hỏi bốn điều kiện và được ngăn bằng thứ tự lock nhất quán.",
+        "**Thread pool** và **goroutine** khấu hao chi phí tạo thread. Với việc I/O-bound, event loop và async/await vượt trội so với mỗi-kết-nối-một-thread nhờ loại bỏ bộ nhớ stack cho từng kết nối và overhead context switch của kernel.",
+        "Trên Linux, thread và process đều là **task** được tạo bởi `clone()` với các cờ chia sẻ khác nhau. Một process con đã kết thúc là **zombie** cho đến khi process cha gọi `wait()`; orphan được PID 1 nhận nuôi và dọn dẹp."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Kernel của hệ điều hành dùng cấu trúc dữ liệu nào để lưu mọi thông tin về một process đang chạy?",
+      "options": [
+        "Page Table",
+        "Process Control Block (PCB)",
+        "Thread Control Block (TCB)",
+        "Interrupt Descriptor Table"
+      ],
+      "explanation": "Process Control Block (PCB) — trong Linux gọi là `task_struct` — lưu mọi thứ kernel biết về một process: PID, trạng thái, program counter, ảnh chụp register, con trỏ bản đồ bộ nhớ, các file descriptor đang mở và thông tin scheduling."
+    },
+    {
+      "id": "q2",
+      "question": "Vì sao trên phần cứng thông thường, context switch giữa các thread nhanh hơn giữa các process?",
+      "options": [
+        "Stack của thread nhỏ hơn nên phải sao chép ít bộ nhớ hơn",
+        "Không gian địa chỉ ảo là một nên không cần flush TLB hay đổi page table",
+        "Độ ưu tiên của thread luôn cao hơn độ ưu tiên của process",
+        "CPU chạy thread ở xung nhịp cao hơn"
+      ],
+      "explanation": "Khi chuyển giữa các thread trong cùng một process, ánh xạ bộ nhớ ảo sang vật lý không đổi — không flush TLB, không cập nhật MMU. Chỉ cần lưu và khôi phục register CPU và stack pointer, nên lần switch tránh được việc đổi page table và TLB vẫn ấm. Với PCID tagging, khoảng chênh đã nhỏ hơn trước, nhưng switch trong cùng process vẫn rẻ hơn."
+    },
+    {
+      "id": "q3",
+      "question": "Một process chuyển từ Running sang Waiting. Nguyên nhân nhiều khả năng nhất là gì?",
+      "options": [
+        "Time quantum của nó đã hết và scheduler preempt nó",
+        "Một process ưu tiên cao hơn vừa ready",
+        "Nó phát một request I/O blocking hoặc chờ một sự kiện synchronization",
+        "Nó gọi fork() để tạo process con"
+      ],
+      "explanation": "Process chuyển sang trạng thái Waiting khi nó tự nguyện block — phổ biến nhất là do yêu cầu I/O (đọc đĩa, gọi mạng) hoặc chờ một mutex, semaphore hay condition variable. Nó quay về Ready khi I/O hoàn tất hoặc sự kiện xảy ra."
+    },
+    {
+      "id": "q4",
+      "question": "Khác biệt then chốt giữa concurrency và parallelism là gì?",
+      "options": [
+        "Concurrency cần nhiều core CPU; parallelism thì không",
+        "Parallelism chỉ khả thi với thread; concurrency dùng được cả với process",
+        "Concurrency nghĩa là nhiều tác vụ cùng tiến triển (có thể xen kẽ trên một core); parallelism nghĩa là các tác vụ thực thi đồng thời trên nhiều core",
+        "Chúng là từ đồng nghĩa — cả hai đều nghĩa là các tác vụ chạy cùng lúc"
+      ],
+      "explanation": "Concurrency là chuyện cấu trúc: các tác vụ có thể tiến triển mà không nhất thiết chạy tại cùng một thời điểm (xen kẽ trên một core cũng được). Parallelism là chuyện thực thi vật lý đồng thời trên nhiều core. Event loop của Node.js là concurrent nhưng đơn thread; worker_threads cho phép parallelism thực sự."
+    },
+    {
+      "id": "q5",
+      "question": "Completely Fair Scheduler của Linux (CFS — mặc định từ 2007 cho đến khi EEVDF thay thế ở kernel 6.6) quyết định task nào chạy tiếp dựa trên:",
+      "options": [
+        "Độ ưu tiên tĩnh được gán lúc tạo process",
+        "Process có CPU burst còn lại ngắn nhất",
+        "Process có virtual runtime (vruntime) nhỏ nhất",
+        "Thứ tự vào trước ra trước trong ready queue"
+      ],
+      "explanation": "CFS theo dõi virtual runtime của mỗi task — thời gian CPU tích lũy, nhân theo trọng số độ ưu tiên (giá trị nice). Nó luôn chọn task có vruntime nhỏ nhất từ một red-black tree, bảo đảm task nào cũng nhận được phần CPU công bằng tỉ lệ với trọng số của nó. Người kế nhiệm EEVDF giữ cách tính thời gian ảo có trọng số nhưng chọn task eligible có virtual deadline sớm nhất."
+    },
+    {
+      "id": "q6",
+      "question": "Cơ chế IPC nào nhanh nhất để chia sẻ dữ liệu lớn giữa hai process trên cùng một máy?",
+      "options": [
+        "Named pipe (FIFO)",
+        "Unix domain socket",
+        "Shared memory (mmap)",
+        "Message queue"
+      ],
+      "explanation": "Shared memory ánh xạ cùng các page vật lý vào không gian địa chỉ ảo của cả hai process. Một bên ghi, bên kia đọc — không cần kernel can thiệp và không sao chép dữ liệu. Mọi cơ chế IPC khác đều chuyển dữ liệu qua kernel, tốn ít nhất một lần sao chép."
+    },
+    {
+      "id": "q7",
+      "question": "Race condition là gì và cách sửa tiêu chuẩn là gì?",
+      "options": [
+        "Một bug khi thread chạy quá nhanh; sửa bằng cách thêm các lời gọi sleep()",
+        "Một lỗi I/O do đọc đĩa đồng thời; sửa bằng cách tuần tự hóa mọi truy cập đĩa",
+        "Một deadlock khi hai thread chờ nhau; sửa bằng cách kill một thread",
+        "Tính đúng đắn phụ thuộc vào thời điểm thực thi của thread khi truy cập shared mutable state; sửa bằng mutual exclusion (mutex/atomic)"
+      ],
+      "explanation": "Race condition xảy ra khi tính đúng đắn của chương trình phụ thuộc vào thời điểm tương đối giữa các thread khi truy cập shared mutable state. Cách sửa là mutual exclusion — bảo đảm mỗi lần chỉ một thread thực thi critical section nhờ mutex, hoặc dùng các atomic operation không thể chia cắt ở tầng CPU."
+    },
+    {
+      "id": "q8",
+      "question": "Trong Node.js, `await Promise.all([fetchA(), fetchB()])` được mô tả đúng nhất là:",
+      "options": [
+        "Parallelism thực sự — cả hai chạy đồng thời trên các core CPU khác nhau",
+        "Concurrent nhưng đơn thread — cả hai thao tác I/O cùng đang chạy dở, callback chạy lần lượt trên event loop",
+        "Tuần tự — fetchB chờ đến khi fetchA hoàn tất",
+        "Đa process — Node.js sinh một child process cho mỗi Promise"
+      ],
+      "explanation": "Promise.all khởi động cả hai thao tác async cùng lúc (cả hai network request được gửi đi đồng thời), nhưng các callback JavaScript chạy trên event loop đơn thread — lần lượt từng cái. Đây là I/O concurrent, không phải parallelism về CPU. Để có parallelism thực sự trong Node.js, hãy dùng worker_threads."
+    },
+    {
+      "id": "q9",
+      "question": "Bốn điều kiện cần để deadlock xảy ra (điều kiện Coffman) là gì?",
+      "options": [
+        "Mutual exclusion, hold-and-wait, no preemption, circular wait",
+        "Starvation, livelock, priority inversion, race condition",
+        "Tạo thread, lock mutex, signal semaphore, context switch",
+        "Cô lập process, IPC, scheduling, bảo vệ bộ nhớ"
+      ],
+      "explanation": "Deadlock đòi hỏi cả bốn điều kiện Coffman cùng lúc: (1) mutual exclusion — tài nguyên không thể dùng chung, (2) hold-and-wait — một thread giữ một tài nguyên trong khi chờ tài nguyên khác, (3) no preemption — tài nguyên không thể bị cưỡng chế lấy đi, và (4) circular wait — một chu trình các thread mà mỗi thread chờ thread kế tiếp. Ngăn được bất kỳ một điều kiện nào là ngăn được deadlock."
+    },
+    {
+      "id": "q10",
+      "question": "Vì sao goroutine trong Go scale tốt hơn thread của hệ điều hành cho các server có concurrency cao?",
+      "options": [
+        "Goroutine chạy ở độ ưu tiên lập lịch cao hơn thread của hệ điều hành",
+        "Goroutine dùng stack cố định 8 MB giống thread hệ điều hành nhưng được lập lịch nhanh hơn",
+        "Go runtime ghép hàng nghìn goroutine lên một pool nhỏ các thread hệ điều hành, với stack khởi đầu rất nhỏ (2-4 KB) và cơ chế \"đỗ\" goroutine một cách cooperative khi chờ I/O",
+        "Goroutine bỏ qua hoàn toàn hệ điều hành và ghi thẳng vào phần cứng mạng"
+      ],
+      "explanation": "Goroutine dùng M:N threading: Go runtime lập lịch G goroutine trên M thread hệ điều hành. Stack khởi đầu của goroutine là 2–4 KB (so với 1–8 MB của stack thread hệ điều hành). Khi một goroutine block vì I/O, runtime \"đỗ\" nó lại mà không cần context switch của kernel và chạy một goroutine khác trên cùng thread hệ điều hành. Nhờ vậy một process có thể chạy hàng triệu goroutine đồng thời."
+    }
+  ]
+}

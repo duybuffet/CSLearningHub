@@ -1,0 +1,213 @@
+{
+  "sourceHash": "d94651069fdc",
+  "title": "CRDT và Eventual Consistency",
+  "tagline": "Những cấu trúc dữ liệu tự merge mà không xung đột — cách CRDT giúp chỉnh sửa cộng tác, counter phân tán và hệ thống luôn khả dụng trở thành hiện thực.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy tưởng tượng hai kỹ sư cùng sửa một tài liệu một lúc — một người ở New York, một người ở Tokyo. Cả hai đều offline trên máy bay. Khi laptop kết nối lại, hệ thống phải bằng cách nào đó tự động merge các thay đổi của họ, không bắt ai phải tự tay giải quyết xung đột. Đây không phải khoa học viễn tưởng: các app cộng tác và local-first làm việc này hàng triệu lần mỗi ngày. Google Docs làm bằng Operational Transformation qua một server trung tâm; engine multiplayer của Figma lấy cảm hứng từ CRDT; còn các editor xây trên library như Yjs và Automerge dùng chính hàng thật — một **Conflict-free Replicated Data Type**, hay **CRDT**.\n\nCRDT là một cấu trúc dữ liệu được thiết kế riêng để các cập nhật concurrent từ nhiều replica luôn có thể được merge tự động và tất định — cho ra kết quả giống hệt nhau bất kể thứ tự nhận cập nhật. Không có xung đột, không cần leader, không có vòng consensus, không có con người can thiệp. Logic merge nằm sẵn trong chính cấu trúc dữ liệu, như một đảm bảo toán học chứ không phải heuristic cố gắng hết sức.\n\nCRDT mang lại một tính chất gọi là **strong eventual consistency**: hai replica bất kỳ đã xử lý cùng một tập cập nhật (theo bất kỳ thứ tự nào, qua bất kỳ số lần đồng bộ trung gian nào) sẽ giữ state giống hệt nhau. Điều này mạnh hơn hẳn eventual consistency cơ bản, vốn chỉ hứa các replica *sẽ* hội tụ *vào một lúc nào đó* mà không nói chúng hội tụ về giá trị nào. CRDT cho bạn biết chính xác giá trị hội tụ sẽ là gì — trước cả khi merge diễn ra.\n\nHiểu CRDT đòi hỏi đan kết ba sợi chỉ: toán học về semilattice, thực tế kỹ thuật của hệ phân tán, và các trade-off thực tế quyết định khi nào CRDT là công cụ đúng. Chương này bao quát cả ba. Đọc xong, bạn sẽ hiểu vì sao G-Counter hội tụ, OR-Set xử lý trường hợp khó xóa-rồi-thêm-lại ra sao, vì sao LWW register có thể lặng lẽ mất dữ liệu, và bạn sẽ gặp CRDT ở đâu trong các hệ thống production bạn đang dùng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hai replica độc lập nhận ghi, rồi đồng bộ. Hàm merge của CRDT đảm bảo cả hai đi tới cùng kết quả — 5 — bất kể thứ tự đồng bộ hay độ trễ mạng."
+    },
+    {
+      "type": "analogy",
+      "title": "Bảng trắng cộng tác với giấy note",
+      "content": "Hình dung hai designer sản phẩm, Alice và Bob, đang làm việc offline trong một design sprint. Mỗi người có một bảng trắng thật. Alice dán một tờ note xanh lá ghi 'Login screen'. Bob dán một tờ note xanh dương ghi 'Dashboard'. Khi họ so bảng sau đó, không có xung đột nào — cả hai tờ note đều lên bảng gộp. Hợp các phần thêm vào rời nhau luôn an toàn.\n\nGiờ hãy tưởng tượng một trường hợp khó hơn: cả Alice và Bob cùng di chuyển một tờ note — tờ ghi 'Signup' — sang các góc phần tư khác nhau trên bảng của mình. Với cách merge ngây thơ, bạn có một xung đột thực sự: hai vị trí khác nhau, phải có một cái thắng. Một hệ thống truyền thống sẽ hỏi con người chọn. Còn **CRDT** biến kết quả thành một quy tắc của chính kiểu dữ liệu. Lưu vị trí tờ note trong một CRDT **register**: LWW-Register giữ lần di chuyển có cặp (timestamp, replica-id) cao nhất, nên cả hai bảng chọn cùng một người thắng một cách tất định; MV-Register giữ *cả hai* vị trí và để app hiển thị xung đột. (Mô hình hóa việc di chuyển thành \"xóa vị trí cũ, thêm vị trí mới\" trong một add-wins set sẽ sai ở đây — hai lần di chuyển concurrent sẽ khiến tờ note nằm ở *hai* chỗ.) Dù cách nào, merge cũng tất định, tự động và giống hệt nhau trên mọi replica.\n\nĐiều rút ra là cấu trúc dữ liệu mã hóa không chỉ giá trị hiện tại mà cả lịch sử thao tác dưới một dạng khiến việc merge trở nên tầm thường. Bạn hy sinh một chút đơn giản trong mô hình dữ liệu để đổi lấy khả năng tự giải quyết xung đột mãi mãi."
+    },
+    {
+      "type": "explanation",
+      "title": "Nền tảng toán học: join-semilattice",
+      "content": "CRDT không phải truyền thuyết kỹ thuật — chúng dựa trên một cấu trúc đại số gọn gàng gọi là **join-semilattice**. Join-semilattice là một tập `S` đi kèm một phép toán hai ngôi `⊔` (gọi là 'join' hay 'merge') thỏa mãn ba luật:\n\n1. **Tính giao hoán**: `A ⊔ B = B ⊔ A` — thứ tự merge hai replica không quan trọng.\n2. **Tính kết hợp**: `(A ⊔ B) ⊔ C = A ⊔ (B ⊔ C)` — cách nhóm các lần merge không quan trọng.\n3. **Tính idempotent**: `A ⊔ A = A` — merge một replica với chính nó (hoặc nhận lại cùng một state) là an toàn.\n\nBa tính chất này cùng nhau có nghĩa: dù bạn trao đổi state bao nhiêu lần, theo thứ tự nào, qua những replica trung gian nào, state merge cuối cùng vẫn như nhau. Tính giao hoán xử lý việc mạng đảo thứ tự. Tính kết hợp xử lý các lần merge từng phần. Tính idempotent xử lý việc giao trùng lặp (mạng at-least-once).\n\nJoin-semilattice cũng ngụ ý một **thứ tự bộ phận** trên các state: `A ≤ B` nếu `A ⊔ B = B` (B đã 'chứa' mọi thứ trong A). Cập nhật luôn đẩy state của một replica *đi lên* trong thứ tự này — không gian state chỉ có một chiều di chuyển. Sự tăng trưởng đơn điệu này là điều biến sự hội tụ thành một chắc chắn toán học thay vì một hy vọng.\n\nVới CRDT dựa trên state (trao đổi snapshot state đầy đủ), hai điều kiện cùng nhau là đủ: merge là phép **join** của một semilattice (ba luật ở trên), và mọi cập nhật cục bộ đều **inflationary** — nó chỉ đẩy state đi lên (`s ≤ update(s)`). Một lần tăng G-Counter nâng một ô; một lần add đưa một phần tử vào set. Một cập nhật hạ state xuống (chẳng hạn giảm một ô G-Counter) sẽ đơn giản bị lần max-merge kế tiếp xóa mất. Hàm có thể đơn giản như phép hợp tập hợp hoặc phức tạp như merge một tree — điều quan trọng là đại số phải đúng."
+    },
+    {
+      "type": "diagram",
+      "caption": "G-Set (grow-only set) tạo thành một join-semilattice với merge = phép hợp tập hợp. State chỉ đi lên — bạn thêm được nhưng không bao giờ xóa được. Cả hai đường đi qua sơ đồ đều tới cùng một state đã merge."
+    },
+    {
+      "type": "explanation",
+      "title": "Hai họ: CRDT dựa trên state và CRDT dựa trên operation",
+      "content": "CRDT có hai họ cài đặt khác nhau về bản chất, mỗi họ có trade-off riêng.\n\n**CRDT dựa trên state (CvRDT — Convergent Replicated Data Type)** hoạt động bằng cách định kỳ gửi toàn bộ state hiện tại của một replica tới các replica khác. Replica nhận áp dụng hàm merge để kết hợp state đến với state của mình. Vì merge giao hoán, kết hợp và idempotent, việc nhận cùng một state nhiều lần, hay state đến sai thứ tự, đều không sao. Nhược điểm là bandwidth: nếu state của bạn là một map lớn với hàng nghìn entry, bạn phát toàn bộ nó ở mỗi lần đồng bộ.\n\n**CRDT dựa trên operation (CmRDT — Commutative Replicated Data Type)** hoạt động khác: thay vì phát state, chúng phát từng *operation* làm thay đổi state (ví dụ 'tăng thêm 1', 'thêm phần tử X với tag T'). Mỗi operation được áp dụng trực tiếp lên mọi replica. Cách này tiết kiệm bandwidth hơn nhiều với state lớn, vì bạn chỉ gửi phần thay đổi. Tuy nhiên, nó đòi hỏi một tầng broadcast tin cậy giao mỗi operation **đúng một lần** tới mọi replica (một lần tăng được áp dụng hai lần là đếm sai) và, với đa số kiểu, theo **thứ tự nhân quả**: nếu operation B phụ thuộc nhân quả vào operation A (B được sinh ra sau khi replica sinh ra B đã thấy A), thì mọi replica phải áp dụng A trước B. Không có causal delivery, một số CRDT dựa trên operation sẽ hỏng — ví dụ một lệnh OR-Set \"xóa tag T1\" đến trước lệnh \"thêm với tag T1\" mà nó đã quan sát. (Counter thuần chỉ cần exactly-once, vì các lần tăng giao hoán với nhau.) Cài đặt causal delivery thường cần vector clock hoặc một messaging middleware theo dõi thứ tự nhân quả.\n\nCó một sự tương đương lý thuyết: bất kỳ CRDT dựa trên state nào cũng chuyển được thành CRDT dựa trên operation và ngược lại. Trên thực tế, phần lớn hệ thống production dùng CRDT dựa trên state cho đơn giản, hoặc **delta-state CRDT** — dạng lai chỉ gửi *phần* state đã thay đổi kể từ lần đồng bộ trước, vừa tiết kiệm bandwidth vừa chịu được message trùng lặp và đảo thứ tự, vì các delta được merge bằng cùng phép join."
+    },
+    {
+      "type": "explanation",
+      "title": "Danh mục CRDT: G-Counter và PN-Counter",
+      "content": "CRDT đơn giản nhất là **G-Counter** (Grow-only Counter). Mỗi node trong cluster có ô riêng trong một vector. Một node chỉ được tăng ô của chính nó — không bao giờ tăng ô của node khác. Giá trị counter hiện tại là tổng mọi ô. Hàm merge lấy max theo từng thành phần của hai vector.\n\nVì sao cách này đúng? Giả sử Node A có `{A:3, B:0}` và Node B có `{A:1, B:4}`. Ô của Node A là 3 (nó đã tăng 3 lần); ô của Node B là 4. Sau merge: `{A:max(3,1), B:max(0,4)} = {A:3, B:4}`. Tổng = 7. Giờ nếu Node A đã nhận một cập nhật từ Node B đưa góc nhìn của nó lên `{A:3, B:4}`, rồi lại nhận cùng state đó lần nữa — `max(4,4) = 4`, không đổi. Idempotent. Nếu Node B merge với A trước rồi với C, sau đó A merge với B — cùng kết quả cuối. Giao hoán và kết hợp.\n\nHạn chế mỗi node chỉ tăng ô của chính mình là điều làm max-merge đúng. Nếu Node A được tăng ô của Node B, một lần merge có thể thấy cùng một lần tăng logic phản ánh trong bản sao ô đó của cả hai node và đếm trùng nó.\n\n**PN-Counter** (Positive-Negative Counter) mở rộng G-Counter để hỗ trợ giảm bằng cách duy trì hai G-Counter: một cho các lần tăng (P) và một cho các lần giảm (N). Giá trị logic là `sum(P) - sum(N)`. Mỗi node tăng ô P của chính nó và ô N của chính nó một cách độc lập. Merge là max theo từng thành phần trên cả hai vector. Điều này cho phép giảm mà không bao giờ phá vỡ tính tăng trưởng đơn điệu của từng G-Counter bên dưới. Hữu ích cho số follower, mức tồn kho, hay bất kỳ metric nào có thể lên hoặc xuống."
+    },
+    {
+      "type": "explanation",
+      "title": "Danh mục CRDT: set và bài toán OR-Set",
+      "content": "Set khó hơn counter vì thao tác xóa tạo ra khả năng xung đột.\n\n**G-Set** (Grow-only Set) rất đơn giản: phần tử chỉ được thêm vào, và merge là phép hợp tập hợp. Vì phép hợp giao hoán, kết hợp và idempotent, G-Set là một CRDT hợp lệ. Giới hạn thì hiển nhiên — bạn không bao giờ xóa được phần tử.\n\n**2P-Set** (Two-Phase Set) thêm một tập tombstone. Một phần tử hiện diện về logic nếu nó nằm trong tập add nhưng không nằm trong tập tombstone. Để xóa một phần tử, bạn thêm nó vào tombstone. Merge là hợp hai tập add và hợp hai tập tombstone. Cách này hoạt động, nhưng có một giới hạn khó chịu: một khi đã bị tombstone, phần tử không bao giờ được thêm lại, vì tombstone tồn tại mãi mãi. Thêm nó lại vào tập add cũng không giúp gì — tombstone luôn thắng.\n\n**OR-Set** (Observed-Remove Set) giải quyết chuyện này thanh lịch. Mỗi lần *thêm* một phần tử được gắn một định danh duy nhất toàn cục (một UUID hoặc timestamp vector clock). Phần tử hiện diện về logic nếu ít nhất một trong các tag của nó chưa bị tombstone. Để xóa một phần tử, bạn tombstone mọi tag *hiện tại* của phần tử — những tag bạn đã quan sát được. Nếu một replica khác sau đó thêm lại phần tử, nó tạo ra một tag hoàn toàn mới (không nằm trong tập tombstone của ai), nên phần tử lại sống. Merge là: hợp mọi cặp (phần tử, tag), hợp mọi tombstone, thành viên = tồn tại ít nhất một tag còn sống.\n\nTrường hợp thêm/xóa concurrent cũng được xử lý đúng: nếu Replica A thêm 'apple' với tag T1 và lần thêm đó tới được Replica B, rồi Replica B xóa 'apple' (tombstone T1 mà nó đã quan sát) trong khi Replica A đồng thời thêm 'apple' lần nữa (tag T2), thì sau khi merge: T1 bị tombstone (Replica B đã xóa nó), T2 còn sống (Replica A đã thêm nó). Kết quả: apple hiện diện. Điều này khớp với ngữ nghĩa 'thêm thắng xóa concurrent', là mặc định đúng cho giỏ hàng và editor cộng tác.\n\n**LWW-Register** (Last-Write-Wins Register) là một giá trị vô hướng đi kèm một timestamp. Merge giữ giá trị có timestamp cao hơn. Nó đơn giản nhưng nguy hiểm: lệch đồng hồ giữa các node có thể khiến một lần ghi thực sự mới hơn nhưng timestamp thấp hơn bị lặng lẽ loại bỏ. Cassandra dùng LWW làm chiến lược giải quyết xung đột mặc định, nhanh và đơn giản nhưng đòi hỏi ý thức về rủi ro mất dữ liệu này.\n\n**MV-Register** (Multi-Value Register) theo triết lý ngược lại: thay vì chọn người thắng, nó giữ *mọi* giá trị được ghi đồng thời (các giá trị không so sánh được trong thứ tự nhân quả). Ứng dụng sau đó thấy nhiều phiên bản và có thể merge chúng ở tầng ứng dụng. Paper Dynamo gốc của Amazon mô tả cách tiếp cận này — giỏ hàng trả về một danh sách phiên bản để client tự hòa giải. Đúng hơn LWW, nhưng đẩy độ phức tạp sang ứng dụng."
+    },
+    {
+      "type": "diagram",
+      "caption": "State machine của OR-Set cho mỗi phần tử: việc xóa tombstone một tag cụ thể, không phải định danh của phần tử. Thêm lại tạo ra một tag mới bắt đầu vòng đời bên ngoài tập tombstone — phần tử lại sống."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Tính đúng đắn của G-Counter dựa hoàn toàn vào việc mỗi node sở hữu một ô. `merge` là `Math.max` theo từng ô — không bao giờ giảm, luôn an toàn khi áp dụng hai lần. PN-Counter kết hợp hai G-Counter. Để ý rằng không counter nào cần phối hợp trước khi nhận một lần ghi — đó chính là toàn bộ mục đích. Mỗi node nhận ghi độc lập và sự hội tụ được đảm bảo bởi toán học của phép merge.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "diagram",
+      "caption": "Merge PN-Counter: max theo từng thành phần trên cả vector P lẫn N. Lần tăng của Node A và lần giảm của Node B độc lập với nhau — không cần phối hợp, giá trị hội tụ về 7."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Nhận thức then chốt của OR-Set là 'xóa' thực chất là 'tombstone đúng phiên bản mà tôi đã quan sát'. Một lần thêm lại tạo phiên bản mới (tag2) mà không tombstone nào chạm tới. Sau khi merge, cả hai replica thống nhất: apple hiện diện vì tag2 còn sống. Hành vi add-wins, observed-remove này là thứ mà set của Riak cung cấp (Riak dùng một biến thể tối ưu, ORSWOT, thay tombstone theo từng phần tử bằng version vector).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "CRDT trong chỉnh sửa văn bản cộng tác",
+      "content": "Chỉnh sửa văn bản là một trong những ứng dụng khắt khe nhất của CRDT vì vị trí ký tự trong tài liệu dịch chuyển khi text được chèn và xóa. Cách ngây thơ — lưu vị trí ký tự bằng số nguyên — thất bại ngay lập tức: nếu Alice chèn một ký tự ở vị trí 5 và Bob chèn một ký tự ở vị trí 5 cùng lúc, số vị trí của họ va chạm theo cách không merge được.\n\n**Sequence CRDT** giải quyết chuyện này bằng cách gán cho mỗi ký tự một định danh duy nhất toàn cục, bất biến, mã hóa vị trí nhân quả thay vì chỉ số vật lý. Có hai cách tiếp cận chủ đạo trên production:\n\n**LOGOOT và LSEQ** biểu diễn tài liệu như một dãy các cặp (vị trí, ký tự), trong đó vị trí được lấy từ một không gian định danh có thứ tự dày đặc. Mỗi định danh được chọn nằm giữa hàng xóm trái và phải của nó, không bao giờ thay đổi khi có chèn ở chỗ khác. Merge đơn giản là sắp xếp mọi cặp (vị trí, ký tự) đã biết theo định danh của chúng.\n\n**RGA (Replicated Growable Array)**, nền tảng của kiểu text trong Automerge, gán cho mỗi ký tự một ID duy nhất — một cặp (Lamport counter, replica ID) — và ghi lại nó được chèn sau ký tự nào. Về bản chất tài liệu là một linked list; các lần chèn concurrent sau cùng một ký tự được sắp thứ tự bằng cách so sánh ID, còn xóa là tombstone (ký tự vẫn nằm trong cấu trúc nhưng được đánh dấu ẩn). Yjs dùng một thuật toán rất gần, YATA, cộng với nén run-length mạnh cho các ký tự liên tiếp. (ShareDB, thường được nhắc cùng, là một hệ OT, không phải CRDT.)\n\nSequence CRDT là động lực cho các editor cộng tác xây trên Yjs (có binding cho ProseMirror/Tiptap, CodeMirror, Monaco, Quill) và Automerge, cùng tính năng cộng tác thời gian thực của JupyterLab. Chúng đảm bảo mọi client hội tụ về một tài liệu giống hệt nhau mà không cần server trung tâm sắp thứ tự thao tác — dù phần lớn sản phẩm vẫn chạy một server để chuyển tiếp, lưu trữ và kiểm soát truy cập."
+    },
+    {
+      "type": "diagram",
+      "caption": "Sequence CRDT: mỗi ký tự có một ID duy nhất bất biến. Các lần chèn concurrent ở cùng vị trí được sắp thứ tự tất định bằng cách so sánh ID — không xung đột, không cần bộ điều phối."
+    },
+    {
+      "type": "explanation",
+      "title": "CRDT trên production: bạn gặp chúng ở đâu ngoài đời",
+      "content": "CRDT không chỉ là sự tò mò học thuật — chúng xuất hiện trong các hệ thống production được dùng ở quy mô khổng lồ.\n\n**Riak** (do Basho xây, được cộng đồng bảo trì từ khi Basho đóng cửa năm 2017) là database phổ biến đầu tiên cung cấp các kiểu CRDT hạng nhất: counter (PN-Counter), set (một OR-Set tối ưu, \"ORSWOT\", dùng version vector thay vì giữ tombstone), map (một cấu trúc kết hợp được, trong đó giá trị của map tự nó là CRDT), flag (bật/tắt) và register (LWW-Register). Triết lý của Riak là 'luôn khả dụng, eventual consistency' — ngay cả khi network partition, ghi vẫn được nhận, và ngữ nghĩa CRDT lo phần hội tụ.\n\n**Redis**: **HyperLogLog** của Redis open-source (đếm số phần tử duy nhất xấp xỉ) merge các sketch bằng `PFMERGE`, lấy max theo từng register — một join-semilattice, nên HLL hành xử như một CRDT dựa trên state cho thao tác add. Các database **Active-Active của Redis Enterprise / Redis Software** dùng CRDT bên trong để nhiều region cùng nhận ghi vào cùng các key.\n\n**Automerge** và **Yjs** là các library CRDT bằng JavaScript/Rust được dùng trực tiếp trong ứng dụng. Yjs là động lực cho tính năng cộng tác thời gian thực của JupyterLab và nhiều tích hợp editor (Tiptap/ProseMirror, CodeMirror, Monaco). Automerge được dùng trong các ứng dụng local-first theo kiến trúc được mô tả trong paper 'local-first software' của nhóm nghiên cứu Ink & Switch.\n\n**Dynamo của Amazon** (hệ thống nội bộ, không phải DynamoDB) dùng vector clock và multi-value register — paper về giỏ hàng ở SOSP 2007 là mô tả kinh điển của cách tiếp cận này, và là tài liệu bắt buộc đọc với kỹ sư hệ phân tán."
+    },
+    {
+      "type": "explanation",
+      "title": "Chi phí và giới hạn thật của CRDT",
+      "content": "CRDT không phải bữa trưa miễn phí. Hiểu chi phí của chúng cũng quan trọng như hiểu lợi ích.\n\n**Overhead lưu trữ**: OR-Set tích lũy tombstone vô thời hạn. Mỗi phần tử từng bị xóa để lại một entry tombstone vĩnh viễn. Nếu không định kỳ compaction (vốn cần phối hợp — một dạng garbage collection phân tán), dung lượng của OR-Set tăng đơn điệu. Cách giảm thiểu khác nhau: các thiết kế tối ưu như ORSWOT tránh tombstone theo từng phần tử bằng version vector; Yjs garbage-collect nội dung đã xóa nhưng giữ các marker tombstone nhỏ; Automerge giữ toàn bộ lịch sử theo thiết kế. Muốn thực sự bỏ metadata thì phải biết mọi replica đã thấy nó — chính là kiểu phối hợp mà CRDT vốn tránh.\n\n**Kích thước state khi đồng bộ**: Một G-Counter ngây thơ với N node gửi một vector N entry ở mỗi lần đồng bộ. Với 10,000 node, đó là 10,000 entry mỗi message. **Delta-state CRDT** giải quyết bằng cách chỉ gửi 'delta' — phần state được thêm từ lần đồng bộ đã được xác nhận gần nhất. Điều này đòi theo dõi state đã xác nhận theo từng peer, thêm độ phức tạp cài đặt.\n\n**Theo dõi nhân quả**: CRDT dựa trên operation cần causal delivery. Cài đặt causal delivery ở quy mô lớn cần vector clock hoặc giải pháp dựa trên epoch, mỗi cái có overhead riêng. Các hệ thống dùng CRDT trên production (như Riak) đầu tư công sức kỹ thuật đáng kể vào tầng giao nhận.\n\n**Giới hạn ngữ nghĩa**: CRDT hoạt động tuyệt vời cho counter, set và register. Chúng không xử lý êm các ràng buộc quan hệ ('tối đa một bản ghi với email này'), bất biến toàn cục ('tổng tồn kho không bao giờ âm'), hay transaction phức tạp ('chuyển $100 từ A sang B một cách nguyên tử'). Các thao tác này về bản chất cần phối hợp. Dùng CRDT cho chúng sẽ dẫn tới bất biến bị vi phạm và phải sửa sau đó — điều có thể ổn với một số ứng dụng (chấp nhận một đơn hàng trùng là khắc phục được) nhưng là thảm họa với những ứng dụng khác (tiêu một khoản tiền hai lần).\n\n**Lệch mô hình tư duy**: Developer quen với database quan hệ mong đợi strong consistency. Code 'đọc lại đúng thứ bạn vừa ghi' là mô hình tư duy mặc định. Với CRDT, lần ghi của bạn có thể chưa hiện ra ở lần đọc kế tiếp từ một replica khác. Test hệ thống dựa trên CRDT đòi hỏi chủ động giả lập network partition và kiểm chứng sự hội tụ — phức tạp hơn unit test một database một node."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Nền tảng toán học của CRDT được Marc Shapiro, Nuno Preguiça, Carlos Baquero và Marek Zawirski hình thức hóa trong một báo cáo kỹ thuật INRIA và một paper Lecture Notes in Computer Science năm 2011. Thuật ngữ 'CRDT' được đặt ra trong paper đó. Tuy nhiên, các ý tưởng nền tảng đã xuất hiện sớm hơn: hệ thống Bayou ở Xerox PARC (1995) dùng hòa giải dựa trên operation, và Dynamo của Amazon (2007) phổ biến eventual consistency với phát hiện xung đột bằng vector clock. Yjs (phát hành lần đầu khoảng năm 2015) và Automerge (2017) trở thành các library CRDT được dùng rộng rãi nhất cho chỉnh sửa cộng tác."
+    },
+    {
+      "type": "callout",
+      "content": "**Bẫy interview và bài thi:** Phân biệt giữa eventual consistency và eventual consistency *strong* thường xuyên được hỏi. Eventual consistency nói các replica *sẽ* thống nhất; strong eventual consistency (từ CRDT) nói các replica đã thấy cùng các cập nhật thì *đã* ở cùng state — không cần chờ. Bẫy phổ biến thứ hai: nhầm lẫn ba luật của CRDT. Tính giao hoán xử lý *thứ tự*; tính kết hợp xử lý *cách nhóm*; tính idempotent xử lý *trùng lặp*. Mỗi luật giải quyết một kiểu sự cố khác nhau trong mạng thực tế. Cuối cùng, nhiều ứng viên kể được tên G-Counter nhưng không giải thích được *vì sao* max-merge đúng — vì mỗi node chỉ tăng ô của chính mình, nên max qua các replica cũng chính là giá trị đúng cho phần đóng góp của node đó."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**CRDT** là cấu trúc dữ liệu có hàm merge **giao hoán, kết hợp và idempotent** — tạo thành một join-semilattice — và có các cập nhật chỉ đẩy state đi lên (inflationary) — điều này đảm bảo **strong eventual consistency**: hai replica bất kỳ có cùng các cập nhật thì giống hệt nhau, bất kể thứ tự giao.",
+        "**CRDT dựa trên state** gửi snapshot state đầy đủ; **CRDT dựa trên operation** phát các operation và cần giao đúng một lần, (thường là) theo thứ tự nhân quả. **Delta-state CRDT** là dạng lai thực dụng chỉ gửi các mảnh state đã thay đổi.",
+        "**G-Counter** dùng ô theo từng node với max-merge (giá trị = tổng các ô). **PN-Counter** kết hợp hai G-Counter cho tăng và giảm. Cả hai đều nhận ghi mà không cần phối hợp giữa các node.",
+        "**OR-Set** gán một tag duy nhất cho mỗi thao tác thêm. Việc xóa tombstone các tag cụ thể đã quan sát được, không phải định danh phần tử — cho phép thêm lại không xung đột sau khi xóa, được dùng trong kiểu set của Riak và các editor cộng tác.",
+        "**LWW-Register** đơn giản nhưng rủi ro: lệch đồng hồ giữa các node có thể khiến một lần ghi thực sự mới hơn bị lặng lẽ loại bỏ vì timestamp của nó thấp hơn. Luôn cân nhắc trade-off này khi chọn LWW.",
+        "Các triển khai production gồm **Riak** (kiểu CRDT hạng nhất), **Redis** (merge HyperLogLog; Redis Enterprise Active-Active), **Automerge** và **Yjs** (editor cộng tác, JupyterLab), và **Amazon Dynamo** (multi-value register cho giỏ hàng).",
+        "CRDT có chi phí thật: **tích lũy tombstone**, **kích thước state tỷ lệ với số node**, **giới hạn ngữ nghĩa với bất biến toàn cục**, và **lệch mô hình tư duy** với developer quen hệ thống strongly consistent. Hãy dùng chúng cho những pattern cụ thể mà chúng giải tốt — counter, set và sequence cộng tác — chứ không phải như thuốc tiên giải quyết xung đột cho mọi thứ."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Hàm merge của một CRDT dựa trên state phải thỏa mãn ba tính chất toán học nào để đảm bảo hội tụ?",
+      "options": [
+        "Đơn điệu, tất định và toàn phần",
+        "Bắc cầu, phản xạ và phản đối xứng",
+        "Giao hoán, kết hợp và idempotent",
+        "Linearizable, serializable và nguyên tử"
+      ],
+      "explanation": "Merge của CRDT phải giao hoán (A ⊔ B = B ⊔ A, nên thứ tự giao không quan trọng), kết hợp ((A ⊔ B) ⊔ C = A ⊔ (B ⊔ C), nên cách nhóm không quan trọng) và idempotent (A ⊔ A = A, nên giao trùng lặp là an toàn). Ba tính chất này cùng nhau tạo thành một join-semilattice, đảm bảo toán học sự hội tụ mà không cần phối hợp gì."
+    },
+    {
+      "id": "q2",
+      "question": "Một G-Counter trên Node A có các ô {A:3, B:0} và Node B có các ô {A:1, B:4}. Sau khi merge, tổng giá trị counter là bao nhiêu?",
+      "options": [
+        "7 — max theo từng thành phần cho {A:3, B:4}, tổng là 7",
+        "5 — tổng của tổng A (3) và tổng B (4)",
+        "8 — tổng mọi giá trị ô riêng lẻ trên cả hai replica",
+        "4 — giá trị lớn nhất trong hai tổng của replica"
+      ],
+      "explanation": "Merge G-Counter lấy max theo từng thành phần: {A:max(3,1), B:max(0,4)} = {A:3, B:4}. Tổng giá trị là tổng mọi ô = 3 + 4 = 7. Node A đóng góp 3 lần tăng (ô của nó), Node B đóng góp 4 (ô của nó). Max-merge chọn giá trị chính thức trong ô riêng của mỗi node."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao OR-Set dùng một tag duy nhất cho mỗi lần thêm thay vì chỉ theo dõi phần tử có thuộc set hay không?",
+      "options": [
+        "Tag cho phép lưu set theo thứ tự đã sắp xếp để tra cứu nhanh hơn",
+        "Tag cần thiết để xác thực mật mã các thao tác ghi giữa các replica",
+        "Tag giảm overhead lưu trữ so với lưu trực tiếp toàn bộ giá trị phần tử",
+        "Tag cho phép thêm lại phần tử sau khi xóa — việc xóa tombstone các tag cụ thể, không phải chính định danh phần tử"
+      ],
+      "explanation": "Trong 2P-Set, xóa một phần tử là tombstone vĩnh viễn định danh của phần tử — nó không bao giờ quay lại được. OR-Set tombstone tag cụ thể (UUID) của một thao tác thêm nào đó. Một lần thêm lại sau đó sinh ra tag mới không có tombstone, nên phần tử lại sống. Điều này xử lý trường hợp giỏ hàng: món hàng bị xóa khỏi giỏ, rồi được thêm lại — một lần thêm riêng biệt cần phải thắng."
+    },
+    {
+      "id": "q4",
+      "question": "'Strong eventual consistency' mà CRDT cung cấp là gì, và nó khác eventual consistency thông thường thế nào?",
+      "options": [
+        "Strong eventual consistency nghĩa là mọi replica thống nhất trong một khoảng thời gian giới hạn 1 giây",
+        "Strong eventual consistency đảm bảo hai replica bất kỳ đã xử lý cùng một tập cập nhật thì đã ở state giống hệt nhau — không cần chờ",
+        "Strong eventual consistency nghĩa là các lần ghi được một quorum xác nhận trước khi được áp dụng",
+        "Strong eventual consistency nghĩa là lần đọc luôn trả về giá trị được ghi gần nhất trên mọi replica"
+      ],
+      "explanation": "Eventual consistency thông thường hứa các replica *sẽ* thống nhất vào một ngày nào đó, nhưng không nói gì về giá trị chúng hội tụ tới hay khi nào. Strong eventual consistency (tính chất CRDT cung cấp) mạnh hơn: nếu replica X và replica Y đều đã xử lý cùng một tập cập nhật (theo bất kỳ thứ tự nào), chúng đã ở state giống hệt nhau ngay lúc này. Toán học của phép merge CRDT đảm bảo điều này, không phải việc giao rốt cuộc."
+    },
+    {
+      "id": "q5",
+      "question": "Rủi ro then chốt khi dùng LWW-Register (Last-Write-Wins) để giải quyết xung đột là gì?",
+      "options": [
+        "Lệch đồng hồ giữa các node có thể khiến một lần ghi thực sự mới hơn có timestamp thấp hơn, khiến nó bị lặng lẽ loại bỏ",
+        "LWW cần một vòng consensus cho mỗi lần ghi, thêm latency đáng kể",
+        "LWW chỉ hỗ trợ giá trị số, không hỗ trợ string hay object phức tạp",
+        "LWW lưu vĩnh viễn mọi giá trị concurrent, khiến dung lượng tăng không giới hạn"
+      ],
+      "explanation": "LWW giữ giá trị có timestamp cao nhất. Nếu đồng hồ của Node B chậm hơn Node A 200ms, một lần ghi trên Node B tại thời điểm thực T+100ms có thể mang timestamp thấp hơn lần ghi của Node A tại thời điểm thực T. Lần ghi cũ hơn của Node A thắng — lần ghi mới hơn của Node B bị lặng lẽ loại bỏ. LWW đơn giản nhưng cần đồng bộ đồng hồ chặt (ví dụ NTP + độ lệch có giới hạn) để tránh mất dữ liệu."
+    },
+    {
+      "id": "q6",
+      "question": "CRDT dựa trên operation (CmRDT) đòi hỏi tính chất cụ thể nào từ tầng giao nhận mà CRDT dựa trên state không cần?",
+      "options": [
+        "Giao nhận có mã hóa để operation không bị các replica trung gian đọc được",
+        "Giao nhận đồng bộ — mọi replica nhận operation vào đúng cùng một thời điểm thực",
+        "Causal delivery — mỗi operation chỉ được giao sau mọi operation đi trước nó theo nhân quả",
+        "Total-order delivery — mọi replica nhận mọi operation theo cùng một trình tự"
+      ],
+      "explanation": "CRDT dựa trên operation phát từng operation thay vì toàn bộ state, nên tầng giao nhận phải giao mỗi operation đúng một lần và — với các kiểu như OR-Set — chỉ sau các operation mà nó phụ thuộc nhân quả (một lệnh xóa không được đến trước lệnh thêm mà nó đã quan sát). CRDT dựa trên state không cần cả hai đảm bảo này: gửi lại hay đảo thứ tự toàn bộ state là vô hại vì merge giao hoán, kết hợp và idempotent."
+    },
+    {
+      "id": "q7",
+      "question": "G-Counter dùng max theo từng thành phần làm hàm merge. Vì sao việc mỗi node chỉ tăng ô của chính mình là đúng?",
+      "options": [
+        "Nó ngăn nhiều node ghi cùng lúc, tránh race condition",
+        "Nó giảm lưu lượng mạng bằng cách giới hạn những ô cần truyền khi đồng bộ",
+        "Nó đảm bảo giá trị counter không bao giờ vượt quá số node trong cluster",
+        "Ô của mỗi node là số đếm chính thức các lần tăng của node đó, nên max-merge chọn đúng phần đóng góp của từng node mà không đếm trùng"
+      ],
+      "explanation": "Nếu Node A được tăng ô của Node B, thì khi A và B đều giữ một bản sao ô B và cùng tăng nó độc lập, max-merge sẽ gộp các lần tăng độc lập đó thành một — mất một lần đếm. Bằng cách giới hạn mỗi node vào ô của chính mình, max-merge luôn chọn đúng giá trị chính thức cho phần đóng góp của từng node, và tổng mọi ô cho ra tổng thật."
+    },
+    {
+      "id": "q8",
+      "question": "Phương án nào sau đây là một giới hạn thật của OR-Set cần được quản lý trong hệ thống production?",
+      "options": [
+        "OR-Set không biểu diễn được quá 65,536 phần tử duy nhất do giới hạn mã hóa tag",
+        "Tombstone tích lũy vô thời hạn trừ khi thực hiện garbage collection phân tán tường minh",
+        "Merge của OR-Set không giao hoán khi tập tombstone trên hai replica có kích thước khác nhau",
+        "OR-Set cần một bộ điều phối trung tâm để sinh tag duy nhất toàn cục cho mỗi thao tác thêm"
+      ],
+      "explanation": "Một OR-Set cơ bản thêm entry tombstone ở mỗi lần xóa, và tập đó chỉ tăng lên. Bỏ tombstone một cách an toàn đòi hỏi biết mọi replica đã thấy chúng — một dạng phối hợp. Các biến thể tối ưu như ORSWOT của Riak tránh tombstone theo từng phần tử bằng version vector, và các library như Yjs garbage-collect nội dung đã xóa trong khi giữ các marker gọn nhẹ; Automerge cố ý giữ toàn bộ lịch sử."
+    },
+    {
+      "id": "q9",
+      "question": "Những hệ thống thực tế nào dùng cấu trúc dữ liệu CRDT trên production ở quy mô lớn?",
+      "options": [
+        "MySQL InnoDB và logical replication của PostgreSQL để giải quyết xung đột multi-primary",
+        "Apache Kafka để đảm bảo thứ tự message giữa các consumer group",
+        "Riak (kiểu set/counter/map), Redis (merge HyperLogLog, Enterprise Active-Active), và các editor cộng tác xây trên Automerge và Yjs",
+        "Nginx và HAProxy cho session affinity và state của load balancing"
+      ],
+      "explanation": "Riak cung cấp các kiểu CRDT hạng nhất (counter, set, map, flag, register). Sketch HyperLogLog của Redis merge bằng max theo từng register, một CRDT dựa trên state, và Redis Enterprise Active-Active dùng CRDT cho ghi đa region. Automerge và Yjs là các library CRDT đứng sau nhiều editor cộng tác và tính năng cộng tác thời gian thực của JupyterLab. Thiết lập multi-primary của MySQL/PostgreSQL, Kafka và load balancer không dùng CRDT."
+    },
+    {
+      "id": "q10",
+      "question": "Cần dùng PN-Counter thay vì G-Counter khi:",
+      "options": [
+        "Counter phải hỗ trợ cả tăng lẫn giảm, như theo dõi tồn kho hiện tại hay số follower",
+        "Counter phải được client bên ngoài nhìn thấy qua một REST API",
+        "Counter cần theo dõi sự kiện trên hơn hai node cùng lúc",
+        "Counter phải nhất quán giữa nhiều data center ở các vùng địa lý khác nhau"
+      ],
+      "explanation": "G-Counter chỉ tăng — giá trị của nó chỉ có thể đi lên. PN-Counter duy trì hai G-Counter: một cho các lần tăng (P) và một cho các lần giảm (N). Giá trị logic là sum(P) - sum(N). Điều này cho phép các thao tác giảm phân tán hội tụ đúng mà không cần phối hợp, phù hợp cho mức tồn kho, số like/unlike và số follower/following."
+    }
+  ]
+}

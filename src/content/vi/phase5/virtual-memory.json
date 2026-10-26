@@ -1,0 +1,232 @@
+{
+  "sourceHash": "ed2b4b0230e9",
+  "title": "Bộ nhớ ảo (Virtual Memory)",
+  "tagline": "Vì sao chương trình nào cũng tin rằng nó sở hữu cả cỗ máy",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mở terminal, gõ `top`, rồi đếm số process: hàng chục, đôi khi hàng trăm chương trình đang cùng chạy trên một máy vật lý. Mỗi chương trình đó chứa code truy cập bộ nhớ bằng cách tham chiếu đến các địa chỉ — những vị trí được đánh số cụ thể trong RAM. Nhưng câu đố là thế này: hai chương trình khác nhau có thể cùng dùng địa chỉ `0x401000`, vậy mà chúng không bao giờ va chạm. Chúng nhìn thấy dữ liệu hoàn toàn khác nhau tại cùng một địa chỉ. Làm sao có thể như vậy?\n\nCâu trả lời là **virtual memory** (bộ nhớ ảo) — một trong những abstraction thanh lịch nhất của khoa học máy tính. Mỗi process đang chạy sống trong một ảo ảnh riêng: nó tin rằng mình độc quyền sở hữu một khối bộ nhớ liên tục, mênh mông, bắt đầu từ địa chỉ 0 và kéo dài đến hàng terabyte. Ảo ảnh này được duy trì chung bởi **hệ điều hành** và một đơn vị phần cứng bên trong CPU gọi là **Memory Management Unit (MMU)**. Mọi địa chỉ mà process nhắc đến đều là địa chỉ *ảo*; MMU lặng lẽ dịch nó sang một địa chỉ *vật lý* trong RAM thật trước khi việc truy cập bộ nhớ xảy ra — thường chỉ trong vài nano giây, chương trình đang chạy hoàn toàn không hay biết.\n\nVirtual memory giải quyết cùng lúc bốn vấn đề then chốt. **Cô lập**: nếu process A ghi vào địa chỉ `0x1000`, nó không thể làm hỏng dữ liệu của process B tại cùng địa chỉ ảo đó, vì hai địa chỉ ánh xạ đến hai vị trí vật lý khác nhau. **Đơn giản**: linker và compiler có thể giả định một không gian địa chỉ sạch sẽ, đồng nhất cho mọi chương trình, bất kể trong RAM tình cờ đang nạp những gì khác. **Overcommit**: chương trình có thể đặt trước nhiều không gian địa chỉ ảo hơn lượng RAM vật lý thực có; các page vật lý được cấp phát một cách lười biếng ở lần truy cập đầu tiên. **Chia sẻ**: nhiều process có thể ánh xạ cùng một page vật lý ở chế độ read-only (ví dụ thư viện chuẩn C chỉ được nạp một lần vào RAM nhưng hiện diện trong không gian địa chỉ của mọi process).\n\nChương này xây dựng mental model đầy đủ: RAM vật lý được chia thành page và frame như thế nào, hệ điều hành dựng page table để ghi lại ánh xạ ra sao, MMU và TLB tăng tốc mọi lần tra cứu thế nào, điều gì xảy ra khi có page fault, swap space mở rộng RAM biểu kiến ra sao, page table nhiều tầng chế ngự không gian địa chỉ 64-bit thế nào, và tất cả những điều đó có ý nghĩa gì với phần mềm bạn viết."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hai process cùng tham chiếu địa chỉ ảo 0x1000, nhưng MMU dịch mỗi cái sang một frame vật lý khác nhau — hoặc lấy page từ đĩa khi cần."
+    },
+    {
+      "type": "analogy",
+      "title": "Quầy lễ tân khách sạn",
+      "content": "Hãy hình dung một khách sạn nơi mỗi vị khách được trao một chìa khóa ghi 'Phòng 1' đến 'Phòng N'. Vị khách nào cũng thực lòng tin rằng mình có Phòng 1 riêng. Nhưng quầy lễ tân giữ một cuốn sổ bí mật: Phòng 1 của khách A thực chất là phòng vật lý 201; Phòng 1 của khách B là phòng vật lý 547. Họ không bao giờ đụng nhau vì quầy lễ tân chặn mọi yêu cầu về phòng và tra cuốn sổ trước khi chỉ đường cho khách.\n\nNếu một vị khách hỏi về một căn phòng đang tạm thời được sửa sang và hiện không dùng được (đồ đạc trong đó được cất ở kho bên ngoài), quầy lễ tân bảo khách chờ, cử nhân viên đi lấy đồ đạc của phòng về, rồi mới cho khách vào. Khoảng trễ chờ lấy đồ đó tương ứng với một **page fault** — hệ điều hành đi lấy một page bộ nhớ từ đĩa.\n\nNhân viên lễ tân còn giữ một cuốn sổ tay bỏ túi ghi các lần tra phòng gần nhất, để không phải lục cả cuốn sổ lớn mỗi lần. Cuốn sổ tay này là **TLB** (Translation Lookaside Buffer) — một cache phần cứng nhỏ xíu, cực nhanh, chứa các lần dịch từ địa chỉ ảo sang vật lý gần đây. Tìm thấy trong sổ tay (hit) thì yêu cầu được giải quyết ngay; không thấy (miss) thì phải tra cuốn sổ đầy đủ (page table) trong RAM."
+    },
+    {
+      "type": "explanation",
+      "title": "Page và frame: đơn vị của quản lý bộ nhớ",
+      "content": "Virtual memory không quản lý từng byte riêng lẻ — làm vậy sẽ cần một bảng tra lớn đến mức bất khả. Thay vào đó, cả không gian địa chỉ ảo lẫn vật lý đều được chia thành những khối có kích thước cố định:\n\n- **Page** là một khối liên tục của không gian địa chỉ ảo, thường là **4 KB** (4096 byte) trên x86 và ARM. Hệ điều hành cũng có thể dùng **huge page** 2 MB hoặc 1 GB cho các workload cấp phát khối lớn, liên tục (database, HPC).\n- **Frame** (hay **page frame**) là khối 4 KB tương ứng trong RAM vật lý.\n\nPage và frame luôn có cùng kích thước — đó là điểm mấu chốt. Nhờ vậy bạn có thể đặt bất kỳ page ảo nào vào bất kỳ frame vật lý nào, bất kể vị trí số học của chúng. Hệ điều hành theo dõi frame nào còn trống bằng một **frame allocator** (thường là một bitmap hoặc free list).\n\nVì page size là lũy thừa của hai, một địa chỉ tách gọn thành hai trường: các bit cao xác định page (hoặc frame) nào, còn các bit thấp là **byte offset** bên trong page đó. Với page 4 KB, 12 bit thấp là offset (vì 2¹² = 4096), và các bit cao là page number.\n\nViệc tách này quan trọng ở tầng phần cứng: page number phải được MMU dịch, nhưng offset đi qua nguyên vẹn, vì một khi đã tìm ra đúng frame vật lý, vị trí của byte bên trong nó cũng giống hệt vị trí của nó bên trong page ảo.\n\nThiết kế này có nghĩa là hệ điều hành chỉ cần ghi một entry dịch cho mỗi page, chứ không phải mỗi byte. Với không gian địa chỉ 4 GB và page 4 KB, chỉ có khoảng một triệu entry cần quản lý — khả thi. Với không gian địa chỉ 64-bit, số page *có thể có* là con số thiên văn, đó là lý do cần đến page table nhiều tầng (trình bày bên dưới)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một địa chỉ ảo tách thành page number (được tra trong page table) và byte offset (đi qua nguyên vẹn). Ghép frame number với offset sẽ cho ra địa chỉ vật lý."
+    },
+    {
+      "type": "explanation",
+      "title": "Page table: cuốn sổ cái của hệ điều hành",
+      "content": "Mỗi process có **page table** riêng — một cấu trúc dữ liệu, thường nằm trong RAM, ghi lại ánh xạ từ page ảo sang frame vật lý của process đó. Mỗi dòng là một **page table entry (PTE)**, chứa:\n\n- **Physical frame number** (page này nằm ở đâu trong RAM)\n- **Bit Present (P)**: 1 nếu page hiện đang ở trong RAM, 0 nếu đã bị swap ra hoặc chưa bao giờ được cấp phát\n- **Bit Dirty (D)**: 1 nếu page đã bị ghi kể từ lúc được nạp (và phải được ghi ngược ra đĩa trước khi bị đẩy ra)\n- **Bit Accessed (A)**: 1 nếu page vừa được đọc hoặc ghi gần đây (dùng bởi các thuật toán eviction)\n- **Các bit quyền**: đọc, ghi, thực thi (được MMU kiểm tra ở mọi lần truy cập)\n- **Bit User/Supervisor**: code ở user mode có được truy cập page này hay không\n\nHệ điều hành chuyển con trỏ page table (lưu trong một register chuyên dụng — `CR3` trên x86) mỗi lần nó context-switch sang một process khác. Từ thời điểm đó, mọi địa chỉ ảo mà process mới sinh ra đều được dịch bằng page table của chính nó. Sự cô lập giữa các process tự động có được.\n\nPage table còn cho phép **copy-on-write (COW)**: khi một process gọi `fork()`, hệ điều hành không sao chép toàn bộ RAM của process cha. Thay vào đó, nó đánh dấu mọi page trong cả hai process là read-only và dùng chung các frame vật lý. Lần đầu tiên một trong hai process cố ghi vào một page dùng chung, MMU phát ra protection fault, hệ điều hành chỉ sao chép đúng page đó, đánh dấu nó là ghi được, rồi cho chạy tiếp. Nhờ vậy `fork()` gần như tức thì ngay cả với các process lớn."
+    },
+    {
+      "type": "explanation",
+      "title": "TLB: cache phần cứng cho các lần dịch địa chỉ",
+      "content": "Nếu mỗi lần truy cập bộ nhớ đều cần tra page table trong RAM, hiệu năng sẽ thảm họa — mỗi lệnh load hay store trước tiên phải đi một vòng page table — với bảng bốn tầng của x86-64, tức là thêm tới bốn lần truy cập bộ nhớ trước lần truy cập thật. Trên một CPU thực hiện hàng tỉ thao tác bộ nhớ mỗi giây, điều đó sẽ nhân latency bộ nhớ lên vài lần.\n\nLời giải là **Translation Lookaside Buffer (TLB)** — một associative cache nhỏ, cực nhanh, nằm trong MMU. Nó lưu một số ít ánh xạ từ page ảo sang frame vật lý vừa được dùng gần đây (data TLB cấp một có khoảng 64–96 entry; TLB cấp hai dùng chung chứa khoảng 1,500–3,000). Ở mọi lần truy cập bộ nhớ, phần cứng kiểm tra TLB trước:\n\n- **TLB hit**: tìm thấy bản dịch; địa chỉ vật lý được suy ra trong 1–2 chu kỳ CPU. Phần lớn các truy cập trong thực tế là TLB hit vì chương trình có **tính cục bộ về không gian và thời gian (spatial and temporal locality)** — chúng có xu hướng dùng đi dùng lại cùng các page.\n- **TLB miss**: bản dịch chưa được cache. CPU (x86 dùng page-table walker bằng phần cứng; MIPS và SPARC trước đây dùng TLB handler bằng phần mềm) đi qua page table trong RAM để tìm PTE. Việc này tốn vài chục chu kỳ nếu các entry của page table nằm trong cache, và hàng trăm chu kỳ nếu phải lấy từ RAM. Kết quả được nạp vào TLB.\n- **Page fault**: PTE có bit Present bằng 0 — page không có trong RAM. Một exception phần cứng được phát ra, và **page-fault handler** của hệ điều hành chạy. Nó cấp phát một frame trống, đọc page từ đĩa (swap hoặc một file được memory-map), cập nhật PTE, rồi thử lại lệnh. Khi có disk I/O, chi phí là vài chục micro giây trên NVMe đến vài mili giây trên đĩa từ — tức hàng trăm nghìn đến hàng triệu chu kỳ.\n\nNếu không có hỗ trợ gì thêm, TLB phải bị **flush** (vô hiệu hóa) ở mỗi lần chuyển process, vì các địa chỉ ảo của process kế tiếp mang nghĩa khác. CPU hiện đại gắn tag cho các entry bằng một ID không gian địa chỉ — **ASID** trên ARM, **PCID** trên x86-64 — nên entry của các process khác nhau có thể cùng tồn tại và phần lớn các lần flush được tránh.\n\n**TLB reach** = số entry của TLB × page size. Một TLB 512 entry với page 4 KB chỉ phủ được 2 MB bộ nhớ. Nếu working set của bạn vượt quá TLB reach, TLB miss trở nên thường xuyên — lợi ích của huge page là bạn dùng ít entry TLB hơn cho cùng một lượng bộ nhớ, giảm mạnh số lần miss với các khối cấp phát lớn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Phân cấp dịch địa chỉ ba tầng: TLB hit là đường nhanh, page-table walk xử lý TLB miss, còn page fault kích hoạt hệ điều hành cho những page không có trong RAM."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Ví dụ này minh họa demand paging: `Buffer.allocUnsafe` thiết lập không gian địa chỉ ảo ngay lập tức, nhưng RSS (Resident Set Size — số page vật lý trong RAM) chỉ tăng khi từng page được ghi lần đầu. Hàm translate mang tính khái niệm cho thấy chính xác phép tính: dịch phải để lấy page number, mask để lấy offset, tra frame, rồi ghép lại.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Page table nhiều tầng: chế ngự không gian địa chỉ 64-bit",
+      "content": "Một page table một tầng (phẳng) cho không gian địa chỉ 32-bit với page 4 KB cần 2³² / 2¹² = 2²⁰ = **một triệu entry**. Với 4 byte mỗi entry, đó là 4 MB cho mỗi process — quản lý được, dù sẽ cộng dồn lại khi bạn có hàng trăm process.\n\nVới không gian địa chỉ 64-bit, vấn đề bùng nổ: 2⁶⁴ / 2¹² = 2⁵² entry. Với 8 byte mỗi entry, bảng phẳng tốn 36 petabyte cho mỗi process. Hoàn toàn bất khả thi.\n\nLời giải là **page table nhiều tầng (multi-level page table)** — một cây các bảng, trong đó mỗi tầng phụ trách một phần các bit địa chỉ. x86-64 mặc định dùng cấu trúc **4 tầng** (Intel đặt tên các tầng là PML4, PDPT, PD và PT; Linux gọi chúng là PGD, PUD, PMD và PTE):\n\n1. **PGD** — Page Global Directory (bit 47–39): 512 entry trỏ đến các PUD\n2. **PUD** — Page Upper Directory (bit 38–30): 512 entry trỏ đến các PMD\n3. **PMD** — Page Middle Directory (bit 29–21): 512 entry trỏ đến các PT\n4. **PT** — Page Table (bit 20–12): 512 entry, mỗi entry là một PTE chứa frame number\n5. **Offset** (bit 11–0): 4096 vị trí byte có thể có bên trong frame\n\n**Paging 5 tầng (LA57)**: CPU server Intel Ice Lake và AMD Zen 4 trở về sau có thể thêm tầng thứ năm (P4D của Linux, nằm giữa PGD và PUD). Địa chỉ ảo tăng từ 48 lên **57 bit** — từ 256 TB lên 128 PB không gian ảo — và địa chỉ vật lý lên 52 bit. Linux bật tính năng này trên phần cứng hỗ trợ, nhưng để giữ tương thích, nó chỉ cấp địa chỉ user vượt quá giới hạn 47-bit cũ khi chương trình yêu cầu tường minh trong `mmap`. Cái giá là thêm một lần truy cập bộ nhớ cho mỗi lần page walk.\n\nĐiều kỳ diệu của bảng nhiều tầng: bạn chỉ cấp phát các node trung gian cho những vùng của không gian địa chỉ thực sự được dùng. Một process 64-bit điển hình chỉ dùng một phần nhỏ xíu của dải địa chỉ user-space 128 TB. Code nằm ở địa chỉ thấp; stack nằm gần đỉnh; ở giữa là một khoảng trống mênh mông không được ánh xạ. Page table chỉ cần entry cho các vùng đang có người ở. Một process với working set 100 MB có thể chỉ cần một nhúm page ở tầng PT thay vì cái bảng phẳng lớn đến mức thiên văn.\n\nKhi TLB miss, page-table walker bằng phần cứng đi theo chuỗi: nạp PGD từ CR3, đánh index vào đó để tìm địa chỉ PUD, nạp PUD, đánh index để tìm PMD, và cứ thế. Mỗi tầng là thêm một lần truy cập bộ nhớ — thường được cache trong L1/L2 vì chúng được dùng lại rất nhiều."
+    },
+    {
+      "type": "diagram",
+      "caption": "Page table walk bốn tầng của x86-64. Mỗi tầng dùng 9 bit của địa chỉ ảo để đánh index vào một bảng 512 entry. Chỉ những nhánh cho vùng đã ánh xạ mới được cấp phát. Paging 5 tầng thêm một tầng 9-bit nữa ở trên cùng."
+    },
+    {
+      "type": "explanation",
+      "title": "Page fault: minor, major và invalid",
+      "content": "Không phải page fault nào cũng như nhau. Page-fault handler của hệ điều hành phân biệt ba trường hợp:\n\n**Minor (soft) page fault**: không cần disk I/O. Hoặc page đã nằm trong RAM nhưng chưa được ánh xạ vào process này (một page của page cache, hay một page của shared library mà process khác đã nạp), hoặc fault có thể được đáp ứng bằng một frame mới được điền toàn số 0 — lần chạm đầu tiên vào bộ nhớ do `malloc` trả về hoạt động theo cách này. Handler chỉ cấp phát/cập nhật PTE. Chi phí: từ dưới một micro giây đến vài micro giây.\n\n**Major (hard) page fault**: page thực sự không có trong RAM — nó nằm trong swap space hoặc trong một file trên đĩa. Handler phải:\n1. Tìm một frame vật lý trống (hoặc đẩy một page \"nguội\" ra để lấy chỗ)\n2. Lên lịch một lần đọc đĩa để nạp nội dung page\n3. Block process gây fault cho đến khi việc đọc hoàn tất\n4. Cập nhật PTE và cho process chạy tiếp\nViệc này tốn vài chục đến vài trăm *micro giây* trên SSD NVMe và vài *mili giây* trên đĩa quay — chậm hơn minor fault nhiều bậc độ lớn, và chậm hơn TLB hit tới hàng triệu lần.\n\n**Invalid (segmentation fault)**: địa chỉ ảo hoàn toàn không được ánh xạ và không thuộc một vùng hợp lệ nào (không nằm trong VMA — virtual memory area — nào). Hệ điều hành gửi SIGSEGV cho process. Đây là cái crash mà chương trình của bạn gặp khi dereference một null pointer hay ghi vượt quá cuối một mảng — phần cứng phát ra page fault, hệ điều hành kiểm tra page table, không tìm thấy ánh xạ hợp lệ nào, và kill process.\n\nHiểu sự phân biệt minor/major là then chốt cho việc phân tích hiệu năng. `/proc/PID/status` của Linux hiển thị `VmRSS` (các page vật lý đang thường trú), `VmSwap` (các page hiện nằm trong swap), và các bộ đếm `MinFlt`/`MajFlt`. Một chương trình tích lũy nhiều major fault là đang đụng đến đĩa — một dấu hiệu cảnh báo hiệu năng nghiêm trọng."
+    },
+    {
+      "type": "explanation",
+      "title": "Swap space và page eviction",
+      "content": "Khi RAM vật lý đầy mà lại cần một page mới, hệ điều hành phải **evict** (đẩy ra) một page đang có để lấy chỗ. Chính sách eviction quyết định page nào bị loại bỏ:\n\n**LRU (Least Recently Used)**: đẩy ra page lâu nhất không được truy cập. LRU thuần túy rất tốn kém để hiện thực bằng phần cứng cho hàng triệu page, nên các hệ điều hành thật dùng các phép xấp xỉ.\n\n**Thuật toán Clock (second chance)**: các page được xếp thành một danh sách vòng. Một kim đồng hồ quét quanh vòng; nếu bit Accessed của một page đang bật, bit đó được xóa và kim đi tiếp (cho page đó một 'cơ hội thứ hai'). Nếu bit đã tắt sẵn khi kim đến, page đó bị đẩy ra. Cách này xấp xỉ LRU với chi phí khấu hao O(1). Cơ chế thu hồi cổ điển của Linux dùng một phép xấp xỉ tương tự: hai danh sách LRU active và inactive, với bit Accessed quyết định page nào được thăng hay giáng cấp.\n\n**Multi-generational LRU (mglru) của Linux**: được thêm vào Linux 6.1, nó gom các page thành các 'thế hệ' dựa trên mức độ gần đây. Nó theo dõi page chính xác hơn mà không tốn chi phí của LRU thuần túy, giảm đáng kể thrashing trên các hệ thống bị áp lực bộ nhớ.\n\nCác page bị đẩy ra mà đã bị sửa đổi (bit Dirty bật) phải được ghi vào **swap space** (hoặc một file) trước khi frame của chúng được dùng lại. Các page read-only (ví dụ code của shared library) có thể đơn giản là bị bỏ đi — file gốc trên đĩa đóng vai trò backing store và có thể đọc lại khi cần.\n\n**Thrashing** xảy ra khi **working set** của hệ thống — tập các page mà các process đang chạy thực sự cần — vượt quá RAM vật lý. Hệ điều hành đẩy một page ra, một process khác lập tức cần nó trở lại, nên nó phải đẩy thứ khác ra để nạp page đó vào, điều này lại hất một page cần thiết khác đi, và cứ thế. Mức sử dụng CPU sụp đổ; hệ thống dành gần như toàn bộ thời gian cho I/O page. Triệu chứng: `vmstat` liên tục cho thấy các cột `si`/`so` (swap-in/swap-out) khác 0, I/O wait cao, latency của ứng dụng tăng vọt.\n\n**Working set model** (do Peter Denning giới thiệu năm 1968) hình thức hóa điều này: mỗi process có một working set W(t, Δ) — tập các page phân biệt mà nó tham chiếu trong cửa sổ thời gian Δ kết thúc tại t. Nếu tổng working set của mọi process vượt quá RAM, thrashing là không thể tránh khỏi. Lời giải là giảm số process đang chạy cho đến khi tổng working set vừa vặn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Page eviction: khi RAM đầy, hệ điều hành chọn một nạn nhân, ghi nó ra đĩa nếu nó dirty, giải phóng frame, nạp page được yêu cầu, và cập nhật page table."
+    },
+    {
+      "type": "explanation",
+      "title": "Bố cục không gian địa chỉ ảo",
+      "content": "Trên một hệ thống Linux 64-bit, không gian địa chỉ ảo của mỗi process được chia thành các vùng gọi là **VMA (Virtual Memory Area)**. Kernel đánh index các VMA của mỗi process trong một search tree (suốt nhiều năm là red-black tree, từ Linux 6.1 là *maple tree*). Bạn có thể xem chúng qua `/proc/PID/maps`. Bố cục chuẩn từ địa chỉ thấp đến cao:\n\n- **`0x0` (null page)**: cố ý không được ánh xạ, để việc dereference null pointer gây fault một cách sạch sẽ\n- **Text segment** (`0x400000` với các binary non-PIE cổ điển; position-independent executable — mặc định trên các distro hiện đại — được nạp gần `0x55…` tại một địa chỉ gốc ngẫu nhiên): read-only, thực thi được — mã máy đã biên dịch của chương trình\n- **Data segment**: các biến toàn cục đã khởi tạo (đọc được, ghi được, không thực thi được)\n- **BSS segment**: các biến toàn cục chưa khởi tạo — kernel điền số 0 vào các page này khi cần\n- **Heap** (`brk`/`mmap`): lớn dần lên phía trên; `malloc` mở rộng nó qua syscall `sbrk` hoặc `mmap`\n- **Vùng memory-mapped**: shared library, ánh xạ có file đứng sau, các khối cấp phát `mmap` ẩn danh — được kernel đặt ở giữa không gian địa chỉ\n- **Stack**: lớn dần xuống phía dưới từ gần đỉnh user space; mỗi thread có stack riêng; bị giới hạn bởi `ulimit -s` (mặc định 8 MB trên Linux)\n- **Kernel space** (`0xFFFF800000000000` trở lên trên x86-64): được ánh xạ trong page table của mọi process nhưng đánh dấu chỉ dành cho Supervisor — code user không truy cập được, nhưng kernel có thể truy cập bộ nhớ user mà không cần chuyển page table\n\n**ASLR (Address Space Layout Randomisation)** ngẫu nhiên hóa địa chỉ gốc của file thực thi, heap, vùng `mmap` và stack ở mỗi lần chạy, để kẻ tấn công không thể hard-code địa chỉ của code hay dữ liệu. Đó là lý do các địa chỉ trong `/proc/self/maps` thay đổi giữa các lần chạy (và vì sao debugger thường tắt ASLR để các phiên debug tái hiện được).\n\nViệc tách kernel space vào page table của mọi process (đánh dấu là user mode không truy cập được) là thứ khiến system call nhanh: CPU có thể chuyển từ user mode sang kernel mode mà không cần đổi `CR3` — không cần flush TLB. (Lỗ hổng Meltdown năm 2017 đã phá vỡ giả định này và buộc phải có **KPTI** — Kernel Page Table Isolation — cấp cho user mode một page table riêng, tối giản, nên mỗi lần vào và ra kernel đều phải đổi `CR3`. PCID giúp việc này không flush toàn bộ TLB, nhưng các workload dùng nhiều syscall vẫn mất vài phần trăm. Các CPU được thiết kế sau Meltdown không bị lỗ hổng này và chạy không cần KPTI.)"
+    },
+    {
+      "type": "code_concept",
+      "explanation": "Các literal BigInt (hậu tố `n`) cho phép JavaScript xử lý phép tính địa chỉ 64-bit mà không mất độ chính xác. Bốn index 9-bit, mỗi cái chọn một trong 512 entry ở tầng page table tương ứng; offset 12-bit là vị trí byte bên trong page 4 KB. Chín bit × 4 tầng + 12 bit offset = 48 bit địa chỉ ảo với paging 4 tầng (thêm tầng thứ năm thì thành 57).",
+      "label": "Khái niệm"
+    },
+    {
+      "type": "explanation",
+      "title": "Memory-mapped file và shared memory",
+      "content": "Virtual memory không chỉ dành cho RAM — nó còn là nền tảng của **memory-mapped I/O**. System call `mmap` ánh xạ một file (hoặc một thiết bị) trực tiếp vào không gian địa chỉ ảo của process. Đọc từ dải địa chỉ đó là đọc từ file; ghi vào nó (với các cờ phù hợp) là ghi ngược về file qua page cache của hệ điều hành. Kernel quản lý việc chuyển các block của file vào và ra khỏi RAM vật lý giống hệt cách nó quản lý các page swap.\n\nĐiều này mang lại một số lợi ích thực tế:\n\n- **Zero-copy I/O**: một process có thể đọc một file lớn ở tốc độ bộ nhớ mà không cần các syscall `read()` tường minh sao chép dữ liệu qua một kernel buffer. Hệ điều hành nạp các block của file dưới dạng page khi cần.\n- **Chia sẻ giữa các process**: nếu hai process cùng `mmap` một file, chúng dùng chung các frame vật lý cho nội dung của file. Một lần ghi của bên này (với MAP_SHARED) lập tức hiển thị với bên kia — nền tảng cho shared memory giữa các process mà không cần IPC tường minh.\n- **Nạp file thực thi**: ELF loader (Linux) và Mach-O loader (macOS) không sao chép binary của chương trình vào RAM lúc khởi động. Chúng `mmap` các segment của binary. Các page code được nạp khi cần, lúc chương trình thực thi chúng lần đầu. Thời gian khởi động giảm đáng kể với các chương trình lớn.\n- **Page cache**: Linux duy trì một **page cache** toàn cục chứa các block file trong bộ nhớ. Khi một process đọc file, kernel đặt một bản sao vào page cache. Các lần đọc sau — từ cùng process hay process khác — được phục vụ từ RAM. Memory-mapped file tham gia trực tiếp vào page cache.\n\nCờ `MAP_ANONYMOUS` tạo một vùng memory-mapped không có file đứng sau — đó là cách `malloc` lấy các khối lớn từ kernel. Nó cũng là cơ chế đằng sau các shared anonymous mapping dùng làm bộ nhớ chung giữa các process trong các chương trình song song dựa trên `fork()`."
+    },
+    {
+      "type": "explanation",
+      "title": "Copy-on-write, fork và hệ quả về hiệu năng",
+      "content": "**Copy-on-write (COW)** là một trong những ứng dụng có tác động lớn nhất của virtual memory. Khi một process gọi `fork()`, cách hiện thực ngây thơ sẽ nhân bản từng byte bộ nhớ của process cha — hàng gigabyte với một server process lớn. Điều đó sẽ biến `fork()` thành một thao tác đắt đỏ, chậm dần theo kích thước process.\n\nVới COW, thay vào đó kernel:\n1. Tạo một page table mới cho process con.\n2. Sao chép các entry trong page table của process cha sang của con, trỏ cả hai đến cùng các frame vật lý.\n3. Đánh dấu mọi page dùng chung là **read-only** trong page table của cả cha lẫn con.\n\n`fork()` trả về gần như ngay lập tức bất kể working set của process. Bộ nhớ vật lý chưa hề được sao chép. Giờ đây, khi một trong hai process cố ghi vào một page dùng chung, MMU phát ra protection fault (page đang là read-only). Handler của hệ điều hành:\n1. Cấp phát một frame mới.\n2. Sao chép nội dung của frame gốc sang frame mới.\n3. Cập nhật PTE của process đang ghi để trỏ đến frame mới, kèm quyền ghi.\n4. Cho chạy tiếp.\n\nChỉ những page thực sự bị ghi mới bị nhân bản. Nếu process con lập tức gọi `exec()` (như khi shell khởi chạy một lệnh), nó thay thế hoàn toàn không gian địa chỉ của mình — không page COW nào bị sao chép cả. Đó là lý do idiom `fork()`+`exec()` hiệu quả trong Unix.\n\nCOW cũng quan trọng với developer ứng dụng. Redis dùng `fork()` để tạo snapshot tại một thời điểm (RDB persistence) mà không block các lần ghi: process con duyệt bộ nhớ và ghi ra đĩa trong khi process cha tiếp tục phục vụ request. Các page bị process cha sửa sau khi fork sẽ được sao chép theo COW; các page không bị sửa thì được dùng chung. Lượng bộ nhớ dùng thêm tỉ lệ với số page mà process cha sửa trong khoảng thời gian chụp snapshot — đó là lý do Redis khuyến nghị tắt Transparent Huge Pages: với page 2 MB, chỉ một lần ghi một byte cũng sao chép 2 MB thay vì 4 KB.\n\nMột cái bẫy thường gặp: nếu bạn cấp phát trước một cấu trúc dữ liệu lớn, rồi `fork()`, và process cha lập tức bắt đầu sửa nó, các bản sao COW có thể đẩy mức dùng bộ nhớ lên đáng kể — đôi khi gây ra OOM (Out of Memory) kill. Các công cụ như `smem` báo **PSS** (Proportional Set Size), chia các page dùng chung theo tỉ lệ cho các process cùng dùng, cho bức tranh chính xác hơn RSS."
+    },
+    {
+      "type": "diagram",
+      "caption": "Copy-on-write khi fork: các page được dùng chung ở chế độ read-only cho đến khi một lần ghi gây ra fault, lúc đó chỉ page bị ghi mới được nhân bản về mặt vật lý."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Virtual memory có trước cả hệ điều hành hiện đại. **Máy tính Atlas** tại Đại học Manchester (1962) giới thiệu paging và demand paging — tự động di chuyển page giữa bộ nhớ trống từ (drum) và bộ nhớ lõi để chương trình có thể giả vờ như có nhiều bộ nhớ hơn thực tế. **Burroughs B5000** (1961) tiên phong với segmentation, và **Multics** (cuối thập niên 1960) kết hợp segmentation với paging. IBM đưa virtual memory lên các mainframe phổ biến với **System/370** (1972), và **80386** của Intel (1985) mang đến cho x86 page table hai tầng, thứ về sau phát triển thành các thiết kế bốn và năm tầng ngày nay. Bài báo năm 1968 về **working set** của Peter Denning vẫn là tài liệu nền tảng. Quản lý bộ nhớ hiện đại của Linux — multi-generational LRU, huge page, nhận biết NUMA, memory cgroup — là hậu duệ trực tiếp của những ý tưởng thập niên 1960 đó, được scale lên hàng terabyte RAM và hàng trăm core."
+    },
+    {
+      "type": "callout",
+      "content": "**Lỗi thường gặp và kinh nghiệm interview:**\n- **Nhầm lẫn kích thước ảo với RSS**: `top` hiển thị cả VIRT lẫn RES. VIRT có thể khổng lồ (hàng trăm GB với process JVM) vì nó bao gồm các vùng đã đặt trước nhưng chưa chạm tới. RSS là phần thường trú về mặt vật lý — con số thực sự quan trọng khi xét áp lực bộ nhớ.\n- **Quên rằng fork nhân bản page table, không nhân bản page**: COW nghĩa là `fork()` là O(n) theo số entry của page table, không phải O(n) theo kích thước working set. Nhưng các lần ghi sau đó vẫn tốn RAM vật lý.\n- **Null là địa chỉ 0**: hầu hết ngôn ngữ bắt được việc dereference null pointer vì hệ điều hành cố ý để page đầu tiên (thường là 64 KB đầu tiên) không được ánh xạ. Truy cập địa chỉ 0 gây ra page fault không có ánh xạ hợp lệ → SIGSEGV.\n- **Meltdown/Spectre**: những lỗ hổng CPU này khai thác speculative execution để đọc bộ nhớ kernel từ user mode bằng cách lạm dụng trạng thái của TLB và cache — lời nhắc rằng sự cô lập của virtual memory được hiện thực bằng phần cứng, và bug phần cứng có thể phá vỡ nó.\n- **Stack overflow đúng nghĩa đen là vậy**: khi stack của một thread lớn dần xuống vượt quá VMA được cấp, page tiếp theo không có ánh xạ → page fault → SIGSEGV. Guard page (các page không được ánh xạ nằm ngay dưới VMA của stack) bắt được điều này một cách đáng tin cậy."
+    },
+    {
+      "type": "callout",
+      "content": "**Overcommit và OOM killer:** Linux mặc định overcommit bộ nhớ (`vm.overcommit_memory=0`, một heuristic): một lần `malloc` lớn hơn RAM trống thường vẫn thành công, vì chưa có gì được cấp phát cho đến khi các page bị chạm tới. Nếu về sau các process chạm vào nhiều bộ nhớ hơn mức RAM cộng swap có thể đáp ứng, **OOM killer** của kernel chọn một nạn nhân (theo `oom_score`, đại khái là \"kẻ dùng nhiều bộ nhớ nhất\") và gửi `SIGKILL` cho nó. Trong container, giới hạn bộ nhớ của cgroup kích hoạt cùng killer đó — chính là exit code **137** (128 + 9) quen thuộc và trạng thái `OOMKilled` trong Kubernetes. Hãy đặt giới hạn container dựa trên RSS/working set, không phải kích thước ảo, và dùng `vm.overcommit_memory=2` ở những nơi cần tính toán chặt chẽ."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Virtual memory** cho mỗi process một không gian địa chỉ riêng, bị cô lập. Hệ điều hành + MMU lặng lẽ dịch mọi địa chỉ ảo sang một địa chỉ RAM vật lý, ngăn các process truy cập bộ nhớ của nhau.",
+        "Bộ nhớ được chia thành các **page** kích thước cố định (thường 4 KB). Một địa chỉ ảo tách thành page number (được page table dịch) và byte offset (đi qua nguyên vẹn). Page table lưu một entry cho mỗi page ảo, không phải cho mỗi byte.",
+        "**TLB** là cache phần cứng cho các bản dịch gần đây. TLB hit tốn ~1–2 chu kỳ; TLB miss kích hoạt một lần page-table walk (vài chục đến vài trăm chu kỳ); một **page fault** major tốn disk I/O (vài chục µs trên NVMe, vài ms trên HDD). Tag ASID/PCID cho phép entry TLB sống sót qua context switch. Tính cục bộ là then chốt cho hiệu quả của TLB.",
+        "**Page table nhiều tầng** (4 tầng trên x86-64, 5 tầng với địa chỉ 57-bit trên các server mới nhất) tránh việc cấp phát chỗ cho cái bảng phẳng lớn đến mức thiên văn mà không gian 64-bit đòi hỏi, bằng cách chỉ tạo node trung gian cho những dải địa chỉ thực sự được dùng.",
+        "**Demand paging** cấp phát frame vật lý một cách lười biếng — `malloc` đặt trước không gian ảo ngay lập tức; RAM vật lý chỉ bị tiêu thụ khi một page được truy cập lần đầu (gây ra một minor page fault). RSS theo dõi mức dùng vật lý thực tế.",
+        "**Copy-on-write** khiến `fork()` gần như tức thì: cha và con dùng chung frame vật lý ở chế độ read-only cho đến khi một lần ghi kích hoạt việc sao chép từng page. Redis dùng điều này cho snapshot persistence; shell dùng nó để thực thi lệnh.",
+        "**Thrashing** xảy ra khi tổng working set của các process đang chạy vượt quá RAM vật lý. Hệ điều hành dành nhiều thời gian đẩy ra và nạp lại page hơn là thực thi code. Cách chữa là thu nhỏ working set, chạy ít process hơn cùng lúc, hoặc thêm RAM — huge page giảm TLB miss, không giảm thrashing.",
+        "Linux mặc định **overcommit**; khi bộ nhớ bị chạm tới vượt quá RAM + swap (hoặc giới hạn cgroup của container), **OOM killer** gửi SIGKILL cho một nạn nhân — exit code 137 / `OOMKilled`."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vai trò chính của Memory Management Unit (MMU) là gì?",
+      "options": [
+        "Lập lịch xem process nào được chạy tiếp trên CPU",
+        "Dịch địa chỉ ảo sang địa chỉ vật lý ở mọi lần truy cập bộ nhớ",
+        "Nén dữ liệu lưu trong RAM để tiết kiệm chỗ",
+        "Quản lý hàng đợi đọc/ghi đĩa"
+      ],
+      "explanation": "MMU là một đơn vị phần cứng bên trong CPU, chặn mọi lần truy cập bộ nhớ và dịch địa chỉ ảo mà process dùng sang địa chỉ vật lý nơi dữ liệu thực sự nằm trong RAM, nhờ TLB và page table."
+    },
+    {
+      "id": "q2",
+      "question": "Trên hệ thống có page 4 KB, một địa chỉ ảo tách thành hai thành phần nào?",
+      "options": [
+        "Segment number và segment offset",
+        "Process ID và byte index",
+        "Page number (các bit cao) và byte offset bên trong page (12 bit thấp)",
+        "Frame number và TLB index"
+      ],
+      "explanation": "Với page 4 KB (2^12), 12 bit thấp là byte offset bên trong page và đi qua MMU nguyên vẹn. Các bit cao là virtual page number, được tra trong page table để tìm physical frame number."
+    },
+    {
+      "id": "q3",
+      "question": "Loại page fault nào cần disk I/O và tốn kém nhất?",
+      "options": [
+        "Minor (soft) fault — page đã trong RAM nhưng chưa được ánh xạ vào process này",
+        "Major (hard) fault — page không có trong RAM, phải nạp từ swap hoặc file",
+        "Invalid fault — dereference null pointer gây SIGSEGV",
+        "TLB fault — bản dịch chưa được cache trong TLB"
+      ],
+      "explanation": "Major (hard) page fault nghĩa là page hiện hoàn toàn không có trong RAM vật lý. Hệ điều hành phải đọc nó từ swap space hoặc một file trên đĩa, mất vài chục micro giây trên NVMe đến vài mili giây trên đĩa cứng — chậm hơn minor fault nhiều bậc độ lớn và chậm hơn TLB hit tới hàng triệu lần."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao hệ thống 64-bit dùng page table nhiều tầng thay vì một bảng phẳng duy nhất?",
+      "options": [
+        "Bảng nhiều tầng cho phép tra TLB nhanh hơn",
+        "MMU phần cứng chỉ hỗ trợ đi qua bốn tầng, không hỗ trợ một tầng",
+        "Bảng một tầng không thể lưu các bit quyền",
+        "Một bảng phẳng cho 2^64 địa chỉ sẽ cần hàng petabyte bộ nhớ cho mỗi process"
+      ],
+      "explanation": "Một page table phẳng cho không gian địa chỉ 64-bit (2^52 page 4 KB có thể có) sẽ cần khoảng 36 petabyte cho mỗi process. Bảng nhiều tầng chỉ cấp phát node trung gian cho những vùng địa chỉ thực sự được dùng, khiến kích thước bảng tỉ lệ với working set chứ không phải toàn bộ không gian địa chỉ."
+    },
+    {
+      "id": "q5",
+      "question": "Copy-on-Write (COW) đạt được điều gì trong một lời gọi fork()?",
+      "options": [
+        "Nó lập tức sao chép mọi page vật lý của process cha sang các frame mới cho process con",
+        "Nó cho cha và con dùng chung frame vật lý ở chế độ read-only; một lần ghi sẽ kích hoạt việc nhân bản từng page",
+        "Nó ngăn process con ghi vào bất kỳ vùng nhớ nào cho đến khi gọi exec()",
+        "Nó chỉ sao chép các page của stack; các page của heap luôn được dùng chung"
+      ],
+      "explanation": "COW đánh dấu mọi page dùng chung là read-only trong page table của cả cha lẫn con. Chỉ khi một process thực sự ghi vào một page thì MMU mới phát ra protection fault, lúc đó hệ điều hành chỉ sao chép đúng page đó sang một frame mới. Nhờ vậy fork() gần như tức thì bất kể kích thước process."
+    },
+    {
+      "id": "q6",
+      "question": "'Thrashing' là gì và nó cho thấy điều gì?",
+      "options": [
+        "Tình trạng hệ điều hành dành nhiều thời gian swap page hơn là thực thi process vì working set vượt quá RAM",
+        "Overhead do CPU context switch liên tục giữa nhiều thread",
+        "Phân mảnh bộ nhớ khiến không cấp phát được các khối lớn liên tục",
+        "Những cơn bão vô hiệu hóa TLB do có quá nhiều process đồng thời"
+      ],
+      "explanation": "Thrashing xảy ra khi tổng working set của các process đang chạy vượt quá RAM vật lý. Hệ điều hành liên tục đẩy ra những page lại được cần ngay sau đó, dẫn đến disk I/O gần như liên tục và mức sử dụng CPU sụp đổ. Thêm RAM hoặc giảm số process đồng thời sẽ giải quyết được."
+    },
+    {
+      "id": "q7",
+      "question": "Khi một process gọi malloc() xin 1 GB trên một hệ thống còn trống 512 MB RAM, điều gì thường xảy ra ngay lập tức?",
+      "options": [
+        "malloc() trả về NULL vì không đủ RAM vật lý",
+        "Hệ điều hành lập tức cấp phát 1 GB từ swap space",
+        "Không gian địa chỉ ảo được đặt trước nhưng frame vật lý chỉ được cấp phát ở lần truy cập đầu tiên (demand paging)",
+        "Hệ điều hành bắt đầu đẩy các process khác ra một cách đồng bộ để giải phóng 1 GB RAM"
+      ],
+      "explanation": "Các hệ điều hành hiện đại dùng cấp phát lạc quan (lười biếng). malloc() đặt trước không gian địa chỉ ảo và trả về con trỏ ngay lập tức. Frame vật lý chỉ được cam kết khi process chạm vào từng page lần đầu (một minor page fault). Đó là lý do kích thước ảo của một process có thể vượt xa RSS của nó."
+    },
+    {
+      "id": "q8",
+      "question": "'Reach' của TLB biểu thị điều gì, và vì sao nó quan trọng với hiệu năng?",
+      "options": [
+        "Số process tối đa mà page table của chúng có thể được cache cùng lúc",
+        "Số chu kỳ CPU tiết kiệm được mỗi lần TLB hit so với một lần page-table walk đầy đủ",
+        "Tổng lượng bộ nhớ vật lý có thể đánh địa chỉ mà không bị TLB miss, bằng số entry TLB nhân với page size",
+        "Khoảng cách tính bằng byte giữa hai entry TLB liên tiếp"
+      ],
+      "explanation": "TLB reach = số entry TLB × page size. Một TLB 512 entry với page 4 KB chỉ phủ được 2 MB. Nếu working set của một process vượt quá TLB reach, miss trở nên thường xuyên và tốn kém. Huge page (2 MB) tăng reach đáng kể, giảm tỉ lệ TLB miss cho các workload lớn như database."
+    },
+    {
+      "id": "q9",
+      "question": "Bit Dirty trong một page table entry được dùng để làm gì?",
+      "options": [
+        "Đánh dấu các page chứa dữ liệu không hợp lệ hoặc bị hỏng",
+        "Ghi lại số lần một page được truy cập để phục vụ LRU eviction",
+        "Gắn cờ cho các page thuộc về kernel mà process user không truy cập được",
+        "Cho biết một page đã bị ghi kể từ lúc được nạp, nghĩa là phải lưu ra đĩa trước khi bị đẩy ra"
+      ],
+      "explanation": "Bit Dirty được MMU bật khi một process ghi vào page. Khi eviction, chỉ những page dirty mới cần được ghi ra swap hoặc file đứng sau — các page sạch (như code read-only) có thể đơn giản bị bỏ đi và đọc lại từ nguồn gốc nếu sau này cần."
+    },
+    {
+      "id": "q10",
+      "question": "Vì sao kernel Linux ánh xạ không gian địa chỉ của chính nó vào page table của mọi process, với đánh dấu chỉ dành cho Supervisor?",
+      "options": [
+        "Để kernel có thể thực thi system call mà không cần chuyển sang một kernel process riêng",
+        "Để process user đọc trực tiếp các cấu trúc dữ liệu của kernel nhằm tăng hiệu năng",
+        "Vì kernel chiếm nửa dưới của không gian địa chỉ 64-bit",
+        "Để kernel có thể đẩy page của process ra mà không cần đổi CR3"
+      ],
+      "explanation": "Ánh xạ kernel space vào page table của mọi process (nhưng đánh dấu chỉ dành cho Supervisor) nghĩa là một system call có thể chuyển từ user mode sang kernel mode mà không cần đổi CR3 — tránh được việc flush TLB. Chỉ có mức đặc quyền của CPU thay đổi. Lỗ hổng Meltdown đã phá vỡ điều này bằng cách làm lộ dữ liệu kernel qua speculative execution, dẫn đến KPTI, cơ chế dùng page table riêng cho user và kernel và đổi CR3 ở mỗi lần vào và ra kernel (PCID tránh được phần lớn các lần flush TLB phát sinh)."
+    }
+  ]
+}

@@ -1,0 +1,229 @@
+{
+  "sourceHash": "bbf6d708e6b1",
+  "title": "Caching và CDN",
+  "tagline": "Cú hích hiệu năng lớn nhất trong hệ thống phân tán — hiểu dữ liệu nằm ở đâu và còn hợp lệ trong bao lâu.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Phần lớn vấn đề hiệu năng trong hệ thống web không bị giới hạn bởi CPU — mà bị giới hạn bởi **latency**. Một query database mất 20ms, chạy một lần mỗi request, sẽ thành thảm họa khi lên quy mô: 100,000 user mỗi giây nghĩa là 100,000 chuyến đi tới database mỗi giây, mỗi round-trip đốt 20ms chờ đợi. Server không hề \"suy nghĩ\" trong 20ms đó — nó chỉ ngồi chờ ổ đĩa. **Caching** là nghệ thuật cắt ngắn sự chờ đợi đó bằng cách giữ một bản sao của câu trả lời ở chỗ nào đó nhanh hơn, gần hơn và rẻ hơn để truy cập.\n\nTừ \"cache\" bắt nguồn từ tiếng Pháp, nghĩa là \"chỗ cất giấu\" — cache là nơi bạn giấu một thứ có giá trị để sau này lấy ra nhanh mà không phải quay về tận nguồn gốc. Trong máy tính, nguồn gốc đó có thể là một database trên server ở xa, một file trên ổ đĩa chậm, hay một API endpoint ở lục địa khác. Cache là chỗ giấu ngay gần: một Redis cluster trong cùng data center, một CDN edge node trong cùng thành phố, hay một dictionary nhỏ trong bộ nhớ của cùng process.\n\nCache có mặt ở mọi tầng của web stack hiện đại. CPU có cache L1, L2 và L3 tính bằng nano giây. Hệ điều hành có page cache giữ các block đĩa vừa truy cập trong RAM. Ứng dụng của bạn có object cache trong process. Một cluster Redis hoặc Memcached cung cấp cache dùng chung cho cả fleet app server. Một reverse proxy như Nginx hay Varnish cache HTTP response. Một **CDN** (Content Delivery Network) cache asset trên các server rải khắp địa cầu. Chính trình duyệt của user cũng cache ảnh, script và API response cục bộ. Mỗi tầng đánh đổi **dung lượng** lấy **tốc độ**: cache L1 của CPU chỉ 32 KB và mất 1ns; Redis cluster phân tán của bạn 100 GB và mất 1ms; database của bạn 10 TB và mất 20ms.\n\nHiểu nên cache ở tầng nào, diễn đạt dữ liệu nào cache được và trong bao lâu, và quan trọng nhất — làm sao giữ mọi cache đó nhất quán khi dữ liệu gốc thay đổi — là một trong những kỹ năng thực tế và giá trị nhất trong systems engineering. Chương này xây dựng hiểu biết đó từ những nguyên lý gốc."
+    },
+    {
+      "type": "diagram",
+      "caption": "Phân cấp cache. Mỗi tầng hứng các miss từ tầng phía trên. Con số latency là thời gian round-trip xấp xỉ. Mục tiêu là đáp ứng càng nhiều request càng tốt ở tầng càng cao trong chuỗi này — lý tưởng nhất là từ cache trình duyệt với chi phí mạng 0ms."
+    },
+    {
+      "type": "analogy",
+      "title": "Hệ thống thư viện chi nhánh",
+      "content": "Hãy hình dung một kho thư viện trung tâm ở rìa thành phố chứa mọi cuốn sách từng được in — hàng triệu đầu sách, nhưng lái xe đi về mất 45 phút. Thành phố còn có các thư viện chi nhánh trong từng khu phố: bộ sưu tập nhỏ hơn, chỉ gồm những cuốn phổ biến nhất, nhưng chỉ cách 5 phút đi bộ. **CDN chính là thư viện chi nhánh gần nhà bạn.** Nội dung phổ biến được nhân bản ở đó nên phần lớn mọi người không bao giờ phải lái xe đường xa tới kho.\n\nGiờ hãy hình dung thủ thư ở chi nhánh để một xe đẩy nhỏ ở quầy lễ tân, chứa những cuốn sách vừa được trả trong một giờ qua — đây là những cuốn nhiều khả năng sẽ được mượn lại nhất. **Redis chính là cái xe đẩy ở quầy đó.** Lấy sách từ xe đẩy mất vài giây; lấy từ kệ mất vài phút.\n\nCuối cùng, ở nhà bạn có một kệ sách nhỏ chứa những cuốn vừa đọc gần đây. Bạn không bao giờ phải ra khỏi nhà để lấy chúng. **Cache trình duyệt là kệ sách ở nhà bạn.**\n\nBài toán khó nhất của thủ thư: chuyện gì xảy ra khi kho nhận được một ấn bản mới, đã sửa lỗi, của một cuốn sách? Mọi thư viện chi nhánh và mọi kệ sách ở nhà đang giữ ấn bản cũ giờ đều sai. Thủ thư gửi thông báo (invalidation), vài người xé trang cũ và dán bản sửa vào (update), còn vài người cứ chờ tới khi cuốn sách đủ cũ để tự nhiên mang trả và lấy cuốn mới (TTL hết hạn). **Cache invalidation chính là bài toán đính chính của thư viện** — và nổi tiếng là bài toán khó nhất trong khoa học máy tính."
+    },
+    {
+      "type": "explanation",
+      "title": "Phân cấp cache: từ nano giây tới giây",
+      "content": "Để lập luận về caching, bạn cần thấm các con số latency ở từng tầng. Đây là những con số ước lượng nhưng mang tính kinh điển mà các engineer kinh nghiệm luôn nhớ trong đầu:\n\n- **Cache L1 của CPU**: ~1 nano giây, ~32 KB mỗi core\n- **Cache L2 của CPU**: ~4 nano giây, ~256 KB mỗi core\n- **Cache L3 của CPU**: ~40 nano giây, ~8 MB dùng chung\n- **RAM chính**: ~100 nano giây, hàng chục GB\n- **Object cache trong process** (dictionary trong app của bạn): ~100 nano giây (không serialize, không qua mạng)\n- **Redis trong cùng LAN**: ~0.5–1 mili giây (một round-trip mạng + parse)\n- **Query database cùng region**: ~1–5 ms (nằm trong buffer pool của DB) hoặc ~20–100 ms (I/O đĩa)\n- **CDN edge node trong cùng quốc gia**: ~5–20 ms\n- **Origin server ở lục địa khác**: ~150–300 ms\n- **I/O đĩa lạnh (đĩa quay)**: ~10 ms seek + truyền dữ liệu\n\nBước nhảy từ nano giây lên mili giây là hệ số một triệu. Khi đi từ một cache hit trong process sang một lần miss phải xuống database, bạn trả latency gấp khoảng 100,000 lần. Đó là lý do việc chọn tầng cache nào không phải là tối ưu vi mô — nó quyết định về bản chất hệ thống của bạn phục vụ được 10 user hay 10 triệu user.\n\n**Sao không cache mọi thứ ở tầng nhanh nhất?** Vì dung lượng và chi phí. Heap của process bị giới hạn ở vài GB, và dữ liệu ở đó không được chia sẻ với các process khác. Redis tốn tiền để cấp phát và có overhead mạng. Cache trình duyệt nằm trên thiết bị của user và không thể bị purge từ phía server. Mỗi tầng cache có dung lượng, đặc tính chia sẻ và cơ chế invalidation khác nhau."
+    },
+    {
+      "type": "explanation",
+      "title": "Các chiến lược caching: ba pattern",
+      "content": "Có ba chiến lược kinh điển để dùng cache, mỗi cái đánh đổi khác nhau giữa sự đơn giản, latency khi ghi, tính nhất quán và độ bền dữ liệu.\n\n**Cache-aside (lazy loading)** là pattern phổ biến nhất ở tầng ứng dụng, bỏ xa các pattern khác. Ứng dụng tự quản lý cache một cách tường minh. Khi đọc, nó kiểm tra cache trước; nếu miss, nó query nguồn dữ liệu và lưu kết quả vào cache kèm TTL. Khi ghi, nó cập nhật nguồn dữ liệu rồi xóa hoặc cập nhật cache key. Cache-aside đơn giản vì cache chỉ mang tính tham khảo — nếu cache lỗi hoặc rỗng, hệ thống suy giảm êm ái về việc đọc thẳng database. Nhược điểm là **vấn đề cold start**: mỗi key duy nhất đều chậm ở lần truy cập đầu tiên, và một cache rỗng sau khi Redis restart nghĩa là một đợt traffic tăng vọt dội xuống database.\n\nCache **write-through** được cập nhật đồng bộ ở mỗi lần ghi. Ứng dụng ghi vào cả cache lẫn database trong cùng một thao tác (hoặc cache là trung gian tự ghi xuyên xuống database). Cache luôn \"ấm\" với dữ liệu vừa được ghi. Trade-off: mỗi lần ghi trả giá hai lần (latency cache + DB), và dữ liệu được ghi mà không bao giờ được đọc thì lãng phí chỗ trong cache.\n\n**Write-back (write-behind)** ghi vào cache ngay lập tức và trả thành công cho client, rồi bất đồng bộ đẩy dữ liệu xuống database ở chế độ nền. Ghi cực nhanh (chỉ là một lần ghi cache), nhưng nếu cache crash trước khi kịp đẩy xuống, những lần ghi đó mất vĩnh viễn. Write-back phù hợp với các workload throughput cao, chịu được mất mát như đếm event analytics hay điểm leaderboard, nhưng nguy hiểm với giao dịch tài chính hay dữ liệu tài khoản user.\n\nBiến thể thứ tư, **read-through**, là khi chính cache (chứ không phải ứng dụng) chịu trách nhiệm nạp dữ liệu từ database khi miss. Redis không hỗ trợ sẵn điều này, nhưng các caching framework như Ehcache thì có. Ứng dụng luôn nói chuyện với cache, và cache tự động lấy từ DB khi cần. Cách này đưa logic cache ra khỏi code ứng dụng, nhưng giờ ứng dụng phụ thuộc vào việc tầng cache phải sẵn sàng — nếu tầng cache sập, việc đọc sẽ thất bại thay vì fallback xuống database."
+    },
+    {
+      "type": "diagram",
+      "caption": "Ba chiến lược caching. Với cache-aside, chính ứng dụng đọc DB và nạp cache; write-through giữ cache luôn ấm khi ghi; write-back tối đa throughput ghi với cái giá là độ bền dữ liệu."
+    },
+    {
+      "type": "explanation",
+      "title": "TTL: Time-to-Live và trade-off về độ cũ của dữ liệu",
+      "content": "Mọi entry trong cache nên có **TTL** (Time-to-Live) — một khoảng hết hạn mà sau đó entry tự động bị loại. Không có TTL, một lần quên invalidation (một bug ở đường ghi khiến bạn quên xóa cache key) nghĩa là user thấy dữ liệu cũ mãi mãi. Có TTL, tệ nhất họ chỉ thấy dữ liệu cũ trong TTL giây trước khi cache tự hết hạn và lần đọc kế tiếp lấy được dữ liệu mới.\n\nChọn TTL đúng là quyết định của cả product lẫn engineering, không chỉ là chuyện kỹ thuật. Câu hỏi là: **dữ liệu này cũ được tới mức nào trước khi user hoặc doanh nghiệp bị ảnh hưởng?**\n\n- **TTL rất ngắn (1–10 giây)**: counter real-time, mức tồn kho trực tiếp, giá cổ phiếu. Cũ 10 giây thì chấp nhận được; cũ 60 giây thì không.\n- **TTL ngắn (60–300 giây)**: kết quả tìm kiếm, danh sách sản phẩm, news feed của user. User chấp nhận dữ liệu cũ vài phút để đổi lấy response nhanh.\n- **TTL trung bình (1–24 giờ)**: dữ liệu profile user, mô tả sản phẩm, cấu hình. Những thứ này thỉnh thoảng thay đổi nhưng không theo thời gian thực.\n- **TTL dài (vài ngày tới vài tuần)**: dữ liệu tham chiếu, danh sách quốc gia/thành phố, nội dung tĩnh không được xử lý bằng content hashing. Hiếm khi thay đổi.\n- **Coi như vô hạn (immutable)**: các asset đánh địa chỉ theo nội dung như `app.a1b2c3.js`, nơi chính URL thay đổi khi nội dung thay đổi. Chúng có thể được cache mãi mãi vì URL đã đảm bảo tính mới.\n\nMột nhận định vận hành then chốt: **luôn đặt TTL kể cả khi bạn đã invalidation tường minh**. Code invalidation của bạn sẽ có bug, deploy sẽ thất bại, lệnh flush cache sẽ bị bỏ sót. TTL là lưới an toàn — nó chặn trên khoảng thời gian dữ liệu cũ trong worst case. Bỏ sót invalidation với TTL 5 phút nghĩa là 5 phút dữ liệu cũ, chứ không phải cũ vĩnh viễn.\n\nMột tinh tế khác: **rải TTL** (staggering) giúp tránh thundering herd khi nhiều key hết hạn cùng lúc. Nếu bạn cache 1,000 profile user đều với TTL=3600 và chúng được nạp cùng một giây (ví dụ lúc server khởi động), chúng sẽ hết hạn cùng lúc, gây ra một đợt 1,000 query DB đồng thời. Thêm một chút jitter ngẫu nhiên — `TTL = 3600 + Math.random() * 300` — sẽ rải các thời điểm hết hạn ra."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Có vài pattern tinh tế ở đây: `redis.setex` là atomic — nó đặt giá trị VÀ TTL trong một command Redis, tránh race condition khi crash giữa `SET` và `EXPIRE` để lại một key không có TTL. TTL jitter rải thời điểm hết hạn ra một khoảng để tránh cache miss đồng loạt. Đường ghi xóa key thay vì cập nhật nó — đơn giản hơn, tránh bug serialize (nếu định dạng dòng DB đã đổi thì sao?), và nghĩa là cache được nạp một cách lười ở lần đọc kế tiếp. Directive HTTP `stale-while-revalidate` bảo CDN phục vụ ngay một entry đã hết hạn cho user trong khi lấy nội dung mới ở chế độ nền — loại bỏ cú tăng vọt latency mà user lẽ ra sẽ thấy khi cache hết hạn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Cache invalidation: bài toán khó nhất",
+      "content": "Câu đùa nổi tiếng của Phil Karlton — \"Trong khoa học máy tính chỉ có hai thứ khó: cache invalidation và đặt tên\" — đã thành sáo ngữ chính vì nó quá chính xác. Cache invalidation khó vì nó đòi hỏi **phối hợp phân tán trong điều kiện có lỗi**: bạn cần đảm bảo mọi cache đang giữ bản sao cũ của một mục dữ liệu đều được cập nhật hoặc loại bỏ khi dữ liệu gốc thay đổi, kể cả khi mạng bị phân mảnh, cache crash, và các lần ghi diễn ra đồng thời.\n\nCác chiến lược chính:\n\n**Xóa khi ghi (invalidation)**: Cách đơn giản nhất. Khi dữ liệu thay đổi, xóa mọi cache key phụ thuộc vào nó. Lần đọc tiếp theo của bất kỳ key nào đã xóa sẽ miss cache, lấy dữ liệu mới từ DB và nạp lại cache. Đây là mặc định an toàn nhất vì worst case thông thường là một cache miss (chậm) chứ không phải một hit trả dữ liệu cũ — dù một reader chậm đã lấy dòng cũ ngay trước lần ghi của bạn vẫn có thể chèn lại nó sau khi bạn xóa, đó là lý do vẫn giữ TTL làm chốt chặn. Thách thức là biết phải xóa key nào — nếu việc cập nhật một sản phẩm ảnh hưởng tới trang chi tiết sản phẩm, trang kết quả tìm kiếm và response của recommendation engine, bạn cần invalidate cả ba.\n\n**Cập nhật khi ghi (write-through invalidation)**: Thay vì xóa key, cập nhật nó bằng giá trị mới đã serialize một cách atomic. Cách này giữ cache luôn ấm (không có đợt tăng vọt cold start sau mỗi lần ghi) nhưng khó cài đặt đúng hơn — giá trị cache đã serialize phải khớp chính xác với thứ mà một lần đọc cache-aside mới tinh sẽ tạo ra.\n\n**Invalidation theo event**: Một message queue (Kafka, RabbitMQ, Redis Streams) phát các event `ProductUpdated`. Mọi service có duy trì cache cho sản phẩm đều subscribe event đó và invalidate cache cục bộ của mình. Cách này tách rời bên ghi khỏi các bên giữ cache và mở rộng tốt hơn cho kiến trúc nhiều service, nhưng mang theo eventual consistency — có một khoảng thời gian giữa lần ghi và lúc event được xử lý.\n\n**Invalidation theo tag**: Gắn cache key với các tag (`product:42`, `category:electronics`). Khi cập nhật, invalidate mọi key mang một tag nhất định. Cách này xử lý thanh lịch bài toán một thay đổi dữ liệu làm mất hiệu lực nhiều entry cache. CDN hỗ trợ sẵn điều này — header `Surrogate-Key` của Fastly, `Cache-Tag` của Cloudflare, cache tag của Akamai, Varnish qua module `xkey` — nên một lệnh purge có thể loại mọi trang đã cache có nhắc tới sản phẩm 42. Redis không hỗ trợ tag sẵn nhưng có thể cài đặt bằng Redis Set làm index.\n\n**Invalidation theo version**: Lưu một số version hoặc timestamp cùng mỗi cache key. Khi ghi, tăng version. Reader kiểm tra version trước khi tin vào kết quả trong cache. Cách này thường dùng cho những trường hợp invalidation toàn bộ quá tốn kém."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường ghi kèm invalidation. Cache key bị xóa ngay sau khi ghi DB. Event bus thông báo cho các service khác. Lần đọc kế tiếp nạp lại cache bằng dữ liệu mới từ DB. Có một khoảng ngắn giữa DEL và lúc nạp lại, khi đó mọi lần đọc đều dội xuống DB."
+    },
+    {
+      "type": "explanation",
+      "title": "Kiến trúc CDN: edge node và PoP",
+      "content": "**CDN** (Content Delivery Network) là một fleet server cache phân tán toàn cầu. Nhận định then chốt mang tính địa lý: latency mạng về bản chất bị giới hạn bởi tốc độ ánh sáng. Tokyo và Virginia cách nhau khoảng 11,000 km; ánh sáng trong cáp quang đi được khoảng 200 km mỗi mili giây, nên một round trip tốn ít nhất ~110 ms trước khi tính các đường vòng routing hay thời gian xử lý (RTT thực tế thường 150–200 ms, và một HTTPS connection mới cần vài round trip). Một CDN edge server ở Tokyo phục vụ cùng nội dung đó trong 5–10ms.\n\nCác nhà cung cấp CDN (Cloudflare, Fastly, Akamai, AWS CloudFront) vận hành các **Point of Presence (PoP)** — data center ở hàng chục hay hàng trăm thành phố khắp thế giới. Mỗi PoP chứa nhiều **edge node** (server cache). Khi user request `https://example.com/images/hero.jpg`, request được lái tới một PoP gần đó — hoặc bằng DNS (resolver nhận IP của một PoP gần), hoặc bằng **anycast** (mọi PoP cùng công bố một IP và routing Internet giao gói tin tới PoP gần nhất, như Cloudflare làm). Edge node kiểm tra cache của nó; nếu hit, nó phục vụ asset trực tiếp. Nếu miss, edge node **kéo từ origin** — lấy từ server thật của bạn — và cache response cho các request tiếp theo từ cùng khu vực.\n\nMô hình kéo này gọi là **pull-based CDN** (cách còn lại, push, nghĩa là bạn upload nội dung lên CDN từ trước — phổ biến với các thư viện video lớn). Origin của bạn chỉ phải xử lý request đầu tiên từ mỗi PoP cho mỗi cache key duy nhất. **Tiered caching / origin shield** còn đi xa hơn: khi miss, các edge PoP hỏi một cache cha cấp khu vực thay vì hỏi origin, nên một URL mới đang hot chỉ gây một lần fetch tới origin thay vì mỗi PoP một lần. Sau đó, edge phục vụ từ cache cho tới khi TTL hết hạn hoặc bạn chủ động purge edge cache.\n\nCDN giờ không còn chỉ dành cho file tĩnh. CDN hiện đại hỗ trợ:\n- **Cache API**: Cache `GET /api/products` ở edge với `Cache-Control: public, max-age=60`. Request đầu tiên từ mỗi khu vực chạm origin; 10,000 request tiếp theo trong khu vực đó được phục vụ từ edge, mỗi cái 10ms.\n- **Edge computing**: Chạy JavaScript hoặc WebAssembly ngay tại edge node trước cả khi hỏi origin (Cloudflare Workers, Fastly Compute). Điều này cho phép cá nhân hóa, A/B testing và kiểm tra auth với latency của edge.\n- **Dynamic site acceleration**: Kể cả với nội dung không cache được, CDN vẫn tăng tốc việc giao bằng cách duy trì các TCP connection lâu dài tới origin và route qua mạng private đã tối ưu thay vì Internet công cộng.\n\nCDN còn là tuyến **phòng thủ DDoS** đầu tiên của bạn. Một cuộc tấn công dạng volumetric đẩy 100 Gbps traffic vào domain của bạn sẽ dội vào các CDN edge node — vốn có capacity lớn hơn origin của bạn rất nhiều — và có thể được hấp thụ hoặc lọc trước khi tới server của bạn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mô hình pull của CDN. Chỉ request đầu tiên cho mỗi resource ở mỗi khu vực mới chạm origin. Mọi request tiếp theo trong khu vực đó được phục vụ từ edge với latency ~5ms, bất kể tải của origin server."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache key của CDN, Vary và cache poisoning",
+      "content": "CDN lưu mỗi response dưới một **cache key** — mặc định đại khái là *scheme + host + path + query string*. Hai request chỉ dùng chung một response đã cache nếu key của chúng khớp nhau, nên cache key quyết định cả tỉ lệ hit lẫn tính đúng đắn.\n\n**Key quá cụ thể sẽ làm cache bị phân mảnh.** `/products?page=1&utm_source=mail` và `/products?utm_source=ads&page=1` mặc định là hai key khác nhau, nên tham số tracking và thứ tự tham số có thể biến một object đang hot thành hàng nghìn object lạnh. Sửa bằng các rule CDN loại bỏ tham số marketing, sắp xếp query string, hoặc chỉ đưa vào key một danh sách cho phép (allow-list) các tham số.\n\n**Key quá rộng sẽ làm lộ hoặc trộn lẫn nội dung.** Nếu response phụ thuộc vào thứ gì đó *không* nằm trong key — một cookie, header `Accept-Language`, loại thiết bị — phiên bản của user đầu tiên sẽ được phục vụ cho tất cả mọi người. Cơ chế HTTP cho chuyện này là `Vary`: `Vary: Accept-Encoding` (phổ quát và an toàn) bảo cache giữ riêng các bản gzip/brotli/thường. Nhưng `Vary: Cookie` hay `Vary: User-Agent` thường phá nát tỉ lệ hit, vì gần như request nào cũng khác nhau; thay vào đó CDN cho phép bạn đưa các giá trị *đã chuẩn hóa* vào key (ví dụ một hạng thiết bị, hoặc một cookie duy nhất như `currency`), còn response cá nhân hóa thì đơn giản nên là `private`.\n\n**Cache poisoning** là phiên bản bảo mật của cùng sai lầm đó. Nếu origin phản chiếu một input *không nằm trong key* — chẳng hạn nó dựng URL tuyệt đối từ `X-Forwarded-Host` — kẻ tấn công gửi một request với giá trị header độc hại, response bị đầu độc được cache dưới key bình thường, và mọi người truy cập sau đó đều nhận nó. Cách phòng thủ: không bao giờ để các header không nằm trong key ảnh hưởng tới một response cache được, loại bỏ hoặc ghi đè các header forwarding ở edge, và tránh cache trang lỗi trong thời gian dài.\n\nThêm hai quy tắc liên quan tới key: CDN không cache các response có đặt cookie (`Set-Cookie`) hoặc mang `Authorization` trừ khi bạn cho phép tường minh — đây là những mặc định tốt nên giữ — và `CDN-Cache-Control` (RFC 9213) cho phép bạn đặt TTL riêng cho CDN mà không thay đổi thứ trình duyệt nhìn thấy."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP cache header: ngôn ngữ của web caching",
+      "content": "Header `Cache-Control` là cách server của bạn truyền đạt chính sách caching tới trình duyệt, CDN và proxy. Có thể nói đây là HTTP header quan trọng nhất cho performance engineering. Hiểu sâu các directive của nó giúp bạn kiểm soát chính xác hành vi caching ở mọi tầng.\n\n**`Cache-Control: public`** — Response này có thể được bất kỳ shared cache nào (CDN, proxy) lưu lại. Dùng cho nội dung giống hệt nhau với mọi user.\n\n**`Cache-Control: private`** — Chỉ trình duyệt của user cuối được cache. CDN và proxy dùng chung không được lưu. Dùng cho nội dung đã xác thực hoặc cá nhân hóa.\n\n**`Cache-Control: no-store`** — Không cache response này ở bất kỳ đâu, kể cả trình duyệt. Dùng cho dữ liệu thực sự nhạy cảm (thông tin tài khoản ngân hàng, hồ sơ y tế).\n\n**`Cache-Control: no-cache`** — Một directive có tên gây nhầm lẫn, KHÔNG có nghĩa là \"đừng cache\". Nó nghĩa là: bạn được lưu response, nhưng phải revalidate với origin trước khi phục vụ lại (dùng `ETag` hoặc `Last-Modified`). Cách này thêm một round-trip request có điều kiện nhưng tránh phục vụ nội dung đã lỗi thời.\n\n**`max-age=N`** — Response được coi là còn mới trong N giây. Sau N giây, cache coi nó là đã cũ (stale).\n\n**`s-maxage=N`** — Giống `max-age` nhưng chỉ áp dụng cho shared cache (CDN). Cho phép đặt TTL khác nhau cho CDN và trình duyệt. Ví dụ, `Cache-Control: public, max-age=60, s-maxage=3600` — trình duyệt cache 1 phút, CDN cache 1 giờ.\n\n**`stale-while-revalidate=N`** — Sau khi `max-age` hết hạn, phục vụ ngay response cũ trong cache thêm tối đa N giây, trong khi bất đồng bộ lấy một bản mới. Cách này loại bỏ cú tăng vọt latency mà user thấy khi một entry cache hết hạn.\n\n**`immutable`** — Body của response sẽ không bao giờ thay đổi. Kết hợp với `max-age` dài, trình duyệt bỏ qua revalidation ngay cả khi user reload trang (một lần reload \"cứng\" cưỡng bức vẫn bỏ qua cache). Chỉ dùng với URL đánh địa chỉ theo nội dung.\n\nCông thức thực tế:\n- **JS/CSS có hash nội dung** (`app.a1b2c3.js`): `Cache-Control: public, max-age=31536000, immutable`\n- **Response API public**: `Cache-Control: public, max-age=60, stale-while-revalidate=30`\n- **HTML dashboard của user**: `Cache-Control: no-store` (hoặc `private, no-cache` nếu trình duyệt được giữ nhưng phải revalidate)\n- **CDN cache 5 phút, trình duyệt luôn revalidate**: `Cache-Control: public, max-age=0, s-maxage=300` — *đừng* thêm `private` ở đây: `private` cấm hoàn toàn shared cache lưu response. (Các header riêng cho CDN như `CDN-Cache-Control` hay `Surrogate-Control` là một lựa chọn thay thế.)"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Hãy để ý cách phân tầng: `s-maxage` cho CDN cache lâu hơn trình duyệt (`s-maxage=300` so với `max-age=60`). ETag cho phép request có điều kiện — khi trình duyệt revalidate sau max-age, nó gửi `If-None-Match: <etag>` và server có thể trả `304 Not Modified` (không có body) thay vì toàn bộ response, tiết kiệm bandwidth. File có hash nội dung được đặt `max-age=31536000` (một năm) một cách an toàn vì chính URL thay đổi khi nội dung thay đổi. Cần gọi API purge sau các lần deploy làm thay đổi nội dung không có hash.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Thundering herd: cache stampede và cách phòng tránh",
+      "content": "Hãy hình dung một Redis key chứa danh sách sản phẩm của trang chủ với TTL 5 phút. Site của bạn nhận 50,000 request mỗi phút. Tức là ~833 request mỗi giây. Ngay khi key hết hạn, mọi request đến trong lúc lần miss đầu tiên còn đang dựng lại giá trị — dễ lên tới hàng trăm nếu query mất một giây — cũng đều miss, và từng cái một đều query database. Database của bạn, vốn chỉ được cấp cho 100 query/giây nhờ có cache đứng trước, đột nhiên nhận tới 833 query/giây cho một query đắt đỏ. Nó oằn xuống, thời gian phản hồi tăng vọt, và user thấy lỗi. Cache vốn đang bảo vệ database — giờ sự bảo vệ đó tạm thời biến mất, và cú tăng tải có thể khiến cache không bao giờ ấm lại được.\n\nĐây là **thundering herd** (còn gọi là **cache stampede**).\n\n**Giải pháp 1: Mutex / distributed lock**. Khi có miss, chỉ một process được phép query database và nạp lại cache. Mọi process khác chờ (hoặc phục vụ giá trị cũ) cho tới khi bên giữ lock làm xong. Trong Redis, có thể cài đặt bằng `SET lock:product_list 1 NX EX 5` (chỉ đặt nếu chưa tồn tại, với TTL 5 giây làm hạn an toàn). Cờ NX (Not eXists) khiến thao tác này atomic. Các process không giành được lock có thể chờ rồi retry, hoặc phục vụ giá trị cũ trước đó nếu có.\n\n**Giải pháp 2: Stale-while-revalidate**. CDN hoặc caching proxy phục vụ ngay entry cũ cho mọi user trong khi một request nền (thường chỉ một cho mỗi cache node) lấy bản mới. Khi request nền hoàn tất, cache đã ấm lại. Không user nào phải chịu response chậm. Cơ chế này có sẵn trong directive HTTP `stale-while-revalidate` và là giải pháp đơn giản nhất cho caching ở tầng HTTP.\n\n**Giải pháp 3: Hết hạn sớm theo xác suất (thuật toán XFetch)**. Thay vì chờ key hết hạn hẳn, mỗi reader có thể tái tạo nó sớm hơn một chút, với xác suất tăng dần khi key tiến gần thời điểm hết hạn và lớn hơn với những giá trị tốn nhiều thời gian tính lại. Một key còn 10 giây có xác suất tái tạo sớm thấp; một key còn 1 giây có xác suất cao. Cách này dàn trải chi phí tái tạo qua nhiều request, ngăn các lần miss đồng loạt.\n\n**Giải pháp 4: Pattern làm mới nền**. Một worker nền riêng liên tục làm mới các cache key hot vài giây trước khi chúng hết hạn, hoàn toàn tách khỏi đường xử lý request. Request luôn gặp cache đã ấm. Cách này lý tưởng cho những key lúc nào cũng cần (ví dụ dữ liệu trang chủ, cấu hình toàn cục).\n\n**Giải pháp 5: TTL jitter**. Khi làm ấm trước nhiều key cùng lúc (ví dụ lúc khởi động), thêm jitter ngẫu nhiên vào TTL của từng key. Thay vì cả 10,000 profile user cùng hết hạn ở T+3600, chúng hết hạn trong khoảng T+3400 tới T+3800. Cách này rải tải miss ra 400 giây thay vì dồn vào một thời điểm."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern mutex để ngăn thundering herd. Chỉ request giành được distributed lock mới query database. Mọi request khác phục vụ ngay giá trị cũ trước đó. Sau khi bên giữ lock nạp lại cache, mọi request sau đó lại hit cache."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Command Redis `SET key value NX EX N` là primitive distributed mutex kinh điển: nó chỉ đặt key nếu key chưa tồn tại (NX = Not eXists), kèm thời hạn (EX) làm lưới an toàn phòng khi bên giữ lock crash. Các bên chờ poll cache trong một khoảng thời gian có giới hạn thay vì tất cả cùng lọt xuống DB. XFetch lưu, bên cạnh giá trị, thời gian đã tốn để tính nó (`delta`) và thời điểm hết hạn logic; mỗi lần đọc sẽ làm mới sớm khi `now + delta × β × (−ln rand)` vượt qua thời điểm hết hạn đó. Khi còn xa thời điểm hết hạn, điều này gần như không bao giờ xảy ra; khi tới gần, một trong số rất nhiều reader sẽ tính lại trước khi key thực sự biến mất — không cần lock, không cần worker nền. `β > 1` làm mới sớm hơn, `β < 1` muộn hơn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Chính sách eviction: bỏ gì khi cache đầy",
+      "content": "Cache có bộ nhớ hữu hạn. Khi đã đầy mà cần lưu một mục mới, phải loại bỏ (evict) thứ gì đó. **Chính sách eviction** quyết định cái gì bị bỏ. Redis hỗ trợ nhiều chính sách, cấu hình qua `maxmemory-policy`:\n\n**LRU (Least Recently Used)** — loại entry được truy cập lâu nhất trước đây. Trực giác: nếu đã lâu bạn không dùng thứ gì, có lẽ bạn cũng sẽ không sớm cần nó. `allkeys-lru` của Redis loại bất kỳ key nào; `volatile-lru` chỉ loại các key có đặt TTL.\n\n**LFU (Least Frequently Used)** — loại entry có số lần truy cập ít nhất. Tốt hơn LRU với các workload trộn lẫn dữ liệu nóng và lạnh: với LRU, một đợt burst các key chỉ dùng một lần (một crawler, một lần quét batch) có thể đẩy ra những key được đọc hàng nghìn lần mỗi giờ nhưng tình cờ không được chạm vào trong vài giây gần nhất; LFU giữ lại những key được dùng thường xuyên. Redis xấp xỉ LFU bằng một counter logarit nhỏ cho mỗi key, giảm dần theo thời gian, nên những key từng phổ biến rồi cũng mất dần sự bảo vệ.\n\n**Random** — loại một key ngẫu nhiên. Đơn giản, overhead hiệu năng dễ đoán, nhưng tỉ lệ hit không tối ưu.\n\n**No eviction (mặc định)** — trả về lỗi khi cache đầy. Phù hợp khi Redis được dùng làm data store chính thay vì làm cache. Nếu dùng làm cache, chính sách này gần như luôn sai.\n\nVới cache ứng dụng, `allkeys-lru` hoặc `allkeys-lfu` là lựa chọn phổ biến nhất. LFU nhìn chung tốt hơn cho các trường hợp có pattern truy cập lệch mạnh (20% key phục vụ 80% traffic — phân phối Pareto kinh điển của workload web). LRU đơn giản hơn và hoạt động tốt khi độ gần đây là chỉ báo tốt nhất cho việc truy cập trong tương lai.\n\n**Lập kế hoạch dung lượng cache**: pattern truy cập web thường lệch rất mạnh (xấp xỉ phân phối Zipf), nên một cache chỉ giữ một phần nhỏ trong tổng số key vẫn phục vụ được phần lớn request. Bạn không cần cache mọi thứ — bạn cần cache phần nóng. Hãy đo: theo dõi tỉ lệ hit theo kích thước cache (và số lần eviction) rồi tăng cache cho tới khi bộ nhớ thêm vào không còn mua được tỉ lệ hit đáng kể."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: Khái niệm cache CPU có từ những năm 1960. IBM giới thiệu cache phần cứng đầu tiên trên IBM System/360 Model 85 năm 1968. Caching ở quy mô web như ta biết ngày nay được Akamai tiên phong, thành lập năm 1998 như một CDN ra đời từ lời thách thức của Tim Berners-Lee tại MIT nhằm \"giải quyết các vấn đề hạ tầng của Internet\". Redis được Salvatore Sanfilippo tạo ra năm 2009, ban đầu để mở rộng LLOOGG, công cụ phân tích web log real-time của anh. Memcached, in-memory cache thống trị còn lại, được Brad Fitzpatrick tạo ra tại LiveJournal năm 2003 để gánh tải database khi site mở rộng. Phần lớn thực hành web caching ngày nay lớn lên từ những câu chuyện mở rộng quy mô thập niên 2000 của các site như LiveJournal, Facebook và YouTube."
+    },
+    {
+      "type": "callout",
+      "content": "**Sai lầm thường gặp và gợi ý cho interview:**\n\n**Sai lầm: cache mà không có TTL.** `redis.set(key, value)` không có thời hạn nghĩa là entry sống cho tới khi bị xóa tường minh hoặc Redis bị flush. Chỉ một lần bỏ sót invalidation là tạo ra dữ liệu cũ mãi mãi.\n\n**Sai lầm: cache dữ liệu thay đổi được, riêng của từng user ở CDN.** Đặt `Cache-Control: public` cho `/api/user/dashboard` sẽ khiến CDN phục vụ dữ liệu riêng tư của user này cho user khác. Luôn dùng `private` hoặc `no-store` cho response cá nhân hóa.\n\n**Sai lầm: cache key của CDN không được lên kế hoạch.** Tham số tracking làm phân mảnh cache; các header hoặc cookie làm thay đổi response nhưng không nằm trong key sẽ phục vụ sai biến thể cho mọi người (và mở đường cho cache poisoning). Hãy chủ động quyết định thứ gì đi vào key.\n\n**Sai lầm: không test đường cache miss.** Developer test với cache đã ấm và không bao giờ thấy đường miss. Trong production, một lần Redis restart hay lần deploy đầu tiên tạo ra cache lạnh. Đường miss phải xử lý được một cách êm ái.\n\n**Gợi ý interview: \"Cache invalidation là gì?\"** Trả lời: quá trình xóa hoặc cập nhật các entry cache đã cũ khi dữ liệu gốc thay đổi. Giải thích ba chiến lược (xóa khi ghi, cập nhật khi ghi, TTL hết hạn) và vì sao TTL là lưới an toàn kể cả khi bạn đã invalidation tường minh.\n\n**Gợi ý interview: \"CDN là gì và hoạt động thế nào?\"** Trả lời: một fleet server cache phân tán toàn cầu đặt tại các Point of Presence. DNS route user tới edge node gần nhất. Edge kéo từ origin khi miss, rồi cache dựa trên header `Cache-Control` của response. Mô tả mức tiết kiệm latency (200ms → 10ms) và mô hình pull."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Cache tạo thành một phân cấp từ nano giây tới mili giây**: CPU L1/L2/L3 → RAM → cache trong process → Redis → CDN edge → database. Mỗi tầng chậm hơn nhưng lớn hơn và được chia sẻ rộng hơn. Đáp ứng request ở tầng cao hơn cắt giảm latency nhiều bậc độ lớn.",
+        "**Ba chiến lược caching cốt lõi**: cache-aside (app tự quản lý cache khi đọc và ghi — phổ biến nhất), write-through (cache được cập nhật đồng bộ ở mỗi lần ghi — luôn ấm), write-back (ghi vào cache, đẩy xuống bất đồng bộ — ghi nhanh nhất nhưng rủi ro về độ bền). Chọn dựa trên tỉ lệ đọc/ghi và mức chịu đựng dữ liệu cũ.",
+        "**Luôn đặt TTL** — kể cả khi đã có invalidation tường minh. TTL là lưới an toàn: một lần bỏ sót invalidation trở thành dữ liệu cũ có giới hạn (TTL giây) thay vì cũ vĩnh viễn. Thêm jitter cho các TTL được đặt hàng loạt để tránh stampede do hết hạn đồng loạt.",
+        "**Header Cache-Control là giao diện giữa server và hạ tầng caching.** Nắm các directive chính: `public` vs `private`, `max-age` vs `s-maxage`, `no-store` vs `no-cache`, `stale-while-revalidate` và `immutable`. File có hash nội dung có thể cache một năm; response cá nhân hóa nên dùng `private` hoặc `no-store`.",
+        "**Cache ở CDN edge** giảm latency từ 200ms (xuyên lục địa) xuống 5ms (edge node gần đó) cho asset tĩnh và response API cache được. CDN còn hấp thụ tấn công DDoS, gánh bớt bandwidth cho origin, và — với edge computing — có thể cá nhân hóa nội dung mà không cần chạm tới origin.",
+        "**Cache key của CDN** (mặc định: host + path + query) quyết định tỉ lệ hit và tính đúng đắn: loại bỏ tham số tracking, dùng `Vary: Accept-Encoding` nhưng tránh `Vary: Cookie`, giữ response cá nhân hóa là `private`, và không bao giờ để header không nằm trong key thay đổi một response cache được (cache poisoning).",
+        "**Cache invalidation** là phần khó nhất: giữ cache nhất quán khi dữ liệu gốc thay đổi. Chiến lược an toàn nhất là xóa khi ghi (cache key bị xóa sau khi cập nhật DB; lần đọc kế tiếp nạp lại dữ liệu mới). Các cách nâng cao hơn gồm invalidation theo event qua message bus và invalidation theo tag cho CDN.",
+        "**Thundering herd** (cache stampede) xảy ra khi một key phổ biến hết hạn và nhiều request đồng thời cùng miss cache. Giảm thiểu bằng distributed mutex lock (Redis `SET NX EX`), `stale-while-revalidate`, hoặc hết hạn sớm theo xác suất (XFetch). Luôn test đường cache miss — đó là thứ user thấy sau mỗi lần deploy và Redis restart."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Trong pattern cache-aside (lazy loading), chuyện gì xảy ra khi cache miss?",
+      "options": [
+        "Ứng dụng query database và lưu kết quả vào cache kèm TTL",
+        "Load balancer retry request trên một cache node khác",
+        "Request trả lỗi 503 cho tới khi cache được làm ấm thủ công",
+        "Cache tự động lấy dữ liệu từ database mà không cần code ứng dụng nào"
+      ],
+      "explanation": "Cache-aside đặt việc quản lý cache vào ứng dụng. Khi miss, app query thẳng DB, ghi kết quả mới vào cache kèm TTL, và trả dữ liệu cho bên gọi. Các request sau cho cùng key sẽ hit cache. Cache chỉ mang tính tham khảo — nếu nó lỗi, hệ thống êm ái fallback về DB."
+    },
+    {
+      "id": "q2",
+      "question": "Khác biệt then chốt giữa write-through và write-back caching là gì?",
+      "options": [
+        "Write-through dùng TTL hết hạn; write-back dùng invalidation tường minh",
+        "Write-through cập nhật cả cache và DB một cách đồng bộ; write-back ghi vào cache ngay và đẩy xuống DB bất đồng bộ",
+        "Write-through chỉ cache kết quả đọc; write-back chỉ cache kết quả ghi",
+        "Write-through dùng cho CDN; write-back dùng cho cache trong process"
+      ],
+      "explanation": "Write-through giữ cache nhất quán bằng cách cập nhật nó đồng bộ với mỗi lần ghi DB (cả hai đều thành công trước khi trả về cho bên gọi). Write-back chỉ ghi ngay vào cache (latency thấp) và hoãn việc đẩy xuống DB cho một process nền — với rủi ro mất dữ liệu nếu cache crash trước khi kịp đẩy xuống."
+    },
+    {
+      "id": "q3",
+      "question": "Một trang sản phẩm được cache ở CDN có tỉ lệ hit tệ hại. Log cho thấy cùng một trang được request dưới dạng /p/42?utm_source=mail, /p/42?utm_source=ads&ref=x, v.v. Cách sửa tốt nhất là gì?",
+      "options": [
+        "Thêm Vary: User-Agent để mỗi trình duyệt có bản tối ưu riêng",
+        "Giảm max-age để CDN làm mới trang thường xuyên hơn",
+        "Chuyển response sang Cache-Control: private",
+        "Cấu hình cache key của CDN để bỏ qua (hoặc chỉ cho phép theo allow-list) các query parameter không làm thay đổi response"
+      ],
+      "explanation": "Mặc định query string là một phần của cache key ở CDN, nên mỗi tổ hợp tham số tracking trở thành một entry cache riêng, phần lớn là lạnh. Loại các tham số không ảnh hưởng tới response (hoặc chỉ đưa vào một allow-list) sẽ gộp chúng lại thành một entry hot duy nhất. Vary: User-Agent sẽ làm cache càng phân mảnh, max-age ngắn hơn làm giảm số hit, còn private thì tắt hẳn caching ở CDN."
+    },
+    {
+      "id": "q4",
+      "question": "Directive `stale-while-revalidate=30` trong header Cache-Control bảo CDN hoặc trình duyệt điều gì?",
+      "options": [
+        "Từ chối mọi request trong 30 giây sau khi max-age hết hạn",
+        "Sau khi max-age hết hạn, phục vụ ngay response cũ trong cache thêm tối đa 30 giây trong khi lấy bản mới ở chế độ nền",
+        "Revalidate response trong cache mỗi 30 giây bằng header ETag",
+        "Trì hoãn việc phục vụ response 30 giây để cache kịp ấm lên"
+      ],
+      "explanation": "stale-while-revalidate cho phép cache phục vụ ngay một response hơi cũ (tránh latency của một round-trip tới origin) đồng thời lấy nội dung mới ở chế độ nền. Nội dung cũ được phục vụ trong lúc revalidate, nên user không bao giờ gặp cú tăng vọt latency vốn sẽ xảy ra nếu cache chỉ đơn giản hết hạn và buộc phải fetch từ origin."
+    },
+    {
+      "id": "q5",
+      "question": "Vấn đề \"thundering herd\" (cache stampede) là gì?",
+      "options": [
+        "Nhiều request đồng thời cùng miss cache khi một key phổ biến hết hạn và tất cả cùng dội vào database một lúc",
+        "Cache phình quá lớn và loại bỏ các entry hữu ích quá mạnh tay",
+        "CDN vô tình cache dữ liệu riêng tư của user và phục vụ nó cho user khác",
+        "Cache write-back mất dữ liệu vì worker đẩy dữ liệu nền không theo kịp"
+      ],
+      "explanation": "Khi một cache key hot hết hạn, mọi request đồng thời cùng nhận cache miss một lúc và cùng query database. DB, vốn được cấp cho tải thấp nhờ có cache, đột ngột nhận một đợt tăng vọt khổng lồ có thể làm nó gục. Cache đang bảo vệ DB — khi nó tạm biến mất lúc key hết hạn, toàn bộ tải dội xuống DB. Các cách giảm thiểu gồm distributed mutex lock, stale-while-revalidate và TTL jitter."
+    },
+    {
+      "id": "q6",
+      "question": "Header Cache-Control nào đúng cho một file JavaScript có hash nội dung (ví dụ `app.a1b2c3d4.js`)?",
+      "options": [
+        "Cache-Control: no-store",
+        "Cache-Control: private, max-age=60",
+        "Cache-Control: public, max-age=31536000, immutable",
+        "Cache-Control: no-cache, must-revalidate"
+      ],
+      "explanation": "Tên file có hash nội dung chứa một hash của nội dung file ngay trong URL. Khi nội dung thay đổi, URL thay đổi — nên trình duyệt và CDN luôn request đúng phiên bản. Điều này khiến việc cache một năm (31536000 giây) hoàn toàn an toàn. Directive `immutable` bảo trình duyệt không revalidate kể cả khi refresh cứng, loại bỏ các request có điều kiện không cần thiết."
+    },
+    {
+      "id": "q7",
+      "question": "CDN phục vụ user với latency thấp chủ yếu bằng cách:",
+      "options": [
+        "Nén kết quả query database trước khi chuyển tới app server",
+        "Mã hóa asset ở tầng mạng để giảm thời gian TLS handshake",
+        "Load balancing traffic ghi qua nhiều database replica",
+        "Cache nội dung tại các edge node phân tán địa lý, gần với user cuối"
+      ],
+      "explanation": "CDN edge node đặt tại các data center khắp thế giới. Một user ở Tokyo được phục vụ từ một edge node gần đó tại Tokyo trong ~5-10ms thay vì từ origin server bên kia Thái Bình Dương mất ~200ms. CDN cache nội dung ở lần kéo đầu tiên từ origin, nên mọi request tiếp theo từ khu vực đó được phục vụ với latency của edge. Khoảng cách vật lý và tốc độ ánh sáng là những ràng buộc nền tảng mà CDN giải quyết."
+    },
+    {
+      "id": "q8",
+      "question": "`Cache-Control: private` bảo một CDN edge node điều gì?",
+      "options": [
+        "Cache response này và mã hóa nó trước khi lưu ở edge",
+        "Chỉ cache response này cho user có token xác thực hợp lệ",
+        "Không lưu response này — nó chỉ được cache bởi trình duyệt của user cuối",
+        "Lưu response trong 60 giây rồi yêu cầu revalidate"
+      ],
+      "explanation": "`private` nghĩa là response dành riêng cho một user và không được lưu trong bất kỳ shared cache nào (CDN, proxy). Chỉ trình duyệt của chính user cuối được cache. Dùng `public` cho nội dung cá nhân hóa là một lỗi bảo mật nghiêm trọng — CDN có thể phục vụ dữ liệu riêng tư của user này cho một user khác request cùng URL."
+    },
+    {
+      "id": "q9",
+      "question": "Chính sách eviction `allkeys-lfu` của Redis loại key nào khi cache đầy?",
+      "options": [
+        "Key có TTL còn lại ngắn nhất",
+        "Key được truy cập lâu nhất trước đây",
+        "Key có tần suất truy cập thấp nhất, được theo dõi bằng một counter giảm dần theo thời gian",
+        "Một key được chọn ngẫu nhiên bất kể pattern truy cập"
+      ],
+      "explanation": "LFU (Least Frequently Used) loại key có tần suất truy cập thấp nhất. Redis xấp xỉ nó bằng một counter logarit nhỏ cho mỗi key, giảm dần theo thời gian, nên nó phản ánh độ phổ biến gần đây chứ không phải tổng mọi thời đại. Cách này thắng LRU với workload lệch: một key được đọc hàng nghìn lần mỗi giờ nhưng không được đọc trong vài giây gần nhất vẫn sống sót qua một đợt burst các key dùng một lần, thứ mà với LRU sẽ đẩy nó ra."
+    },
+    {
+      "id": "q10",
+      "question": "Bạn muốn thêm TTL jitter để ngăn thundering herd khi nạp cache hàng loạt. Cách cài đặt nào đúng?",
+      "options": [
+        "Đặt mọi key cùng một TTL nhưng tên key khác nhau",
+        "Cộng một giá trị ngẫu nhiên trong khoảng ±10% TTL gốc vào thời hạn của từng key",
+        "Đặt TTL bằng không và chỉ dựa vào invalidation tường minh",
+        "Dùng LRU eviction để Redis tự nhiên rải thời điểm hết hạn"
+      ],
+      "explanation": "Jitter thêm tính ngẫu nhiên vào giá trị TTL, rải các sự kiện hết hạn theo thời gian thay vì dồn vào một thời điểm. Ví dụ, với TTL gốc 3600 giây và jitter 10%, key hết hạn trong khoảng 3240 tới 3960 giây — một khoảng 720 giây thay vì một thời điểm duy nhất. Điều này ngăn mọi key được đặt lúc khởi động cùng hết hạn đồng loạt và gây cache miss hàng loạt. LRU eviction giải quyết áp lực bộ nhớ, không phải thời điểm hết hạn."
+    }
+  ]
+}

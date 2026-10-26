@@ -1,0 +1,223 @@
+{
+  "sourceHash": "6bb602872589",
+  "title": "Docker và Container",
+  "tagline": "Đóng gói một lần, chạy ở mọi nơi — container giải quyết bài toán \"máy tôi chạy được mà\" bằng cách gói code cùng toàn bộ runtime vào một image di động.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Suốt nhiều thập kỷ, deploy phần mềm đồng nghĩa với vật lộn với hàng nghìn khác biệt môi trường vô hình. Laptop của developer chạy Python 3.9 với OpenSSL 1.1; server CI có Python 3.7 với OpenSSL 3.0; production thì chạy trên một máy CentOS 7 bị \"đóng băng\" từ năm 2018. Chỉ cần thiếu một shared library, lệch một chút thiết lập locale, hay khác phiên bản gcc là bản release có thể sập lúc 2 giờ sáng. Ngành công nghiệp giải quyết được một nửa vấn đề bằng **máy ảo (virtual machine)** — mỗi ứng dụng có OS riêng — nhưng boot một VM mất 30–60 giây và mỗi VM mang theo hàng gigabyte overhead của OS. Bạn không thể nhét mười VM lên một chiếc laptop như cách nhét mười service lên một node trên cloud.\n\nTháng 3 năm 2013, Solomon Hykes giới thiệu Docker tại PyCon và thay đổi cách phần mềm được phát hành. Docker phổ biến hóa **container** — các đơn vị cô lập, di động, gói ứng dụng cùng mọi dependency nó cần vào một artifact duy nhất gọi là **image**. Container không phải VM. Chúng dùng chung kernel của hệ điều hành host và khởi động trong vài mili giây. Một container chạy từ cùng một image trên MacBook của developer, trên runner GitHub Actions hay trên node Kubernetes production đều hành xử giống hệt nhau, vì môi trường mà nó thấy đã được nhúng sẵn trong image.\n\nBên dưới, Docker là một lớp bọc thân thiện quanh hai tính năng của Linux kernel có từ năm 2002 và 2008: **namespace** (cô lập những gì một process có thể *thấy*) và **cgroup** (giới hạn những gì một process có thể *tiêu thụ*). Docker giúp các primitive này của kernel trở nên dễ tiếp cận thông qua một file build khai báo — `Dockerfile` — và một định dạng image nhiều layer, định danh theo nội dung (content-addressed), giúp build nhanh và image có thể kết hợp với nhau.\n\nChương này đi qua toàn bộ mô hình tư duy: image được build và chia layer thế nào, container đạt được sự cô lập ra sao, registry phân phối image thế nào, multi-stage build thu nhỏ artifact production ra sao, Docker Compose điều phối stack nhiều service thế nào, cùng những chỗ dễ vấp — lộ secret, cache miss ở layer, storage tạm thời (ephemeral) và xử lý signal. Đọc xong, bạn sẽ viết được Dockerfile chất lượng production, suy luận được về bên trong container và trả lời tự tin các câu hỏi về container trong technical interview."
+    },
+    {
+      "type": "diagram",
+      "caption": "Quy trình làm việc với container: Dockerfile được build thành một image bất biến, push lên registry, rồi được pull về ở bất kỳ môi trường nào. Mỗi lần `docker run` sinh ra một container cô lập mới từ cùng image đó, bảo đảm hành vi giống hệt nhau ở mọi nơi."
+    },
+    {
+      "type": "analogy",
+      "title": "Thùng container vận tải tiêu chuẩn",
+      "content": "Trước những năm 1950, vận tải hàng hóa toàn cầu là một mớ hỗn loạn. Mỗi cảng xử lý hàng theo một kiểu — chỗ này thùng phuy, chỗ kia hòm gỗ, chỗ khác lại là ngũ cốc đổ rời. Bốc dỡ hàng phải làm thủ công theo từng trường hợp, chậm và dễ sai. Hàng hóa liên tục bị thất lạc hoặc hư hỏng vì chưa ai chuẩn hóa *cái thùng* chứa hàng.\n\nNăm 1956, doanh nhân ngành vận tải đường bộ Malcolm McLean giới thiệu thùng container thép tiêu chuẩn ISO. Kích thước cố định. Các khóa góc được chuẩn hóa. Từ đó, mọi cần cẩu, tàu, toa xe lửa hay xe tải trên thế giới đều xử lý được cùng một chiếc thùng mà không cần biết bên trong chứa gì. Nội dung bên trong không còn quan trọng với hạ tầng — chỉ giao diện chuẩn mới quan trọng.\n\nDocker container chính là phiên bản phần mềm của ý tưởng đó. Trước Docker, deploy một ứng dụng Node.js đòi hỏi máy đích phải có đúng phiên bản Node, đúng các package npm, đúng OpenSSL, đúng dữ liệu múi giờ — một \"hợp đồng ngầm\" chằng chịt giữa ứng dụng và môi trường host. Sau Docker, bạn gói ứng dụng Node.js, thư mục `node_modules`, đúng phiên bản Node, config và các thư viện OS vào một image. Bất kỳ máy nào có Docker daemon đều đối xử với image đó như một thùng container ISO — nó làm việc với giao diện chuẩn mà không quan tâm bên trong có gì. **Host OS** là bến cảng; **container runtime** là cần cẩu; **image** là chiếc thùng thép; **Docker Hub** là cảng trung chuyển toàn cầu."
+    },
+    {
+      "type": "explanation",
+      "title": "Image được build thế nào: layer và union filesystem",
+      "content": "Một Docker image không phải là một file lớn duy nhất — nó là **một chồng các layer chỉ đọc (read-only)**. Mỗi lệnh trong `Dockerfile` tạo ra một layer mới đặt lên trên layer trước. Khi Docker chạy container, nó ghép tất cả các layer chỉ đọc này thành một filesystem thống nhất, nhờ vào **union filesystem** (OverlayFS trên Linux hiện đại).\n\nĐặc tính quan trọng nhất của thiết kế này là **layer caching**. Docker tính hash nội dung của từng layer. Khi bạn build lại image, Docker so sánh lệnh mới trong Dockerfile cùng context của nó với hash đã cache. Nếu khớp, Docker dùng lại layer đã cache — không phải làm gì, tốn 0 giây. Ngay khi một layer thay đổi, Docker vô hiệu hóa layer đó **và toàn bộ các layer phía sau**, vì các layer sau có thể phụ thuộc vào nội dung vừa đổi.\n\nĐiều này có nghĩa là **thứ tự layer quyết định tốc độ build**. Nếu bạn đặt `COPY . .` trước `RUN npm install`, thì mọi thay đổi code — kể cả sửa một lỗi chính tả trong comment — đều vô hiệu hóa layer `npm install` và kích hoạt cài lại toàn bộ dependency. Hãy đảo thứ tự: copy `package.json` trước, chạy `npm install`, rồi mới copy phần source còn lại. Khi đó `npm install` chỉ chạy lại khi `package.json` thay đổi.\n\nMỗi layer cũng góp phần vào **kích thước image**. Một lỗi phổ biến là cài package trong một lệnh `RUN` rồi cố xóa chúng ở một lệnh `RUN` khác — cách này không làm image nhỏ đi, vì phần cài đặt đã nằm cứng trong layer trước đó. Thay vào đó, hãy nối các thao tác trong cùng một `RUN` bằng `&&`: cài, dùng công cụ, rồi dọn dẹp — tất cả trong một layer duy nhất.\n\nMảnh ghép cuối cùng là **writable container layer**. Khi Docker khởi động container, nó thêm một layer mỏng, tạm thời, có thể ghi lên trên chồng layer chỉ đọc của image. Mọi thao tác ghi file trong container đều đi vào layer này theo cơ chế copy-on-write — layer gốc của image không bao giờ bị sửa. Khi container bị xóa, writable layer cũng bị bỏ đi. Với dữ liệu cần tồn tại qua các lần container khởi động lại (database, file upload), bạn cần một **volume**."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các layer của image là chỉ đọc và xếp chồng lên nhau. Container đang chạy thêm một writable layer mỏng, tạm thời ở trên cùng. Các layer ổn định (base image, npm install) được cache; chỉ những layer thay đổi và các layer phụ thuộc vào chúng mới phải build lại."
+    },
+    {
+      "type": "explanation",
+      "title": "Primitive của Linux kernel: namespace và cgroup",
+      "content": "Muốn hiểu cách container cô lập, bạn cần hiểu Linux kernel thực sự cung cấp gì. Docker không tự xây cơ chế cô lập từ đầu — nó lắp ghép hai cơ chế của kernel: **namespace** và **cgroup**.\n\n**Namespace** kiểm soát những gì một process có thể *thấy*. Linux có tám loại namespace; sáu loại dưới đây là những loại kinh điển mà container dựa vào (namespace `cgroup` và `time` hoàn thiện bộ này):\n\n- namespace `pid`: container có không gian PID riêng. Process đầu tiên trong container là PID 1, dù host OS thấy nó là (giả sử) PID 4731. Process ở các container khác nhau không thấy PID của nhau.\n- namespace `net`: mỗi container có network stack riêng — loopback interface riêng, địa chỉ IP riêng, routing table riêng, rule `iptables` riêng. `eth0` của container là một thiết bị ethernet ảo được bridge với host.\n- namespace `mnt`: container thấy filesystem root của riêng nó. Giống `chroot` nhưng mạnh hơn nhiều — các layer của image trở thành `/` của container.\n- namespace `uts`: container có thể có hostname và domain name riêng.\n- namespace `ipc`: cô lập giao tiếp liên process (shared memory, semaphore).\n- namespace `user`: ánh xạ UID/GID bên trong container sang UID/GID khác trên host — cho phép một process chạy dưới quyền root bên trong container trong khi trên host nó chỉ là user không có đặc quyền.\n\n**cgroup** (control group) kiểm soát những gì một process có thể *tiêu thụ*. Nếu namespace trả lời câu hỏi \"bạn thấy được gì?\", thì cgroup trả lời \"bạn được dùng bao nhiêu?\". Bạn có thể đặt giới hạn cứng cho thời gian CPU (`--cpus` của Docker, mà Kubernetes biểu diễn bằng millicore), bộ nhớ (byte), bandwidth I/O khối và số lượng process (`pids`). Bandwidth mạng không phải là giới hạn của cgroup — nó được điều tiết riêng bằng traffic control (`tc`) hoặc CNI plugin. Khi container vượt quá giới hạn bộ nhớ trong cgroup, OOM (out-of-memory) killer của kernel sẽ kill các process của container đó — thay vì để một container bỏ đói các container khác trên cùng host.\n\nKết hợp lại, namespace + cgroup + union filesystem + bộ lọc syscall `seccomp` (không bắt buộc nhưng bật mặc định trong Docker) tạo nên câu chuyện cô lập của container. Điều quan trọng cần hiểu là sự cô lập này **không mạnh bằng VM** — chúng dùng chung kernel. Một exploit ở tầng kernel sẽ vượt qua mọi ranh giới container. Với các workload multi-tenant có thể mang tính thù địch, gVisor (sandbox kernel chạy ở user-space của Google) hoặc Kata Containers (VM nhẹ dùng làm container runtime) cung cấp mức cô lập mạnh hơn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Namespace cho mỗi container một góc nhìn riêng về hệ thống; cgroup áp đặt giới hạn tài nguyên; OverlayFS trình bày các layer của image thành một filesystem thống nhất. Mọi container đều dùng chung kernel của host."
+    },
+    {
+      "type": "explanation",
+      "title": "Container hay máy ảo: khi nào dùng cái nào",
+      "content": "Cuộc tranh luận container hay VM thực ra là một lựa chọn giả trong production — hầu hết các hệ thống trên cloud dùng cả hai. Hiểu trade-off giúp bạn chọn đúng công cụ cho từng tầng.\n\n**Máy ảo** dùng **hypervisor** (VMware, KVM, Hyper-V) để giả lập phần cứng. Mỗi VM chạy một guest OS hoàn chỉnh của riêng nó (kernel, init system, userspace). Điều này cho mức cô lập mạnh — kernel panic trong guest không thể làm sập host hay các VM bên cạnh. Thời gian boot là 30–60 giây. Image nặng 1–10 GB. Overhead mỗi VM: 200–500 MB RAM chỉ riêng cho guest OS. Bạn có ranh giới bảo mật theo từng VM: lý tưởng để chạy code bên thứ ba không đáng tin cậy hoặc cô lập multi-tenant.\n\n**Container** dùng chung kernel của host. Không có OS nào phải boot — process khởi động trong vài mili giây. Image thường chỉ 50–300 MB (dựa trên Alpine). Overhead: gần như bằng 0 ngoài bản thân process. Chỗ chỉ vừa 5 VM thì bạn có thể nhét được 50 container. Nhưng sự cô lập yếu hơn — dùng chung kernel nghĩa là một exploit ở tầng kernel có thể thoát khỏi mọi container. Phù hợp để chạy code đáng tin cậy của chính bạn trên cả một fleet máy.\n\nTrên thực tế, các nhà cung cấp cloud (AWS, GCP, Azure) chạy container của bạn bên trong VM. VM cung cấp ranh giới bảo mật giữa các tenant; container cung cấp mật độ và tốc độ khởi động bên trong VM. Node của Kubernetes là VM. Mỗi node chạy một container runtime (containerd, CRI-O) để quản lý container. Sự kết hợp này cho bạn cả mức cô lập mạnh (VM) lẫn mật độ cao (container).\n\nMột mô hình tư duy hữu ích: **VM dùng cho ranh giới bảo mật; container dùng cho đóng gói và mật độ.**"
+    },
+    {
+      "type": "explanation",
+      "title": "Docker, OCI, containerd và runc: ai thực sự chạy container?",
+      "content": "\"Docker\" gồm nhiều tầng, và các hệ thống production thường chỉ dùng một phần trong số đó. **OCI (Open Container Initiative)** chuẩn hóa định dạng image, API phân phối của registry và đặc tả runtime, nên một image build bằng `docker build`, Buildah hay Kaniko đều chạy được ở bất cứ đâu chấp nhận OCI image.\n\nKhi bạn gõ `docker run`, Docker CLI nói chuyện với **Docker Engine** (`dockerd`). Engine giao việc cho **containerd** (pull image, snapshot, vòng đời container), và containerd gọi một OCI runtime cấp thấp — thường là **runc** — để thực hiện các syscall `clone()`/namespace/cgroup thực sự rồi rút lui.\n\nKubernetes bỏ qua hoàn toàn Docker Engine: từ v1.24 (2022), adapter Docker tích hợp sẵn trong kubelet (\"dockershim\") đã bị gỡ bỏ, và các node nói chuyện với **containerd** hoặc **CRI-O** thông qua Container Runtime Interface. Image build bằng Docker vẫn chạy nguyên vẹn vì chúng là OCI image. Thay runc bằng **gVisor** (`runsc`) hoặc **Kata Containers** cho bạn mức cô lập mạnh hơn mà không phải đổi image.\n\nCác lựa chọn rootless cũng đáng chú ý: **Podman** chạy container mà không cần daemon chạy quyền root, và chấp nhận cùng Dockerfile cũng như các lệnh CLI tương tự."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Dockerfile này minh họa bốn best practice production trong một file: (1) multi-stage build để npm cache và devDependencies không bao giờ lọt vào image cuối, (2) sắp thứ tự layer theo kiểu copy dependency manifest trước để tối đa cache hit, (3) dùng user không phải root (các image Node chính thức có sẵn user `node`), và (4) CMD dạng exec để process của ứng dụng là PID 1 và nhận được signal của OS cho graceful shutdown. Hai lưu ý: file `.dockerignore` là bắt buộc, nếu không `COPY . .` sẽ kéo cả `node_modules`, `.git` và `.env` ở máy bạn vào build context; và process chạy với PID 1 **không có signal handler mặc định** nào từ kernel, nên ứng dụng phải tự xử lý SIGTERM (hoặc chạy dưới một init như `docker run --init` / tini).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Multi-stage build: vì sao quan trọng",
+      "content": "Một Dockerfile ngây thơ cho ứng dụng Go hoặc TypeScript sẽ cài cả bộ toolchain compiler, build binary rồi phát hành kết quả — với compiler vẫn nằm trong image. Các compiler này thêm hàng trăm megabyte, mở rộng bề mặt tấn công (thêm nhiều binary có thể bị khai thác) và làm chậm việc push lên registry. Multi-stage build giải quyết chuyện này gọn gàng.\n\nMột multi-stage build định nghĩa **nhiều lệnh `FROM`**, mỗi lệnh bắt đầu một stage mới. Stage có thể được đặt tên (ví dụ `AS builder`, `AS runner`). Bạn copy file giữa các stage bằng `COPY --from=<stage>`. **Image cuối cùng** chỉ là stage cuối — mọi stage trung gian đều bị bỏ đi và không bao giờ xuất hiện trong image được push.\n\nVới ngôn ngữ thông dịch như Python hay Node.js, lợi ích nằm ở việc loại bỏ dev dependency. Một lệnh `npm install` thông thường (không có `--omit=dev`) sẽ kéo về Jest, TypeScript, ESLint — những công cụ bạn không cần ở runtime. Hãy cài chúng ở build stage, rồi chỉ copy `node_modules/` (hoặc output đã compile) sang stage cuối.\n\nVới ngôn ngữ biên dịch (Go, Rust, Java), lợi ích còn lớn hơn. Một binary Go không có dependency runtime bên ngoài nào — stage cuối có thể là `FROM scratch` (một image rỗng) chỉ chứa đúng binary đó. Image thu được nhỏ hơn 10 MB.\n\nPattern này áp dụng cho bất kỳ bước build nào bạn không muốn có trong production: bundle CSS (chỉ copy `dist/`), sinh migration database (chỉ copy file SQL migration), sinh certificate (chỉ copy cert).\n\n**Lỗi thường gặp**: nhiều người nghĩ multi-stage build chỉ dành cho ngôn ngữ biên dịch. Thực ra nó có giá trị ngang nhau với mọi ngôn ngữ mà môi trường build khác môi trường chạy."
+    },
+    {
+      "type": "diagram",
+      "caption": "Multi-stage build: builder stage cài mọi thứ cần để build; chỉ các artifact production mới được chuyển sang stage cuối. Các stage trung gian không bao giờ xuất hiện trong image được push, giúp image nhỏ gọn và không chứa công cụ dev."
+    },
+    {
+      "type": "explanation",
+      "title": "Registry: phân phối và chiến lược gắn tag",
+      "content": "**Registry** là một dịch vụ lưu trữ Docker image theo nội dung (content-addressed). Sau khi `docker build` tạo image ở máy local, `docker push` upload nó lên registry theo từng layer. Những layer đã tồn tại trên registry (nhận diện qua content hash) được bỏ qua — chỉ layer mới được upload. Nhờ vậy việc push rất nhanh khi bạn chỉ thay đổi các layer phía trên.\n\nĐịnh dạng tham chiếu image đầy đủ là: `registry/namespace/name:tag`. Ví dụ:\n- `nginx:1.25-alpine` — Docker Hub (ngầm định), image chính thức, đã ghim phiên bản\n- `docker.io/library/nginx:1.25-alpine` — giống hệt trên, nhưng viết tường minh\n- `123456789012.dkr.ecr.us-east-1.amazonaws.com/myapp:v1.4.2` — AWS ECR\n- `ghcr.io/myorg/myapp:sha-a1b2c3d` — GitHub Container Registry, tag theo git SHA\n\n**Chiến lược gắn tag cực kỳ quan trọng với độ tin cậy của production**. Các pattern phổ biến:\n\n`latest` — tag mặc định nếu bạn không chỉ định. Đây là một **con trỏ di động** — nó thay đổi mỗi khi có image mới được publish. Đừng bao giờ dùng `latest` trong production; hạ tầng của bạn không bao giờ nên tự cập nhật khi bạn không chủ đích.\n\nTag theo semantic version (`v1.4.2`) — được ghim cố định, tái lập được và dễ đọc. Có thể gắn thêm tag `latest` cho cùng image để tiện cho các công cụ.\n\nTag theo git SHA (`sha-a1b2c3d`) — mỗi lần build từ CI đều được gắn tag là SHA ngắn của git commit. Tái lập hoàn toàn — bạn luôn xác định được chính xác code nào đang chạy và tại sao. Đây là tiêu chuẩn vàng cho deployment production.\n\nTag theo môi trường (`staging`, `production`) — các con trỏ có thể thay đổi, do CD pipeline cập nhật. `docker pull myapp:staging` luôn lấy bản build staging mới nhất. Công cụ đơn giản hơn nhưng audit trail kém hơn.\n\n**Ghim theo digest** là bảo đảm tái lập tối thượng: `nginx@sha256:3c4c1f42...` trỏ tới đúng một image duy nhất mãi mãi. Digest là hash SHA256 của image manifest — bất biến. Hãy dùng nó trong manifest production (`image: nginx@sha256:...`) khi bạn cần bảo đảm chính xác từng byte đang chạy — tag có thể bị trỏ lại, digest thì không."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Các pattern chính trong file Compose này: (1) `depends_on` kèm `condition: service_healthy` chờ database vượt qua health check rồi mới khởi động API — tránh lỗi 'connection refused' lúc khởi động. (2) Mẹo dùng hai volume cho node_modules ngăn node_modules của host che mất node_modules của container. (3) Named volume (`pg_data`) giữ dữ liệu database qua các vòng `docker compose down`/`up`, khác với bản thân container vốn là tạm thời. (4) Health check giúp cả Compose lẫn Kubernetes biết khi nào một service thực sự sẵn sàng.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Compose ngày nay: `docker compose`, không có key `version:`.** Compose v1 (binary Python `docker-compose`) đã hết vòng đời vào năm 2023; Compose v2 hiện tại là một plugin của Docker CLI, gọi bằng `docker compose` (dấu cách, không phải gạch nối). Nó tuân theo Compose Specification, vốn đã khiến trường `version:` ở cấp cao nhất trở nên lỗi thời — Compose v2 bỏ qua trường này và in ra cảnh báo, nên đừng viết nó nữa. Tên file được khuyến nghị là `compose.yaml`, dù `docker-compose.yml` vẫn được nhận diện. Lưu ý rằng `depends_on: condition: service_healthy` chỉ sắp thứ tự khởi động; ứng dụng của bạn vẫn nên retry khi kết nối database."
+    },
+    {
+      "type": "explanation",
+      "title": "Mạng trong Docker: bridge, DNS và port mapping",
+      "content": "Khi Docker tạo container, nó tạo một **cặp ethernet ảo (veth pair)** — một đầu nằm trong network namespace của container, đầu kia nằm trên một **bridge network** trong namespace của host. Mặc định, mọi container trên cùng một bridge có thể giao tiếp với nhau. Docker cũng chạy một DNS server nhúng để các container có thể resolve nhau theo **tên service** — trong Compose, `db`, `cache` và `api` tự động resolve ra IP của nhau.\n\n**Port mapping** (`-p host_port:container_port` hoặc `ports:` trong Compose) là cách traffic bên ngoài đi vào container. Docker thêm một rule DNAT trong `iptables`: các gói tin đến `host_port` được viết lại để trỏ tới IP của container và `container_port`. Không có port mapping, container chỉ truy cập được từ các container khác trên cùng Docker network — không phải từ máy host hay từ internet.\n\n**Xung đột port** là vấn đề thường gặp khi dev local: bạn cố khởi động container Postgres thứ hai trên `5432:5432` và nó thất bại vì port của host đã bị chiếm. Cách giải quyết: dùng port host khác (`5433:5432`) hoặc dùng mạng của Docker mà không publish port — container API của bạn có thể truy cập DB qua `db:5432` trên mạng nội bộ mà không cần mở port nào ra host.\n\n**Custom network** cung cấp sự cô lập giữa các nhóm container. Mặc định mọi service trong Compose dùng chung một bridge network. Với kịch bản multi-tenant (ví dụ hai ứng dụng riêng biệt chạy cùng lúc), hãy định nghĩa các mục `networks:` trong Compose và gán service vào — các container ở network khác nhau không thể giao tiếp trừ khi được kết nối tường minh vào cả hai.\n\nTrong Kubernetes production, mô hình mạng này được mở rộng: mỗi Pod có IP riêng, và CNI plugin của cluster (Calico, Flannel, Cilium) đảm nhận routing giữa các Pod trên các node. DNS nhúng của Docker trở thành CoreDNS của Kubernetes. Port mapping trở thành Kubernetes Service có load balancing."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mạng trong Docker: traffic từ host đi qua port mapping và được định tuyến tới IP nội bộ của container. Các container resolve nhau theo tên service qua DNS nhúng của Docker. Named volume gắn vào container nhưng tồn tại ngoài vòng đời của container."
+    },
+    {
+      "type": "explanation",
+      "title": "Volume: lưu trữ bền vững ngoài layer tạm thời",
+      "content": "Writable layer của container bị bỏ đi khi container bị xóa — đây là thiết kế có chủ đích cho các service stateless. Nhưng database, file upload và log của ứng dụng cần sống lâu hơn từng container riêng lẻ. Docker cung cấp ba cơ chế lưu trữ:\n\n**Named volume** (`docker volume create pg_data` hoặc `volumes:` trong Compose) do Docker quản lý. Chúng nằm ở `/var/lib/docker/volumes/` trên host (hoặc một đường dẫn được quản lý tương đương). Chúng tồn tại cả khi container bị xóa. Liệt kê và xem chi tiết rất dễ (`docker volume ls`, `docker volume inspect`). Hãy dùng chúng cho database local muốn giống production.\n\n**Bind mount** (`-v /host/path:/container/path`) mount một thư mục hoặc file cụ thể của host vào container. Thay đổi bên trong container hiện ngay trên host, và ngược lại. Đây là nền tảng của **hot reload khi dev local** — mount source code vào container, và một file watcher khởi động lại server mỗi lần bạn lưu. Bind mount có toàn quyền nhìn thấy filesystem của host, nên có thể là mối lo bảo mật với các image không đáng tin cậy.\n\n**Mount `tmpfs`** nằm trong bộ nhớ — dữ liệu chỉ tồn tại khi container đang chạy và không bao giờ được ghi xuống đĩa. Hữu ích cho vùng nhớ tạm và các secret cực kỳ nhạy cảm không bao giờ được chạm tới storage bền vững.\n\n**Cái bẫy `node_modules`** trong Compose đáng được nhắc riêng. Nếu bạn bind-mount source (`./api:/app`) và `node_modules` của host khác với của container (khác OS, khác native module), phiên bản của host sẽ ghi đè lên phiên bản của container. Cách sửa là **mẹo anonymous volume**: thêm `/app/node_modules` như một mục volume riêng. Docker xét volume theo mức độ cụ thể — anonymous volume được ưu tiên hơn bind mount cho thư mục con đó."
+    },
+    {
+      "type": "callout",
+      "content": "**`ENTRYPOINT` vs `CMD`**: Hai lệnh này hay bị nhầm. `ENTRYPOINT` định nghĩa executable cố định — nó luôn được chạy. `CMD` cung cấp tham số mặc định cho `ENTRYPOINT` (hoặc là lệnh mặc định nếu không có `ENTRYPOINT`). Pattern phổ biến là `ENTRYPOINT [\"node\"]` + `CMD [\"server.js\"]`, cho phép bạn chỉ override phần script: `docker run myapp other-script.js`. Một script `ENTRYPOINT` (shell script làm các bước setup trước khi `exec \"$@\"`) là cách chuẩn để inject biến môi trường và khởi tạo trước khi chuyển quyền cho process chính. Lệnh `exec \"$@\"` ở cuối là then chốt — nó thay thế shell bằng chính process thực sự, để process đó nhận được signal của OS với tư cách PID 1."
+    },
+    {
+      "type": "callout",
+      "content": "**Bốn lỗi Docker phổ biến nhất trong production và cách tránh:**\n\n1. **Secret nằm trong layer của image** — `ENV DATABASE_PASSWORD=secret` trong Dockerfile sẽ ghi cứng secret vào image. Bất kỳ ai có quyền `docker pull` đều có thể chạy `docker history myimage` và đọc được nó. Cách sửa: inject secret lúc runtime qua `-e`, Kubernetes Secret hoặc một secrets manager. Nếu cần secret *trong lúc build* (ví dụ token npm private), hãy dùng BuildKit secret mount — `RUN --mount=type=secret,id=npmrc npm ci` với `docker build --secret id=npmrc,src=.npmrc` — cách này không bao giờ ghi secret vào layer. `ARG` cũng không an toàn: build arg hiện rõ trong `docker history`.\n\n2. **Chạy dưới quyền root** — user mặc định trong container là root (UID 0). Nếu ứng dụng có lỗ hổng RCE, kẻ tấn công có quyền root trong container và có thể leo thang đặc quyền. Luôn chuyển sang user không phải root bằng `USER` (tạo user bằng `adduser`/`useradd`, hoặc dùng user có sẵn của image như `node`).\n\n3. **Dùng tag `latest` trong production** — `FROM nginx:latest` thay đổi mỗi khi nginx ra bản mới. Build lại vào thứ Ba có thể dùng nginx khác với bản release hôm thứ Hai. Hãy ghim vào `nginx:1.25-alpine` hoặc một digest. CI nên gắn tag image bằng git SHA.\n\n4. **CMD dạng shell** — `CMD node server.js` chạy qua `/bin/sh -c node server.js`. Shell là PID 1; node là process con. Kubernetes gửi SIGTERM tới PID 1 (là shell) khi dừng Pod. Shell có thể không chuyển tiếp signal, dẫn tới phải chờ hết grace period 30 giây rồi mới bị SIGKILL. Hãy dùng dạng exec: `CMD [\"node\", \"server.js\"]` — và nhớ rằng PID 1 không có hành vi SIGTERM mặc định, nên ứng dụng phải tự cài handler (hoặc chạy dưới `--init`/tini, vốn cũng dọn dẹp các zombie process)."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Container** là các process được cô lập, dùng chung kernel của host OS thông qua **namespace** (thấy được gì) và **cgroup** (dùng được bao nhiêu) của Linux. Chúng khởi động trong vài mili giây và nhẹ hơn VM rất nhiều, nhưng VM cung cấp ranh giới bảo mật mạnh hơn.",
+        "**Image** là chồng các layer chỉ đọc, định danh theo nội dung, được build từ `Dockerfile`. Mỗi lệnh thêm một layer. Docker cache layer theo hash — layer đầu tiên thay đổi sẽ vô hiệu hóa mọi layer phía sau, nên **các bước ổn định đặt trước** (base image, cài dependency) và **các bước hay thay đổi đặt sau cùng** (COPY source code).",
+        "**Multi-stage build** định nghĩa nhiều stage `FROM`. Công cụ build, dev dependency và artifact trung gian ở lại các stage đầu. Chỉ artifact production được copy vào stage cuối — giữ image nhỏ, an toàn và không chứa công cụ thừa.",
+        "**Registry** (Docker Hub, ECR, GCR, GHCR) lưu trữ và phân phối image theo các layer định danh bằng nội dung. Luôn ghim tag image trong production — `latest` là một con trỏ di động. Tag theo git SHA và ghim theo digest cho bảo đảm tái lập hoàn toàn.",
+        "**Docker Compose** (v2, chạy bằng `docker compose`; không cần key `version:`) điều phối stack nhiều service ở local từ một file `compose.yaml` duy nhất. `depends_on` kèm `condition: service_healthy` chờ health check. Named volume giữ dữ liệu qua các lần container khởi động lại. Mẹo anonymous volume ngăn `node_modules` của host ghi đè `node_modules` của container.",
+        "**CMD dạng exec** (`CMD [\"node\", \"server.js\"]`) biến ứng dụng thành PID 1 để nó nhận SIGTERM và shutdown êm. CMD dạng shell giao PID 1 cho `/bin/sh`, vốn có thể không chuyển tiếp signal — một vấn đề production tinh vi nhưng nghiêm trọng.",
+        "**Đừng bao giờ nhúng secret vào Dockerfile**. `ENV SECRET=value` bị ghi cứng vào image manifest và bất kỳ ai có quyền truy cập registry đều đọc được. Hãy inject secret khi container khởi động qua biến môi trường, đối tượng Secret của orchestrator hoặc một secrets manager bên ngoài.",
+        "**Docker là một hiện thực của các chuẩn mở**: image là OCI artifact; containerd + runc làm phần việc cấp thấp; Kubernetes dùng trực tiếp containerd hoặc CRI-O (dockershim đã bị gỡ ở v1.24), và image build bằng Docker vẫn chạy nguyên vẹn ở đó."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Khác biệt kỹ thuật chính giữa Docker container và máy ảo là gì?",
+      "options": [
+        "Container chạy một guest OS đầy đủ; VM dùng chung kernel của host",
+        "Container dùng chung kernel của host OS thông qua namespace và cgroup; mỗi VM chạy một guest OS hoàn chỉnh",
+        "VM khởi động nhanh hơn vì bỏ qua quá trình boot OS",
+        "Container cần nhiều RAM hơn vì gói kèm cả một hệ điều hành đầy đủ"
+      ],
+      "explanation": "Container dùng namespace của Linux (cô lập những gì process thấy được) và cgroup (giới hạn tài nguyên) ngay trong kernel sẵn có của host. VM dùng hypervisor để giả lập phần cứng và boot một guest OS riêng. Đó là lý do container khởi động trong vài mili giây và tốn ít bộ nhớ hơn nhiều."
+    },
+    {
+      "id": "q2",
+      "question": "Trong Dockerfile, vì sao `COPY . .` (copy source của ứng dụng) nên đặt SAU `RUN npm install`?",
+      "options": [
+        "npm cần có source file trước thì mới cài được package",
+        "Docker yêu cầu mọi lệnh COPY phải đứng trước mọi lệnh RUN",
+        "Đặt bước copy code sau npm install giúp tối đa cache: layer cài đặt chỉ bị vô hiệu hóa khi package.json thay đổi, chứ không phải mỗi lần sửa code",
+        "Hệ điều hành phải được cấu hình xong trước khi copy source code của ứng dụng"
+      ],
+      "explanation": "Docker vô hiệu hóa build cache tại layer đầu tiên thay đổi và build lại mọi layer phía sau. Nếu source code được copy trước `npm install`, mọi thay đổi code đều kích hoạt cài lại toàn bộ. Chỉ copy `package.json` trước rồi chạy `npm install` giúp Docker cache được bước tốn kém đó — nó chỉ chạy lại khi dependency manifest thay đổi."
+    },
+    {
+      "id": "q3",
+      "question": "Tính năng nào của Linux kernel giới hạn mức dùng CPU và bộ nhớ của container?",
+      "options": [
+        "cgroup (control group) — áp đặt giới hạn cứng về mức tiêu thụ tài nguyên",
+        "Namespace — cô lập những tài nguyên mà process có thể thấy",
+        "iptables — kiểm soát việc phân bổ bandwidth mạng cho từng process",
+        "seccomp — lọc những system call mà process được phép gọi"
+      ],
+      "explanation": "cgroup (control group) áp đặt giới hạn tài nguyên: tỷ lệ CPU tối đa, bộ nhớ tối đa, bandwidth I/O. Namespace kiểm soát những gì process THẤY được (không gian PID, network stack, filesystem riêng). Cả hai cùng tạo nên sự cô lập của container, nhưng chỉ cgroup giới hạn mức tiêu thụ."
+    },
+    {
+      "id": "q4",
+      "question": "Lợi ích chính của multi-stage Docker build là:",
+      "options": [
+        "Chạy các bước build song song trên nhiều nhân CPU để tăng tốc compile",
+        "Tự động cache output của từng stage vào một layer registry riêng",
+        "Cho phép cùng một container chạy đồng thời trên nhiều hệ điều hành",
+        "Chỉ copy artifact production cuối cùng vào một image tối giản, để công cụ build và dev dependency lại trong các stage trước vốn bị bỏ đi"
+      ],
+      "explanation": "Multi-stage build dùng một hoặc nhiều stage để compile và cài dependency (với đầy đủ công cụ), sau đó chỉ copy output — binary, node_modules production, static asset — vào một stage cuối tối giản. Các stage trung gian bị bỏ đi và không bao giờ xuất hiện trong image được push, tạo ra artifact nhỏ hơn và an toàn hơn."
+    },
+    {
+      "id": "q5",
+      "question": "Dùng `FROM nginx:latest` làm base image trong Dockerfile production là rủi ro vì:",
+      "options": [
+        "Tag `latest` không được hỗ trợ trên Docker Hub cho các image chính thức",
+        "Tag `latest` là một con trỏ có thể thay đổi khi có phiên bản mới, phá vỡ khả năng build tái lập",
+        "Tag `latest` luôn trỏ tới một bản beta pre-release không ổn định",
+        "Docker tự động xóa tag `latest` khỏi registry sau 30 ngày"
+      ],
+      "explanation": "`latest` là một con trỏ di động — nó thay đổi mỗi khi một phiên bản image mới được publish. Build lại cùng Dockerfile vào thứ Ba có thể dùng phiên bản nginx khác với bản build hôm thứ Hai, có thể mang theo breaking change hoặc hồi quy về bảo mật. Hãy ghim vào một tag cụ thể như `nginx:1.25-alpine` hoặc một digest để bảo đảm tái lập."
+    },
+    {
+      "id": "q6",
+      "question": "Trong `docker-compose.yml`, port mapping `\"3000:3000\"` có tác dụng gì?",
+      "options": [
+        "Giới hạn container dùng tối đa 3000 MB RAM",
+        "Chỉ mở port 3000 cho các container khác trên cùng Docker network",
+        "Chuyển tiếp traffic đến port 3000 trên máy host vào port 3000 bên trong container",
+        "Giới hạn service tối đa 3000 kết nối TCP đồng thời"
+      ],
+      "explanation": "Định dạng port mapping là `host_port:container_port`. Docker thêm một rule DNAT trong iptables để traffic đến `host_port` trên host được viết lại, trỏ tới IP nội bộ của container và `container_port`. Không có mapping này, port của container chỉ truy cập được từ các container khác trên cùng Docker network."
+    },
+    {
+      "id": "q7",
+      "question": "Secret production (mật khẩu database, API key) nên được lưu ở đâu so với Docker image?",
+      "options": [
+        "Trong lệnh `ENV` của Dockerfile để container đang chạy luôn có sẵn",
+        "Trong một file config được copy vào image bằng lệnh `COPY`",
+        "Mã hóa vào tên tag của image để dễ nhận diện trên registry",
+        "Inject lúc runtime qua biến môi trường, đối tượng Secret của orchestrator hoặc một secrets manager — không bao giờ ghi cứng vào image"
+      ],
+      "explanation": "Lệnh `ENV` và các file được `COPY` vào đều trở thành một phần của layer image và có thể bị khôi phục bởi bất kỳ ai pull được image (`docker history` hiện giá trị ENV; tarball của layer chứa các file đã copy). Ai có quyền pull từ registry đều có thể trích xuất secret. Hãy inject secret khi container khởi động qua cờ `-e`, volume Kubernetes Secret hoặc một secrets manager như AWS Secrets Manager hay HashiCorp Vault."
+    },
+    {
+      "id": "q8",
+      "question": "Writable container layer mà Docker thêm lên trên các layer chỉ đọc của image có đặc điểm:",
+      "options": [
+        "Tạm thời — bị bỏ đi khi container bị xóa, trừ khi được hỗ trợ bởi volume",
+        "Tự động được lưu lên registry khi container dừng",
+        "Được chia sẻ giữa mọi container đang chạy dùng cùng base image",
+        "Được mã hóa mặc định bằng khóa mã hóa đĩa của host"
+      ],
+      "explanation": "Mỗi container có writable layer mỏng, tạm thời của riêng nó, dùng cơ chế copy-on-write. Mọi thao tác ghi file trong container đi vào đây. Khi container bị xóa (`docker rm`), layer này bị bỏ đi. Với dữ liệu cần tồn tại qua các lần container khởi động lại — database, file upload — bạn phải dùng named volume hoặc bind mount."
+    },
+    {
+      "id": "q9",
+      "question": "Vì sao CMD dạng exec `CMD [\"node\", \"server.js\"]` được ưu tiên hơn dạng shell `CMD node server.js` trong Dockerfile production?",
+      "options": [
+        "Dạng exec nhanh hơn vì bỏ qua hoàn toàn trình thông dịch shell",
+        "Dạng shell không được hỗ trợ trong multi-stage build",
+        "Dạng exec biến process của ứng dụng thành PID 1 để nó nhận trực tiếp signal của OS như SIGTERM và shutdown êm",
+        "Dạng exec tự động bật JSON logging cho process"
+      ],
+      "explanation": "Dạng shell chạy lệnh qua `/bin/sh -c`, khiến shell trở thành PID 1. Ứng dụng là process con và có thể không nhận được SIGTERM từ Kubernetes khi Pod bị dừng, dẫn tới bị SIGKILL cưỡng bức sau grace period. Dạng exec chạy ứng dụng trực tiếp với PID 1 nên nó nhận được signal và có thể shutdown êm."
+    },
+    {
+      "id": "q10",
+      "question": "Trong Docker Compose, việc thêm `/app/node_modules` như một mục volume riêng khi bind-mount source code bằng `- ./api:/app` nhằm mục đích gì?",
+      "options": [
+        "Ngăn container cài thêm package npm mới lúc runtime",
+        "Bảo đảm thư mục node_modules của host được tự động đồng bộ lên registry",
+        "Bật hot reload bằng cách theo dõi thay đổi trong thư mục node_modules",
+        "Ngăn node_modules của host ghi đè node_modules của container, vốn có thể khác nhau do native module phụ thuộc OS"
+      ],
+      "explanation": "Khi bạn bind-mount `./api:/app`, Docker mount thư mục của host đè lên `/app` — bao gồm cả `/app/node_modules`. Nếu node_modules của host chứa binary macOS trong khi container cần binary Linux (ví dụ với native addon), việc ghi đè sẽ làm hỏng ứng dụng. Anonymous volume `/app/node_modules` được ưu tiên hơn bind mount cho thư mục con đó, giữ lại node_modules riêng của container."
+    }
+  ]
+}

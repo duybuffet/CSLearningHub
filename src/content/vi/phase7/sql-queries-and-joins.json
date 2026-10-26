@@ -1,0 +1,239 @@
+{
+  "sourceHash": "330e77a4433c",
+  "title": "SQL query & join",
+  "tagline": "Viết SQL vừa đúng vừa nhanh: thứ tự thực thi, logic NULL, mọi loại join, window function, upsert và cách đọc query plan.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Gần như mọi backend bạn từng động tới đều kết thúc bằng một SQL query. ORM, GraphQL resolver, dashboard analytics và data pipeline rốt cuộc đều sinh ra `SELECT ... FROM ... JOIN ...` rồi giao cho một database quan hệ. Engineer đọc và viết SQL thành thạo sẽ debug nhanh hơn, ít gây ra regression về hiệu năng hơn, và làm được nhiều việc hơn hẳn trong interview lẫn khi trực on-call.\n\nSQL mang tính **khai báo (declarative)**: bạn mô tả bạn muốn kết quả *gì*, còn **query planner** của database quyết định tính nó *thế nào*: dùng index nào, đọc bảng nào trước, chạy thuật toán join nào. Sự tách biệt đó vừa là nguồn sức mạnh vừa là nguồn bất ngờ của SQL. Cùng một query có thể mất 2 ms hoặc 20 giây tùy vào index và thống kê, và một query trông có vẻ đúng vẫn có thể lặng lẽ trả về sai dòng vì ngữ nghĩa của `NULL` hoặc một filter đặt sai chỗ trên outer join.\n\nChương này làm việc với một dataset nhỏ, khách hàng và order của họ, và đi từ mô hình quan hệ tới các mối quan tâm trên production:\n- các mệnh đề cốt lõi và **thứ tự logic** mà database đánh giá chúng,\n- `NULL` và **logic ba giá trị**, nguồn gốc của nhiều bug tinh vi,\n- mọi loại join, với bảng kết quả chính xác,\n- aggregation, subquery so với `EXISTS` so với join, CTE (kể cả recursive) và **window function**,\n- upsert bằng `INSERT ... ON CONFLICT`,\n- đọc output của `EXPLAIN` và ba **thuật toán join** đằng sau nó,\n- hai lỗi kinh điển phía ứng dụng: **N+1 query** và **SQL injection**.\n\nToàn bộ SQL là PostgreSQL (16–18) và mọi bảng kết quả hiển thị đều được tạo ra bằng cách chạy thật query đó. Transaction, isolation và cấu trúc bên trong của B-tree được trình bày ở chương ACID & Indexes. Chương này nói về chính việc viết query."
+    },
+    {
+      "type": "diagram",
+      "caption": "Thứ tự xử lý query logic. Bạn viết SELECT đầu tiên, nhưng về mặt khái niệm database đánh giá nó ở bước thứ năm. Đó là lý do alias trong SELECT không dùng được trong WHERE nhưng dùng được trong ORDER BY."
+    },
+    {
+      "type": "analogy",
+      "title": "Anh thủ kho làm đúng từng chữ",
+      "content": "Hãy tưởng tượng một anh thủ kho làm đúng y yêu cầu viết của bạn và theo một thứ tự cố định, bất kể bạn viết theo thứ tự nào.\n\nĐầu tiên anh ấy lấy mọi thùng hàng từ các kệ bạn chỉ định (**FROM**), dán băng keo nối các thùng ở kệ khác nhau khi nhãn khớp nhau (**JOIN**). Sau đó anh ấy bỏ đi những thùng không đạt điều kiện của bạn (**WHERE**). Tiếp theo anh ấy xếp các thùng còn lại thành từng đống (**GROUP BY**) và bỏ đi những đống quá nhỏ (**HAVING**). Chỉ đến lúc này anh ấy mới viết tờ tóm tắt bạn yêu cầu (**SELECT**), sắp xếp nó (**ORDER BY**) và đưa cho bạn vài dòng đầu tiên (**LIMIT**).\n\nAnh thủ kho cũng rất nghiêm khắc với sự không chắc chắn. Nếu một thùng có nhãn trống và bạn yêu cầu \"những thùng không dán nhãn Hanoi\", anh ấy sẽ không đoán. Nhãn trống là *không biết*, không phải \"không phải Hanoi\", nên thùng đó bị bỏ ra. Đó chính là `NULL` của SQL.\n\nCuối cùng, anh thủ kho có một quản đốc (**query planner**) được phép thay đổi *cách* làm việc — dùng một index thay vì đi khắp mọi lối, hay kiểm tra kệ B trước kệ A — miễn là tờ kết quả cuối cùng giống hệt. Bạn kiểm soát *cái gì*; quản đốc kiểm soát *thế nào*. Việc của bạn là viết những yêu cầu đúng và cho quản đốc những lựa chọn tốt."
+    },
+    {
+      "type": "explanation",
+      "title": "Mô hình quan hệ và dataset mẫu của chúng ta",
+      "content": "Trong mô hình quan hệ (E. F. Codd, 1970), dữ liệu nằm trong các **relation**, thứ SQL gọi là bảng. Một relation là một tập các **tuple** (dòng), mỗi tuple có cùng các **attribute** (cột) có tên và có kiểu. Một vài hệ quả định hình mọi thứ còn lại:\n\n- **Dòng không có thứ tự cố hữu.** Một bảng là một tập hợp (nói chính xác thì bảng SQL là multiset vì cho phép trùng lặp). Không có `ORDER BY`, database có thể trả dòng theo bất kỳ thứ tự nào, và thứ tự đó có thể thay đổi giữa các lần chạy.\n- **Dòng được định danh bằng giá trị, không phải vị trí.** Một **primary key** định danh duy nhất một dòng. Một **foreign key** trong một bảng tham chiếu tới một key ở bảng khác, đó là cách biểu diễn quan hệ.\n- **Query tạo ra relation.** Output của một `SELECT` tự nó là một bảng, nên các query có thể ghép với nhau: bạn có thể join một subquery, hay đưa một CTE vào một CTE khác.\n\nDataset xuyên suốt của chúng ta có hai bảng. `orders.customer_id` là foreign key tới `customers.id`. Nó nullable, vì order 104 là thanh toán của khách vãng lai. Chen không có order nào và không có thành phố.\n\n**customers**\n| id | name | city |\n|---|---|---|\n| 1 | Alice | Hanoi |\n| 2 | Bob | Saigon |\n| 3 | Chen | NULL |\n| 4 | Dana | Hanoi |\n\n**orders**\n| id | customer_id | amount | created_at |\n|---|---|---|---|\n| 101 | 1 | 50.00 | 2026-01-05 |\n| 102 | 1 | 30.00 | 2026-01-20 |\n| 103 | 2 | 120.00 | 2026-02-02 |\n| 104 | NULL | 15.00 | 2026-02-10 |\n| 105 | 4 | 80.00 | 2026-03-01 |\n\nVài dòng này đã chứa mọi edge case mà một phép join có thể gặp: một bản ghi cha có nhiều con (Alice), một bản ghi cha không có con nào (Chen), và một bản ghi con không có cha (order 104)."
+    },
+    {
+      "type": "explanation",
+      "title": "SELECT, WHERE, ORDER BY, LIMIT và thứ tự xử lý logic",
+      "content": "Bộ khung của một query:\n\n```sql\nSELECT name, upper(name) AS shout     -- which columns / expressions\nFROM customers                         -- which rows to start from\nWHERE city = 'Hanoi'                   -- row filter\nORDER BY shout DESC                    -- sort (alias allowed here)\nLIMIT 1;                               -- Dana | DANA\n```\n\nCác predicate hữu ích: `IN ('Hanoi', 'Hue')`, `BETWEEN 10 AND 50` (bao gồm cả hai đầu), `LIKE 'Al%'` (`ILIKE` để không phân biệt hoa thường trong PostgreSQL), `IS NULL`. `SELECT DISTINCT` loại bỏ các dòng output trùng lặp.\n\n**Thứ tự xử lý logic.** Database đánh giá các mệnh đề theo thứ tự: `FROM`/`JOIN` → `WHERE` → `GROUP BY` → `HAVING` → `SELECT` → `DISTINCT` → `ORDER BY` → `LIMIT`/`OFFSET`. Điều này giải thích một số quy tắc trông có vẻ tùy tiện:\n- `WHERE shout = 'DANA'` lỗi vì `shout` được định nghĩa trong `SELECT`, vốn chạy sau. Hãy lặp lại biểu thức hoặc bọc query trong một subquery hay CTE.\n- `ORDER BY shout` chạy được vì việc sắp xếp diễn ra sau `SELECT`.\n- `WHERE count(*) > 1` không hợp lệ vì aggregate chưa tồn tại cho đến sau bước nhóm. Đó là việc của `HAVING`.\n- Window function (`row_number() OVER ...`) được tính ở bước `SELECT`, nên bạn cũng không thể lọc theo chúng trong `WHERE`. PostgreSQL không có mệnh đề `QUALIFY`, nên bạn phải bọc query lại.\n\nĐây là thứ tự *logic* định nghĩa kết quả. Plan vật lý có thể khác: planner đẩy filter xuống tận các lượt scan, dùng index để tránh sắp xếp, hoặc dừng sớm khi `LIMIT` đã thỏa.\n\n**ORDER BY + LIMIT phải tất định.** `ORDER BY created_at LIMIT 20` với các timestamp trùng nhau có thể trả về dòng khác nhau ở mỗi lần chạy, khiến các trang chồng lấn hoặc bỏ sót dòng. Hãy thêm một tiêu chí phá hòa duy nhất: `ORDER BY created_at, id`.\n\n**Phân trang bằng OFFSET càng sâu càng chậm.** `LIMIT 20 OFFSET 100000` vẫn tạo ra rồi vứt bỏ 100,000 dòng. **Keyset (seek) pagination** ghi nhớ dòng cuối cùng đã thấy và tiếp tục từ đó, dùng một index trên `(created_at, id)`:\n\n```sql\nSELECT * FROM orders\nWHERE (created_at, id) > ($1, $2)   -- last row of the previous page\nORDER BY created_at, id\nLIMIT 20;\n```"
+    },
+    {
+      "type": "explanation",
+      "title": "NULL và logic ba giá trị",
+      "content": "`NULL` nghĩa là \"không biết hoặc bị thiếu\", và nó không phải một giá trị như `0` hay `''`. Mọi phép so sánh với `NULL` đều trả về một giá trị chân lý thứ ba, **UNKNOWN** (SQL biểu diễn nó bằng một boolean `NULL`):\n\n| Biểu thức | Kết quả |\n|---|---|\n| `NULL = NULL` | NULL (không biết) |\n| `NULL <> 'Hanoi'` | NULL |\n| `NULL AND false` | false |\n| `NULL AND true` | NULL |\n| `NULL OR true` | true |\n| `NOT NULL` | NULL |\n\nQuy tắc then chốt: **WHERE, JOIN ... ON và HAVING chỉ giữ một dòng khi predicate là TRUE.** Cả FALSE lẫn UNKNOWN đều loại nó. (Constraint `CHECK` thì ngược lại: nó cho qua trừ khi kết quả là FALSE, nên `NULL` lọt qua được `CHECK`.)\n\nHệ quả trên dữ liệu của chúng ta:\n- `WHERE city <> 'Hanoi'` chỉ trả về **Bob**. Thành phố của Chen là NULL, `NULL <> 'Hanoi'` là unknown, nên Chen bị loại. Nếu ý bạn là \"không phải Hanoi, kể cả không biết\", hãy viết `WHERE city IS DISTINCT FROM 'Hanoi'` (trả về Bob và Chen) hoặc `city <> 'Hanoi' OR city IS NULL`.\n- `WHERE city = NULL` không bao giờ khớp với thứ gì. Hãy dùng `IS NULL` / `IS NOT NULL`.\n- **Bẫy `NOT IN`:** `SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders)` trả về **không dòng nào**, dù Chen không có order. Subquery chứa NULL (order 104), nên với Chen phép kiểm tra trở thành `3 <> 1 AND 3 <> 2 AND 3 <> 4 AND 3 <> NULL`, tức là `true AND ... AND unknown` = unknown. Hãy dùng `NOT EXISTS`, nó trả về Chen đúng như mong đợi.\n\nAggregate có các quy tắc NULL riêng:\n- `count(*)` đếm dòng, còn `count(city)` bỏ qua NULL. Trên customers: `count(*) = 4`, `count(city) = 3`, `count(DISTINCT city) = 2`.\n- `sum`, `avg`, `min` và `max` bỏ qua NULL, và trên không dòng nào chúng trả về **NULL**, không phải 0. Bọc bằng `coalesce(sum(amount), 0)` khi ứng dụng cần một con số.\n- `GROUP BY city` đặt mọi NULL vào **một** nhóm, dù `NULL = NULL` là unknown.\n- PostgreSQL sắp xếp NULL như lớn hơn mọi giá trị: cuối cùng khi `ASC`, đầu tiên khi `DESC`. Thay đổi bằng `NULLS FIRST` / `NULLS LAST`.\n- Constraint `UNIQUE` mặc định cho phép nhiều NULL. PostgreSQL 15+ hỗ trợ `UNIQUE NULLS NOT DISTINCT` để chỉ cho phép một."
+    },
+    {
+      "type": "explanation",
+      "title": "Gia đình join: INNER, LEFT, RIGHT, FULL và CROSS",
+      "content": "Một phép join kết hợp các dòng từ hai bảng. Về khái niệm, nó bắt đầu từ mọi cặp dòng có thể (tích Descartes) và giữ lại các cặp mà điều kiện `ON` là TRUE. Loại join quyết định số phận của những dòng không khớp với gì.\n\n**INNER JOIN** (`JOIN` trơn) chỉ giữ các cặp khớp. Chen (không có order) và order 104 (không có khách hàng) đều biến mất:\n\n| name | order_id | amount |\n|---|---|---|\n| Alice | 101 | 50.00 |\n| Alice | 102 | 30.00 |\n| Bob | 103 | 120.00 |\n| Dana | 105 | 80.00 |\n\nĐể ý Alice xuất hiện **hai lần**. Join một bảng cha với bảng con tạo ra một dòng cho mỗi con, đây là lý do phổ biến nhất khiến một phép `sum` bị thổi phồng: bạn join hai bảng con cùng lúc và nhân số dòng lên.\n\n**LEFT [OUTER] JOIN** giữ mọi dòng của bảng bên trái. Ở đâu không có dòng bên phải nào khớp, các cột bên phải là NULL:\n\n| name | order_id |\n|---|---|\n| Alice | 101 |\n| Alice | 102 |\n| Bob | 103 |\n| Chen | NULL |\n| Dana | 105 |\n\n**RIGHT JOIN** là ảnh phản chiếu: mọi order đều sống sót, và order 104 xuất hiện với `name = NULL` còn Chen biến mất. Mọi RIGHT JOIN đều có thể viết lại thành LEFT JOIN bằng cách đổi chỗ hai bảng, và phần lớn team chỉ dùng LEFT cho dễ đọc.\n\n**FULL [OUTER] JOIN** giữ các dòng không khớp từ **cả hai** phía: bốn dòng khớp, cộng `Chen | NULL`, cộng `NULL | 104`, tổng cộng 6 dòng. Nó hữu ích cho các job đối soát (\"bản ghi nào có ở A mà không có ở B, hoặc có ở B mà không có ở A\").\n\n**CROSS JOIN** không có điều kiện và trả về mọi tổ hợp: 4 khách hàng × 5 order = **20 dòng**. Nó hữu ích khi dùng có chủ đích (tạo lưới lịch × sản phẩm) và nguy hiểm khi vô tình (quên điều kiện join trong cú pháp dấu phẩy kiểu cũ `FROM a, b`).\n\n**Pattern anti-join:** `LEFT JOIN orders o ... WHERE o.id IS NULL` trả về các khách hàng không có order (Chen). Hãy kiểm tra một cột NOT NULL ở bảng bên phải, như primary key của nó, để NULL chỉ có thể mang nghĩa \"không khớp\".\n\n**ON so với WHERE trong outer join.** Điều kiện `ON` quyết định *dòng nào khớp*. `WHERE` lọc *sau* khi join. Với INNER join, hai cách là tương đương. Với LEFT join thì không:\n- `LEFT JOIN orders o ON o.customer_id = c.id AND o.amount > 60` giữ **cả 4 khách hàng** (Alice và Chen với order NULL).\n- `LEFT JOIN orders o ON o.customer_id = c.id WHERE o.amount > 60` chỉ trả về **Bob và Dana**, vì các dòng được bù NULL không qua được `NULL > 60`. Mệnh đề WHERE đã lặng lẽ biến LEFT JOIN của bạn thành INNER JOIN.\n\n**Self join** join một bảng với chính nó dưới hai alias. Đây là cách chuẩn để liên kết các dòng trong cùng một bảng, như nhân viên → quản lý, hay so sánh mỗi dòng với dòng trước nó. Code bên dưới join `employees e` với `employees m` theo `m.id = e.manager_id`, dùng LEFT để CEO (không có quản lý) vẫn còn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Chọn loại join bằng cách hỏi dòng nào phải được giữ lại. Semi-join và anti-join được viết bằng EXISTS / NOT EXISTS và không bao giờ nhân bản các dòng bên trái."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Chạy từ trên xuống dưới trong psql để tái tạo mọi kết quả trong chương này. Hai query dưới mục \"Filter placement\" chỉ khác nhau ở chỗ đặt `o.amount > 60`, vậy mà trả về 4 dòng so với 2 dòng. FULL JOIN dùng `NULLS LAST` để order của khách vãng lai nằm ở cuối. Với thứ tự tăng dần mặc định của PostgreSQL, NULL vốn đã nằm cuối, nhưng viết rõ ra giúp thể hiện ý định.",
+      "label": "Join"
+    },
+    {
+      "type": "explanation",
+      "title": "Aggregation: GROUP BY, HAVING và FILTER",
+      "content": "**Aggregate function** (`count`, `sum`, `avg`, `min`, `max`, `string_agg`, `array_agg`, `bool_and`...) gộp nhiều dòng thành một giá trị. **GROUP BY** chia các dòng thành nhóm và tạo một dòng output cho mỗi nhóm:\n\n```sql\nSELECT city, count(*) AS n\nFROM customers\nGROUP BY city\nHAVING count(*) > 1;      -- Hanoi | 2\n```\n\nNhững quy tắc nên nắm thật chính xác:\n- Mọi cột trong `SELECT` phải hoặc nằm trong một aggregate, hoặc được liệt kê trong `GROUP BY`. PostgreSQL nới lỏng quy tắc này khi bạn nhóm theo primary key của một bảng: `GROUP BY c.id` cho phép bạn select `c.name` vì nó phụ thuộc hàm vào key. MySQL mặc định thực thi quy tắc chặt (`ONLY_FULL_GROUP_BY`, từ 5.7). MySQL cũ hơn thì lặng lẽ chọn một giá trị tùy ý.\n- **WHERE lọc dòng trước khi nhóm. HAVING lọc nhóm sau đó.** Đặt điều kiện mức dòng trong `WHERE` để ít dòng hơn đi tới bước nhóm. Chỉ dùng `HAVING` cho điều kiện trên aggregate.\n- `count(o.id)` so với `count(*)` sau một LEFT JOIN: dòng được bù NULL của Chen tính là 1 với `count(*)` nhưng là 0 với `count(o.id)`. Khi đếm bản ghi con, hãy đếm một cột của bảng con.\n- **Conditional aggregation** với `FILTER` thay thế cho nhiều query riêng lẻ: `count(*) FILTER (WHERE amount >= 50) AS big, count(*) AS all_orders` trả về `3 | 5` trong một lượt. Cách tương đương có tính portable là `sum(CASE WHEN amount >= 50 THEN 1 ELSE 0 END)`.\n- `GROUP BY ROLLUP (city)` / `CUBE` / `GROUPING SETS` tạo ra tổng phụ và tổng cộng trong một query. Chúng là phần SQL đứng sau phần lớn các báo cáo dạng pivot table.\n\n**Bẫy fan-out:** nếu bạn join customers → orders → order_items rồi `sum(orders.amount)`, mỗi order bị lặp lại một lần cho mỗi item, nên tổng bị quá lớn. Hãy aggregate từng bảng con trong subquery hoặc CTE riêng trước, rồi mới join các kết quả đã tổng hợp."
+    },
+    {
+      "type": "explanation",
+      "title": "Subquery, EXISTS hay JOIN",
+      "content": "Thường có ba cách để hỏi \"những khách hàng đã đặt một order trên 40\":\n\n```sql\n-- 1. IN (subquery)\nSELECT name FROM customers WHERE id IN (SELECT customer_id FROM orders WHERE amount > 40);\n-- 2. EXISTS (correlated subquery)\nSELECT name FROM customers c\nWHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id AND o.amount > 40);\n-- 3. JOIN + DISTINCT\nSELECT DISTINCT c.name FROM customers c JOIN orders o ON o.customer_id = c.id WHERE o.amount > 40;\n```\n\nCả ba đều trả về Alice, Bob và Dana, nhưng ý nghĩa khác nhau:\n- `IN` và `EXISTS` là **semi-join**: mỗi khách hàng xuất hiện **tối đa một lần**, bất kể có bao nhiêu order khớp. Planner của PostgreSQL biến cả hai thành một plan node `Semi Join`, nên chúng thường có hiệu năng như nhau.\n- Phiên bản `JOIN` tạo ra một dòng cho mỗi order khớp. Alice sẽ xuất hiện hai lần nếu không có `DISTINCT`, và `DISTINCT` thêm một bước sort hoặc hash. Hãy dùng join khi bạn thực sự cần cột từ bảng kia, và semi-join khi bạn chỉ cần kiểm tra sự tồn tại.\n- Với trường hợp phủ định, hãy ưu tiên **`NOT EXISTS`**. Planner biến nó thành `Hash Anti Join`, và nó xử lý NULL đúng. `NOT IN (subquery)` trả về rỗng nếu subquery cho ra bất kỳ NULL nào, và PostgreSQL không thể chuyển nó thành anti-join (nó chạy như một hashed SubPlan, hoặc tệ hơn, một subplan cho từng dòng khi kết quả subquery quá lớn so với bộ nhớ).\n\nCác dạng subquery khác:\n- **Scalar subquery** trong SELECT: `(SELECT count(*) FROM orders o WHERE o.customer_id = c.id) AS n` phải trả về tối đa một dòng (nếu không sẽ lỗi lúc chạy), và trả về NULL khi không có dòng nào. Nó ổn với output nhỏ, nhưng chạy cho từng dòng output trừ khi planner tối ưu được.\n- **Derived table** trong FROM: `FROM (SELECT ...) AS t`. Trong PostgreSQL, ở các phiên bản trước 16, mọi derived table đều cần alias.\n- **LATERAL** cho phép một subquery trong FROM tham chiếu tới các bảng phía trước, cho ra lời giải \"top-N cho mỗi dòng\" rất gọn:\n\n```sql\nSELECT c.name, o.id, o.amount\nFROM customers c\nCROSS JOIN LATERAL (\n  SELECT id, amount FROM orders o\n  WHERE o.customer_id = c.id ORDER BY amount DESC LIMIT 1\n) o;   -- Alice 101 50.00 | Bob 103 120.00 | Dana 105 80.00\n```\n\nVới một index trên `orders (customer_id, amount DESC)`, query này chạy như một lần dò index nhỏ xíu cho mỗi khách hàng."
+    },
+    {
+      "type": "explanation",
+      "title": "CTE và recursive CTE",
+      "content": "Một **Common Table Expression** (`WITH name AS (...)`) đặt tên cho một subquery để query chính đọc được từ trên xuống thay vì từ trong ra ngoài:\n\n```sql\nWITH totals AS (\n  SELECT customer_id, sum(amount) AS total FROM orders GROUP BY customer_id\n)\nSELECT c.name, t.total FROM customers c JOIN totals t ON t.customer_id = c.id;\n```\n\n**Ngữ nghĩa hiệu năng (PostgreSQL 12+):** một CTE không recursive, không có side effect, được tham chiếu **một lần** sẽ được inline vào query chính và được tối ưu như thể bạn viết một subquery. Một CTE được tham chiếu **nhiều hơn một lần** mặc định sẽ được materialize (tính một lần thành một kết quả tạm). Bạn có thể ghi đè hành vi này bằng `WITH t AS MATERIALIZED (...)` hoặc `NOT MATERIALIZED`. Trước phiên bản 12, mọi CTE đều là một \"hàng rào tối ưu\" (optimization fence), đó là lý do các bài blog cũ khuyên tránh chúng. Lời khuyên đó đã lỗi thời với PostgreSQL, nhưng hãy kiểm tra engine của bạn. CTE còn có thể chứa các câu lệnh sửa dữ liệu: `WITH moved AS (DELETE FROM queue ... RETURNING *) INSERT INTO archive SELECT * FROM moved;`.\n\n**Recursive CTE** duyệt các cấu trúc phân cấp và graph (sơ đồ tổ chức, cây danh mục, bill of materials, \"mọi dependency bắc cầu\"):\n\n```sql\nWITH RECURSIVE chain AS (\n  SELECT id, name, 0 AS depth FROM employees WHERE manager_id IS NULL   -- anchor\n  UNION ALL\n  SELECT e.id, e.name, c.depth + 1\n  FROM employees e JOIN chain c ON e.manager_id = c.id                  -- recursive step\n)\nSELECT * FROM chain;\n```\n\nViệc thực thi là lặp, không thực sự đệ quy. Các dòng anchor khởi tạo một *working table*. Mỗi vòng lặp chạy phần recursive chỉ trên các dòng do vòng trước tạo ra. Vòng lặp dừng khi một bước không tạo ra dòng mới nào. Hai điểm an toàn:\n- **Chu trình** (A quản lý B, B quản lý A) sẽ lặp vô hạn với `UNION ALL`. Hãy dùng `UNION` (loại bỏ dòng trùng, nhưng chỉ giúp được khi các dòng giống hệt nhau), theo dõi một array đường đi đã thăm, hoặc dùng mệnh đề `CYCLE id SET is_cycle USING path` của PostgreSQL 14. PostgreSQL 14 cũng thêm `SEARCH DEPTH FIRST / BREADTH FIRST BY` để sắp thứ tự.\n- Thêm giới hạn độ sâu (`WHERE c.depth < 20`) làm hàng rào bảo vệ với các graph do người dùng kiểm soát."
+    },
+    {
+      "type": "diagram",
+      "caption": "WITH RECURSIVE thực thi thế nào. Mỗi lượt chỉ thấy các dòng mới của lượt trước, nên một sơ đồ tổ chức sâu 3 tầng cần 3 lượt cộng một lượt cuối rỗng."
+    },
+    {
+      "type": "explanation",
+      "title": "Window function: xếp hạng, tổng lũy kế và LAG",
+      "content": "Một **window function** tính một giá trị trên một tập dòng có liên quan tới dòng hiện tại, **mà không gộp chúng lại**. GROUP BY biến 5 order thành 3 dòng khách hàng. Window function giữ nguyên cả 5 dòng và thêm một cột. Cú pháp là `function() OVER (PARTITION BY ... ORDER BY ... frame)`:\n- `PARTITION BY` chia các dòng thành các nhóm độc lập (giống GROUP BY, nhưng dòng được giữ lại).\n- `ORDER BY` sắp thứ tự các dòng trong mỗi partition, bắt buộc với các phép xếp hạng và tính lũy kế.\n- **Frame** (`ROWS BETWEEN ...`) chọn những dòng lân cận nào một aggregate được nhìn thấy.\n\n**Các hàm xếp hạng** chỉ khác nhau ở cách xử lý các dòng hòa. Với tổng theo khách hàng Bob 120, Alice 80, Dana 80:\n| name | total | row_number | rank | dense_rank |\n|---|---|---|---|---|\n| Bob | 120.00 | 1 | 1 | 1 |\n| Alice | 80.00 | 2 | 2 | 2 |\n| Dana | 80.00 | 3 | 2 | 2 |\n\n`row_number` luôn cho số duy nhất (hãy phá hòa tường minh, nếu không thứ tự giữa Alice và Dana là tùy ý). `rank` cho các dòng hòa cùng một số và **để lại khoảng trống** (khách hàng thứ tư sẽ có hạng 4). `dense_rank` không để khoảng trống (sẽ là 3).\n\n**Top-N cho mỗi nhóm**, một bài interview kinh điển: đánh số dòng bằng `row_number() OVER (PARTITION BY customer_id ORDER BY amount DESC)` trong một subquery, rồi lọc `WHERE rn = 1` ở bên ngoài, vì kết quả window chưa tồn tại ở bước `WHERE`.\n\n**Tổng lũy kế và trung bình trượt:** `sum(revenue) OVER (ORDER BY month)`. Hãy cẩn thận với frame mặc định. Khi có `ORDER BY`, nó là `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, bao gồm mọi **peer** (các dòng có sort key bằng nhau). Nếu hai dòng cùng ngày, cả hai sẽ hiện cùng một tổng lũy kế. Hãy dùng `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` cho tổng tính chặt theo từng dòng, và `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` cho trung bình trượt 7 dòng.\n\n**LAG / LEAD** đọc một giá trị từ dòng trước hoặc dòng sau trong window. Dùng chúng cho thay đổi tháng-so-với-tháng, khoảng cách giữa các session (\"thời gian kể từ sự kiện trước đó của người dùng\"), hay phát hiện chuyển trạng thái. `lag(x)` trả về NULL ở dòng đầu tiên. `lag(x, 1, 0)` cung cấp một giá trị mặc định thay thế.\n\nCác window function hữu ích khác là `first_value`, `last_value` (chú ý frame), `ntile(4)` cho tứ phân vị, và `percent_rank`. Để dùng lại một định nghĩa, hãy đặt tên cho nó: `... OVER w FROM t WINDOW w AS (PARTITION BY a ORDER BY b)`."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mỗi kết quả đều được tạo ra bằng cách chạy query trên dữ liệu mẫu. Query 2 cho thấy ba hàm xếp hạng chỉ bất đồng ở chỗ Alice/Dana hòa nhau. Query 3 kết hợp một CTE (doanh thu theo tháng) với hai window function. `lag` là NULL ở tháng Một vì không có tháng nào trước đó. Query 4 là pattern top-N-cho-mỗi-nhóm chuẩn. Query 5 duyệt sơ đồ tổ chức, mỗi vòng lặp một tầng. Sắp xếp theo `path` cho ra danh sách theo chiều sâu (depth-first).",
+      "label": "Analytics"
+    },
+    {
+      "type": "explanation",
+      "title": "UPSERT: INSERT ... ON CONFLICT",
+      "content": "\"Insert dòng này, hoặc update nếu nó đã tồn tại\" là một thao tác ghi rất phổ biến, và phiên bản ngây thơ là một race condition:\n\n```sql\n-- WRONG under concurrency: two requests both see \"no row\" and both INSERT\nSELECT 1 FROM page_views WHERE page = '/home';\n-- ...then INSERT or UPDATE in application code\n```\n\n**`INSERT ... ON CONFLICT`** của PostgreSQL (9.5+) làm việc đó một cách atomic:\n\n```sql\nCREATE TABLE page_views (\n  page      text PRIMARY KEY,\n  views     bigint NOT NULL DEFAULT 0,\n  last_seen timestamptz\n);\n\nINSERT INTO page_views (page, views, last_seen)\nVALUES ('/home', 1, now())\nON CONFLICT (page) DO UPDATE\n  SET views     = page_views.views + EXCLUDED.views,\n      last_seen = EXCLUDED.last_seen\nRETURNING page, views;\n-- 1st run: /home | 1   (inserted)\n-- 2nd run: /home | 2   (updated)\n```\n\nNhững chi tiết quan trọng trên production:\n- Conflict target `(page)` phải khớp với một **unique index hoặc constraint** (hoặc bạn có thể gọi tên nó bằng `ON CONFLICT ON CONSTRAINT name`). Không có unique constraint thì không có gì để xung đột, và bạn sẽ nhận bản ghi trùng.\n- `EXCLUDED` là dòng bạn *đã cố* insert. Tên bảng (`page_views.views`) tham chiếu tới dòng đang tồn tại.\n- `DO NOTHING` bỏ qua các dòng xung đột. Rất lý tưởng cho việc ingest sự kiện idempotent với key là event id. Lưu ý `RETURNING` không trả về gì cho các dòng bị bỏ qua.\n- Thêm `WHERE` vào phần update để bỏ qua các lần ghi không thay đổi gì: `DO UPDATE SET ... WHERE page_views.last_seen < EXCLUDED.last_seen`, hữu ích cho \"lần ghi sau thắng theo timestamp\".\n- Một câu lệnh không thể update cùng một dòng hai lần: `INSERT ... VALUES ('/a',1), ('/a',1) ON CONFLICT ... DO UPDATE` lỗi với \"cannot affect row a second time\". Hãy loại trùng trong batch trước.\n- Các id dựa trên sequence vẫn bị tiêu thụ kể cả khi dòng rốt cuộc được update, nên hãy chấp nhận có khoảng trống. Khoảng trống trong id là bình thường và không bao giờ là bug.\n- PostgreSQL 15 thêm **`MERGE`** theo chuẩn SQL (có `RETURNING` từ 17), tốt cho logic đồng bộ phức tạp (insert / update / delete trong một câu lệnh). Với upsert thông thường dưới tải đồng thời, `ON CONFLICT` vẫn được ưu tiên: `MERGE` có thể thất bại với lỗi unique-violation khi một transaction đồng thời insert cùng key. Tương đương bên MySQL là `INSERT ... ON DUPLICATE KEY UPDATE`. SQLite hỗ trợ `ON CONFLICT` kiểu PostgreSQL."
+    },
+    {
+      "type": "explanation",
+      "title": "EXPLAIN và ba thuật toán join",
+      "content": "`EXPLAIN` hiển thị plan mà optimizer đã chọn. `EXPLAIN ANALYZE` thực sự **chạy** query và thêm số dòng cùng thời gian thật. Đừng bao giờ chạy `EXPLAIN ANALYZE` trên một `UPDATE`/`DELETE` ở production mà không bọc nó trong `BEGIN; ... ROLLBACK;`. Thêm `BUFFERS` để xem cache hit so với đọc đĩa.\n\nĐây là một plan thật (PostgreSQL, 1M order × 100k khách hàng, tắt song song cho dễ đọc, cắt bớt độ rộng):\n\n```text\nHashAggregate  (cost=37592..37592 rows=3) (actual time=705..705 rows=3 loops=1)\n  Group Key: c.city\n  ->  Hash Join  (cost=3342..32592 rows=1000000) (actual time=29..545 rows=1000000 loops=1)\n        Hash Cond: (o.customer_id = c.id)\n        ->  Seq Scan on big_orders o  (rows=1000000) (actual time=0.3..98 rows=1000000)\n        ->  Hash  (rows=100000) (actual time=29..29 rows=100000)\n              Buckets: 131072  Batches: 2  Memory Usage: 3107kB\n              ->  Seq Scan on big_customers c  (rows=100000) (actual time=0.004..9 rows=100000)\nExecution Time: 705.378 ms\n```\n\nCách đọc:\n- Nó là một **tree**. Việc thực thi bắt đầu từ các lá thụt vào sâu nhất và đi ngược lên. Ở đây hai sequential scan nuôi một hash join, hash join nuôi một aggregate.\n- `cost=startup..total` tính bằng đơn vị tùy ý của planner. `rows=` là **ước lượng** còn `actual ... rows=` là thực tế. Lệch 10× hoặc hơn là nguyên nhân số một của plan tồi. Hãy chạy `ANALYZE`, hoặc tạo extended statistics cho các cột tương quan.\n- `loops=N` nghĩa là node đã chạy N lần. Thời gian và số dòng thực tế là **cho mỗi vòng**, nên hãy nhân lên.\n- `Batches: 2` nghĩa là hash table không vừa trong `work_mem` (nhân với `hash_mem_multiplier`, mặc định 2.0 từ PG 15) và đã tràn xuống đĩa.\n\n**Ba thuật toán join**, mà mọi engine quan hệ đều cài đặt:\n- **Nested loop**: với mỗi dòng ngoài, tra các dòng trong khớp. Cài ngây thơ là O(N × M), nhưng có index ở phía trong thì thành O(N log M), và nó là plan tốt nhất khi phía ngoài nhỏ. Ví dụ: `WHERE c.id = 42` cho 1 dòng khách hàng, rồi một lần dò index trên `orders.customer_id`, xong trong 2 ms. Nó cũng là thuật toán duy nhất xử lý được điều kiện không phải bằng tùy ý (`ON a.ts BETWEEN b.start_at AND b.end_at`).\n- **Hash join**: dựng một hash table trong bộ nhớ trên đầu vào nhỏ hơn (node `Hash`), rồi stream đầu vào lớn hơn và dò vào đó. Nó là O(N + M) và là “con ngựa thồ” cho các equi-join lớn không có thứ tự hữu ích. Nó cần bộ nhớ và chỉ dùng được cho điều kiện bằng. MySQL có hash join từ 8.0.18. Trước đó nó chỉ có nested loop.\n- **Merge join**: nếu cả hai đầu vào đã được sắp theo join key (nhờ index hoặc một bước sort trước đó), đi song song qua chúng trong một lượt. Nó là O(N + M) cộng chi phí sort nếu có. Trên cùng các bảng đó, `ORDER BY c.id` khiến PostgreSQL chọn `Merge Join` trên hai index scan, vì đằng nào output cũng phải được sắp xếp.\n\nPlanner chọn dựa trên số dòng ước lượng, các index sẵn có và bộ nhớ. Bạn hiếm khi ép một lựa chọn (PostgreSQL không có hint, chỉ có các thiết lập `enable_*` để thử nghiệm). Bạn tác động tới nó bằng cách thêm đúng index, giữ thống kê luôn mới, và viết predicate sargable: `WHERE created_at >= '2026-01-01'` dùng được index, còn `WHERE date(created_at) = ...` thì không, trừ khi bạn đánh index biểu thức đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Planner của PostgreSQL thường chọn thuật toán join thế nào. Cả ba đều xuất hiện trong output EXPLAIN dưới tên Nested Loop, Hash Join và Merge Join."
+    },
+    {
+      "type": "explanation",
+      "title": "Từ code ứng dụng: N+1 query và SQL injection",
+      "content": "Hai trong số các sự cố production phổ biến nhất liên quan tới SQL xảy ra trong code ứng dụng, không phải trong database.\n\n**N+1 query.** Một ORM nạp một danh sách (1 query), rồi lazy load một quan hệ cho từng item trong vòng lặp (N query). Với 3 khách hàng là 4 round trip. Với 500 dòng trên một dashboard là 501. Mỗi query có thể chỉ tốn 1 ms trên server, nhưng với 1–2 ms network latency mỗi round trip, trang mất hơn một giây, và database tốn thời gian parse các query nhỏ xíu. Dấu hiệu: số query tăng theo kích thước trang, và cùng một dạng câu lệnh lặp đi lặp lại trong log hay APM trace.\n\nCách sửa, theo thứ tự ưu tiên:\n- **Eager loading** trong ORM: `includes` của Rails, `select_related` (JOIN) / `prefetch_related` (query thứ hai với `IN`) của Django, `JOIN FETCH` hoặc `@BatchSize` của Hibernate/JPA, `include` của Prisma, `selectinload` của SQLAlchemy.\n- **Gom batch theo key**: một query với `WHERE customer_id = ANY($1)` (hoặc `IN (...)`), rồi nhóm kết quả trong bộ nhớ. Các GraphQL server dùng **DataLoader** để làm việc này tự động trong một tick của request.\n- **Một phép JOIN duy nhất** hoặc một lateral subquery khi bạn cần dòng từ cả hai phía trong một kết quả.\n- Tự động phát hiện regression: Bullet (Rails), nplusone / django-debug-toolbar, hoặc một test khẳng định số lượng query.\n\n**SQL injection.** Dựng SQL bằng cách nối chuỗi cho phép input của người dùng thay đổi *cấu trúc* của câu lệnh. Với `email = \"x' OR '1'='1\"`, query `... WHERE email = '${email}'` trở thành `WHERE email = 'x' OR '1'='1'`, khớp với mọi dòng. Các biến thể có thể nối thêm `; DROP TABLE`, dùng `UNION SELECT` để đọc bảng khác, hoặc làm lộ dữ liệu qua thời gian phản hồi (`pg_sleep`). Nó vẫn là một trong những lớp lỗ hổng bị khai thác nhiều nhất.\n\nCách sửa là **parameterized query** (còn gọi là bind parameter hay prepared statement): đoạn text SQL chứa placeholder (`$1` trong PostgreSQL, `?` trong MySQL/SQLite), và giá trị được gửi riêng trong giao thức, nên server không bao giờ parse chúng như SQL. Mọi driver và ORM phổ biến đều hỗ trợ, và các library SQL dạng tagged template (postgres.js, Slonik, helper `sql` của Drizzle) tự động biến mỗi phép nội suy `${value}` thành một bind parameter.\n\nQuy tắc:\n- **Không bao giờ** nội suy input người dùng vào SQL, kể cả input nội bộ \"đáng tin\". Escape bằng tay rất mong manh.\n- Placeholder chỉ dùng cho **giá trị**, không dùng cho identifier hay keyword. Với cột hay chiều sắp xếp do người dùng chọn, hãy ánh xạ input qua một **allowlist** (`{ newest: 'created_at DESC' }`). Với identifier động bên trong database, dùng `format('%I', name)` hoặc `quote_ident`.\n- Pattern `LIKE`: parameterize giá trị và escape `%`/`_` trong từ khóa tìm kiếm của người dùng nếu chúng cần được hiểu theo nghĩa đen.\n- Phòng thủ nhiều lớp: role database của ứng dụng nên có quyền tối thiểu (không DDL, không superuser), để một bug không thể biến thành `DROP TABLE`."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`db` giả chỉ đếm số round trip, chính là chi phí quan trọng với N+1. Phiên bản gom batch luôn chỉ có 2 query dù có 3 hay 3,000 khách hàng. `Map.groupBy` có sẵn trong Node 21+. Phần cuối in ra SQL thật được tạo bằng cách nối chuỗi (đoạn `OR '1'='1'` bị chèn vào khiến predicate đúng với mọi dòng) cạnh dạng parameterized, nơi text SQL không bao giờ thay đổi và chuỗi độc hại chỉ là một giá trị để so sánh. Chạy bằng `node` để thấy đúng output như trong các comment.",
+      "label": "N+1 & injection"
+    },
+    {
+      "type": "explanation",
+      "title": "Lỗi và hiểu lầm thường gặp",
+      "content": "- **Mong đợi có thứ tự mà không có ORDER BY.** Kết quả trả về theo bất kỳ thứ tự nào plan tạo ra. Nó thường trông giống thứ tự insert cho đến khi một parallel scan hay một index mới thay đổi điều đó.\n- **`= NULL` / `<> value` trên cột nullable.** `WHERE city <> 'Hanoi'` lặng lẽ bỏ các thành phố NULL. Hãy dùng `IS NULL` hoặc `IS DISTINCT FROM`.\n- **`NOT IN (subquery)` với cột nullable** trả về không dòng nào. Mặc định hãy dùng `NOT EXISTS`.\n- **Lọc bảng bên phải của LEFT JOIN trong WHERE** biến nó thành INNER JOIN. Chuyển điều kiện vào `ON`, hoặc chủ đích kiểm tra `IS NULL`.\n- **Cộng tổng qua một join bị fan-out.** Join hai bảng con sẽ nhân số dòng. Hãy aggregate trước từng bảng con trong subquery hoặc CTE.\n- **`count(*)` sau LEFT JOIN** đếm dòng được bù NULL là 1. Hãy đếm một cột của bảng bên phải.\n- **`SELECT *` trong query của ứng dụng** dễ hỏng khi thêm cột, phá index-only scan và gửi đi những byte không dùng tới. Hãy liệt kê tên cột.\n- **Hàm trên cột có index** (`WHERE lower(email) = $1`, `WHERE created_at::date = $1`) ngăn việc dùng index thông thường. Viết lại thành một khoảng, hoặc tạo expression index.\n- **Phân trang OFFSET sâu** chậm dần tuyến tính. Dùng keyset pagination cho feed và infinite scroll.\n- **Upsert kiểu đọc-rồi-ghi** bị race khi chạy đồng thời. Dùng `INSERT ... ON CONFLICT` dựa trên một unique constraint.\n- **Tin `EXPLAIN` mà không có `ANALYZE`** với query chậm. Ước lượng có thể sai nhiều bậc độ lớn, và chính sự chênh lệch đó thường là bug.\n- **Nghĩ rằng \"ORM lo SQL rồi\".** Nó sinh ra SQL. Hãy bật query logging khi phát triển và đọc những gì nó tạo ra."
+    },
+    {
+      "type": "callout",
+      "title": "Ba bẫy NULL lọt qua code review",
+      "content": "1. `WHERE id NOT IN (SELECT customer_id FROM orders)`: chỉ một NULL trong subquery là cả query trả về rỗng. Dùng `NOT EXISTS`.\n2. `LEFT JOIN orders o ON ... WHERE o.amount > 60`: mệnh đề WHERE loại các dòng được bù NULL, nên LEFT JOIN đã thành INNER JOIN. Đặt điều kiện vào `ON`.\n3. `sum(amount)` trên không dòng nào là **NULL**, không phải 0, và `NULL + 5` là NULL. Dùng `coalesce(sum(amount), 0)` tại ranh giới nơi cần một con số."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "SQL mang tính **khai báo**: bạn chỉ định kết quả, **planner** chọn index, thứ tự join và thuật toán. Cùng một query có thể nhanh hoặc chậm tùy vào index và thống kê.",
+        "**Thứ tự logic:** FROM/JOIN → WHERE → GROUP BY → HAVING → SELECT (kể cả window function) → DISTINCT → ORDER BY → LIMIT. Đó là lý do alias trong SELECT dùng được trong ORDER BY nhưng không dùng được trong WHERE, và vì sao aggregate được lọc bằng HAVING.",
+        "**Logic ba giá trị:** so sánh với NULL cho ra UNKNOWN, và WHERE/ON/HAVING chỉ giữ dòng TRUE. Dùng `IS NULL` / `IS DISTINCT FROM`, và ưu tiên `NOT EXISTS` hơn `NOT IN` vì chỉ một NULL cũng khiến `NOT IN` trả về rỗng.",
+        "**Join:** INNER giữ các cặp khớp, LEFT giữ mọi dòng bên trái (bù NULL), FULL giữ dòng không khớp từ cả hai phía, CROSS trả về N×M. Một filter WHERE trên bảng bên phải của LEFT JOIN lặng lẽ biến nó thành INNER.",
+        "**Join cha với con sẽ lặp lại cha** một lần cho mỗi con. Cộng tổng qua hai bảng con làm thổi phồng kết quả, nên hãy aggregate trước từng bảng con. Dùng EXISTS (semi-join) khi bạn chỉ cần kiểm tra sự tồn tại.",
+        "**CTE** giúp query dễ đọc và, trong PostgreSQL 12+, được inline khi chỉ tham chiếu một lần. **WITH RECURSIVE** lặp anchor → bước recursive cho đến khi không còn dòng mới, đó là cách bạn duyệt tree và graph (nhớ phòng chu trình).",
+        "**Window function** thêm một cột tính toán mà không gộp dòng: `row_number` (duy nhất), `rank` (hòa thì chung số, sau đó có khoảng trống), `dense_rank` (không khoảng trống), `sum() OVER (ORDER BY ...)` lũy kế, `lag`/`lead` cho chênh lệch giữa các dòng. Lọc theo chúng ở query bên ngoài.",
+        "**Upsert** bằng `INSERT ... ON CONFLICT (key) DO UPDATE SET col = EXCLUDED.col`. Nó atomic khi chạy đồng thời nhưng cần một unique constraint trên conflict target. Đọc-rồi-ghi trong code ứng dụng sẽ bị race.",
+        "**Thuật toán join:** nested loop (phía ngoài nhỏ + index, hoặc join không phải bằng), hash join (equi-join lớn, cần work_mem), merge join (đầu vào đã được sắp xếp). Đọc EXPLAIN ANALYZE từ dưới lên và so sánh số dòng ước lượng với thực tế.",
+        "**N+1** (mỗi dòng một query do ORM lazy load) được sửa bằng eager loading hoặc gom batch với `= ANY($1)`. **SQL injection** chỉ được sửa bằng parameterized query, cùng allowlist cho các identifier như cột sắp xếp."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vì sao `SELECT amount * 2 AS doubled FROM orders WHERE doubled > 100` lỗi trong PostgreSQL, còn `... ORDER BY doubled` thì chạy được?",
+      "options": [
+        "WHERE được đánh giá trước SELECT, nên alias chưa tồn tại. ORDER BY được đánh giá sau SELECT",
+        "Alias chỉ dùng được cho biểu thức aggregate",
+        "PostgreSQL yêu cầu alias phải được đặt trong dấu nháy trong mệnh đề WHERE",
+        "ORDER BY chạy lại danh sách SELECT, còn WHERE không chạy được biểu thức"
+      ],
+      "explanation": "Thứ tự xử lý logic là FROM → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT. Alias được tạo ở bước SELECT, nên chỉ các bước sau (ORDER BY) mới tham chiếu được. Hãy lặp lại biểu thức trong WHERE, hoặc bọc query trong một subquery hay CTE."
+    },
+    {
+      "id": "q2",
+      "question": "Bảng customers có các dòng với city = 'Hanoi', 'Saigon' và NULL. `SELECT name FROM customers WHERE city <> 'Hanoi'` trả về gì?",
+      "options": [
+        "Chỉ các khách hàng ở Saigon, vì NULL <> 'Hanoi' là unknown và WHERE chỉ giữ dòng TRUE",
+        "Các khách hàng ở Saigon và các khách hàng có city là NULL",
+        "Một lỗi, vì cột chứa NULL",
+        "Mọi dòng, vì NULL được coi như chuỗi rỗng"
+      ],
+      "explanation": "Theo logic ba giá trị, so sánh với NULL cho ra UNKNOWN, và WHERE loại bỏ cả FALSE lẫn UNKNOWN. Để bao gồm các thành phố không biết, hãy viết `city IS DISTINCT FROM 'Hanoi'` hoặc thêm `OR city IS NULL`."
+    },
+    {
+      "id": "q3",
+      "question": "`SELECT name FROM customers WHERE id NOT IN (SELECT customer_id FROM orders)` trả về không dòng nào, dù có những khách hàng không có order. Nguyên nhân khả dĩ nhất là gì?",
+      "options": [
+        "Bảng orders không có index trên customer_id",
+        "Subquery trả về ít nhất một customer_id là NULL, khiến mọi phép kiểm tra NOT IN đều UNKNOWN",
+        "NOT IN chỉ dùng được với list hằng, không dùng được với subquery",
+        "Planner đã chuyển NOT IN thành INNER JOIN"
+      ],
+      "explanation": "`x NOT IN (a, b, NULL)` khai triển thành `x <> a AND x <> b AND x <> NULL`. Vế cuối là UNKNOWN, nên toàn bộ predicate không bao giờ có thể là TRUE. `NOT EXISTS` không gặp vấn đề này và planner chạy nó như một anti-join."
+    },
+    {
+      "id": "q4",
+      "question": "Bạn chạy `customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE o.amount > 60`. Các khách hàng không có order biến mất khỏi kết quả. Vì sao?",
+      "options": [
+        "LEFT JOIN không bao giờ trả về dòng không khớp khi có mệnh đề WHERE",
+        "Planner bỏ qua LEFT khi có index trên orders",
+        "Mệnh đề WHERE chạy sau join, và `NULL > 60` là UNKNOWN, nên các dòng được bù NULL bị lọc mất, khiến nó hành xử như INNER JOIN",
+        "Khách hàng không có order chỉ được trả về bởi RIGHT JOIN"
+      ],
+      "explanation": "ON quyết định dòng nào khớp, còn WHERE lọc kết quả join sau đó. Các khách hàng không khớp có o.amount = NULL, không qua được `> 60`. Chuyển điều kiện vào mệnh đề ON (`ON o.customer_id = c.id AND o.amount > 60`) để giữ mọi khách hàng."
+    },
+    {
+      "id": "q5",
+      "question": "Tổng theo khách hàng là Bob 120, Alice 80, Dana 80 và Eve 50. `rank() OVER (ORDER BY total DESC)` gán cho Eve số mấy?",
+      "options": [
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "explanation": "rank cho các dòng hòa cùng một số rồi nhảy cóc: Bob 1, Alice 2, Dana 2, Eve 4. dense_rank sẽ cho Eve 3, còn row_number cho các số duy nhất 1–4 với thứ tự tùy ý giữa các dòng hòa trừ khi bạn thêm tiêu chí phá hòa."
+    },
+    {
+      "id": "q6",
+      "question": "Cần gì để `INSERT INTO page_views ... ON CONFLICT (page) DO UPDATE ...` hoạt động như một upsert?",
+      "options": [
+        "Một unique index hoặc constraint unique/primary-key trên `page`",
+        "Bảng phải được khai báo WITH (upsert = true)",
+        "Câu lệnh phải chạy ở isolation SERIALIZABLE",
+        "Một trigger phát hiện dòng đã tồn tại trước khi insert"
+      ],
+      "explanation": "ON CONFLICT được kích hoạt bởi một vi phạm tính duy nhất, nên conflict target phải tương ứng với một unique index hoặc constraint (hoặc một exclusion constraint). Khi đã có, upsert là atomic kể cả khi có insert đồng thời, ở mức READ COMMITTED mặc định."
+    },
+    {
+      "id": "q7",
+      "question": "EXPLAIN hiển thị `Nested Loop` với một `Index Scan ... rows=1` ở phía ngoài và một `Index Scan on orders_customer_id_idx` ở phía trong. Vì sao đây là một plan tốt?",
+      "options": [
+        "Nested loop luôn là thuật toán join nhanh nhất",
+        "Phía ngoài cho ra rất ít dòng, nên join chỉ tốn vài lần dò index rẻ trên bảng bên trong",
+        "Nested loop tránh được việc đọc bất kỳ table page nào",
+        "Đó là thuật toán join duy nhất PostgreSQL hỗ trợ cho foreign key"
+      ],
+      "explanation": "Chi phí của nested loop xấp xỉ (số dòng ngoài) × (chi phí một lần tra bên trong). Với 1 dòng ngoài và một index trên join key bên trong, đó là một lần dò B-tree. Với hàng triệu dòng ngoài trên một equi-join, hash join thường tốt hơn. Với các đầu vào đã sắp theo key, merge join tốt hơn."
+    },
+    {
+      "id": "q8",
+      "question": "Một trang liệt kê 50 bài viết và log cho thấy 51 query gần như giống hệt nhau: một cho danh sách bài viết và một `SELECT * FROM users WHERE id = $1` cho mỗi bài. Cách sửa tốt nhất là gì?",
+      "options": [
+        "Thêm index trên users.id",
+        "Tăng kích thước connection pool của database lên 51",
+        "Cache mỗi dòng user trong một map toàn cục trong tiến trình mãi mãi",
+        "Eager-load các tác giả: một query gom batch với `WHERE id = ANY($1)` (hoặc một JOIN), rồi nhóm trong bộ nhớ"
+      ],
+      "explanation": "Đây là pattern N+1. Chi phí nằm ở số round trip, không phải tốc độ tra cứu: users.id đã là primary key, nên thêm index chẳng thay đổi gì. Eager loading hoặc gom batch giảm 51 round trip xuống 1 hoặc 2 bất kể kích thước trang. Một pool lớn hơn hay một cache không giới hạn chỉ chữa triệu chứng và thêm vấn đề mới."
+    },
+    {
+      "id": "q9",
+      "question": "Cách nào cho phép người dùng sắp xếp danh sách sản phẩm theo một cột họ chọn (ví dụ `?sort=price`) một cách đúng đắn?",
+      "options": [
+        "Truyền tên cột như một bind parameter: `ORDER BY $1`",
+        "Escape dấu nháy trong input rồi nối nó vào SQL",
+        "Ánh xạ input qua một allowlist các biểu thức cột đã biết, và bind mọi giá trị của người dùng như parameter",
+        "Dùng stored procedure, vì stored procedure không thể bị injection"
+      ],
+      "explanation": "Bind parameter chỉ mang giá trị. `ORDER BY $1` sắp xếp theo một hằng số, không phải theo một cột. Identifier phải đến từ một allowlist (`{price: 'price ASC'}`) hoặc được quote bằng format('%I'). Escape bằng tay rất mong manh, và stored procedure dựng SQL động bằng cách nối chuỗi cũng dễ bị injection y như vậy."
+    },
+    {
+      "id": "q10",
+      "question": "Phát biểu nào về CTE trong PostgreSQL 12 trở về sau là đúng?",
+      "options": [
+        "Mọi CTE đều được materialize và đóng vai một hàng rào tối ưu",
+        "Một CTE không recursive, không side effect, được tham chiếu một lần sẽ được inline vào query chính, và bạn có thể ép hành vi bằng MATERIALIZED / NOT MATERIALIZED",
+        "CTE không thể chứa INSERT, UPDATE hay DELETE",
+        "Recursive CTE thực thi bằng đệ quy thật và bị giới hạn bởi độ sâu call stack"
+      ],
+      "explanation": "Từ PostgreSQL 12, CTE tham chiếu một lần được inline và tối ưu như subquery, còn CTE tham chiếu nhiều lần mặc định được materialize. CTE sửa dữ liệu (`WITH x AS (DELETE ... RETURNING *)`) được cho phép. Recursive CTE chạy lặp trên một working table cho đến khi không còn dòng mới nào xuất hiện."
+    }
+  ]
+}

@@ -1,0 +1,224 @@
+{
+  "sourceHash": "461fc4ae155c",
+  "title": "Actor Model và Message Passing",
+  "tagline": "Hệ thống concurrent mà không cần shared mutable state",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Lịch sử lập trình concurrent phần lớn là một lịch sử đau thương. Thread, mutex, semaphore, condition variable — nhiều thế hệ kỹ sư đã viết code concurrent đúng, rồi phải chứng kiến nó deadlock một cách bí ẩn trên production, làm hỏng dữ liệu chia sẻ trong những race condition hiếm gặp, hoặc trở nên không thể suy luận nổi khi hệ thống lớn dần. Vấn đề cốt lõi là **shared mutable state** (trạng thái chia sẻ có thể thay đổi) và **concurrency** không tương thích nhau một cách sâu sắc, mang tính cấu trúc: bất cứ khi nào hai thread có thể đọc và ghi cùng một vị trí bộ nhớ mà không có điều phối, tính đúng đắn đòi hỏi mọi thread phải tuân thủ giao thức một cách hoàn hảo, mãi mãi.\n\nNăm 1973, nhà khoa học máy tính **Carl Hewitt** ở MIT đề xuất một mô hình hoàn toàn khác: **Actor Model**. Thay vì các thread chia sẻ bộ nhớ, sẽ ra sao nếu mỗi đơn vị tính toán sở hữu độc quyền trạng thái của mình và chỉ có thể tương tác với các đơn vị khác bằng cách gửi **message**? Không có bộ nhớ chia sẻ nghĩa là không có lock và không có data race — không phải vì lập trình viên cẩn thận, mà vì mô hình ngăn chặn chúng về mặt cấu trúc. (Như ta sẽ thấy, race condition ở mức cao hơn và thậm chí deadlock vẫn có thể xảy ra, nhưng cả một lớp bug biến mất.)\n\nĐây không chỉ là sự thanh lịch về lý thuyết. **Erlang**, ngôn ngữ được Ericsson xây dựng trên Actor Model vào những năm 1980, đã vận hành các tổng đài viễn thông như AXD301 của Ericsson — hệ thống nổi tiếng với con số được công bố là **chín số chín về availability** (99.9999999% — khoảng 31 mili giây downtime mỗi năm). WhatsApp cũng chạy trên Erlang: quanh thời điểm được mua lại năm 2014, khoảng 32 kỹ sư phục vụ 450 triệu người dùng (khoảng 50 kỹ sư cho 900 triệu người dùng vào năm 2015), và từ năm 2012 một server duy nhất đã xử lý 2 triệu connection đồng thời. Akka, một actor framework cho JVM, từng là nền móng cho các hệ thống ở LinkedIn, Twitter và PayPal; kể từ khi Lightbend chuyển nó sang license source-available năm 2022, bản fork theo license Apache là **Apache Pekko** tiếp nối dòng mã nguồn mở. Elixir, một ngôn ngữ hiện đại chạy trên Erlang VM, đã đưa lối tư duy dựa trên actor tới cộng đồng phát triển web rộng hơn.\n\nChương này trình bày Actor Model từ những nguyên lý đầu tiên: actor là gì, message passing hoạt động về mặt cơ chế ra sao, vì sao mô hình loại bỏ được cả một lớp bug concurrency, supervision tree giúp xây dựng hệ thống chịu lỗi tự phục hồi như thế nào, actor được cài đặt trong thực tế ra sao, và khi nào nên chọn mô hình này thay vì các lựa chọn khác như threading với bộ nhớ chia sẻ hay event loop."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một luồng xử lý request điển hình dựa trên actor. Mỗi actor sở hữu một mailbox riêng và xử lý từng message một. Không actor nào có thể trực tiếp đọc hay ghi trạng thái của actor khác — mọi tương tác đều qua message passing bất đồng bộ."
+    },
+    {
+      "type": "analogy",
+      "title": "Phép so sánh với các phòng ban trong công ty",
+      "content": "Hãy hình dung một công ty lớn, nơi mỗi **phòng ban** (actor) có tủ hồ sơ riêng được khóa (trạng thái riêng) và một **khay thư đến** đặt trên bàn ngoài hành lang (mailbox). Công ty có quy định nghiêm ngặt: không nhân viên nào được đi vào phòng của bộ phận khác và lục lọi tủ hồ sơ của họ. Nếu phòng Kế toán cần thông tin từ phòng Nhân sự, họ viết một **bản ghi nhớ** (message) và bỏ vào khay thư của phòng Nhân sự.\n\nPhòng Nhân sự xử lý từng bản ghi nhớ trong khay một — họ không cố đọc hai bản cùng lúc. Xử lý xong một bản, họ có thể làm đúng ba việc: (1) cập nhật tủ hồ sơ của chính mình dựa trên nội dung bản ghi nhớ, (2) bỏ các bản ghi nhớ trả lời vào khay thư của phòng ban khác, hoặc (3) lập một nhóm nội bộ mới (spawn một child actor) để xử lý công việc. Họ không thể bước sang phòng Kế toán và sửa trực tiếp bảng tính ngân sách.\n\nVì mỗi phòng ban chỉ chạm vào tủ của chính mình, **không có xung đột hồ sơ** — không cần thương lượng xem ai đang giữ chìa khóa. Hãy so với một văn phòng mở (bộ nhớ chia sẻ), nơi ai cũng có thể tới bất kỳ kệ nào vào bất cứ lúc nào. Trong văn phòng mở, bạn cần những hệ thống ký mượn phức tạp (lock), và nếu hai người cùng chộp một tập hồ sơ một lúc, dữ liệu sẽ bị rối tung (race condition). Nếu hai người cứ chờ người kia trả lại hồ sơ, sẽ chẳng việc gì được hoàn thành, mãi mãi (deadlock).\n\nGiờ thì: chuyện gì xảy ra khi phòng Điều phối gặp sự cố — một quản lý nghỉ việc, chuông báo cháy, một lỗi nghiêm trọng? Trong một công ty lành mạnh, **người giám sát** (một parent actor) nhận ra qua một hệ thống thông báo chính thức, và có thể tuyển người thay thế (restart actor) mà phần còn lại của công ty không hề biết có chuyện gì xảy ra. Đó là **supervision tree** — cơ chế chịu lỗi cốt lõi của Erlang, và là lý do các hệ thống viễn thông xây trên Erlang có thể cam kết uptime phi thường."
+    },
+    {
+      "type": "explanation",
+      "title": "Ba primitive: một actor có thể làm gì",
+      "content": "Định nghĩa hình thức của Actor Model tối giản đến đáng kinh ngạc. Khi nhận một message, actor có thể làm **đúng ba việc** — không hơn:\n\n**1. Gửi message** tới các actor mà nó biết địa chỉ. Trong Erlang, những địa chỉ này gọi là PID (Process Identifier). Trong Akka, chúng là các đối tượng `ActorRef`. Điều quan trọng: message passing là **bất đồng bộ** — bên gửi không block để chờ trả lời. Nó thả message vào mailbox của bên nhận rồi đi tiếp. Điều này khác hẳn với một lời gọi hàm, vốn là đồng bộ.\n\n**2. Tạo child actor mới**. Một actor có thể spawn actor mới và nhận về địa chỉ của chúng. Đây là cách hệ thống lớn lên một cách động — một actor web server có thể spawn một actor xử lý connection mới cho mỗi connection tới, cấp cho nó một mailbox và vòng đời riêng.\n\n**3. Chỉ định hành vi mới** (cập nhật trạng thái riêng) cho message tiếp theo. Vì actor xử lý message tuần tự, nó có thể cập nhật trạng thái nội bộ sau khi xử lý một message, và trạng thái mới đó sẽ hiển hiện khi message tiếp theo được xử lý. Không có thread nào khác có thể quan sát trạng thái khi nó đang cập nhật dở dang.\n\nHãy để ý những gì **không** có trong danh sách: biến chia sẻ, lock, trạng thái toàn cục, lời gọi blocking đồng bộ. Chính những ràng buộc này là nguồn gốc các đảm bảo về tính đúng đắn của mô hình.\n\nMột chi tiết tinh tế quan trọng: **đảm bảo về thứ tự message**. Actor Model nguyên bản không đảm bảo thứ tự nào cả, nhưng các runtime thực tế thêm vào một đảm bảo: trong Erlang và Akka, message giữa một cặp gửi–nhận cụ thể tới đúng theo thứ tự gửi — nếu Actor A gửi M1 rồi M2 cho Actor B, B nhận chúng theo đúng thứ tự đó. Nhưng nếu Actor C cùng lúc gửi M3 cho B, M3 có thể xen vào bất kỳ đâu giữa M1/M2. Điều này khớp với trực giác về giao tiếp thực tế: thư từ cùng một người gửi tới đúng thứ tự, nhưng thư của hai người khác nhau gửi cùng lúc có thể tới theo bất kỳ thứ tự tương đối nào."
+    },
+    {
+      "type": "explanation",
+      "title": "Message được xử lý thế nào: tuần tự bên trong, concurrent giữa các actor",
+      "content": "Một nhầm lẫn phổ biến khi mới học Actor Model: 'nếu mỗi actor xử lý từng message một, thì concurrent ở chỗ nào?' Câu trả lời rất thanh lịch: **đơn vị của concurrency là actor, không phải message handler**.\n\nXét một web server xử lý 10.000 HTTP request đồng thời. Với mô hình thread pool, bạn có thể cần tới 10.000 thread — mỗi thread bị block chờ I/O. Với Actor Model, bạn có 10.000 **connection actor**, mỗi actor có mailbox riêng. Mỗi actor được runtime lập lịch độc lập. Khi một gói tin mạng tới cho connection 7.423, runtime đưa một message vào mailbox của actor đó và lên lịch cho nó chạy. Trong lúc nó chạy, 7.422 actor khác cũng có thể đang chạy trên các core CPU khác. Không có trạng thái chia sẻ, không lock — chỉ có 10.000 state machine độc lập tiến lên từng bước khi message tới.\n\nĐó là lý do Erlang có thể hỗ trợ **hàng triệu process nhẹ chạy concurrent**: mỗi process chỉ là một mailbox, một call stack và một heap nhỏ — dung lượng ban đầu khoảng 2–4 KB, so với ~1 MB của một OS thread. Erlang VM (BEAM) chạy mỗi core CPU một scheduler thread và multiplex các process lên đó bằng scheduler preemptive riêng, dựa trên việc đếm reduction — hệ điều hành chỉ thấy một nhúm thread.\n\n**Backpressure và mailbox có giới hạn**: một chi tiết tinh tế mà mô hình buộc bạn phải giải quyết. Nếu mailbox của một actor phình to không giới hạn vì message tới nhanh hơn tốc độ nó xử lý, bạn có một **hot spot** — có nguy cơ cạn kiệt bộ nhớ. Akka giải quyết bằng kích thước mailbox có thể cấu hình và các pattern flow-control. Mailbox của process Erlang mặc định là không giới hạn, đẩy trách nhiệm sang người thiết kế hệ thống. Các hệ thống production thực tế theo dõi kích thước mailbox như một metric sức khỏe then chốt."
+    },
+    {
+      "type": "diagram",
+      "caption": "Message passing là bất đồng bộ: bên gửi đưa vào queue rồi tiếp tục. Bên nhận lấy ra và xử lý từng message một. Không có bộ nhớ chia sẻ nào đi qua bất kỳ ranh giới nào."
+    },
+    {
+      "type": "explanation",
+      "title": "Location transparency và phân tán",
+      "content": "Một trong những thuộc tính mạnh nhất của Actor Model là **location transparency** (trong suốt về vị trí): địa chỉ của một actor (PID hoặc ActorRef) hoạt động y hệt nhau bất kể actor đích nằm trong cùng process, cùng máy, hay trên một máy ở bên kia địa cầu.\n\nTừ góc nhìn của bên gửi, việc gửi message trông như nhau trong mọi trường hợp:\n\n```\nsend(actorRef, { type: 'PROCESS_ORDER', orderId: 42 })\n```\n\nRuntime lo việc định tuyến. Nếu actor ở local, message đi thẳng vào mailbox trong bộ nhớ của nó. Nếu ở remote, runtime serialize message, gửi qua mạng, rồi deserialize tại đích. Code của bên gửi không thay đổi.\n\nĐiều này biến **horizontal scaling thành mối quan tâm hàng đầu** thay vì thứ tính sau. Bạn có thể bắt đầu với một hệ thống chạy mọi actor trên một máy, và khi tải tăng, chuyển những loại actor cụ thể sang các máy riêng — mà không phải sửa logic ứng dụng. Distributed Erlang của Erlang/OTP, Akka Cluster và Orleans của Microsoft đều tận dụng thuộc tính này.\n\nTrade-off: bạn phải thiết kế cho **partial failure** (lỗi một phần). Với một lời gọi hàm local, hoặc nó thành công hoặc cả process crash. Với message passing phân tán, bên gửi có thể gửi một message không bao giờ tới (network partition), bên nhận có thể crash sau khi xử lý nhưng trước khi trả lời, hoặc câu trả lời có thể bị mất. Điều này buộc bạn phải nghĩ về ngữ nghĩa giao nhận **at-most-once, at-least-once hay exactly-once** ngay từ đầu — đây thực ra là một tính năng chứ không phải bug, vì những vấn đề này dù sao cũng tồn tại trong hệ thống phân tán; Actor Model chỉ làm chúng lộ ra sớm."
+    },
+    {
+      "type": "diagram",
+      "caption": "Location transparency: bên gửi dùng cùng một API gửi dù đích nằm trong cùng process, khác process, hay trên một máy remote. Runtime lo việc định tuyến và serialize."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mỗi `Worker` là một actor: nó sở hữu `state` trong sự cô lập hoàn toàn, và mọi tương tác đều đi qua `postMessage` (gửi) và listener `message` (nhận). `spawnSupervised` là một supervisor one-for-one tí hon: khi một actor throw, nó khởi động một actor thay thế với trạng thái ban đầu mới tinh và giữ nguyên `ref`, nên bên gọi không bao giờ cần biết đã có một lần restart — và sau vài lần restart thì nó bỏ cuộc, điều mà trong OTP sẽ đẩy lỗi lên supervisor cấp trên. Khi B crash, A vẫn tiếp tục xử lý mailbox của mình (cô lập crash), và B quay lại với count 1000 chứ không phải 800: trạng thái bị hỏng đã chết cùng actor bị crash. Các actor runtime thực tế multiplex hàng nghìn actor trên mỗi OS thread; mỗi actor một Worker ở đây chỉ để minh họa.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Supervision tree: chịu lỗi ngay từ thiết kế",
+      "content": "Trong code server truyền thống, một exception không được xử lý trong request handler hoặc làm crash cả process, hoặc bị nuốt bởi một try-catch chung chung khiến hệ thống rơi vào trạng thái không xác định. Framework OTP (Open Telecom Platform) của Erlang chọn cách khác: **đưa việc xử lý lỗi vào chính kiến trúc**.\n\n**Supervision tree** là một cây phân cấp các actor, trong đó parent actor chịu trách nhiệm theo dõi và restart các child actor. Việc duy nhất của một actor **supervisor** là canh chừng các con của nó và áp dụng một **restart strategy** khi một đứa crash.\n\nErlang/OTP định nghĩa ba strategy chuẩn:\n\n- **one-for-one**: Chỉ child bị crash được restart. Mọi anh em khác tiếp tục chạy. Dùng khi các child độc lập với nhau — ví dụ một pool các connection handler.\n\n- **one-for-all**: Khi bất kỳ child nào crash, supervisor dừng và restart *tất cả* các child. Dùng khi các child phụ thuộc lẫn nhau và crash ở một child sẽ để các anh em rơi vào trạng thái không nhất quán.\n\n- **rest-for-one**: Restart child bị crash và tất cả các child được khởi động *sau* nó. Dùng khi có thứ tự phụ thuộc lúc khởi động — các actor sau phụ thuộc vào các actor trước.\n\nBản thân supervisor cũng có thể có supervisor (một **supervisor của các supervisor**), cứ thế lên tới root supervisor do framework ứng dụng khởi động. Lỗi chỉ lan lên cây khi các child crash nhanh hơn mức **restart intensity** cho phép của supervisor (mặc định của OTP: hơn 1 lần restart trong 5 giây) — lúc đó chính supervisor sẽ kết thúc, kích hoạt strategy của supervisor cấp trên.\n\nKiến trúc này đưa việc phục hồi lỗi ra bên ngoài. Thay vì try-catch phòng thủ rải khắp nơi, bạn viết **những actor giả định input hợp lệ và crash khi gặp trạng thái bất ngờ**. Strategy của supervisor và các child specification — là code bình thường, không phải phần xử lý lỗi rải rác trong các worker — khai báo cách hệ thống phản ứng. Đó là triết lý **'let it crash'** (cứ để nó crash) — một thực hành ngược trực giác nhưng cực kỳ hiệu quả, đã được Erlang/OTP kiểm chứng ở quy mô lớn suốt 40 năm.\n\n**Akka** (JVM) và **Microsoft Orleans** (.NET) áp dụng các cây phân cấp supervision tương tự. Ngay cả những ngôn ngữ không có actor runtime gốc (Go, Rust với Tokio actor, JavaScript với worker_threads) cũng có thể tự cài đặt các pattern supervision."
+    },
+    {
+      "type": "diagram",
+      "caption": "Supervision tree: Web Supervisor dùng strategy one-for-one — chỉ Handler B được restart khi crash. DB Supervisor và các thành viên trong pool của nó hoàn toàn không bị ảnh hưởng. Lỗi chỉ lan lên trên nếu tần suất restart vượt ngưỡng."
+    },
+    {
+      "type": "explanation",
+      "title": "Message passing và bộ nhớ chia sẻ: toàn cảnh trade-off",
+      "content": "Cả message passing lẫn concurrency với bộ nhớ chia sẻ đều là những công cụ chính đáng. Hiểu trade-off của chúng giúp bạn ra quyết định kiến trúc có cơ sở.\n\n**Bộ nhớ chia sẻ với lock** là mô hình được dùng bởi POSIX thread, `synchronized` của Java, `Mutex<T>` của Rust và `std::mutex` của C++. Nó có **latency thấp** — đọc một giá trị từ một struct chia sẻ chỉ là một lần truy cập bộ nhớ. Nhưng tính đúng đắn đòi hỏi mọi thread phải lấy đúng lock theo đúng thứ tự. Chỉ một lần quên lấy lock, một lock được lấy theo thứ tự khác thường lệ, là sinh ra dữ liệu bị hỏng âm thầm hoặc deadlock. Keyword `volatile`, memory barrier, `compare-and-swap` — độ phức tạp cứ chồng chất. Diện tích bề mặt của bug tỷ lệ với số biến chia sẻ nhân với số thread chạm vào chúng.\n\n**Message passing** loại bỏ hoàn toàn trạng thái chia sẻ. Không có gì để lock. Đảm bảo về tính đúng đắn mang tính cấu trúc: trạng thái của một actor chỉ có thể bị thay đổi bởi chính message handler của actor đó. Cái giá phải trả:\n\n- **Overhead serialize**: message phải được copy (hoặc serialize, với actor remote). Với bandwidth bộ nhớ cỡ hàng chục gigabyte mỗi giây, copy vài trăm byte chỉ mất vài nano giây — không đáng kể với hầu hết ứng dụng. Với các vòng lặp trong cùng xử lý mảng lớn (tính toán khoa học, audio real-time), điều này có thể đáng kể.\n- **Latency**: các pattern request-reply bất đồng bộ thêm một vòng round-trip vào thứ lẽ ra là một lời gọi hàm đồng bộ. Các pattern như **ask** (gửi + await trả lời có timeout) giải quyết tính tiện dụng nhưng tăng latency.\n- **Độ phức tạp của back-pressure**: nếu một bên gửi nhanh lấn át một bên nhận chậm, mailbox sẽ phình ra. Code bộ nhớ chia sẻ dùng work queue cũng gặp đúng vấn đề này, nhưng dễ quan sát trực tiếp hơn.\n\n**Khi nào chọn message passing**: bất cứ khi nào các task vốn độc lập (request handler của web, các stage của pipeline, microservice, mô phỏng entity trong game), khi bạn cần cô lập lỗi và khả năng restart, khi bạn cần phân tán theo chiều ngang, hoặc khi domain ánh xạ tự nhiên thành các tác nhân độc lập có trạng thái riêng (tài khoản tài chính, nhân vật game, trạng thái thiết bị IoT).\n\n**Khi nào chọn bộ nhớ chia sẻ**: các vòng lặp trong cùng chặt chẽ, nơi serialize thực sự không thể chấp nhận — DSP audio real-time, phép toán ma trận trong GPU compute shader, ring buffer zero-copy giữa các thread trên hot path của hệ thống giao dịch. `SharedArrayBuffer` + `Atomics` trong JavaScript, hoặc cấu trúc dữ liệu lock-free trong C++/Rust, là phù hợp ở đây."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Cách tiếp cận bộ nhớ chia sẻ đòi hỏi `Atomics` ở mọi lần truy cập — quên một lần là bạn có một race condition âm thầm. Cách tiếp cận message passing không có yêu cầu đó: đảm bảo tuần tự được gắn sẵn vào vòng lặp xử lý của actor, chứ không phụ thuộc vào kỷ luật của lập trình viên. Biến `count` của actor không bao giờ bị truy cập đồng thời vì mỗi lúc chỉ có một lời gọi `handleMessage` chạy.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Các hệ thống actor thực tế: Erlang, Akka, Elixir và Orleans",
+      "content": "Hiểu cách các hệ thống actor production cài đặt mô hình sẽ làm sâu sắc thêm trực giác của bạn về các lựa chọn thiết kế.\n\n**Erlang/OTP (1986, Ericsson)**: Hệ thống actor production nguyên bản. Process Erlang cực kỳ nhẹ (heap ~2-4 KB) — có hàng triệu process concurrent là chuyện thường. BEAM VM có run queue cho từng core và scheduler preemptive riêng (actor bị preempt sau một số lượng reduction cố định, không phải theo ranh giới của OS thread). Copy message là bắt buộc; không có heap chia sẻ. OTP cung cấp **gen_server** (một abstraction actor tổng quát), **gen_statem** (actor dạng state machine), và các behaviour supervisor như những pattern của thư viện chuẩn. Triết lý 'let it crash' được thể chế hóa: code Erlang nổi tiếng là ít xử lý lỗi vì supervision tree lo việc phục hồi.\n\n**Elixir (2012, José Valim)**: Một ngôn ngữ hiện đại biên dịch ra bytecode BEAM và chạy cùng VM với Erlang. Elixir bổ sung syntactic sugar (toán tử pipe `|>`, macro), một hệ thống module quen thuộc hơn, và web framework Phoenix hỗ trợ hàng triệu WebSocket connection concurrent qua **Phoenix Channels** — mỗi channel là một process Elixir nhẹ.\n\n**Akka (2009, Jonas Bonér; sau này là Typesafe/Lightbend — Apache Pekko là bản fork theo license Apache từ 2022)**: Một bộ công cụ actor cho JVM (Scala và Java). Bên dưới dùng thread của JVM (số lượng thread trong thread pool có thể cấu hình để gánh hàng triệu actor). Akka **mặc định không copy message** — các actor chia sẻ heap của JVM, và lập trình viên chịu trách nhiệm không truyền các reference có thể thay đổi. Đây là một trade-off thực dụng về hiệu năng, phá vỡ tính cô lập nghiêm ngặt của actor model nhưng chấp nhận được trong thực tế trên một JVM. Akka Cluster bổ sung location transparency giữa các node.\n\n**Microsoft Orleans (Microsoft Research; mã nguồn mở năm 2015)**: Một hệ thống 'virtual actor' cho .NET. Actor (gọi là Grain) tự động được kích hoạt khi cần và hủy kích hoạt khi rảnh, với runtime quản lý việc đặt chúng trên cluster. Điều này đơn giản hóa việc suy luận về vòng đời actor — bạn không bao giờ tạo hay hủy grain một cách tường minh; chúng dường như luôn tồn tại và chỉ việc được gọi. Orleans được xây dựng cho và đang vận hành các dịch vụ cloud như backend online của Halo 4 và Halo 5.\n\n**Goroutine + channel của Go**: Go không cài đặt Actor Model một cách nghiêm ngặt, nhưng phương châm 'do not communicate by sharing memory; share memory by communicating' (đừng giao tiếp bằng cách chia sẻ bộ nhớ; hãy chia sẻ bộ nhớ bằng cách giao tiếp) phản ánh cùng một triết lý. Goroutine là coroutine rẻ; channel là message queue có kiểu. Pattern tương tự nhưng thủ công hơn — không có supervision có sẵn, không có location transparency, và bạn vẫn có thể dùng bộ nhớ chia sẻ với `sync.Mutex` khi cần."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các hệ thống actor lớn và nền tảng runtime của chúng. Erlang/Elixir chạy trên BEAM VM với sự cô lập nghiêm ngặt theo từng process. Akka chạy trên thread pool của JVM với sự cô lập do lập trình viên tự đảm bảo. Orleans dùng virtual actor với cơ chế đặt vị trí tự động."
+    },
+    {
+      "type": "explanation",
+      "title": "Actor và CSP channel (Go): mailbox nằm ở đâu",
+      "content": "Actor và **CSP** (Communicating Sequential Processes) kiểu Go đều tránh bộ nhớ chia sẻ, nhưng đặt queue ở những chỗ khác nhau — một phép so sánh được ưa chuộng trong interview.\n\n| | Actor (Erlang, Akka) | CSP (Go, Clojure core.async) |\n|---|---|---|\n| Thứ có danh tính | Actor (PID, ActorRef) | Channel |\n| Gửi | Bất đồng bộ, vào mailbox của một actor | Vào một channel; send trên channel không buffer sẽ block cho tới khi có bên nhận lấy (rendezvous) |\n| Buffer | Mailbox, thường không giới hạn | Tường minh: `make(chan T, n)` |\n| Bên nhận | Chỉ chủ sở hữu mailbox | Bất kỳ goroutine nào giữ channel — nhiều goroutine có thể dùng chung một channel |\n| Phân tán | Location-transparent giữa các node | Chỉ trong cùng process |\n| Xử lý lỗi | Link, monitor, supervision tree | Thủ công: lỗi là giá trị, hủy bằng `context` |\n\nChannel đồng bộ của CSP mang lại **backpressure** một cách tự nhiên — producer nhanh đơn giản là bị block — và giúp diễn đạt pipeline cùng fan-out/fan-in dễ dàng. Actor mang lại danh tính ổn định và sự cô lập lỗi mở rộng được qua nhiều máy. Không cái nào miễn nhiễm với deadlock: hai goroutine cùng bị block khi send trên một channel không buffer mà bên kia sẽ không bao giờ đọc, hoặc hai actor cùng chờ một lời gọi đồng bộ tới nhau, sẽ kẹt mãi mãi."
+    },
+    {
+      "type": "explanation",
+      "title": "Các pattern phổ biến: Request-Reply, Publish-Subscribe và Actor Pool",
+      "content": "Actor Model cơ bản cho bạn ba primitive, nhưng hệ thống thực tế kết hợp chúng thành những pattern lặp đi lặp lại:\n\n**Request-Reply (Ask Pattern)**: Cách chuyển thể tự nhiên nhất của RPC đồng bộ sang actor. Bên gửi tạo một địa chỉ **reply-to** (thường là một actor dùng một lần tạm thời hoặc một Promise), đính kèm vào message, và chờ phản hồi. Trong Akka đó là toán tử `?`; trong Erlang, việc này được làm bằng `receive` pattern-matching trên một câu trả lời được gắn tag. Rủi ro: nếu bên nhận crash hoặc chậm, bên gửi phải xử lý timeout — điều này buộc phải có logic timeout và retry tường minh, thứ vốn có thể bị che giấu trong một lời gọi blocking.\n\n**Publish-Subscribe**: Một topic actor (hoặc message broker) giữ danh sách địa chỉ của các subscriber actor. Khi publisher gửi một message sự kiện tới topic actor, topic actor phát tán nó tới mọi subscriber. Điều này tách rời publisher và subscriber — không bên nào biết trực tiếp địa chỉ của bên kia. `pg` (process group) của Erlang và `EventBus` của Akka cài đặt pattern này. Nó mở rộng một cách tự nhiên: thêm subscriber mới chỉ là đăng ký với topic actor.\n\n**Actor Pool (Router Pattern)**: Khi một actor đơn lẻ trở thành nút thắt (công việc CPU-bound), bạn tạo một pool các worker actor giống hệt nhau và một actor **router** phân phối message tới chúng theo một strategy (round-robin, smallest-mailbox, consistent hash). Bên gọi gửi tới địa chỉ router và không biết thành viên nào trong pool xử lý message. Các router actor có sẵn của Akka cài đặt điều này ngay từ đầu.\n\n**Saga / Long-Running Process**: Một actor điều phối quản lý một quy trình nhiều bước (ví dụ một đơn hàng: giữ hàng trong kho → thu tiền → báo bên giao hàng). Nếu bất kỳ bước nào thất bại, saga actor gửi các message bù trừ để rollback các bước trước đó. Đây là câu trả lời của actor model cho transaction phân tán, thứ nổi tiếng khó làm với các cách tiếp cận bộ nhớ chia sẻ.\n\n**Circuit Breaker**: Một actor theo dõi tỷ lệ lỗi từ các actor service phía sau. Khi lỗi vượt ngưỡng, nó 'ngắt mạch' — trả lỗi ngay lập tức mà không chuyển tiếp message tới service phía sau đang lỗi, cho service đó thời gian phục hồi. Hystrix và pattern circuit breaker của Akka cài đặt điều này."
+    },
+    {
+      "type": "explanation",
+      "title": "Edge case và những quan niệm sai phổ biến",
+      "content": "**'Actor loại bỏ mọi bug concurrency'**: Không hẳn. Actor loại bỏ data race và deadlock *giữa* các actor vì không có bộ nhớ chia sẻ và không có chờ blocking. Nhưng bug logic vẫn tồn tại: một actor có thể xử lý message theo thứ tự bất ngờ và rơi vào trạng thái sai, hoặc hai actor có thể deadlock nếu chúng cùng lúc gửi ask đồng bộ cho nhau (ask của A chờ B, ask của B chờ A). Mô hình loại bỏ lớp bug làm hỏng bộ nhớ ở mức thấp, chứ không phải mọi bug có thể có.\n\n**'Copy message lúc nào cũng tốn kém'**: Với message nhỏ (struct, bản ghi sự kiện, vài trăm byte), CPU hiện đại copy nhanh tới mức không đáng kể. Với payload lớn (frame video, blob nhị phân lớn), bạn cần chiến lược zero-copy: truyền một reference bất biến tới một vùng bộ nhớ chia sẻ (hợp lệ trong cùng một process), dùng buffer đếm reference, hoặc chuyển ownership thay vì copy. Erlang đưa ra reference **sub-binary** và lưu binary trên một binary heap chia sẻ (không theo từng process) chính là để tránh copy binary lớn.\n\n**'Mỗi actor nên là một OS thread'**: Ngược lại — đó là cái bẫy hiệu năng. OS thread tốn ~1 MB bộ nhớ stack và context switch theo độ mịn của scheduler hệ điều hành. Các actor runtime duy trì hàng triệu actor trên một nhúm OS thread bằng cách tự cài đặt scheduler cooperative hoặc preemptive. Trong JavaScript, `worker_threads` là một phép so sánh hợp lý với actor để giảng dạy, nhưng trên production bạn sẽ dùng một actor framework thật sự, multiplex nhiều actor lên một thread pool.\n\n**'Mailbox có thứ tự toàn cục'**: Mailbox chỉ đảm bảo thứ tự theo từng bên gửi. Mailbox của một actor có thể nhận message từ nhiều bên gửi, và thứ tự tương đối giữa các message đó có thể thay đổi. Nếu bạn cần đảm bảo thứ tự toàn cục (ví dụ event sourcing), bạn cần một cơ chế đánh số thứ tự tường minh (sequence number trên message, hoặc một actor sequencer chuyên trách).\n\n**'Location transparency nghĩa là vấn đề mạng biến mất'**: Location transparency nghĩa là API trông giống nhau, chứ không phải lỗi biến mất. Một lần gửi message remote có thể thất bại âm thầm do network partition. Các hệ thống actor phân tán trên production dùng những kỹ thuật như **heartbeat monitoring**, **giao thức cluster membership**, và **failure detector** tường minh để phát hiện vấn đề mạng và kích hoạt phản ứng supervision phù hợp."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: Carl Hewitt, cùng Peter Bishop và Richard Steiger, công bố 'A Universal Modular ACTOR Formalism for Artificial Intelligence' năm 1973. Luận án năm 1985 của Gul Agha (xuất bản năm 1986 với tên *Actors: A Model of Concurrent Computation in Distributed Systems*) đặt nền ngữ nghĩa hình thức vẫn được dùng tới ngày nay. **CSP** (1978) của Tony Hoare là một truyền thống riêng, xây dựng trên giao tiếp đồng bộ qua channel — chính nó, chứ không phải Actor Model, là tổ tiên trực tiếp của channel trong Go — và **π-calculus** (1992) của Robin Milner sau đó đã hình thức hóa các process truyền channel cho nhau. Erlang, được Joe Armstrong, Robert Virding và Mike Williams thiết kế tại Ericsson từ năm 1986, đã tự đi tới ngữ nghĩa giống actor một cách độc lập (Armstrong nói ông chỉ biết tới công trình của Hewitt về sau) và trở thành ngôn ngữ đầu tiên chạy chúng ở quy mô công nghiệp trong các hệ thống viễn thông."
+    },
+    {
+      "type": "callout",
+      "content": "**Góc nhìn interview và design review**: Khi được yêu cầu so sánh thread với actor, hãy neo vào **cái gì được chia sẻ** — thread mặc định chia sẻ bộ nhớ và phải thêm đồng bộ hóa; actor mặc định không chia sẻ gì và phải gửi message một cách tường minh. Khi thiết kế một hệ thống dựa trên actor, hãy hỏi 'đơn vị của lỗi là gì?' — mỗi actor nên đại diện cho một phần trạng thái nhất quán, cùng lỗi và cùng restart với nhau. Câu hỏi nối tiếp phổ biến trong interview: 'chuyện gì xảy ra nếu hai actor ask nhau một cách đồng bộ?' — deadlock; luôn thiết kế tương tác ask-pattern có timeout, hoặc dùng các pattern bất đồng bộ kiểu tell-rồi-trả-lời-sau. Cũng cần biết rằng nguyên tắc 'let it crash' **không** có nghĩa là bỏ qua lỗi — nó nghĩa là xử lý lỗi ở đúng tầng kiến trúc (supervision), chứ không lẫn vào happy path."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Actor** là một đơn vị tính toán độc lập với ba khả năng: gửi message tới các actor đã biết, spawn child actor, và cập nhật trạng thái riêng của chính nó — nó không bao giờ có thể trực tiếp đọc hay ghi trạng thái của actor khác.",
+        "**Message passing là bất đồng bộ**: bên gửi đưa message vào queue và tiếp tục ngay mà không block; bên nhận xử lý từng message trong mailbox một, loại bỏ race condition bên trong actor.",
+        "**Không có shared mutable state** nghĩa là không có lock và không có data race — không phải vì lập trình viên cẩn thận, mà vì mô hình ngăn chặn chúng về mặt cấu trúc. Deadlock trở nên hiếm nhưng vẫn có thể xảy ra với các vòng request-reply (ask) đồng bộ.",
+        "**Supervision tree** (Erlang OTP, Akka) đưa việc phục hồi lỗi vào kiến trúc: parent actor theo dõi child, áp dụng restart strategy (one-for-one, one-for-all, rest-for-one), và tạo nên hệ thống tự phục hồi — nền tảng cho độ tin cậy huyền thoại của Erlang.",
+        "**Location transparency** cho actor một địa chỉ thống nhất bất kể vị trí vật lý, biến horizontal scaling và phân tán thành thuộc tính thiết kế hàng đầu thay vì thứ chắp vá thêm sau.",
+        "**Concurrency mở rộng được** vì actor nhẹ (~2-4 KB mỗi actor) có thể được tạo ra hàng triệu cái; runtime lập lịch chúng trên các core CPU, tránh overhead của OS thread (~1 MB mỗi thread) vốn giới hạn các kiến trúc thread-per-connection.",
+        "**Chọn message passing** cho các task độc lập, cô lập lỗi và hệ thống phân tán; chỉ chọn bộ nhớ chia sẻ với `Atomics` cho các vòng lặp trong cùng chặt chẽ, nơi latency của serialize thực sự không chấp nhận được.",
+        "**Actor và CSP**: actor có danh tính và mailbox (gửi bất đồng bộ, location-transparent, có supervision); trong Go thì channel mới là danh tính (send không buffer phải rendezvous, mang lại backpressure), chỉ trong cùng process, không có supervision sẵn."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Theo Actor Model hình thức, ba và chỉ ba việc mà một actor có thể làm khi nhận một message là gì?",
+      "options": [
+        "Gửi message tới các actor đã biết, spawn child actor mới, và cập nhật trạng thái riêng của chính nó",
+        "Lấy lock, đọc bộ nhớ chia sẻ, và nhả lock",
+        "Fork một thread, ghi vào buffer chia sẻ, và signal một condition variable",
+        "Thực thi một system call, block vì I/O, và trả một giá trị cho bên gọi"
+      ],
+      "explanation": "Actor Model định nghĩa hình thức đúng ba khả năng phản hồi: gửi message tới các actor đã biết địa chỉ (PID/ActorRef), tạo child actor mới, và chỉ định hành vi mới bằng cách cập nhật trạng thái local riêng. Mọi thứ khác — bộ nhớ chia sẻ, lock, lời gọi blocking — đều nằm ngoài mô hình."
+    },
+    {
+      "id": "q2",
+      "question": "Vì sao Actor Model loại bỏ data race giữa các actor về mặt cấu trúc?",
+      "options": [
+        "Actor tự động lấy mutex trước khi đọc biến chia sẻ",
+        "Runtime áp đặt một lock toàn cục lên mọi thay đổi trạng thái",
+        "Trạng thái của mỗi actor thuộc sở hữu độc quyền của actor đó và không bao giờ được chia sẻ — actor khác chỉ có thể yêu cầu thay đổi qua message",
+        "Actor chạy trên một core CPU duy nhất nên mỗi lúc chỉ một actor được thực thi"
+      ],
+      "explanation": "Data race đòi hỏi truy cập đồng thời không được đồng bộ vào cùng một vị trí bộ nhớ. Vì không actor nào có thể trực tiếp đọc hay ghi trạng thái của actor khác — mọi tương tác đều qua message passing — nên chẳng có gì để race cả. Bất biến về sở hữu độc quyền được mô hình áp đặt, không phải nhờ kỷ luật của lập trình viên."
+    },
+    {
+      "id": "q3",
+      "question": "Actor Model đạt được concurrency bằng cách nào nếu mỗi actor xử lý message tuần tự, từng cái một?",
+      "options": [
+        "Không thể — xử lý message tuần tự nghĩa là không có concurrency thật sự",
+        "Mỗi actor dùng async/await bên trong để xen kẽ việc xử lý message trong cùng một lần thực thi",
+        "Hàng nghìn hoặc hàng triệu actor, mỗi actor xử lý mailbox của mình độc lập, cho phép runtime lập lịch nhiều actor concurrent trên các core CPU",
+        "Một scheduler round-robin toàn cục chạy handler của mỗi actor trong một lát thời gian cố định"
+      ],
+      "explanation": "Concurrency trong Actor Model đến từ số lượng actor, không phải từ bên trong một actor. Mỗi actor tuần tự ở bên trong, nhưng với hàng triệu actor cùng xử lý mailbox của riêng mình một cách độc lập, runtime có thể lập lịch nhiều actor song song trên các core CPU — đạt mức song song khổng lồ mà không cần trạng thái chia sẻ."
+    },
+    {
+      "id": "q4",
+      "question": "'Location transparency' có nghĩa là gì trong bối cảnh Actor Model?",
+      "options": [
+        "Mọi actor phải được đặt chung trên cùng một máy vật lý để đạt hiệu năng",
+        "Actor vô hình đối với scheduler của hệ điều hành",
+        "Message được cache ở local và chỉ gửi đi remote khi mạng rảnh",
+        "Địa chỉ của actor hoạt động y hệt nhau dù đích nằm trong cùng process, cùng máy hay trên một server remote — code của bên gửi không thay đổi"
+      ],
+      "explanation": "Location transparency nghĩa là API gửi và địa chỉ actor thống nhất bất kể vị trí vật lý. Runtime lo việc định tuyến và serialize một cách trong suốt. Điều này biến horizontal scaling thành mối quan tâm hàng đầu — bạn có thể chuyển actor sang các máy khác mà không phải sửa logic ứng dụng."
+    },
+    {
+      "id": "q5",
+      "question": "Theo triết lý 'let it crash' của Erlang, một worker actor nên làm gì khi nhận được một message khiến nó rơi vào trạng thái bất ngờ hoặc bị hỏng?",
+      "options": [
+        "Bắt mọi exception, log lại, và tiếp tục xử lý message kế tiếp",
+        "Retry thao tác thất bại tối đa năm lần với exponential backoff",
+        "Crash ngay lập tức và để supervision tree lo việc phục hồi bằng một lần restart sạch sẽ",
+        "Thông báo cho mọi actor anh em và yêu cầu chúng tạm dừng trước khi actor kết thúc"
+      ],
+      "explanation": "'Let it crash' nghĩa là worker actor không nên cố phục hồi phức tạp tại chỗ từ một trạng thái bất ngờ — loại code đó khó viết đúng và để actor ở trạng thái không xác định. Thay vào đó, hãy crash một cách sạch sẽ. Supervisor phát hiện tín hiệu crash, áp dụng restart strategy (one-for-one, v.v.), và khởi chạy lại actor với trạng thái ban đầu mới tinh. Cách này đáng tin cậy hơn việc cố phục hồi từ một trạng thái xấu không xác định."
+    },
+    {
+      "id": "q6",
+      "question": "Restart strategy nào CHỈ restart đúng child actor bị crash, để mọi anh em khác tiếp tục chạy?",
+      "options": [
+        "one-for-all — restart tất cả child khi bất kỳ child nào crash",
+        "rest-for-one — restart child bị crash và tất cả child được khởi động sau nó",
+        "one-for-one — chỉ restart child bị crash",
+        "all-for-one — dừng supervisor và tất cả child rồi khởi động lại từ đầu"
+      ],
+      "explanation": "One-for-one chỉ restart đúng child bị crash. Đây là strategy ít gây xáo trộn nhất và phù hợp khi các child độc lập — ví dụ một pool các connection-handler actor, mỗi actor xử lý một client khác nhau. One-for-all restart tất cả anh em và được dùng khi các child phụ thuộc lẫn nhau."
+    },
+    {
+      "id": "q7",
+      "question": "Chi phí hiệu năng chính của message passing so với truy cập bộ nhớ chia sẻ trực tiếp là gì?",
+      "options": [
+        "Message phải được copy (hoặc serialize với actor remote), thêm latency copy bộ nhớ — không đáng kể với message nhỏ nhưng đáng kể với payload lớn trong vòng lặp chặt",
+        "Message passing cần nhiều core CPU hơn bộ nhớ chia sẻ",
+        "Message passing đòi hỏi một lần dừng garbage collection toàn cục trước mỗi lần gửi",
+        "Actor runtime tiêu tốn RAM gấp đôi so với một cài đặt thread pool tương đương"
+      ],
+      "explanation": "Message passing đòi hỏi copy dữ liệu để bên gửi và bên nhận mỗi bên có bản sao độc lập (không có reference chia sẻ). Với message nhỏ, việc này chỉ mất vài nano giây trên phần cứng hiện đại. Với payload lớn trong các vòng lặp trong cùng quan trọng về hiệu năng (DSP audio, toán ma trận), overhead copy này có thể đáng kể, đó là lý do SharedArrayBuffer + Atomics được ưu tiên trong những tình huống cụ thể đó."
+    },
+    {
+      "id": "q8",
+      "question": "'Hot spot' của mailbox trong một hệ thống actor là gì, và nó cho thấy điều gì?",
+      "options": [
+        "Một actor có mức dùng CPU vượt 90% — cho thấy cần tách nó thành các actor nhỏ hơn",
+        "Một node actor remote có network latency cao hơn actor local",
+        "Một supervisor actor restart child hơn hai lần mỗi giây — cho thấy một vòng lặp bất ổn",
+        "Tình trạng mailbox của một actor phình to không giới hạn vì message tới nhanh hơn tốc độ actor xử lý — cho thấy vấn đề backpressure"
+      ],
+      "explanation": "Hot spot xảy ra khi một bên gửi (hoặc nhiều bên gửi) tạo message nhanh hơn tốc độ actor nhận tiêu thụ. Mailbox phình to không giới hạn, cuối cùng vắt kiệt bộ nhớ. Giải pháp là backpressure: làm chậm bên gửi, thêm actor vào một pool (router pattern), hoặc áp dụng admission control. Theo dõi độ sâu mailbox là một metric vận hành then chốt trong các hệ thống dựa trên actor."
+    },
+    {
+      "id": "q9",
+      "question": "Hệ thống thực tế nào nổi tiếng vì đã chứng minh khả năng mở rộng của Actor Model với khoảng 2 triệu connection đồng thời trên một server duy nhất?",
+      "options": [
+        "Redis, dùng event loop single-threaded với non-blocking I/O",
+        "WhatsApp, dùng actor Erlang trên máy ảo BEAM",
+        "Nginx, dùng mô hình mỗi connection một OS thread với kernel splice",
+        "Apache Kafka, dùng Reactor pattern với các log được partition"
+      ],
+      "explanation": "WhatsApp chạy trên Erlang, đạt 2 triệu connection đồng thời trên một server duy nhất. Process actor nhẹ của Erlang (mỗi cái ~2-4 KB) và cơ chế lập lịch theo từng core của BEAM VM đã biến điều này thành hiện thực. Khi được Facebook mua lại năm 2014, WhatsApp phục vụ khoảng 450 triệu người dùng với khoảng 32 kỹ sư (khoảng 50 kỹ sư cho 900 triệu người dùng năm 2015) — một tỷ lệ chỉ khả thi nhờ sự đơn giản trong vận hành mà actor và supervision tree mang lại."
+    },
+    {
+      "id": "q10",
+      "question": "Một counter actor nhận message 'GET' và trả về một câu trả lời. Vì sao nó nên trả về bản sao của giá trị count thay vì một reference tới đối tượng trạng thái nội bộ?",
+      "options": [
+        "Trả về reference tới đối tượng sẽ cho phép bên nhận thay đổi trực tiếp trạng thái riêng của actor, vi phạm bất biến sở hữu độc quyền vốn làm nên sự an toàn của Actor Model",
+        "Bản sao serialize sang JSON hiệu quả hơn reference đối tượng khi đi qua mạng",
+        "Actor Model yêu cầu mọi message chỉ dùng kiểu primitive — không được dùng đối tượng",
+        "Trả về reference khiến garbage collector ghim heap của actor, tăng áp lực bộ nhớ"
+      ],
+      "explanation": "Đảm bảo an toàn của Actor Model dựa trên bất biến rằng chỉ chính actor mới được sửa trạng thái của nó. Trả về một reference có thể thay đổi tới trạng thái nội bộ cho phép bên nhận vượt qua bất biến này và sửa trạng thái trực tiếp — tạo ra đúng loại shared mutable state mà mô hình được thiết kế để loại bỏ. Luôn trả về bản sao hoặc giá trị bất biến trong message trả lời."
+    }
+  ]
+}

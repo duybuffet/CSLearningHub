@@ -1,0 +1,227 @@
+{
+  "sourceHash": "e93d94aa277e",
+  "title": "Consistency Models",
+  "tagline": "Phổ từ strong consistency tới eventual consistency — mỗi mô hình đảm bảo điều gì và bạn phải đánh đổi gì để có được nó.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Khi cùng một dữ liệu được lưu trên nhiều node, các node đó có thể bất đồng — ít nhất là tạm thời. **Consistency model** là một hợp đồng hình thức giữa hệ phân tán và người dùng của nó: nó định nghĩa chính xác một thao tác đọc được phép trả về những giá trị nào, với một lịch sử ghi cụ thể. Nghe thì khô khan, nhưng đây là một trong những quyết định thiết kế hệ trọng nhất của bất kỳ hệ phân tán nào. Sai theo một hướng, hệ thống của bạn lặng lẽ làm hỏng dữ liệu. Sai theo hướng kia, hệ thống trở nên chậm và mong manh tới mức gần như không dùng được ở quy mô lớn.\n\nSự giằng co cốt lõi không hề học thuật. Xét hai ứng dụng rất khác nhau: số lượt like trên Instagram có thể trễ vài giây — nếu bạn thấy 10,241 like thay vì 10,242, chẳng có gì tệ xảy ra. Nhưng số dư ngân hàng của bạn không thể hiển thị tổng không nhất quán trên hai cây ATM cùng lúc — nếu một ATM hiện tài khoản của bạn có $500 còn ATM kia hiện $200, một trong hai sắp gây ra rắc rối nghiêm trọng. Hai kịch bản này đòi hỏi những đảm bảo hoàn toàn khác nhau, và consistency model là bộ từ vựng mà kỹ sư dùng để đặc tả và suy luận về chính những đảm bảo đó.\n\nCác consistency model yếu cho phép availability cao hơn và latency thấp hơn, vì node có thể phục vụ đọc tại chỗ mà không phối hợp với mọi node khác ở mỗi thao tác. Các consistency model mạnh đòi hỏi phối hợp — các node phải thống nhất trước khi xác nhận một lần ghi hay phục vụ một lần đọc — điều này thêm latency và có thể khiến hệ thống không khả dụng khi network partition. Mọi database phân tán bạn từng dùng đều đã có một lựa chọn có chủ ý ở đâu đó trên phổ này, và hiểu lựa chọn đó giúp bạn dự đoán kiểu sự cố của nó, thiết kế né các giới hạn của nó, và chọn đúng khi tự xây hệ thống.\n\nChương này đi từ mô hình mạnh nhất (linearizability) xuống yếu nhất (eventual consistency), giải thích cơ chế của từng cái, các hệ thống cài đặt chúng và các trade-off chúng áp đặt. Ta cũng sẽ nói về CAP theorem và người kế nhiệm nhiều sắc thái hơn là PACELC, và kết thúc bằng hướng dẫn thực tế để chọn đúng mô hình cho ứng dụng thật."
+    },
+    {
+      "type": "diagram",
+      "caption": "Phân cấp consistency từ mạnh nhất (linearizability) tới yếu nhất (eventual consistency). Mỗi bậc đi xuống cho phép availability cao hơn và latency thấp hơn bằng cách nới lỏng một đảm bảo. Các hệ như DynamoDB và Cassandra nằm gần đáy; etcd và Google Spanner nằm trên đỉnh."
+    },
+    {
+      "type": "analogy",
+      "title": "Bài toán bảng tỉ số",
+      "content": "Hãy tưởng tượng một hệ thống bảng tỉ số thể thao toàn cầu với vài chiến lược cài đặt. Chiến lược một: một **trọng tài trung tâm** duy nhất điều khiển một bảng tỉ số chính thức duy nhất mà ai cũng thấy (**linearizability**). Mọi cổ động viên ở bất kỳ đâu trên Trái Đất đều thấy cùng tỉ số tại cùng một khoảnh khắc — nhưng nếu kết nối của trọng tài rớt, không ai nhận được cập nhật nào. Chiến lược hai: mỗi sân vận động có **bảng tỉ số riêng**, nhân viên cập nhật độc lập và đồng bộ với nhau dần theo thời gian (**eventual consistency**). Cập nhật tức thì tại chỗ nhưng các sân có thể hiện tỉ số khác nhau trong chốc lát sau một bàn thắng; nếu không có thêm bàn thắng nào, mọi bảng rốt cuộc sẽ khớp nhau.\n\nGiờ xét một điểm ở giữa: hệ thống đảm bảo rằng nếu sân B nghe về một bàn thắng từ sân A, thì bảng của sân B hiển thị bàn thắng đó **trước** khi hiển thị bất kỳ bàn thắng nào được ghi để đáp trả nó (**causal consistency**). Cổ động viên ở B có thể vẫn chậm hơn cổ động viên ở A một chút, nhưng họ sẽ không bao giờ thấy sân B ăn mừng bàn gỡ trước khi thấy bàn thắng gốc đã khơi mào nó.\n\nCuối cùng, **read-your-writes** giống một quy tắc đặc biệt cho cầu thủ vừa ghi bàn: họ luôn thấy bàn thắng của mình ngay lập tức trên bảng tỉ số tại chỗ, bất kể đang nhìn vào sân nào. Cổ động viên khác có thể bị trễ, nhưng góc nhìn của chính cầu thủ luôn cập nhật với hành động của họ. Đây là đảm bảo tối thiểu mà hầu hết người dùng cần để không có cảm giác hệ thống bị hỏng."
+    },
+    {
+      "type": "explanation",
+      "title": "Linearizability: tiêu chuẩn vàng",
+      "content": "**Linearizability** — còn gọi là **atomic consistency** hay **strong consistency** — là consistency model mạnh nhất cho các thao tác riêng lẻ. Tính chất định nghĩa của nó là mọi thao tác có vẻ như diễn ra nguyên tử tại một thời điểm duy nhất, ở đâu đó giữa lúc client gửi request và lúc client nhận response. Mọi client chia sẻ một chuỗi sự kiện duy nhất được thống nhất toàn cục, như thể cả hệ phân tán là một máy duy nhất với một CPU duy nhất.\n\nVề hình thức: nếu thao tác A hoàn tất trước khi thao tác B bắt đầu (theo thời gian thực), thì mọi client phải thấy tác động của A trước của B. Không có chỗ cho sự mơ hồ. Một khi một lần ghi đã trả về, mọi lần đọc sau đó của bất kỳ client nào ở bất kỳ đâu trên thế giới đều phải thấy lần ghi đó hoặc một lần ghi muộn hơn.\n\nĐảm bảo này có cảm giác tự nhiên vì nó phản chiếu cách ta nghĩ về code tuần tự. Khi bạn gọi `x = 5` và nó trả về, bạn mong mọi `print(x)` sau đó ở bất kỳ đâu đều hiện 5. Linearizability mang lại cho hệ phân tán đúng tính chất trực giác đó.\n\nCái giá là đáng kể. Để linearize các thao tác qua nhiều node, hệ thống thường chạy một **consensus protocol** — Paxos hoặc Raft — đòi hỏi một quorum node xác nhận mọi lần ghi trước khi nó được coi là đã commit (một register linearizable đơn lẻ cũng có thể xây từ quorum read kèm write-back, tức thuật toán ABD, nhưng bất cứ thứ gì kiểu compare-and-set đều cần consensus). Điều này thêm ít nhất một round-trip mạng cho mỗi lần ghi, và hệ thống trở nên không khả dụng nếu ít hơn một quorum node liên lạc được với nhau. Ngưỡng latency tối thiểu bị chặn bởi tốc độ ánh sáng qua phân bố địa lý của cluster.\n\nCác hệ thống thực tế cung cấp linearizability: **etcd** (kho lưu trữ nền của Kubernetes, dùng Raft), **Apache ZooKeeper** (dùng protocol Zab), **Google Spanner** (dùng TrueTime để giới hạn độ bất định của đồng hồ và đạt external consistency — một biến thể của linearizability), và **CockroachDB**. Database quan hệ một node như PostgreSQL hiển nhiên cung cấp linearizability (chỉ có một node để phối hợp)."
+    },
+    {
+      "type": "explanation",
+      "title": "Sequential consistency: bỏ ràng buộc thời gian thực",
+      "content": "**Sequential consistency**, được Leslie Lamport định nghĩa năm 1979, nới lỏng một khía cạnh của linearizability: thứ tự thao tác toàn cục vẫn phải nhất quán và được mọi node thống nhất, nhưng không còn cần tôn trọng thời gian thực ngoài đời. Các thao tác của mỗi process riêng lẻ xuất hiện theo thứ tự chương trình, và mọi process thấy cùng một chuỗi đan xen — nhưng chuỗi đó có thể trễ so với thực tế.\n\nKhác biệt thực tế: với linearizability, nếu Alice ghi lúc 10:00:00.000 và Bob đọc lúc 10:00:00.001, Bob phải thấy lần ghi của Alice. Với sequential consistency, Bob có thể thấy giá trị cũ hơn, miễn là mọi client thống nhất cùng một thứ tự toàn phần của các thao tác.\n\nMô hình này chủ yếu liên quan tới **kiến trúc bộ nhớ của CPU**. Bộ xử lý hiện đại sắp xếp lại các truy cập bộ nhớ rất mạnh tay để tăng hiệu năng. CPU thật còn *yếu hơn* sequential consistency: x86 dùng **Total Store Order** (TSO), cho phép một core đọc store đang nằm trong buffer của chính nó trước khi các core khác thấy, nên việc sắp xếp lại store→load là quan sát được; ARM và RISC-V còn yếu hơn nữa. Memory model của ngôn ngữ — Java Memory Model, `std::memory_order` của C++11, atomic của Rust — hứa **sequential consistency cho chương trình không có data race** (SC-DRF): nếu bạn đồng bộ đúng (lock, atomic `seq_cst`, `volatile` trong Java) bạn có SC; relaxed atomic cho phép chuyên gia đánh đổi nó lấy tốc độ.\n\nVới database phân tán, sequential consistency hiếm khi được cài đặt tường minh — các hệ thống thường nhảy từ linearizability xuống causal consistency, vì bước trung gian sequential consistency không có đảm bảo thời gian thực khó cung cấp hiệu quả mà lợi ích thực tế so với causal consistency lại hạn chế."
+    },
+    {
+      "type": "diagram",
+      "caption": "Dưới linearizability, sau khi lần ghi x=5 hoàn tất (quorum đã xác nhận), mọi lần đọc sau đó của bất kỳ client nào trên bất kỳ replica nào đều phải trả về 5 hoặc giá trị muộn hơn. Điều này đòi hỏi đọc từ một quorum nhất quán hoặc từ primary."
+    },
+    {
+      "type": "explanation",
+      "title": "Causal consistency: giữ quan hệ nhân quả",
+      "content": "**Causal consistency** là mô hình mạnh nhất đạt được mà không cần phối hợp toàn cục ở mỗi thao tác, khiến nó là một điểm giữa rất hấp dẫn. Nó giữ khái niệm trực giác về nhân quả: nếu thao tác A **đi trước theo nhân quả** thao tác B (A xảy ra trước B và B có thể đã bị A ảnh hưởng), thì mọi node trong hệ thống phải thấy A trước B.\n\nHai thao tác có quan hệ nhân quả nếu: (1) chúng đến từ cùng một client và theo thứ tự chương trình, hoặc (2) thao tác thứ hai đọc một giá trị do thao tác thứ nhất tạo ra, hoặc (3) có một chuỗi các quan hệ như vậy. Các thao tác **concurrent** — không cái nào đi trước cái nào theo nhân quả — có thể được các node khác nhau thấy theo thứ tự khác nhau, và điều đó chấp nhận được.\n\nVí dụ kinh điển là chuỗi trả lời trên mạng xã hội. Nếu Alice đăng một tin và Bob trả lời nó, mọi người dùng phải thấy bài của Alice trước câu trả lời của Bob — thấy câu trả lời mà không có bài gốc là vô nghĩa và vi phạm nhân quả. Nhưng nếu Carol và Dave đăng bài độc lập cùng lúc mà không có quan hệ nhân quả, thì việc một số người thấy Carol trước còn người khác thấy Dave trước là ổn.\n\nCausal consistency thường được cài đặt bằng **vector clock** hoặc **version vector** (một số hệ thống thay vào đó gắn danh sách phụ thuộc tường minh, như COPS, hoặc timestamp hybrid logical clock, như MongoDB). Mỗi node duy trì một vector các timestamp logic, mỗi node trong hệ thống một phần tử. Khi một sự kiện xảy ra, phần tử cục bộ được tăng lên. Khi gửi message, vector clock hiện tại đi kèm với nó. Node nhận cập nhật vector của mình bằng cách lấy max theo từng thành phần. Điều này cho phép bất kỳ node nào xác định hai sự kiện có thứ tự nhân quả (một vector trội hơn vector kia) hay là concurrent (không vector nào trội).\n\n**Causal+ consistency** (được COPS, một key-value store phân tán trong giới học thuật, dùng) mở rộng causal consistency với một tính chất hội tụ: các lần ghi concurrent rốt cuộc phải hội tụ về cùng một giá trị ở mọi replica, dùng một quy tắc giải quyết xung đột tất định.\n\nCác hệ thống cung cấp causal consistency: **causally consistent session của MongoDB** (dùng operation time và cluster time), mức *Session* của **Azure Cosmos DB** (mặc định trong năm mức của nó), cho một session client read-your-writes, monotonic reads/writes và writes-follow-reads — thứ tự nhân quả trong phạm vi một session chứ không phải đảm bảo nhân quả toàn cục, và các hệ thống nghiên cứu như COPS và Bolt-on Causal Consistency."
+    },
+    {
+      "type": "diagram",
+      "caption": "Causal consistency đảm bảo câu trả lời luôn xuất hiện sau bài gốc của nó (có thứ tự nhân quả). Nhưng hai bài đăng concurrent độc lập có thể xuất hiện theo thứ tự khác nhau trên các node khác nhau — điều đó chấp nhận được vì không bài nào gây ra bài kia."
+    },
+    {
+      "type": "explanation",
+      "title": "Session guarantee: read-your-writes, monotonic reads và hơn nữa",
+      "content": "**Session guarantee** là các tính chất consistency yếu hơn, áp dụng trong phạm vi một session client thay vì toàn cục. Chúng được Terry và cộng sự hình thức hóa năm 1994 và cung cấp một bộ đảm bảo thực tế cho ứng dụng hướng người dùng mà không cần phối hợp toàn cục tốn kém.\n\n**Read-your-writes** (còn gọi là **read-your-own-writes**) đảm bảo rằng sau khi một client ghi một giá trị, chính client đó — trong cùng session — sẽ luôn đọc được giá trị đó hoặc giá trị mới hơn ở các lần đọc sau. Client khác có thể vẫn thấy giá trị cũ. Đây là đảm bảo hữu ích tối thiểu cho ứng dụng tương tác. Nếu người dùng cập nhật tên hiển thị rồi lập tức vào trang profile, họ phải thấy tên mới. Thấy tên cũ là vi phạm kỳ vọng cơ bản nhất của người dùng.\n\nChiến lược cài đặt read-your-writes:\n- **Sticky session tới primary**: định tuyến mọi lần đọc và ghi của một session tới cùng một node, thường là primary. Đơn giản nhưng tạo hot spot.\n- **Token read-after-write**: lần ghi trả về một version token hoặc timestamp. Các lần đọc sau truyền token này và replica từ chối phục vụ đọc cho tới khi nó bắt kịp version đó.\n- **Cache phía client**: cache các lần ghi gần đây tại chỗ; kiểm tra cache trước database. Không có overhead phía server, nhưng cache mất nếu client crash.\n\n**Monotonic reads** đảm bảo rằng nếu một client đọc một giá trị tại thời điểm T, mọi lần đọc sau sẽ trả về giá trị ít nhất cũng mới bằng — client không bao giờ thấy thời gian chạy lùi. Không có nó, một client luân phiên giữa hai replica cũ có thể thấy một giá trị xuất hiện, rồi biến mất, rồi lại xuất hiện — cực kỳ khó hiểu.\n\n**Monotonic writes** đảm bảo các lần ghi từ một client được áp dụng theo thứ tự. Nếu bạn ghi A rồi ghi B, không replica nào áp dụng B trước A.\n\n**Writes-follow-reads** (còn gọi là session causality) đảm bảo rằng nếu một client đọc giá trị V rồi ghi W, W được áp dụng sau lần ghi đã tạo ra V. Điều này ngăn vấn đề cập nhật ma, khi lần ghi của bạn có vẻ tham chiếu tới một giá trị mà replica chưa nhận được.\n\nPhần lớn database quan hệ tự động cho bạn cả bốn đảm bảo trong phạm vi một connection. Phần kỹ thuật thú vị diễn ra khi bạn có một hệ phân tán với connection pooling, load balancer hoặc read replica, nơi các request của một client có thể rơi vào các node khác nhau."
+    },
+    {
+      "type": "explanation",
+      "title": "Eventual consistency: availability tối đa với một cái giá",
+      "content": "**Eventual consistency** là consistency model hữu ích yếu nhất. Định nghĩa của nó đơn giản tới mức đánh lừa: nếu không có cập nhật mới nào cho một mục dữ liệu, mọi replica rốt cuộc sẽ hội tụ về cùng một giá trị. Không có giới hạn thời gian nào được chỉ định — 'rốt cuộc' có thể là vài mili giây hay vài giờ tùy điều kiện mạng và replication lag. Không có ràng buộc thứ tự nào được đảm bảo cho các lần đọc.\n\nSức mạnh của eventual consistency là nó cho phép các replica phục vụ đọc và nhận ghi hoàn toàn độc lập, không cần phối hợp giữa các replica. Một replica bị cô lập hoàn toàn khỏi phần còn lại của cluster khi network partition vẫn nhận được đọc và ghi — chỉ là nó có thể phân kỳ khỏi các replica khác. Khi partition lành lại, các replica trao đổi các cập nhật phân kỳ và áp dụng một chiến lược **giải quyết xung đột** để hội tụ.\n\nCác chiến lược giải quyết xung đột dưới eventual consistency gồm:\n- **Last-write-wins (LWW)**: mỗi lần ghi có một timestamp; lần ghi có timestamp muộn nhất thắng. Đơn giản nhưng mất dữ liệu — các lần ghi concurrent bị lặng lẽ loại bỏ. DynamoDB và Cassandra mặc định dùng LWW.\n- **Hội tụ đa giá trị (vector clock)**: lưu mọi giá trị concurrent (sibling) và phơi xung đột ra cho ứng dụng tự giải quyết. Riak (sibling) và CouchDB (conflict revision) dùng cách này.\n- **CRDT (Conflict-free Replicated Data Type)**: cấu trúc dữ liệu được thiết kế toán học để mọi thứ tự merge đều cho cùng kết quả. Counter (chỉ tăng), set (chỉ thêm hoặc có tombstone) và register là các loại CRDT phổ biến. Data type của Riak 2.0 và database Active-Active của Redis Enterprise dùng chúng.\n- **Operational Transformation (OT)**: dùng trong chỉnh sửa cộng tác (Google Docs), nơi các thao tác được biến đổi so với các thao tác concurrent để cho ra kết quả nhất quán.\n\nEventual consistency phù hợp khi: dữ liệu tự nhiên là idempotent hoặc giao hoán (số đếm, like, đánh giá), khi dữ liệu hơi cũ không gây hại gì cho nghiệp vụ (danh mục sản phẩm, asset cache trên CDN, bản ghi DNS), hoặc khi availability và partition tolerance là không thể thương lượng (mạng xã hội toàn cầu, lượt đọc thương mại điện tử).\n\nCác hệ thống eventual consistency thực tế: **Amazon DynamoDB** (chế độ mặc định), **Apache Cassandra**, **CouchDB**, **DNS** (ví dụ kinh điển — việc lan truyền bản ghi mất vài phút tới vài giờ trên toàn cầu). Lưu ý **Amazon S3** *không còn* nằm trong danh sách này: từ tháng 12 năm 2020, nó cho strong read-after-write consistency với mọi request, tự động và không tốn thêm chi phí."
+    },
+    {
+      "type": "diagram",
+      "caption": "Dưới eventual consistency với async replication, client đọc từ một replica bị trễ sẽ thấy giá trị cũ. Hệ thống sẽ hội tụ — Replica 2 rốt cuộc sẽ nhận x=5 — nhưng không có đảm bảo thời gian nào. Khoảng thời gian dữ liệu cũ từ lúc ghi tới lúc đọc phụ thuộc vào replication lag."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mỗi phương án đại diện cho một điểm khác nhau trên phổ consistency. Phương án A nhanh nhất và rẻ nhất nhưng có thể vi phạm read-your-writes, gây ra một bug thật mà người dùng thấy được. Phương án B đúng và đơn giản nhưng tốn gấp 2 read capacity unit và thêm latency round-trip. Phương án C đạt read-your-writes mà không tốn thêm chi phí database, đổi lại bộ nhớ cục bộ và một giả định có giới hạn thời gian về replication lag. Phương án D mang theo một version token: đọc rẻ khi replica đã bắt kịp và chỉ quay về đọc strongly consistent khi chưa — cùng ý tưởng mà session token của Cosmos DB và causal session của MongoDB cài đặt sẵn. Trên thực tế, phần lớn ứng dụng dùng Phương án C cho các lần đọc không quan trọng và chỉ dùng Phương án B cho các thao tác mà tính đúng đắn là không thể thương lượng.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "CAP theorem: vì sao bạn không thể có tất cả",
+      "content": "**CAP theorem**, được Eric Brewer phát biểu năm 2000 và được Gilbert và Lynch chứng minh hình thức năm 2002, nói rằng một hệ phân tán có thể cung cấp đồng thời tối đa hai trong ba tính chất:\n\n- **C**onsistency (theo nghĩa của CAP): mọi lần đọc nhận được lần ghi gần nhất hoặc một lỗi (nghĩa này gần với linearizability hơn là nghĩa rộng của 'consistency')\n- **A**vailability: mọi request mà một node không hỏng nhận được đều nhận về response không phải lỗi (dù có thể là dữ liệu cũ)\n- **P**artition tolerance: hệ thống tiếp tục hoạt động khi network partition xảy ra (message giữa các node bị mất hoặc trễ)\n\nNhận thức then chốt là **network partition không phải tùy chọn** trong hệ phân tán thực tế — chúng xảy ra do lỗi phần cứng, vấn đề định tuyến BGP, sự cố kết nối data center và các đợt deploy phần mềm cuốn chiếu. Vì vậy, mọi hệ phân tán production đều phải chịu được partition. Trade-off thật sự là giữa C và A khi partition xảy ra.\n\nKhi partition, một node không liên lạc được với các node khác phải lựa chọn: từ chối phục vụ request (giữ consistency, hy sinh availability) hoặc phục vụ request từ state cục bộ (giữ availability, chấp nhận rủi ro không nhất quán). Không có lựa chọn thứ ba.\n\nĐiều này tạo ra cách phân loại:\n- **Hệ CP** (consistency + partition tolerance): chọn trả lỗi hoặc chặn lại thay vì trả về dữ liệu có thể đã cũ. Ví dụ: etcd, ZooKeeper, HBase, Google Spanner.\n- **Hệ AP** (availability + partition tolerance): chọn trả về dữ liệu có thể đã cũ thay vì trả lỗi. Ví dụ: DynamoDB (mặc định), Cassandra, CouchDB.\n- **Hệ CA**: chỉ khả thi khi không có partition — tức là hệ một node như một instance PostgreSQL độc lập.\n\n**Giới hạn của CAP**: Định lý này thường bị đơn giản hóa quá mức. Nó chỉ nói về hai lựa chọn cực đoan (nhất quán hoàn toàn vs. khả dụng hoàn toàn), bỏ qua cả phổ phong phú ở giữa. Nó cũng không nói gì về latency. Điều này dẫn tới **mô hình PACELC** (Daniel Abadi, bài blog năm 2010, paper IEEE Computer năm 2012), mở rộng CAP: ngay cả khi không có **P**artition, hệ phân tán vẫn phải đánh đổi giữa **L**atency và **C**onsistency. Spanner hy sinh latency (dùng các khoảng chờ TrueTime tốn kém) để đạt external consistency. Cassandra hy sinh consistency để giảm tối đa latency. PACELC nắm bắt trade-off luôn hiện diện này mà CAP bỏ qua."
+    },
+    {
+      "type": "diagram",
+      "caption": "Khi network partition, hệ thống phải chọn giữa consistency (CP) và availability (AP). Hệ CP chặn hoặc báo lỗi cho tới khi partition lành; hệ AP tiếp tục phục vụ dữ liệu có thể đã cũ hoặc xung đột. Sau khi lành, hệ AP phải hòa giải các lần ghi phân kỳ."
+    },
+    {
+      "type": "explanation",
+      "title": "CRDT: merge không xung đột",
+      "content": "Một trong những lời giải thanh lịch nhất cho bài toán xung đột của eventual consistency là **Conflict-free Replicated Data Type (CRDT)**, do Shapiro, Preguiça, Baquero và Zawirski phát triển khoảng năm 2011. CRDT là cấu trúc dữ liệu được đảm bảo toán học sẽ hội tụ về cùng giá trị bất kể thứ tự merge các cập nhật — miễn là mọi cập nhật rốt cuộc đều được nhận.\n\nNhận thức then chốt là không phải thao tác nào cũng giao hoán (A+B = B+A) hay idempotent (áp dụng hai lần = áp dụng một lần). CRDT được thiết kế sao cho phép merge của nó có tính giao hoán, kết hợp và idempotent (một join-semilattice), và mọi cập nhật chỉ đẩy state \"đi lên\":\n\n**G-Counter (grow-only counter)**: mỗi node duy trì bộ đếm số nguyên riêng. Giá trị counter là vector mọi số đếm theo từng node. Giá trị toàn cục là tổng. Để tăng, cộng 1 vào ô của chính mình. Để merge, lấy max theo từng thành phần. Vì không bao giờ giảm và luôn lấy max, mọi thứ tự merge đều cho cùng kết quả. Nó rất hợp cho bộ đếm like và lượt xem phân tán.\n\n**LWW-Register (last-write-wins register)**: mỗi lần ghi kèm một timestamp. Merge bằng cách lấy giá trị có timestamp cao nhất. Đơn giản và mất dữ liệu — các lần ghi concurrent mất một giá trị — nhưng phù hợp khi giá trị gần nhất là giá trị đúng (cài đặt ưu tiên của người dùng, vị trí hiện tại).\n\n**OR-Set (observed-remove set)**: cho phép thêm và xóa phần tử. Mỗi phần tử nhận một tag duy nhất khi được thêm. Xóa được thực hiện bằng cách xóa mọi tag đã quan sát được. Nếu một phần tử được thêm và xóa đồng thời, thao tác thêm thắng — thao tác xóa chỉ xóa các tag nó quan sát được tại thời điểm xóa. (Paper Dynamo năm 2007 của Amazon xử lý giỏ hàng khác đi — nó giữ các phiên bản concurrent và merge chúng bằng phép hợp, đó là lý do món hàng đã xóa có thể xuất hiện lại; OR-Set sửa chính xác điều đó.)\n\n**Operational Transformation** là một cách tiếp cận liên quan nhưng khác, dùng trong chỉnh sửa văn bản cộng tác. Thay vì làm cho thao tác giao hoán ở mức cấu trúc dữ liệu, OT biến đổi các thao tác so với các thao tác concurrent để cho ra kết quả tương đương. Google Docs dùng OT với một server trung tâm; các editor cộng tác và local-first mới hơn thường được xây trên các library CRDT như Yjs và Automerge, vì CRDT không cần server trung tâm để sắp thứ tự thao tác và xử lý tốt các khoảng thời gian offline dài."
+    },
+    {
+      "type": "code_example",
+      "explanation": "G-Counter minh họa tính chất cốt lõi của CRDT: merge có tính giao hoán (A.merge(B) = B.merge(A)), kết hợp và idempotent (merge cùng một state hai lần không có tác dụng gì thêm). Chừng nào mọi lần tăng rốt cuộc tới được mọi node, tổng toàn cục luôn đúng. LWW-Register đơn giản hơn nhưng mất dữ liệu — các lần ghi concurrent khiến một lần ghi bị lặng lẽ loại bỏ. Lựa chọn giữa các loại CRDT phụ thuộc vào việc bạn có chấp nhận mất dữ liệu không (LWW ổn với cài đặt ưu tiên của người dùng, nguy hiểm với dữ liệu tài chính).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Linearizability vs. serializability: một phân biệt then chốt",
+      "content": "Hai thuật ngữ này thường xuyên bị nhầm lẫn — kể cả bởi kỹ sư senior và trong interview. Cả hai đều là tính chất về tính đúng đắn, nhưng áp dụng ở các mức abstraction khác nhau.\n\n**Linearizability** là tính chất của **từng thao tác đọc/ghi riêng lẻ**. Nó đòi hỏi các thao tác có vẻ như thực thi tức thời tại một thời điểm thực duy nhất. Mô hình thế giới là một key-value store đơn giản, nơi mỗi thao tác đọc hoặc ghi một giá trị duy nhất.\n\n**Serializability** là tính chất của **transaction** (chuỗi nhiều thao tác). Nó đòi hỏi kết quả thực thi các transaction concurrent tương đương với việc thực thi chúng theo một thứ tự tuần tự nào đó — nhưng thứ tự tuần tự đó không cần khớp với thời gian thực. Một database đạt serializability cho phép bạn chạy `BEGIN; read(x); read(y); write(z); COMMIT;` như một đơn vị nguyên tử, và đảm bảo kết quả như thể mọi transaction chạy lần lượt từng cái một.\n\nMột hệ thống có thể có cái này mà không có cái kia:\n- **Serializable nhưng không linearizable**: một database serializable phục vụ các transaction chỉ đọc từ một replica được cập nhật bất đồng bộ. Mỗi lần đọc thấy một snapshot nhất quán khớp với *một* thứ tự tuần tự nào đó — nhưng là thứ tự cũ, nên một transaction bắt đầu sau khi bạn commit có thể không thấy nó.\n- **Linearizable nhưng không serializable**: một key-value store có get và put trên một key là linearizable nhưng không cung cấp transaction nhiều key. Mỗi thao tác là nguyên tử, nhưng một read-modify-write qua hai key có thể đan xen với thao tác của client khác. (Snapshot isolation là một điểm thứ ba: nó không phải cả hai — nó cho phép write skew, nên nó *không* serializable.)\n\n**Strict serializability** (còn gọi là **strong serializability**) kết hợp cả hai: transaction có vẻ như thực thi tuần tự theo thứ tự thời gian thực. Đây là tiêu chuẩn vàng cho hệ thống transaction: Google Spanner (gọi nó là external consistency) và FoundationDB cung cấp nó trên toàn cluster. Nhiều database \"serializable\" — CockroachDB, PostgreSQL `SERIALIZABLE` đọc từ replica — cho serializability mà không có đầy đủ đảm bảo thời gian thực trong mọi trường hợp.\n\nCho interview: khi ai đó nói 'consistent' trong bối cảnh phân tán, hãy hỏi họ ý nói linearizable read hay serializable transaction. Đó là hai thứ khác nhau giải quyết hai vấn đề khác nhau."
+    },
+    {
+      "type": "diagram",
+      "caption": "Linearizability và serializability là hai tính chất trực giao. Strict serializability kết hợp cả hai. Phần lớn database một node cung cấp serializability; phần lớn key-value store phân tán cung cấp linearizability; các hệ như Spanner đạt strict serializability trên toàn cầu."
+    },
+    {
+      "type": "explanation",
+      "title": "Chọn đúng mô hình: khung quyết định thực tế",
+      "content": "Consistency model phù hợp phụ thuộc vào ba yếu tố: **yêu cầu về tính đúng đắn** của dữ liệu, **pattern truy cập** (đọc nhiều vs. ghi nhiều, cục bộ vs. toàn cầu), và **ngân sách latency và availability**.\n\n**Dùng linearizability khi**: sai sót về tính đúng đắn có hậu quả nghiêm trọng. Leader election (etcd: mỗi lúc chỉ một leader), distributed lock, giao dịch tài chính (rút tiền ATM, chuyển khoản), quản lý cấu hình (mọi node phải thấy cùng cấu hình), và giữ chỗ tồn kho khi bán vượt là không chấp nhận được. Ngân sách: overhead latency 2–10x so với eventual consistency; hy sinh availability khi có partition.\n\n**Dùng causal consistency khi**: bạn cần thứ tự trực giác mà không phải trả toàn bộ cái giá của linearizability. Chuỗi bình luận và feed mạng xã hội (trả lời sau bài gốc), chỉnh sửa tài liệu cộng tác, state game nhiều người chơi khi người chơi cần thấy hành động của nhau theo thứ tự nhân quả. Ngân sách: overhead vừa phải từ vector clock; availability cao hơn linearizability.\n\n**Dùng read-your-writes khi**: người dùng tương tác với dữ liệu của chính họ. Cập nhật profile, trang cài đặt, nội dung giỏ hàng, nội dung do người dùng tạo. Đây thường là mức tối thiểu thực tế cho mọi hệ thống hướng người dùng. Ngân sách: có thể đạt rẻ qua sticky session hoặc cache phía client.\n\n**Dùng eventual consistency khi**: dữ liệu tự nhiên hội tụ, lượt đọc áp đảo lượt ghi, hoặc latency thấp toàn cầu là bắt buộc. Giá trong danh mục sản phẩm (hiếm khi cập nhật, được đọc hàng tỷ lần), số like/lượt xem trên mạng xã hội, bản ghi DNS, asset tĩnh cache trên CDN, bộ đếm analytics, index full-text search. Ngân sách: chấp nhận dữ liệu cũ vài giây hoặc vài phút; cài đặt giải quyết xung đột.\n\n**Một heuristic hữu ích**: hãy hỏi 'hậu quả worst case của một lần đọc dữ liệu cũ là gì?' Nếu câu trả lời là 'người dùng thấy thông tin hơi lỗi thời trong chốc lát' — eventual consistency nhiều khả năng ổn. Nếu câu trả lời là 'tiền bị chuyển sai' hoặc 'hai process cùng lấy được một lock' — hãy dùng linearizability.\n\nCũng nhớ rằng **trong cùng một service** bạn có thể dùng các mức consistency khác nhau cho các dữ liệu khác nhau. DynamoDB cho bạn chọn consistency theo từng lần đọc. Cassandra cho bạn đặt consistency level theo từng query với các tham số điều chỉnh được (ONE, QUORUM, ALL). Bạn không cần chọn một mô hình duy nhất cho toàn bộ hệ thống."
+    },
+    {
+      "type": "callout",
+      "content": "**Phần mở rộng PACELC**: CAP theorem chỉ mô tả hành vi khi network partition, nhưng partition là sự kiện hiếm. **Mô hình PACELC** (Daniel Abadi, 2012) bổ sung nhận xét rằng ngay cả khi không có Partition, hệ phân tán vẫn đối mặt với trade-off giữa **L**atency và **C**onsistency. Cassandra được xếp loại PA/EL (khả dụng khi partition, latency thấp lúc bình thường). Spanner được xếp loại PC/EC (nhất quán khi partition, và lúc bình thường cũng nhất quán với cái giá là latency). DynamoDB mặc định là PA/EL, là PC/EC khi dùng ConsistentRead. PACELC là mô hình đầy đủ hơn vì nó nắm bắt trade-off latency luôn hiện diện mà CAP bỏ qua, và giải thích vì sao kỹ sư thực tế quan tâm tới consistency ngay cả khi mạng của họ khỏe mạnh."
+    },
+    {
+      "type": "callout",
+      "content": "**Bẫy interview và kiến trúc cần thuộc lòng**: (1) 'Linearizability không phải serializability' — một cái về thao tác riêng lẻ, cái kia về transaction; nhầm lẫn chúng cho thấy hiểu biết nông. (2) 'Eventual consistency không có nghĩa là nhanh' — một replica có thể trễ vài phút khi tải ghi nặng; eventual không phải là đảm bảo về latency. (3) 'CAP giả định lựa chọn nhị phân' — hệ thống thực tế tinh chỉnh consistency level theo từng thao tác; DynamoDB, Cassandra và MongoDB đều hỗ trợ tinh chỉnh theo từng query. (4) 'Read-your-writes không miễn phí' — sticky session tạo hot spot; version token thêm độ phức tạp; cache phía client thêm bug hết hạn TTL. (5) 'Quorum read không phải lúc nào cũng cho linearizability' — trong các hệ kiểu Dynamo, R+W > N chỉ đảm bảo chồng lấn với lần ghi *đã được xác nhận* gần nhất. Sloppy quorum, last-write-wins với đồng hồ lệch, và các lần ghi thất bại một phần đều phá vỡ linearizability; đọc linearizable cần read-repair đồng bộ (write-back của ABD), và read-modify-write linearizable cần consensus hoặc compare-and-set. (6) Last-write-wins lặng lẽ loại bỏ các lần ghi concurrent — đừng bao giờ dùng LWW cho dữ liệu tài chính hay bất kỳ dữ liệu nào mà các lần ghi concurrent đều phải được giữ lại."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Linearizability** (mạnh nhất) khiến hệ phân tán hành xử như một server duy nhất — mọi thao tác có vẻ tức thời và có thứ tự toàn cục theo thời gian thực — với cái giá là phối hợp dựa trên quorum ở mỗi lần ghi và không khả dụng khi partition. Dùng cho lock, leader election và thao tác tài chính.",
+        "**Sequential consistency** giữ một thứ tự thao tác toàn cục duy nhất mà không có ràng buộc thời gian thực — liên quan tới memory model của CPU và các primitive concurrency của ngôn ngữ, hiếm khi được cài đặt tường minh trong database phân tán.",
+        "**Causal consistency** giữ thứ tự nhân quả (trả lời sau bài gốc, response sau request) mà không cần phối hợp toàn cục, dùng vector clock để theo dõi phụ thuộc nhân quả. Nó là mô hình mạnh nhất đạt được với availability cao.",
+        "**Session guarantee** (read-your-writes, monotonic reads, monotonic writes, writes-follow-reads) áp dụng trong phạm vi một session client và cung cấp mức consistency hữu ích tối thiểu cho ứng dụng tương tác hướng người dùng mà không cần phối hợp tốn kém giữa các node.",
+        "**Eventual consistency** (yếu nhất) chỉ đảm bảo hội tụ khi không có lần ghi mới — không giới hạn thời gian, không đảm bảo thứ tự. Nó tối đa hóa availability và latency thấp, phù hợp cho like, lượt xem, DNS, asset CDN và bộ đếm analytics. Xung đột được giải quyết qua LWW, CRDT hoặc sibling dùng vector clock.",
+        "**CRDT** là cấu trúc dữ liệu có phép merge giao hoán, kết hợp và idempotent — đảm bảo hội tụ bất kể thứ tự merge. Chúng là lời giải có nguyên tắc cho bài toán xung đột trong hệ eventual consistency.",
+        "**CAP theorem** nói rằng khi network partition bạn phải chọn consistency hoặc availability — hệ CP (etcd, ZooKeeper) chặn lại; hệ AP (Cassandra, DynamoDB mặc định) phục vụ dữ liệu cũ. **PACELC** mở rộng điều này: ngay cả khi không có partition, mọi hệ phân tán đều đánh đổi latency lấy consistency. **Linearizability không phải serializability** — cái trước áp dụng cho thao tác riêng lẻ, cái sau cho transaction nhiều thao tác; strict serializability kết hợp cả hai."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Consistency model nào đảm bảo mọi thao tác có vẻ như diễn ra tại một thời điểm thực duy nhất giữa lúc gọi và lúc nhận response, hiện rõ toàn cục với mọi client?",
+      "options": [
+        "Eventual consistency",
+        "Linearizability",
+        "Causal consistency",
+        "Sequential consistency"
+      ],
+      "explanation": "Linearizability (còn gọi là atomic consistency hay strong consistency) đòi hỏi mọi thao tác có vẻ như thực thi tức thời tại một thời điểm thực duy nhất. Nó áp đặt một thứ tự toàn phần được thống nhất toàn cục, tôn trọng thứ tự theo đồng hồ thực. Sequential consistency cũng có thứ tự toàn cục nhưng không cần khớp với thứ tự thời gian thực, nên yếu hơn."
+    },
+    {
+      "id": "q2",
+      "question": "Một người dùng đăng bình luận trên mạng xã hội và lập tức refresh feed của mình — họ thấy bình luận của mình. Tuy nhiên, bạn của họ xem cùng feed đó một giây sau vẫn chưa thấy. Kịch bản này mô tả consistency model nào đối với người dùng gốc?",
+      "options": [
+        "Linearizability",
+        "Monotonic reads",
+        "Read-your-writes",
+        "Causal consistency"
+      ],
+      "explanation": "Read-your-writes (read-your-own-writes) đảm bảo rằng sau khi một client ghi, chính client đó sẽ luôn thấy lần ghi đó hoặc giá trị mới hơn ở các lần đọc sau — ngay cả khi client khác vẫn thấy dữ liệu cũ. Đây chính xác là kịch bản được mô tả: tác giả thấy bài của mình ngay trong khi người khác bị trễ."
+    },
+    {
+      "id": "q3",
+      "question": "Phép merge phải có tính chất gì để một cấu trúc dữ liệu được coi là CRDT (Conflict-free Replicated Data Type)?",
+      "options": [
+        "Merge phải luôn ưu tiên giá trị từ node có ID cao hơn",
+        "Merge phải được một bộ điều phối trung tâm thực hiện để tránh xung đột",
+        "Merge phải cần một quorum node đồng ý",
+        "Merge phải có tính giao hoán, kết hợp và idempotent"
+      ],
+      "explanation": "Với CRDT, phép merge (join) phải giao hoán (A merge B = B merge A), kết hợp ((A merge B) merge C = A merge (B merge C)) và idempotent (A merge A = A). Ba tính chất này đảm bảo toán học rằng bất kỳ thứ tự merge nào của bất kỳ tập con cập nhật nào rốt cuộc cũng cho cùng kết quả ở mọi replica, không cần phối hợp."
+    },
+    {
+      "id": "q4",
+      "question": "Tùy chọn `ConsistentRead: true` của DynamoDB cung cấp mức consistency nào?",
+      "options": [
+        "Linearizable read",
+        "Sequential consistency",
+        "Eventual consistency",
+        "Causal consistency"
+      ],
+      "explanation": "ConsistentRead: true của DynamoDB buộc lần đọc được phục vụ bởi node giữ partition primary (leader), đảm bảo nó phản ánh lần ghi đã commit gần nhất — đây là một linearizable read. Nó tốn gấp đôi read capacity unit so với lần đọc eventually consistent mặc định, vốn có thể được bất kỳ replica nào phục vụ, kể cả replica bị trễ."
+    },
+    {
+      "id": "q5",
+      "question": "Alice đăng 'Mình vừa ghi bàn!' và Bob trả lời 'Chúc mừng Alice!'. Dưới causal consistency, điều nào sau đây được đảm bảo?",
+      "options": [
+        "Mọi node thấy cả hai bài cùng lúc",
+        "Mọi node thấy bài của Alice trước câu trả lời của Bob",
+        "Bài của Alice và câu trả lời của Bob được xử lý theo thứ tự thời gian thực toàn cục",
+        "Câu trả lời của Bob bị từ chối cho tới khi bài của Alice được một quorum xác nhận"
+      ],
+      "explanation": "Causal consistency đảm bảo rằng nếu thao tác A đi trước thao tác B theo nhân quả (câu trả lời của Bob phụ thuộc nhân quả vào bài của Alice, vì Bob đã đọc bài trước khi trả lời), thì mọi node phải thấy A trước B. Nó không đòi hỏi thứ tự thời gian thực, giao đồng thời hay xác nhận quorum — nó chỉ áp đặt thứ tự phụ thuộc nhân quả."
+    },
+    {
+      "id": "q6",
+      "question": "CAP theorem nói rằng một hệ phân tán phải hy sinh điều gì khi network partition?",
+      "options": [
+        "Hoặc throughput hoặc durability",
+        "Hoặc latency hoặc partition tolerance",
+        "Hoặc consistency hoặc availability",
+        "Hoặc atomicity hoặc isolation"
+      ],
+      "explanation": "CAP theorem: khi network partition (P), một hệ phân tán phải chọn giữa Consistency (C — trả về lần ghi gần nhất hoặc một lỗi) và Availability (A — trả về một response, dù có thể là dữ liệu cũ). Vì network partition là không tránh khỏi trong hệ thống thực tế, mọi database phân tán đều ngầm chọn giữa CP hoặc AP khi partition."
+    },
+    {
+      "id": "q7",
+      "question": "Khác biệt then chốt giữa linearizability và serializability là gì?",
+      "options": [
+        "Linearizability áp dụng cho transaction nhiều thao tác; serializability áp dụng cho từng lần đọc và ghi",
+        "Serializability luôn là đảm bảo mạnh hơn linearizability trong mọi bối cảnh",
+        "Chúng là hai thuật ngữ tương đương cho cùng một đảm bảo và dùng thay thế nhau được trong tài liệu database",
+        "Linearizability áp dụng cho thao tác riêng lẻ với thứ tự thời gian thực; serializability áp dụng cho transaction nhiều thao tác xuất hiện theo một thứ tự tuần tự nào đó"
+      ],
+      "explanation": "Linearizability là về từng lần đọc/ghi riêng lẻ có vẻ nguyên tử với ràng buộc thời gian thực. Serializability là một tính chất isolation của transaction — các transaction concurrent có vẻ như thực thi theo một thứ tự tuần tự nào đó (không nhất thiết theo thời gian thực). Strict serializability kết hợp cả hai. Một hệ thống có thể serializable nhưng không linearizable (transaction chỉ đọc được phục vụ từ snapshot replica cũ), hoặc linearizable nhưng không serializable (thao tác một key nguyên tử nhưng không có transaction nhiều key)."
+    },
+    {
+      "id": "q8",
+      "question": "Phương án nào mô tả tốt nhất đóng góp của mô hình PACELC so với CAP theorem?",
+      "options": [
+        "PACELC cho thấy ngay cả khi không có partition, hệ phân tán vẫn phải đánh đổi latency với consistency",
+        "PACELC chứng minh partition tolerance là tùy chọn trong môi trường cloud hiện đại",
+        "PACELC đưa vào tính chất thứ tư của CAP: hội tụ rốt cuộc",
+        "PACELC thay thế CAP bằng cách chứng minh rằng luôn đạt được cả consistency lẫn availability"
+      ],
+      "explanation": "PACELC (Daniel Abadi, 2010/2012) mở rộng CAP bằng nhận xét rằng ngay cả khi không có Partition (trường hợp vận hành bình thường), hệ phân tán vẫn đối mặt với trade-off giữa Latency (L) và Consistency (C). CAP chỉ mô tả hành vi trong các sự kiện partition hiếm hoi; PACELC nắm bắt trade-off kỹ thuật luôn hiện diện, giải thích vì sao các hệ như Spanner chấp nhận latency cao hơn để có consistency còn Cassandra chấp nhận không nhất quán để có latency thấp hơn."
+    },
+    {
+      "id": "q9",
+      "question": "Một CRDT G-Counter có hai node. Node A có số đếm theo từng node là [5, 2] và Node B có [3, 7]. Sau khi hai node merge với nhau, tổng toàn cục cuối cùng mà value() trả về là bao nhiêu?",
+      "options": [
+        "7",
+        "10",
+        "12",
+        "17"
+      ],
+      "explanation": "Merge của G-Counter lấy max theo từng thành phần: [max(5,3), max(2,7)] = [5, 7]. value() toàn cục cộng mọi ô: 5 + 7 = 12. Kết quả phản ánh 5 lần tăng ở Node A và 7 lần tăng ở Node B, không bị đếm trùng. Phép merge là idempotent — merge lại lần nữa cho cùng kết quả."
+    },
+    {
+      "id": "q10",
+      "question": "Một client muốn có read-your-writes với DynamoDB mà không trả tiền cho ConsistentRead có thể làm bằng cách:",
+      "options": [
+        "Dùng distributed transaction cho mọi cặp đọc-ghi",
+        "Luôn định tuyến lần đọc tới một replica khác với replica đã nhận lần ghi",
+        "Cache các lần ghi tại chỗ để các lần đọc sau của cùng client kiểm tra cache trước database",
+        "Chờ cố định 5 giây sau mỗi lần ghi rồi mới đọc"
+      ],
+      "explanation": "Cache lần ghi phía client đạt read-your-writes mà không phải trả cho consistent read tốn kém. Sau một lần ghi, client lưu giá trị đã ghi vào một cache trong bộ nhớ với TTL đủ dài để vượt qua replication lag thông thường. Các lần đọc sau kiểm tra cache trước — nếu cache hit, client trả về giá trị chính nó đã ghi. Cách này có phạm vi session: client hay process khác không dùng chung cache này, nên chúng có thể vẫn thấy dữ liệu cũ (điều này chấp nhận được với read-your-writes)."
+    }
+  ]
+}

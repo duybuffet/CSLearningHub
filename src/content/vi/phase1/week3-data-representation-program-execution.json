@@ -1,0 +1,235 @@
+{
+  "sourceHash": "76d36ee4e1e8",
+  "title": "Chương trình được thực thi thế nào (Program Execution)",
+  "tagline": "Từ source code tới process đang chạy — compiler, interpreter, JIT engine và V8 biến văn bản của bạn thành lệnh máy ra sao.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Bạn viết một hàm bằng JavaScript, Python hay C++. Bạn bấm chạy. Một tích tắc sau, kết quả hiện ra. Chuyện gì đã xảy ra giữa hai khoảnh khắc đó?\n\nKhoảng cách giữa source code con người đọc được và mã máy CPU thực thi được không được vượt qua trong một bước. Đó là một pipeline nhiều giai đoạn gồm lexer, parser, optimizer, linker, loader và runtime engine — mỗi thứ thêm một lớp trừu tượng giúp việc lập trình khả thi, đồng thời che đi sự phức tạp cơ học khổng lồ. Hiểu pipeline này không phải chuyện hàn lâm: nó giải thích vì sao C đã biên dịch thường chạy nhanh hơn CPython 10–100 lần trên các vòng lặp chặt, vì sao V8 (JS engine của Chrome) có thể tiệm cận tốc độ C với code nóng, vì sao chương trình của bạn crash bằng segfault chứ không phải exception, và vì sao một số ngôn ngữ cần thời gian 'khởi động' (warm-up) trước khi đạt hiệu năng đỉnh.\n\nBài này đi theo một đoạn source code trên hành trình từ file văn bản tới process đang chạy. Ta sẽ đi qua bốn mô hình thực thi chính — **biên dịch ra mã máy**, **thông dịch**, **bytecode với virtual machine**, và **biên dịch just-in-time** — rồi zoom vào engine JavaScript V8 như một ví dụ cụ thể, hiện đại cho cách tiếp cận tinh vi nhất: JIT nhiều tầng với tối ưu suy đoán (speculative optimization) và deoptimization. Cuối cùng, ta xem process trông thế nào trong bộ nhớ khi chạy: stack, heap, code segment, và vì sao stack overflow xảy ra.\n\nĐến cuối bài, khi ai đó nói 'JavaScript là ngôn ngữ thông dịch', bạn sẽ biết đó là một cách nói đơn giản hóa từ thập niên 1990 — và bạn sẽ giải thích chính xác được V8 thực sự làm gì thay vào đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bốn mô hình thực thi chính: biên dịch, thông dịch, bytecode+VM, và JIT"
+    },
+    {
+      "type": "analogy",
+      "title": "Sách công thức và người hướng dẫn nấu ăn trực tiếp",
+      "content": "Hãy hình dung bạn muốn nấu một món Pháp phức tạp. Bạn có vài lựa chọn.\n\n**Lựa chọn 1 — Sách công thức (biên dịch):** Trước khi bắt đầu nấu, một chuyên gia song ngữ dịch toàn bộ công thức tiếng Pháp sang tiếng mẹ đẻ của bạn, tối ưu các bước cho đúng căn bếp và dụng cụ của bạn, rồi in ra một tờ hướng dẫn cuối cùng. Mỗi lần nấu món đó, bạn làm theo thẳng tờ hướng dẫn đã tối ưu — không cần dịch nữa. Việc dịch ban đầu mất 10 phút, nhưng mọi lần nấu sau đều nhanh nhất có thể.\n\n**Lựa chọn 2 — Người hướng dẫn trực tiếp (thông dịch):** Một đầu bếp người Pháp đứng cạnh bạn và dịch từng bước một, chỉ khi bạn tới bước đó. Không phải chờ lúc đầu, nhưng bước nào cũng tốn công dịch. Nấu cùng món đó 100 lần nghĩa là phải dịch lại toàn bộ 100 lần.\n\n**Lựa chọn 3 — Ghi chú soạn sẵn (bytecode + VM):** Đầu bếp dịch công thức tiếng Pháp sang một ký hiệu trung gian đơn giản — không phải tiếng Việt, không phải tiếng Pháp, mà là một bộ ký hiệu nấu ăn phổ quát mà các thiết bị trong bếp của bạn hiểu được. Các thiết bị đó (VM) sau đó thực thi bộ ký hiệu. Nhanh hơn dịch trực tiếp, nhưng vẫn không nhanh bằng Lựa chọn 1 vì các thiết bị là một lớp nằm trên vật lý thô của cái lò.\n\n**Lựa chọn 4 — Người hướng dẫn biết thích nghi (JIT):** Người hướng dẫn bắt đầu dịch trực tiếp như Lựa chọn 2, nhưng để ý xem bạn lặp lại những bước nào nhiều nhất. Với những bước nóng đó, họ dừng lại và soạn một tấm thẻ in sẵn, tối ưu hoàn toàn bằng tiếng mẹ đẻ của bạn. Sau đủ số lần lặp, các thao tác bạn làm thường xuyên nhất chạy với tốc độ gần bằng Lựa chọn 1, mà không phải chờ lúc khởi đầu. Đó là biên dịch JIT: thông dịch lúc đầu, rồi dùng mã máy cho các hot path sau khi đã profile."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 1: phân tích từ vựng (tokenization)",
+      "content": "Giai đoạn đầu tiên của mọi bộ xử lý ngôn ngữ — compiler hay interpreter — là **phân tích từ vựng (lexical analysis)** (còn gọi là *scanning* hay *tokenization*). Lexer đọc các ký tự source thô và gom chúng thành **token**: các đơn vị có nghĩa của ngôn ngữ.\n\nVới đoạn source `let x = 42 + y;`, một lexer JavaScript sinh ra luồng token:\n```\nKeyword('let')  Identifier('x')  Operator('=')  Number(42)  Operator('+')  Identifier('y')  Punctuation(';')\n```\n\nLexer bỏ đi khoảng trắng và comment (chúng không phải token). Nó nhận diện literal số (số nguyên, số thực, hex), literal chuỗi (kèm escape sequence), keyword (`if`, `while`, `let`), identifier (tên biến), toán tử (`+`, `===`, `=>`) và dấu câu (`{`, `;`, `(`).\n\nLexer thường được hiện thực bằng máy trạng thái điều khiển bởi biểu thức chính quy. Lexer hiện đại chạy một lượt tuyến tính duy nhất qua source, nên rất nhanh — cỡ vài mili giây cho mỗi megabyte JavaScript.\n\n**Vì sao tách riêng giai đoạn lexer?** Tách tokenization khỏi parsing giúp parser đơn giản hơn. Parser thấy một luồng token đã có kiểu, gọn gàng, thay vì ký tự thô, nên không phải xử lý khoảng trắng, bỏ comment hay so khớp mẫu ở mức ký tự bên trong các luật ngữ pháp."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 2: parsing và Abstract Syntax Tree",
+      "content": "**Parser** nhận luồng token và dựng nên một **Abstract Syntax Tree (AST — cây cú pháp trừu tượng)** — một cấu trúc dữ liệu dạng tree biểu diễn cấu trúc ngữ pháp của chương trình. AST là nền móng cho mọi thứ phía sau: kiểm tra kiểu, tối ưu, sinh code và thông dịch.\n\nVới `let x = 42 + y;`, parser sinh ra một tree như:\n```\nVariableDeclaration\n  kind: 'let'\n  declarations:\n    VariableDeclarator\n      id: Identifier('x')\n      init: BinaryExpression\n        operator: '+'\n        left: Literal(42)\n        right: Identifier('y')\n```\n\nTree này nắm được thứ tự ưu tiên và tính kết hợp: trong `2 + 3 * 4`, node `+` là gốc với `2` là con trái và node `3 * 4` là con phải — nên phép nhân được tính trước.\n\n**Chiến lược parsing:** Hầu hết ngôn ngữ dùng **recursive descent parser** (parser đệ quy đi xuống) hoặc một parser sinh ra từ ngữ pháp hình thức (LALR(1), LR(1)). Các compiler production — V8, GCC, Clang, Go — chủ yếu dùng recursive descent viết tay để có hiệu năng tốt và thông báo lỗi dễ hiểu hơn.\n\n**Lỗi parse:** Nếu luồng token không khớp ngữ pháp của ngôn ngữ, parser báo syntax error. `let x =;` là syntax error vì sau `=` cần một biểu thức, không phải `;`.\n\n**Công cụ AST bạn có thể dùng:** Các package npm `acorn` và `@babel/parser` (cùng các parser viết bằng Rust nhanh hơn nhiều trong SWC và Oxc) parse JavaScript thành AST (theo đặc tả ESTree). Bạn có thể xem AST của bất kỳ đoạn JS nào tại `astexplorer.net`. Babel, ESLint và TypeScript đều hoạt động bằng cách biến đổi AST — các luật lint kiểm tra AST tìm pattern có vấn đề, còn transpile viết lại AST cho các môi trường đích cũ hơn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Từ văn bản source tới token tới Abstract Syntax Tree — hai giai đoạn biên dịch đầu tiên"
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 3: phân tích ngữ nghĩa, IR và tối ưu",
+      "content": "Sau khi parse, compiler thực hiện **phân tích ngữ nghĩa (semantic analysis)**: kiểm tra ý nghĩa của AST vượt ra ngoài ngữ pháp. Việc này gồm:\n- **Kiểm tra kiểu:** Trong ngôn ngữ kiểu tĩnh (C, Java, TypeScript ở bước compile), xác minh các biểu thức có kiểu tương thích (bạn không thể cộng một chuỗi với một struct).\n- **Phân giải scope:** Xác định mỗi identifier trỏ tới khai báo nào (che biến — shadowing, closure, hoisting trong JavaScript).\n- **Phân tích luồng điều khiển:** Kiểm tra code không bao giờ chạy tới, dùng biến chưa khởi tạo, và thiếu câu lệnh return.\n\nSau đó AST được hạ xuống thành một **Intermediate Representation (IR — biểu diễn trung gian)** — một dạng cấp thấp hơn, đều đặn hơn, dễ phân tích và tối ưu hơn AST. Các dạng IR phổ biến:\n- **Three-Address Code / SSA (Static Single Assignment):** Mỗi biến được gán đúng một lần. Khiến việc phân tích luồng dữ liệu trở nên dễ dàng. Được GCC, LLVM, V8 TurboFan dùng.\n- **Bytecode:** Một chuỗi gọn các lệnh của virtual machine. Được CPython, Java, .NET CLR, và tầng Ignition của V8 dùng.\n\n**Các lượt tối ưu (optimization pass)** làm việc trên IR, gồm:\n- **Constant folding:** Thay `2 * 3` bằng `6` ngay lúc biên dịch.\n- **Loại bỏ dead code:** Xóa code không bao giờ có thể chạy.\n- **Inlining:** Thay một lời gọi hàm bằng thân hàm, loại bỏ chi phí gọi hàm và mở đường cho tối ưu tiếp xuyên qua ranh giới lời gọi.\n- **Loop invariant code motion:** Đưa các phép tính không đổi bên trong vòng lặp ra trước vòng lặp.\n- **Cấp phát register:** Ánh xạ biến của chương trình vào register của CPU (một tài nguyên có hạn) để giảm tối đa truy cập bộ nhớ.\n\nTối ưu là nơi các compiler như Clang/LLVM tạo nên danh tiếng: một bản build release với `-O3` có thể biến code dễ đọc thành assembly trông chẳng giống source chút nào nhưng lại nhanh hơn đáng kể."
+    },
+    {
+      "type": "explanation",
+      "title": "Biên dịch ahead-of-time: dịch ra mã máy trước khi chạy",
+      "content": "**Biên dịch ahead-of-time (AOT)** dịch source code ra mã máy gốc (native) trước khi chương trình chạy. Đầu ra là một file nhị phân chứa các lệnh mà CPU thực thi trực tiếp được — không interpreter, không bộ dịch lúc runtime.\n\n**Pipeline biên dịch cho C/C++ (GCC/Clang):**\n1. **Preprocessor:** Xử lý `#include`, `#define`, biên dịch có điều kiện. Sinh ra một file C duy nhất đã được khai triển.\n2. **Front-end của compiler:** Lexing, parsing, phân tích ngữ nghĩa → IR (LLVM IR hoặc GCC GIMPLE).\n3. **Optimizer:** Nhiều lượt qua IR: inlining, loop unrolling, vector hóa, loại bỏ dead code.\n4. **Back-end sinh code:** Chọn lệnh máy cho kiến trúc CPU đích (x86-64, ARM64, RISC-V). Thực hiện cấp phát register và sắp xếp lệnh.\n5. **Assembler:** Đổi văn bản assembly thành **object file** (`.o`), chứa mã máy nhưng còn các tham chiếu chưa được phân giải tới hàm bên ngoài.\n6. **Linker:** Gộp nhiều file `.o` và các thư viện lưu trữ (`.a`, `.so`/`.dll`) thành file thực thi cuối cùng, phân giải mọi tham chiếu chéo giữa các file. Sinh ra file nhị phân cuối cùng.\n7. **Loader:** Lúc chạy, hệ điều hành map file thực thi vào bộ nhớ, dynamic linker (`ld.so` trên Linux, `dyld` trên macOS) nạp các shared library và phân giải symbol của chúng, rồi quyền điều khiển nhảy tới entry point (`_start`), nơi khởi tạo C runtime và sau đó gọi `main`.\n\n**Ưu điểm của AOT:**\n- Hiệu năng runtime tối đa: mọi phân tích và tối ưu đều diễn ra trước khi thực thi.\n- Latency dễ đoán: không có JIT warm-up, không có GC pause (với ngôn ngữ không có GC).\n- Ít phụ thuộc runtime: một file thực thi C chỉ cần hệ điều hành và các shared library của nó.\n\n**Nhược điểm:**\n- Thời gian build lâu hơn (vài giây tới vài phút với dự án lớn).\n- Gắn với nền tảng: một file nhị phân biên dịch cho x86-64 Linux không chạy được trên macOS ARM.\n- Phân tích tĩnh lúc biên dịch phải thận trọng — nó không nhìn thấy giá trị thực lúc runtime. (**Profile-guided optimization**, PGO, thu hẹp khoảng cách này bằng cách đưa một profile đã ghi lại ngược vào quá trình build.)"
+    },
+    {
+      "type": "explanation",
+      "title": "Thông dịch: thực thi mà không biên dịch",
+      "content": "Một **interpreter** thuần túy thực thi source code (hoặc AST) trực tiếp mà không dịch nó ra mã máy trước. Với mỗi câu lệnh, nó đọc lệnh và ngay lập tức thực hiện hành động tương ứng.\n\n**Tree-walking interpreter (dạng đơn giản nhất):** Duyệt AST một cách đệ quy. Khi gặp một node `BinaryExpression` với toán tử `+`, tính đệ quy con trái và con phải, rồi cộng kết quả. Các phiên bản Ruby đời đầu (< 1.9) và AWK nguyên bản hoạt động theo cách này.\n\n**Ưu điểm:**\n- Không tốn thời gian khởi động (không có pha biên dịch).\n- Dễ hiện thực — vài trăm dòng code là thông dịch được một ngôn ngữ đơn giản.\n- Tuyệt vời cho môi trường REPL và scripting, nơi bạn chạy code một lần.\n- Cho phép các tính năng hoàn toàn động: `eval` lúc runtime, kiểu động, monkey-patching.\n\n**Nhược điểm — chi phí thông dịch:**\nVới mỗi thao tác, interpreter phải: lấy lệnh kế tiếp từ AST hoặc bytecode, decode loại của nó, dispatch tới handler đúng, rồi mới thực hiện phép tính thực sự. Chi phí dispatch này thường khiến thông dịch thuần túy **chậm hơn 10–100 lần** so với code đã biên dịch với tác vụ nặng CPU. Một vòng lặp chặt cộng hai số nguyên hàng triệu lần chỉ tốn vài nano giây cho phép cộng thật, nhưng phải trả chi phí dispatch ở mọi vòng lặp.\n\n**Tối ưu: direct threading và computed goto:** Thay vì một câu lệnh `switch` trong vòng lặp interpreter, nhiều interpreter (trong đó có CPython) dùng extension `computed goto` của GCC/Clang để nhảy thẳng tới địa chỉ handler của từng lệnh — loại bỏ cái switch trung tâm và cho bộ dự đoán nhánh một lệnh nhảy gián tiếp riêng cho mỗi handler. (LuaJIT còn đi xa hơn: interpreter của nó được viết tay bằng assembly.)\n\n**Khi nào thông dịch là ổn:** Chương trình nặng I/O (web server chờ query database) dành 99% thời gian để chờ, không phải tính toán. Một interpreter chậm hơn 10 lần chỉ làm request đó chậm hơn ít hơn rất nhiều so với 10 lần tính theo thời gian thực. Đó là lý do Python và Ruby chạy hoàn toàn ổn cho web backend — nút thắt là database hoặc mạng, không phải CPU."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Đoạn này cho thấy đầu ra mang tính khái niệm của từng giai đoạn biên dịch. Engine V8 thật sinh ra các cấu trúc tương tự bên trong. Bạn có thể chạy `node --print-bytecode` trên bất kỳ script nào để xem bytecode Ignition thật, hoặc vào astexplorer.net để xem AST của bất kỳ đoạn JavaScript nào.",
+      "label": "Trực quan hóa các giai đoạn biên dịch"
+    },
+    {
+      "type": "explanation",
+      "title": "Bytecode và virtual machine",
+      "content": "**Bytecode** là một biểu diễn trung gian gọn, độc lập nền tảng: một chuỗi các lệnh đơn giản, có kiểu, dành cho một **virtual machine (VM — máy ảo)**. Nó trừu tượng hơn mã máy (không có cấp phát register, không có lệnh riêng của nền tảng) nhưng cụ thể hơn AST (tuyến tính, dễ dispatch, gọn).\n\n**Mô hình của Java (hình mẫu tham chiếu):** Compiler Java (`javac`) biến source `.java` thành các file `.class` chứa **bytecode JVM**. Bytecode JVM giống hệt nhau bất kể bạn chạy trên Windows x86, Linux ARM hay macOS. Runtime JVM sau đó thông dịch hoặc JIT-compile bytecode này. Đó là lời hứa 'write once, run anywhere': bytecode là đơn vị độc lập nền tảng.\n\n**Mô hình của Python (CPython):** Source Python (`.py`) được biên dịch thành bytecode (`.pyc`) ở lần import đầu tiên và được interpreter CPython thực thi. VM của CPython là một **stack machine**: hầu hết lệnh push hoặc pop giá trị trên một operand stack. `BINARY_OP` (trước Python 3.11 gọi là `BINARY_ADD`) pop hai giá trị, áp dụng toán tử, và push kết quả. `LOAD_FAST` push một biến cục bộ. Bạn có thể xem bytecode Python bằng `import dis; dis.dis(my_function)`. Từ 3.11, CPython là interpreter *specializing adaptive* (nó viết lại các bytecode nóng thành phiên bản chuyên biệt theo kiểu), và 3.13+ có kèm một JIT copy-and-patch thử nghiệm, tắt theo mặc định.\n\n**Lợi ích của bytecode + VM:**\n- **Tính di động:** Phát hành một file bytecode, chạy trên mọi nền tảng có cài VM.\n- **Nhanh hơn thông dịch AST:** Dispatch bytecode rẻ hơn duyệt tree. Một mảng tuyến tính các opcode nhỏ thân thiện với cache hơn một tree gồm các node cấp phát trên heap.\n- **Dễ tối ưu hơn:** VM có thể profile việc thực thi bytecode và JIT-compile các hot path (xem phần tiếp theo).\n- **An toàn:** VM thực thi các bất biến (giới hạn mảng, an toàn kiểu trong Java) trước khi lệnh CPU thực sự chạy, cho phép garbage collection và xử lý exception an toàn.\n\n**Cái giá:** Bản thân VM là một chương trình chạy trên CPU. Mỗi lệnh bytecode tốn ít nhất vài lệnh native. Với tính toán số, thông dịch bytecode không có JIT thường chậm hơn code native đã tối ưu 5–50 lần, tùy VM và workload."
+    },
+    {
+      "type": "explanation",
+      "title": "Biên dịch just-in-time: lấy cái tốt của cả hai",
+      "content": "**Biên dịch just-in-time (JIT)** profile code đang chạy và biên dịch các hot path ra mã máy native *trong lúc* chương trình thực thi — kết hợp khởi động nhanh của thông dịch với hiệu năng đỉnh của biên dịch ahead-of-time.\n\n**Ý tưởng cốt lõi:** Bắt đầu bằng thông dịch hoặc thực thi bytecode. Đếm số lần mỗi hàm hoặc thân vòng lặp được chạy. Khi một hot path vượt ngưỡng (ví dụ được gọi 1,000 lần), biên dịch nó ra code native đã tối ưu. Các lần gọi sau dùng bản native, chỉ trả chi phí biên dịch một lần.\n\n**JIT nhiều tầng (cách tiếp cận hiện đại):** Các JIT engine hiện đại dùng nhiều tầng biên dịch:\n1. **Tầng 0 — Interpreter/bytecode cơ sở:** Thực thi ngay, không biên dịch. Thu thập dữ liệu profile (type feedback).\n2. **Tầng 1 — Baseline JIT:** Biên dịch nhẹ, nhanh ra code native với rất ít tối ưu. Giảm chi phí thông dịch nhanh chóng (10–100ms sau khi khởi động).\n3. **Tầng 2 — Optimizing JIT:** Biên dịch tối ưu đầy đủ dựa trên dữ liệu profile. Áp dụng các tối ưu mạnh tay, giả định rằng các kiểu đã quan sát được sẽ tiếp tục đúng. Sinh ra code gần tốc độ C cho các vòng lặp nặng về số.\n\n**Tối ưu suy đoán (speculative optimization):** Optimizing JIT có thể giả định rằng một biến luôn là số nguyên sẽ tiếp tục là số nguyên. Nó sinh code số nguyên chuyên biệt thay vì code tổng quát xử lý mọi kiểu. Giả định này gọi là một **speculation**.\n\n**Deoptimization:** Nếu một speculation hóa ra sai (biến trở thành chuỗi), JIT phải **deoptimize**: bỏ code native đi, dựng lại trạng thái của interpreter, và quay về thông dịch. Việc này tốn thời gian nhưng hiếm xảy ra với code có kiểu ổn định.\n\n**Hidden class (V8) / inline cache:** Đối tượng JavaScript có kiểu động. V8 theo dõi 'hình dạng' (tên và thứ tự property) của đối tượng và gán cho chúng một **hidden class**. Truy cập property trên các đối tượng cùng hidden class được biên dịch thành phép tra chỉ số mảng đơn giản thay vì tra hash table. Đó là lý do `{x: 1, y: 2}` và `{y: 2, x: 1}` có hidden class khác nhau dù có cùng property — thứ tự thêm vào quan trọng với việc tối ưu."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bốn tầng JavaScript của V8 (2026): Ignition thông dịch và profile, Sparkplug loại bỏ chi phí interpreter, Maglev và TurboFan tối ưu suy đoán — và một guard thất bại sẽ deoptimize về lại Ignition."
+    },
+    {
+      "type": "explanation",
+      "title": "V8 thực thi JavaScript thế nào: đi sâu",
+      "content": "**V8** là JavaScript engine mã nguồn mở do Google phát triển, dùng trong Chrome, Node.js, Deno và Edge. Nó là JIT engine được nghiên cứu nhiều nhất và là một bài học bậc thầy về cách làm một ngôn ngữ kiểu động chạy nhanh.\n\n**Bước 1 — Parsing.** Parser recursive descent viết tay của V8 xử lý cả eager parsing (parse đầy đủ toàn bộ code) và **lazy parsing** (chỉ parse đầy đủ một hàm khi nó được gọi lần đầu), giảm thời gian khởi động với các bundle lớn.\n\n**Bước 2 — Biên dịch ra bytecode Ignition.** AST được biên dịch thành **bytecode Ignition** — ngôn ngữ trung gian dựa trên register của V8 (không phải stack machine). Bytecode dựa trên register làm nhiều việc hơn mỗi lệnh so với bytecode dựa trên stack, giảm tổng số lệnh bytecode và cải thiện hiệu quả cache. Việc biên dịch này nhanh (vài mili giây) và diễn ra trước lần thực thi đầu tiên.\n\n**Bước 3 — Thông dịch bằng Ignition.** Ignition thực thi bytecode bằng một vòng lặp dispatch. Mỗi lệnh bytecode tốn vài chục lệnh native. Đồng thời Ignition thu thập **type feedback**: với mỗi lần truy cập property, phép toán số học và lời gọi hàm, nó ghi lại những kiểu đã xuất hiện. Profile này được lưu trong một **feedback vector** gắn với hàm.\n\n**Bước 4 — Sparkplug (baseline).** Khi một hàm đã ấm lên, Sparkplug (thêm vào năm 2021) dịch thẳng bytecode của nó ra mã máy trong một lượt nhanh duy nhất, không tối ưu gì — nó chỉ loại bỏ chi phí dispatch của interpreter trong khi giữ nguyên bố cục frame và việc thu thập feedback.\n\n**Bước 5 — Maglev và TurboFan (tối ưu).** Các hàm nóng hơn được chuyển cho **Maglev** (có mặt trong Chrome từ 2023), một compiler tối ưu tầng giữa, biên dịch nhanh hơn TurboFan khoảng 10 lần và nhanh chóng sinh ra code tốt. Code nóng nhất được biên dịch lại bằng **TurboFan** (backend của nó được xây lại thành *Turboshaft* trong 2023–24), nhận bytecode cộng type feedback và sinh ra mã máy được tối ưu cao:\n- **Truy cập property chuyên biệt theo shape:** các inline cache ở các tầng thấp đã ghi lại những hidden class mà `obj.x` gặp. Optimizer sinh ra một phép kiểm tra shape nhanh rồi load thẳng tại một offset cố định — `memory[obj + offset_of_x]` — thay vì tra dictionary.\n- **Inlining hàm:** Các hàm nhỏ, hay được gọi được inline tại chỗ gọi, loại bỏ chi phí gọi hàm và cho phép tối ưu xuyên qua ranh giới lời gọi.\n- **Chuyên biệt hóa kiểu:** Nếu `a` và `b` luôn là số nguyên nhỏ (Smi), `a + b` được biên dịch thành một lệnh `ADD` duy nhất cộng một phép kiểm tra tràn. Không chuyên biệt hóa, nó phải kiểm tra kiểu, có thể phải chuyển đổi, và xử lý cả nối chuỗi.\n- **Escape analysis:** Những đối tượng không bao giờ 'thoát' khỏi hàm đã tối ưu (không được lưu lại, trả về, hay truyền cho code không được inline) có thể bị loại bỏ hoàn toàn — các field của chúng được giữ trong register (scalar replacement), nên không có lần cấp phát heap nào cả.\n\n**Bước 6 — Deoptimization.** Code đã tối ưu (Maglev hay TurboFan) có các **guard check** — phép kiểm tra kiểu nhanh trước mỗi thao tác đã tối ưu. Nếu một guard thất bại (ví dụ `a` bỗng dưng là `BigInt` thay vì `number`), V8 deoptimize: nó dựng lại frame interpreter tương đương từ frame đã tối ưu, tiếp tục thực thi trong Ignition từ đúng điểm đó, và ghi lại thông tin kiểu mới đã làm speculation mất hiệu lực. Các lần gọi sau có thể được tối ưu lại với giả định đã cập nhật.\n\n**WebAssembly (Wasm) — một pipeline riêng.** V8 cũng có một engine WebAssembly (không phải một tầng JavaScript). Wasm là một định dạng lệnh nhị phân với kiểu tĩnh và bố cục bộ nhớ dễ đoán. Nó không cần suy luận kiểu, cho phép biên dịch tất định với hiệu năng tối đa. Code C, C++ hay Rust nhạy cảm về hiệu năng có thể biên dịch sang Wasm và chạy trong trình duyệt với tốc độ gần native — né hoàn toàn chi phí kiểu động của JavaScript."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Các pattern này theo đúng hướng dẫn hiệu năng của chính V8. Hàm monomorphic (một shape đối tượng) có inline cache nhanh nhất. Phép tính có kiểu ổn định (toàn số nguyên nhỏ, hoặc toàn double) được dùng lệnh native chuyên biệt. `delete` và việc thêm property sau khi khởi tạo sẽ làm thay đổi hoặc bỏ rơi hidden class. (Lời khuyên cũ về việc đối tượng `arguments` \"giết\" tối ưu có từ thời compiler Crankshaft của V8 trước 2017 — ngày nay rest parameter `...args` đơn giản là lựa chọn rõ ràng hơn.)",
+      "label": "Các pattern tối ưu V8"
+    },
+    {
+      "type": "explanation",
+      "title": "AOT, JIT và thông dịch: trade-off trong nháy mắt",
+      "content": "Giờ ta đã xem kỹ cả ba mô hình thực thi, đây là một bảng so sánh có cấu trúc:\n\n**Thời gian khởi động:**\n- Thông dịch: gần như bằng 0 (thực thi ngay)\n- Bytecode+VM: nhanh (biên dịch bytecode nhanh)\n- JIT: lúc đầu nhanh, đạt tốc độ đỉnh sau warm-up (từ mili giây tới vài giây với hàm JS; từ vài giây tới vài phút với service JVM lớn)\n- AOT: việc biên dịch diễn ra trước khi deploy; khởi động lúc runtime gần như bằng 0\n\n**Hiệu năng đỉnh:**\n- AOT (C, Rust): cao nhất có thể — mọi tối ưu được làm offline với thời gian không giới hạn\n- JIT (V8, HotSpot): tiệm cận AOT với code nóng, kiểu ổn định — thường trong khoảng 1–3 lần so với C đã tối ưu, thỉnh thoảng còn nhanh hơn nhờ profile lúc runtime\n- Bytecode+VM không có JIT: chậm hơn AOT khoảng 5–50 lần với code nặng CPU\n- Thông dịch: chậm hơn AOT 10–100 lần\n\n**Tính di động:**\n- AOT: file nhị phân gắn với kiến trúc\n- JIT/VM: bytecode chạy ở mọi nơi có cài VM\n\n**Tính năng động:**\n- AOT: hạn chế (generic/template, nhưng không đổi kiểu lúc runtime)\n- Thông dịch/JIT: tối đa (eval, dynamic dispatch, đổi kiểu lúc runtime)\n\n**Sử dụng bộ nhớ:**\n- JIT: cao hơn — phải lưu đồng thời bytecode, type feedback và code native\n- AOT: chi phí runtime thấp hơn (không có hạ tầng JIT)\n\n**Ví dụ:**\n- AOT: C, C++, Rust, Go, Swift (thường là vậy), Kotlin/Native, Zig\n- JIT: JavaScript (V8, SpiderMonkey), Java (HotSpot), C# (.NET CLR), Python (PyPy)\n- Bytecode+VM (phần lớn không có JIT): Python (CPython — có JIT thử nghiệm từ 3.13), Ruby (YARV, với compiler YJIT tùy chọn mà Rails bật mặc định), Lua (PUC-Lua)\n- Thông dịch kiểu tree-walking: Ruby đời đầu (≤ 1.8), AWK, shell script\n\n**Ranh giới đang mờ dần:** Dart có cả AOT (bản build release của Flutter) lẫn JIT (hot reload khi phát triển). Java có thể biên dịch AOT bằng GraalVM Native Image, và Project Leyden (JDK 24+) cache việc nạp class và profile trước thời hạn để giảm warm-up. .NET có NativeAOT. ART của Android kết hợp một interpreter, một JIT, và biên dịch AOT có hướng dẫn bằng profile cho code nóng trong lúc điện thoại rảnh."
+    },
+    {
+      "type": "explanation",
+      "title": "Bố cục bộ nhớ lúc runtime: stack, heap, code và data",
+      "content": "Khi một chương trình đang chạy, hệ điều hành cấp cho nó một vùng virtual memory được tổ chức thành các segment riêng biệt. Hiểu bố cục này là thiết yếu để lập luận về lời gọi hàm, biến cục bộ, cấp phát động và stack overflow.\n\n**Bốn vùng bộ nhớ chính:**\n\n**1. Code segment (text segment):** Vùng chỉ đọc chứa các lệnh máy đã biên dịch. Program counter (register PC/IP) trỏ vào vùng này tại lệnh hiện tại. Code do JIT biên dịch được ghi vào một vùng bộ nhớ thực thi riêng (được mmap với quyền execute) lúc runtime.\n\n**2. Data segment:** Chứa biến toàn cục và biến static: `.data` cho các giá trị được khởi tạo tường minh, **BSS** (`.bss`) cho các giá trị khởi tạo bằng 0 (nó không chiếm chỗ trong file — loader chỉ việc map các trang toàn số 0), và `.rodata` cho dữ liệu chỉ đọc như literal chuỗi và hằng số.\n\n**3. Stack:** Một vùng bộ nhớ lớn lên và thu nhỏ lại khi hàm được gọi và trả về. Thường lớn *xuống dưới* trong không gian địa chỉ (từ địa chỉ cao xuống địa chỉ thấp trên x86-64). Register stack pointer (RSP trên x86-64, SP trên ARM) luôn trỏ tới đỉnh stack.\n\n**Stack frame:** Mỗi lời gọi hàm push một **stack frame** (còn gọi là activation record) lên stack. Một stack frame chứa:\n- **Return address**: nơi việc thực thi tiếp tục sau khi hàm này trả về.\n- **Base pointer đã lưu** (frame pointer) của hàm gọi.\n- **Biến cục bộ** của hàm này.\n- **Tham số hàm** (những tham số không vừa trong register).\n- **Các register đã lưu** mà hàm phải giữ nguyên cho bên gọi.\n\nKhi hàm trả về, stack frame của nó bị pop: stack pointer được khôi phục, và CPU nhảy tới return address. Mọi biến cục bộ ngay lập tức được 'giải phóng' (vùng nhớ chỉ đơn giản là nằm phía trên stack pointer mới).\n\n**Stack overflow:** Stack có kích thước tối đa cố định (thường 1–8 MB mỗi thread). Đệ quy vô hạn hoặc lời gọi lồng nhau quá sâu làm cạn stack, gây ra **stack overflow**: chương trình chạm vào **guard page** chưa được map nằm dưới stack và hệ điều hành kill nó bằng segmentation fault (SIGSEGV). Các managed runtime tự kiểm tra giới hạn của mình trước và throw một lỗi bắt được thay vào đó — V8 dành khoảng 1 MB và throw `RangeError: Maximum call stack size exceeded` (khoảng 10,000 frame với một hàm đơn giản); Java throw `StackOverflowError`. Lưu ý rằng main thread thường được cấp stack lớn hơn (8 MB trên Linux/macOS) so với các thread phụ (thường 512 KB–2 MB), còn Windows mặc định 1 MB.\n\n**4. Heap:** Một vùng bộ nhớ lớn cho cấp phát động (`malloc` trong C, `new` trong Java/JS, tạo đối tượng trong Python). Bộ nhớ heap được allocator quản lý (thủ công trong C, garbage-collected trong Java/JS/Python). Các vùng cấp phát trên heap tồn tại cho tới khi được giải phóng tường minh hoặc bị garbage collect — chúng không biến mất khi hàm trả về.\n\n**Vì sao điều này quan trọng với JavaScript:** Mỗi `new Object()`, literal `{}`, literal `[]` và giá trị hàm đều tạo ra một lần cấp phát heap trong V8. Garbage collector định kỳ quét heap để tìm và thu hồi các đối tượng không còn với tới được. Hiểu điều này sẽ thấy vì sao tạo nhiều đối tượng sống ngắn trong một vòng lặp nóng là anti-pattern về hiệu năng — nó làm tăng áp lực lên GC."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bố cục process Linux 64-bit điển hình, từ địa chỉ cao xuống thấp: kernel chiếm nửa trên không gian địa chỉ, stack lớn dần xuống phía heap, và trang 0 không bao giờ được map để việc dereference null pointer gây crash. (Address-space layout randomization dịch chuyển mỗi vùng ở mỗi lần chạy.)"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Ví dụ closure cho thấy sự sống sót trên heap: sau khi makeCounter() trả về, stack frame của nó đã mất, nhưng `count` vẫn sống vì phân tích scope của V8 (lúc parse) thấy một hàm bên trong tham chiếu tới nó và đặt nó vào một đối tượng **Context** cấp phát trên heap thay vì trong stack frame. Ví dụ áp lực GC cho thấy vì sao đối tượng heap sống ngắn trong vòng lặp có cái giá của nó — dù các tầng tối ưu của V8 thường loại bỏ hoàn toàn được một lần cấp phát như `[i, i * 2]` nhờ escape analysis, code chưa tối ưu và các đối tượng bị thoát ra ngoài vẫn phải cấp phát và cuối cùng phải được thu gom.",
+      "label": "Stack và heap trong thực tế"
+    },
+    {
+      "type": "explanation",
+      "title": "Garbage collection: quản lý bộ nhớ tự động",
+      "content": "Các ngôn ngữ quản lý bộ nhớ tự động dùng **garbage collector (GC)** để tìm và thu hồi bộ nhớ heap không còn với tới được từ các root của chương trình (biến toàn cục, biến trên stack, register của CPU).\n\n**Mark-and-sweep (thuật toán kinh điển):**\n1. **Pha mark:** Bắt đầu từ các root, duyệt mọi đối tượng với tới được và đánh dấu chúng là còn sống.\n2. **Pha sweep:** Quét toàn bộ heap; thu hồi (giải phóng) mọi đối tượng không được đánh dấu.\n\n**Giả thuyết thế hệ (generational hypothesis):** Phần lớn đối tượng chết trẻ. Một đối tượng vừa được tạo nhiều khả năng sẽ không còn với tới được trong vòng vài mili giây. GC hiện đại tận dụng điều này bằng cách chia heap thành các **thế hệ**:\n- **Thế hệ trẻ (young generation / nursery):** Các lần cấp phát mới diễn ra ở đây. Được thu gom thường xuyên và nhanh (minor GC). Phần lớn đối tượng chết ở đây và được thu hồi với chi phí thấp.\n- **Thế hệ già (old generation / tenured):** Những đối tượng sống sót qua nhiều lần minor GC được chuyển lên đây. Được thu gom không thường xuyên (major GC).\n\n**GC của V8 — Orinoco:**\n- Dùng một **generational collector** với thế hệ trẻ (chia thành không gian 'from' và 'to' cho copying collector của Cheney) và thế hệ già dùng **Mark-Compact**.\n- **Incremental marking:** Thay vì dừng cả thế giới (stop-the-world) cho một pha mark đầy đủ, V8 đánh dấu đối tượng từng chút một trong những lát nhỏ giữa các tác vụ JavaScript, giảm thời gian pause tối đa.\n- **Concurrent marking/sweeping:** Công việc GC chạy trên các thread nền song song với việc thực thi JavaScript.\n- **Idle-time GC:** V8 xếp lịch công việc GC vào các khoảng rảnh (idle callback của trình duyệt) để giảm tối đa các lần pause nhìn thấy được.\n\n**GC pause và vì sao chúng quan trọng:** Ngay cả với GC incremental/concurrent, vẫn có những lần pause stop-the-world ngắn. Với ứng dụng thời gian thực (game 60 fps, xử lý âm thanh), toàn bộ ngân sách cho một frame là ~16.7 ms, nên một lần GC pause 5 ms có thể dễ dàng gây rớt frame. Đó là lý do game engine và các library âm thanh ưa quản lý bộ nhớ thủ công (C++) hoặc các ngôn ngữ có bộ nhớ tất định (hệ thống ownership của Rust)."
+    },
+    {
+      "type": "callout",
+      "content": "**WebAssembly (Wasm) và tương lai của việc thực thi:** WebAssembly là một định dạng lệnh nhị phân được thiết kế làm đích biên dịch cho các ngôn ngữ như C, C++ và Rust. Khác với JavaScript, Wasm có kiểu tĩnh, bố cục bộ nhớ dễ đoán (một buffer bộ nhớ tuyến tính phẳng), và không cần suy luận kiểu. V8 biên dịch Wasm ra code native bằng một compiler đơn giản, nhanh (Liftoff để dùng ngay) và một compiler tối ưu đầy đủ (TurboFan) cho code nóng. Code Wasm thường chạy trong khoảng 1.1–2 lần so với tốc độ native (kiểm tra giới hạn, tập lệnh hạn chế và sandbox tạo ra khoảng chênh này). Wasm component model và WASI (WebAssembly System Interface) đang mở rộng Wasm ra ngoài trình duyệt, vào các runtime phía server, hệ thống plugin và edge computing. Hiểu biên dịch JIT và AOT giúp bạn hiểu vì sao Wasm đưa ra được những bảo đảm hiệu năng này, điều mà JavaScript không làm được."
+    },
+    {
+      "type": "callout",
+      "content": "**Mẹo hiệu năng và interview về việc thực thi chương trình:**\n\n1. **'JavaScript là ngôn ngữ thông dịch' là một huyền thoại.** Trong V8, JavaScript được biên dịch thành bytecode Ignition ở lần gọi đầu, rồi được JIT-compile dần bởi Sparkplug, Maglev và TurboFan khi nó nóng lên. JS hiện đại có thể tiệm cận tốc độ C với code số có kiểu ổn định.\n2. **Ổn định kiểu là đòn bẩy hiệu năng lớn nhất trong V8.** Giữ biến monomorphic (một kiểu). Tránh các hàm xử lý cả số nguyên lẫn chuỗi. Theo dõi việc lên/xuống tầng bằng `node --trace-opt --trace-deopt`.\n3. **Tránh stack overflow bằng vòng lặp thay cho đệ quy** khi đệ quy sâu. Dù ES2015 quy định proper tail call, chỉ JavaScriptCore của Safari hiện thực nó — V8 và SpiderMonkey thì không.\n4. **Tính nhất quán của shape đối tượng là quan trọng.** Luôn gán property cho đối tượng theo cùng thứ tự trong constructor. Đừng bao giờ thêm property sau khi khởi tạo nếu bạn muốn inline cache tối ưu.\n5. **Closure giữ các biến được tham chiếu sống trên heap** — một nguồn memory leak phổ biến. Nếu một closure giữ tham chiếu tới một đối tượng lớn, đối tượng đó sẽ không bị GC cho tới khi closure được giải phóng.\n6. **JIT warm-up nghĩa là benchmark phải chạy đủ lâu.** Một hàm được đo trước khi TurboFan vào cuộc trông chậm hơn 5–10 lần so với sau warm-up. Dùng một library benchmark có warm-up và chạy lặp lại (ví dụ `tinybench` hoặc `mitata` — Benchmark.js không còn được bảo trì).\n7. **Stack và heap trong V8:** biến cục bộ không bị closure nào capture sẽ nằm trong register hoặc stack frame (chi phí GC bằng 0); biến cục bộ bị capture nằm trong một Context trên heap. Đối tượng, mảng, closure và các số không phải số nguyên nhỏ trong code chưa tối ưu đều được cấp phát trên heap — dù optimizer có thể loại bỏ những lần cấp phát không thoát ra ngoài."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "Source code được xử lý theo các giai đoạn: lexer (token) → parser (AST) → phân tích ngữ nghĩa → IR → tối ưu → sinh code. Mỗi giai đoạn biến code thành một biểu diễn thấp hơn, thân thiện với máy hơn.",
+        "Biên dịch AOT dịch source ra mã máy native trước khi thực thi, tối đa hóa hiệu năng đỉnh với cái giá là file nhị phân gắn với nền tảng và thời gian build lâu hơn (C, Rust, Go).",
+        "Thông dịch thuần túy thực thi code trực tiếp — khởi động nhanh, không biên dịch, nhưng chậm hơn code native 10–100 lần với tác vụ nặng CPU do chi phí dispatch trên từng lệnh.",
+        "Bytecode + VM cho tính di động: compiler sinh ra bytecode độc lập nền tảng; VM (CPython, JVM, CLR) thực thi nó. Hiệu năng nằm giữa thông dịch thuần túy và JIT.",
+        "Biên dịch JIT profile code đang chạy và biên dịch các hot path ra code native lúc runtime. JIT engine hiện đại (V8, HotSpot) dùng nhiều tầng: thông dịch → baseline JIT → optimizing JIT, với tối ưu suy đoán và deoptimization khi kiểu bị vi phạm.",
+        "V8 chạy JavaScript qua bốn tầng: **Ignition** (interpreter bytecode + type feedback) → **Sparkplug** (baseline compiler) → **Maglev** (optimizing JIT nhanh) → **TurboFan** (optimizing JIT cao nhất), deoptimize về lại Ignition khi một speculation thất bại. Ổn định kiểu và shape đối tượng nhất quán giữ code ở các tầng đã tối ưu.",
+        "Bộ nhớ của một process được chia thành code segment (lệnh), data segment (biến toàn cục), heap (cấp phát động, được GC trong ngôn ngữ managed), và stack (các frame lời gọi với biến cục bộ và return address). Stack overflow xảy ra khi độ sâu đệ quy làm cạn kích thước stack cố định.",
+        "Proper tail call có trong đặc tả ES2015 nhưng chỉ Safari/JavaScriptCore hiện thực — trên Node/Chrome, đệ quy sâu sẽ làm tràn stack (~10k frame), nên hãy chuyển nó thành vòng lặp hoặc một stack tường minh."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Lexer (tokenizer) sinh ra gì từ source code?",
+      "options": [
+        "Một chuỗi token có kiểu (keyword, identifier, toán tử, literal)",
+        "Một Abstract Syntax Tree (AST)",
+        "Các lệnh mã máy native",
+        "Một biểu diễn trung gian để tối ưu"
+      ],
+      "explanation": "Lexer đọc các ký tự source thô và gom chúng thành token — các đơn vị có nghĩa của ngôn ngữ (keyword như 'let', identifier như 'x', toán tử như '+', literal số như '42'). AST do parser sinh ra ở giai đoạn kế tiếp."
+    },
+    {
+      "id": "q2",
+      "question": "Ưu điểm chính của biên dịch just-in-time (JIT) so với biên dịch ahead-of-time (AOT) là gì?",
+      "options": [
+        "Code biên dịch bằng JIT luôn chạy nhanh hơn code biên dịch AOT",
+        "JIT có thể tối ưu dựa trên thông tin kiểu thực tế lúc runtime và pattern sử dụng",
+        "JIT loại bỏ nhu cầu garbage collection",
+        "JIT sinh ra file nhị phân nhỏ hơn compiler AOT"
+      ],
+      "explanation": "JIT có thể thu thập dữ liệu profile trong lúc chạy — kiểu thực tế đã gặp, tần suất gọi thực tế, kết quả rẽ nhánh thực tế — và dùng nó để tối ưu cụ thể hơn những gì AOT làm được. AOT phải thận trọng; JIT thì được phép suy đoán. Mặt trái là thời gian warm-up và rủi ro deoptimization."
+    },
+    {
+      "id": "q3",
+      "question": "Trong pipeline thực thi của V8, Ignition là gì?",
+      "options": [
+        "Compiler AOT của V8, chạy trước khi trình duyệt tải trang",
+        "Interpreter bytecode dựa trên register của V8, thực thi mọi JavaScript lúc ban đầu",
+        "Garbage collector của V8 cho các đối tượng thế hệ trẻ",
+        "Engine parse HTML/CSS của V8"
+      ],
+      "explanation": "Ignition là interpreter bytecode của V8. Parser sinh ra AST; Ignition biên dịch AST thành bytecode dựa trên register và thực thi nó. Ignition còn thu thập type feedback cho TurboFan dùng. Code đã ấm lên sau đó được chuyển lên Sparkplug (baseline), Maglev và TurboFan (các optimizing JIT)."
+    },
+    {
+      "id": "q4",
+      "question": "'Deoptimization' trong một JIT compiler là gì?",
+      "options": [
+        "Tắt JIT cho cả phiên làm việc sau khi hiệu năng bị suy giảm",
+        "Hoàn tác các thay đổi source code đã gây chậm",
+        "Xóa các hàm không dùng khỏi file nhị phân đã biên dịch để tiết kiệm bộ nhớ",
+        "Bỏ code native đã tối ưu và quay về thông dịch khi một speculation (ví dụ về kiểu) bị vi phạm"
+      ],
+      "explanation": "JIT tối ưu bằng cách suy đoán (ví dụ 'biến này luôn là số nguyên'). Nếu sau đó speculation bị vi phạm (biến trở thành chuỗi), JIT phải deoptimize: bỏ code native của hàm đó, dựng lại trạng thái interpreter, và tiếp tục trong interpreter bytecode với thông tin kiểu đã cập nhật."
+    },
+    {
+      "id": "q5",
+      "question": "Biến cục bộ của một hàm được lưu ở đâu trong lúc hàm thực thi?",
+      "options": [
+        "Trên heap, cấp phát cùng garbage collector",
+        "Trong code segment, cạnh các lệnh máy của hàm",
+        "Trong stack frame của lời gọi hàm đó",
+        "Trong data segment, cạnh các biến toàn cục"
+      ],
+      "explanation": "Mỗi lời gọi hàm tạo ra một stack frame chứa biến cục bộ, tham số, return address và các register đã lưu của hàm. Khi hàm trả về, frame bị pop và mọi biến cục bộ ngay lập tức được 'giải phóng'. Những biến thoát ra khỏi hàm (closure, đối tượng trả về theo tham chiếu) được cấp phát trên heap."
+    },
+    {
+      "id": "q6",
+      "question": "Điều gì gây ra lỗi stack overflow?",
+      "options": [
+        "Cấp phát quá nhiều đối tượng trên heap",
+        "Ghi vượt quá cuối một mảng trong bộ nhớ heap",
+        "Quá nhiều lời gọi hàm lồng nhau làm cạn vùng stack có kích thước cố định",
+        "Một vòng lặp deoptimization của JIT ngốn hết bộ nhớ khả dụng"
+      ],
+      "explanation": "Stack có kích thước tối đa cố định (thường 1–8 MB mỗi thread). Mỗi lời gọi hàm push một stack frame; đệ quy vô hạn hoặc lời gọi lồng nhau rất sâu làm cạn stack, khiến hệ điều hành báo stack overflow. Trong JavaScript: 'Maximum call stack size exceeded'."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao V8 quan tâm tới thứ tự gán property của đối tượng?",
+      "options": [
+        "Thứ tự thêm property khác nhau tạo ra các hidden class khác nhau, cản trở tối ưu inline cache",
+        "Các property thêm vào sau được lưu trong một hash table đường chậm riêng",
+        "V8 sắp xếp property theo bảng chữ cái trước khi tối ưu, nên thứ tự ảnh hưởng thời gian sắp xếp",
+        "Đặc tả JavaScript yêu cầu thứ tự property cho phép so sánh ==="
+      ],
+      "explanation": "V8 gán 'hidden class' cho đối tượng dựa trên shape của chúng (tên property và thứ tự thêm vào). Các đối tượng cùng hidden class dùng chung inline cache nhanh để truy cập property. Nếu hai đối tượng có cùng property nhưng được thêm theo thứ tự khác nhau, chúng nhận hidden class khác nhau, khiến việc truy cập property thành polymorphic và chậm hơn."
+    },
+    {
+      "id": "q8",
+      "question": "'Giả thuyết thế hệ' mà các garbage collector hiện đại dựa vào là gì?",
+      "options": [
+        "Đối tượng do code cũ (library legacy) tạo ra sống lâu hơn đối tượng của code hiện đại",
+        "Phần lớn đối tượng chết trẻ — đối tượng mới cấp phát nhanh chóng không còn với tới được",
+        "Mỗi thế hệ thuật toán GC nhanh hơn thế hệ trước 10 lần",
+        "Biến khai báo bằng 'let' được thu gom sớm hơn khai báo 'var'"
+      ],
+      "explanation": "Giả thuyết thế hệ là quan sát thực nghiệm rằng phần lớn đối tượng trên heap trở nên không với tới được rất nhanh sau khi được tạo. GC thế hệ tận dụng điều này bằng cách duy trì một thế hệ trẻ (thu gom thường xuyên, rẻ) và một thế hệ già (thu gom không thường xuyên). Chỉ những đối tượng sống lâu mới được chuyển lên thế hệ già."
+    },
+    {
+      "id": "q9",
+      "question": "Abstract Syntax Tree (AST) được dùng để làm gì trong xử lý ngôn ngữ?",
+      "options": [
+        "Nó là đầu ra cuối cùng của compiler, sẵn sàng cho CPU thực thi",
+        "Nó là một đồ thị cho biết hàm nào gọi hàm nào, dùng để loại bỏ dead code",
+        "Nó là định dạng nhị phân của bytecode lưu trong file .class hoặc .pyc",
+        "Nó là biểu diễn dạng tree của cấu trúc source code, dùng cho kiểm tra kiểu, tối ưu và sinh code"
+      ],
+      "explanation": "AST là một cấu trúc dữ liệu dạng tree do parser sinh ra, nắm bắt cấu trúc ngữ pháp của chương trình (biểu thức, câu lệnh, khai báo). Nó là nền móng cho mọi bước xử lý tiếp theo: kiểm tra kiểu, phân tích scope, hạ xuống IR, tối ưu và sinh code. Các công cụ như Babel và ESLint làm việc trực tiếp trên AST."
+    },
+    {
+      "id": "q10",
+      "question": "Vì sao tạo nhiều đối tượng sống ngắn trong một vòng lặp JavaScript chặt là mối lo về hiệu năng?",
+      "options": [
+        "Mỗi lần tạo đối tượng cần một syscall đòi hệ điều hành context switch",
+        "V8 không JIT-compile được vòng lặp có chứa object literal",
+        "Đối tượng sống ngắn làm tăng áp lực GC, gây ra các lần minor GC thường xuyên làm tạm dừng việc thực thi",
+        "Việc tạo đối tượng JavaScript là tuần tự và V8 không song song hóa được"
+      ],
+      "explanation": "Mọi đối tượng được tạo ra đều rơi vào thế hệ trẻ của heap V8. Tốc độ tạo đối tượng cao làm đầy thế hệ trẻ nhanh chóng, kích hoạt các chu kỳ minor GC thường xuyên. Dù minor GC nhanh (vài mili giây), chúng vẫn tạm dừng việc thực thi JavaScript. Tránh cấp phát không cần thiết trong vòng lặp nóng giữ áp lực GC ở mức thấp và giúp code do TurboFan biên dịch chạy không bị gián đoạn."
+    }
+  ]
+}

@@ -1,0 +1,244 @@
+{
+  "sourceHash": "620888b1133b",
+  "title": "Concurrency & Deadlock",
+  "tagline": "Shared state, race condition và vì sao các thread bị treo cứng",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Chương trình hiện đại làm nhiều việc cùng lúc. Trình duyệt của bạn vừa render HTML, vừa chạy JavaScript, vừa giải mã video, vừa lắng nghe các gói tin mạng — tất cả đồng thời. Web server xử lý hàng nghìn HTTP request cùng một lúc. Database commit một transaction trong khi ba transaction khác đang chờ. **Concurrency** là nghệ thuật quản lý nhiều luồng thực thi song song, và đây là một trong những mảng phong phú, tinh tế bậc nhất của kỹ thuật phần mềm.\n\nThách thức trung tâm của concurrency là **shared mutable state** (trạng thái dùng chung và có thể bị thay đổi): khi hai thread cùng đọc và ghi một vùng nhớ, phần cứng không đảm bảo thứ tự giữa chúng — và chỉ một chút lệch về thời điểm cũng có thể cho ra kết quả hoàn toàn khác. Loại bug này gọi là **race condition**. Race condition nổi tiếng là lúc có lúc không, phụ thuộc môi trường, và gần như không thể tái hiện trong debugger.\n\nLời giải là **synchronization** (đồng bộ hóa) — áp đặt thứ tự lên các lần truy cập của thread bằng các primitive như **mutex** và **semaphore**. Nhưng bản thân synchronization lại kéo theo một mối nguy riêng: **deadlock**. Khi Thread A giữ Lock 1 và chờ Lock 2, còn Thread B giữ Lock 2 và chờ Lock 1, cả hai thread đóng băng mãi mãi — chờ nhau, không đi đến đâu, không tốn CPU nhưng cũng chẳng tiến triển gì. Hệ thống bị deadlock sẽ treo một cách im lặng, thường là ngay trên production, và không có thông báo lỗi nào để lần theo.\n\nChương này xây dựng mental model đầy đủ: concurrency nghĩa là gì, vì sao race condition xảy ra ở tầng phần cứng, mutex và semaphore hoạt động về mặt cơ chế ra sao, deadlock hình thành thế nào và cần đủ bốn điều kiện nào thì nó mới xảy ra, cùng với kho chiến lược thực tế — prevention (ngăn chặn), detection (phát hiện) và avoidance (né tránh) — mà người thiết kế hệ thống dùng để chế ngự nó. Những ý tưởng này là nền móng của hệ điều hành, database, web server và bất kỳ chương trình nào làm nhiều hơn một việc cùng lúc."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hai kiểu thất bại chính của concurrency: race condition (không có synchronization) và deadlock (synchronization sai cách)."
+    },
+    {
+      "type": "analogy",
+      "title": "Cây cầu một làn và đèn giao thông",
+      "content": "Hãy hình dung một cây cầu núi hẹp, chỉ đủ cho đúng một chiếc xe. Xe đến từ cả hai phía. Nếu không có ai điều phối, hai xe cùng lúc lên cầu từ hai đầu ngược nhau — giờ không xe nào qua được, không xe nào chịu lùi trước, và con đường bị chặn vĩnh viễn. Đó chính là **deadlock**: mỗi xe giữ tài nguyên mình đang chiếm (một nửa cây cầu) và chờ tài nguyên mà xe kia đang giữ.\n\nBản thân cây cầu là một **critical section** (vùng găng) — tài nguyên dùng chung mà tại mỗi thời điểm chỉ nên có một bên sử dụng. **Mutex** (mutual exclusion lock — lock loại trừ lẫn nhau) giống như đèn giao thông ở mỗi đầu cầu: trước khi lên cầu, xe phải có đèn xanh (acquire lock). Trong lúc xe đó đang qua, mọi đèn ở đầu kia giữ màu đỏ (các thread khác bị block). Khi xe ra khỏi cầu, nó bật đèn xanh cho phía bên kia (release lock). Mỗi lần chỉ một xe qua. Không va chạm. Không deadlock.\n\n**Semaphore** là phiên bản tinh tế hơn: hãy tưởng tượng một bãi đỗ xe có đúng N chỗ. Bảng đếm ở cổng vào hiển thị còn bao nhiêu chỗ trống. Mỗi xe vào làm bộ đếm giảm đi một; mỗi xe ra làm nó tăng lên một. Khi bộ đếm về 0, xe phải xếp hàng ở cổng cho đến khi có xe khác rời đi. Cách này cho phép tối đa N xe cùng lúc — tức là tổng quát hóa quy tắc nhị phân \"mỗi lần một xe\" của mutex.\n\nCòn ví von cho **race condition**: hai kế toán cùng lúc đọc bảng cân đối (giá trị: £1000), cả hai cùng trừ £200, rồi mỗi người tự ghi kết quả của mình lại. Số dư cuối cùng là £800 — một trong hai khoản rút £200 đã bị ghi đè mất, không để lại dấu vết. Đáp án đúng phải là £600. Hai kế toán đã \"chạy đua\" trên cùng một cuốn sổ và cho ra kết quả sai. Riêng từng người thì chẳng ai làm sai cả — vấn đề nằm ở chỗ thiếu phối hợp."
+    },
+    {
+      "type": "explanation",
+      "title": "Race condition xảy ra thế nào ở tầng phần cứng",
+      "content": "Race condition không phải là lỗi lập trình theo nghĩa hiển nhiên — nó thường xuất hiện trong những đoạn code đọc từng dòng thì trông hoàn toàn đúng. Vấn đề là thứ trông như một thao tác trong source code có thể được biên dịch thành **nhiều lệnh máy**, và scheduler của hệ điều hành có thể ngắt một thread giữa bất kỳ hai lệnh nào.\n\nLấy ví dụ kinh điển là tăng biến đếm: `balance = balance + 1`. Ở mã máy, đây là ba lệnh: (1) **LOAD** giá trị từ bộ nhớ vào một register của CPU, (2) **ADD** 1 vào register, (3) **STORE** register ngược về bộ nhớ. Scheduler có thể preempt (giành quyền chạy) thread sau bước 1 hoặc bước 2 — ngay giữa thứ mà bạn tưởng là một thao tác duy nhất.\n\nThế là Thread A đọc `balance = 5` vào register của nó. Scheduler chuyển sang Thread B. Thread B đọc `balance = 5` vào register riêng, cộng 1, ghi `balance = 6`. Scheduler chuyển lại Thread A. Thread A cộng 1 vào giá trị cũ trong register (vẫn là 5) và ghi `balance = 6`. Cả hai thread đều đã tăng — nhưng balance chỉ đi từ 5 lên 6 thay vì lên 7. **Một lần tăng đã biến mất trong im lặng.**\n\nHiện tượng này gọi là **lost update** và là race condition điển hình nhất. Khoảng thời gian mà mọi thứ có thể hỏng gọi là **race window** — khoảng hở giữa LOAD và STORE. Race window càng nhỏ thì bug càng hiếm, nhưng hiếm không có nghĩa là không thể. Trên các server có throughput cao, một race window chỉ vài nano giây vẫn có thể \"trúng\" hàng nghìn lần mỗi giây.\n\nChuỗi thao tác không được phép bị ngắt quãng gọi là **critical section**. Làm cho critical section trở nên **atomic** — không thể chia cắt, nhìn từ góc độ các thread khác — chính là việc mà các synchronization primitive đảm nhận. CPU hiện đại cung cấp những lệnh atomic đặc biệt (như `compare-and-swap` / CAS) thực hiện trọn chu trình read-modify-write trong một bước phần cứng duy nhất, không thể bị ngắt. Lock thường được xây dựng bên trên các lệnh atomic này."
+    },
+    {
+      "type": "diagram",
+      "caption": "Thread 1 bị preempt giữa LOAD và STORE. Thread 2 hoàn tất trọn lần tăng của mình. Thread 1 chạy tiếp với giá trị đã cũ và ghi đè kết quả của Thread 2 — một race condition kinh điển gây ra lost update."
+    },
+    {
+      "type": "explanation",
+      "title": "Mutex: lock nhị phân cho critical section",
+      "content": "**Mutex** (viết tắt của mutual exclusion — loại trừ lẫn nhau) là synchronization primitive cơ bản nhất. Nó có hai thao tác: **lock** (còn gọi là `acquire`) và **unlock** (còn gọi là `release`). Mutex luôn ở một trong hai trạng thái: đang bị giữ hoặc đang rảnh.\n\nKhi một thread gọi `lock()` trên một mutex đang rảnh, nó chiếm được mutex và chạy tiếp. Lúc này mutex đang bị giữ. Nếu một thread khác gọi `lock()` trên cùng mutex đó, thread này sẽ **block** — bị hệ điều hành tạm dừng và đưa vào một wait queue. Nó sẽ không chạy lại cho đến khi mutex được release. Khi thread đang giữ gọi `unlock()`, một thread đang chờ sẽ được đánh thức. (Nhiều implementation, kể cả mutex dựa trên futex của Linux, đánh thức một thread chờ rồi để nó tranh lock lại thay vì trao quyền sở hữu trực tiếp — nhanh hơn, nhưng không đảm bảo công bằng theo kiểu FIFO tuyệt đối.)\n\nĐoạn code nằm giữa `lock()` và `unlock()` là **critical section**. Tại mọi thời điểm chỉ có một thread được ở bên trong — đó là bất biến mà mutex bảo đảm. Đây là lý do các thao tác bên trong critical section thực chất là atomic đối với những thread khác đang tranh cùng mutex đó.\n\nBa tính chất mà một giải pháp mutual exclusion đúng đắn phải có (tiêu chí kinh điển trong sách giáo khoa):\n- **Mutual exclusion**: tại mọi thời điểm có nhiều nhất một thread giữ mutex (bảo đảm cốt lõi).\n- **Progress**: nếu không thread nào giữ mutex và có thread đang chờ, cuối cùng sẽ có một thread chiếm được nó.\n- **Bounded waiting**: không thread nào phải chờ mãi mãi (tính công bằng — quan trọng để tránh **starvation**, khi một thread liên tục bị các thread khác giành lock trước).\n\n**Một mutex hiện đại được xây thế nào:** nhánh không có tranh chấp (uncontended) không bao giờ đi vào kernel. Việc lock chỉ là một lệnh compare-and-swap atomic trên một word trong bộ nhớ user (cỡ vài chục nano giây); chỉ khi lock đã bị giữ thì thread mới spin một chút rồi đi ngủ qua một system call (`futex` trên Linux, `WaitOnAddress` trên Windows, `os_unfair_lock` trên macOS). Đó là lý do lock không tranh chấp rất rẻ, còn lock *bị tranh chấp* (contended) mới là thứ gây đau.\n\nMột điểm tinh tế: **quyền sở hữu mutex**. Trong hầu hết các hệ điều hành, mutex được *sở hữu* bởi thread đã lock nó — chỉ thread đó mới được unlock. Điều này khác với binary semaphore, nơi bất kỳ thread nào cũng có thể signal. Tính sở hữu này khiến mutex rất hợp để bảo vệ những critical section mà một thread đi vào rồi đi ra.\n\n**Recursive mutex** (còn gọi là reentrant mutex) cho phép cùng một thread lock cùng một mutex nhiều lần mà không tự deadlock chính mình — nó giữ một bộ đếm và chỉ thực sự release khi bộ đếm về 0. Tính năng này hữu ích nhưng có thể che giấu bug, nên hãy dùng cẩn thận."
+    },
+    {
+      "type": "explanation",
+      "title": "Semaphore: đếm mức độ concurrency",
+      "content": "**Semaphore** là sự tổng quát hóa khái niệm mutex, do Edsger Dijkstra phát minh năm 1965. Thay vì trạng thái nhị phân (giữ/rảnh), semaphore duy trì một **bộ đếm số nguyên** được khởi tạo bằng một giá trị N nào đó. Nó có hai thao tác atomic:\n\n- **`wait()` (còn gọi là `P`, `down` hoặc `acquire`)**: giảm bộ đếm. Nếu bộ đếm đã bằng 0, block cho đến khi nó dương trở lại.\n- **`signal()` (còn gọi là `V`, `up` hoặc `release`)**: tăng bộ đếm. Nếu có thread nào đang block ở `wait()`, đánh thức một trong số đó.\n\nVới N=1, semaphore hoạt động như một mutex (mỗi lần cho đúng một thread đi qua). Với N=10, nó cho tối đa 10 thread đi qua cùng lúc — rất hợp cho một **connection pool** khi bạn có 10 kết nối database và muốn có nhiều nhất 10 thao tác database đồng thời.\n\nSemaphore có hai trường hợp sử dụng chính:\n\n**Đếm tài nguyên** — trường hợp N>1 ở trên. Bạn có một lượng tài nguyên hữu hạn (connection, file descriptor, worker thread) và muốn tránh cấp phát vượt quá. Bộ đếm của semaphore biểu diễn số đơn vị còn trống.\n\n**Báo hiệu giữa các thread** — khởi tạo semaphore bằng 0, cho một thread gọi `wait()` còn thread kia gọi `signal()`, bạn có ngay một cơ chế thông báo sự kiện dùng một lần đơn giản. Consumer block cho đến khi producer làm xong một việc nào đó. Đây là viên gạch để xây producer-consumer queue.\n\nKhác biệt về ngữ nghĩa so với mutex rất quan trọng: semaphore **không có chủ sở hữu**. Bất kỳ thread nào cũng có thể gọi `signal()`, kể cả thread chưa từng gọi `wait()`. Sự linh hoạt này mở ra các pattern báo hiệu, nhưng cũng khiến semaphore dễ bị dùng sai hơn mutex."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một counting semaphore khởi tạo bằng 3 cho đúng 3 thread đi qua đồng thời — lý tưởng để giới hạn truy cập vào một pool tài nguyên có kích thước cố định như các kết nối database."
+    },
+    {
+      "type": "explanation",
+      "title": "Condition variable và monitor: chờ trạng thái thay đổi",
+      "content": "Mutex trả lời câu hỏi \"mỗi lần chỉ một\"; nó không trả lời được \"hãy chờ cho đến khi queue có phần tử\". Spin bằng `while (queue.isEmpty()) {}` thì đốt trọn một core, còn đi ngủ mà không giữ lock thì có nguy cơ **lost wakeup** (producer signal đúng vào khoảng giữa lúc bạn kiểm tra và lúc bạn ngủ). **Condition variable** giải quyết chuyện này. Nó luôn được dùng cùng với một mutex:\n\n- `wait(cv, mutex)` **một cách atomic** vừa release mutex vừa cho thread đi ngủ; khi được đánh thức, nó acquire lại mutex rồi mới return.\n- `signal`/`notify` đánh thức một thread đang chờ; `broadcast`/`notify_all` đánh thức tất cả.\n\nQuy tắc vàng: **luôn kiểm tra lại điều kiện trong vòng lặp `while`, đừng bao giờ dùng `if`.** Hầu hết implementation (POSIX, Java, Python, C++) dùng *Mesa semantics*: thread được đánh thức chỉ chuyển sang trạng thái runnable, và đến lúc nó acquire lại được mutex thì có thể một thread khác đã lấy mất phần tử. Các implementation cũng được phép có **spurious wakeup** — return khỏi `wait` mà chẳng hề có signal nào.\n\n**Monitor** là một mutex cộng với các condition variable của nó, đóng gói chung với dữ liệu mà chúng bảo vệ. Java tích hợp sẵn monitor vào mọi object (`synchronized` + `wait()`/`notify()`), còn C++ ghép `std::mutex` với `std::condition_variable`. Semaphore cũng có thể diễn đạt kiểu báo hiệu tương tự, nhưng condition variable có thể chờ trên *bất kỳ* điều kiện nào của shared state, chứ không chỉ một bộ đếm."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`threading.Condition` của Python là một condition variable gắn với một lock. `wait()` release lock trong lúc ngủ và acquire lại trước khi return, nhờ vậy producer vẫn chạy tiếp được trong khi consumer đang chờ. Các vòng `while` kiểm tra lại điều kiện sau mỗi lần thức dậy, bao được cả spurious wakeup lẫn trường hợp một thread khác đã lấy phần tử trước. Với capacity 2, producer bị block nhiều lần — đó chính là bounded buffer đang tạo backpressure.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Race ở đây mang tính tất định: cả hai lần rút đều đọc 1000 trước khi bên nào kịp ghi, nên bên ghi sau cùng thắng và một lần rút biến mất. Async mutex nối mỗi task vào sau task trước đó, nên lần rút thứ hai chỉ đọc `balance` sau khi lần thứ nhất đã ghi xong. Dòng `run.catch(() => {})` rất quan trọng: thiếu nó, chỉ cần một task bị reject là cả chuỗi bị reject và mọi task sau đó bị bỏ qua. Semaphore giữ một FIFO queue các resolver đang chờ — `signal()` trao slot trống trực tiếp cho thread chờ kế tiếp — và khối `finally` bảo đảm luôn release kể cả khi thao tác ném exception.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Deadlock: bốn điều kiện Coffman",
+      "content": "**Deadlock** là trạng thái mà một tập các thread đều đang bị block, mỗi thread chờ một tài nguyên do một thread khác trong tập đó giữ. Không thread nào tiến triển được. Hệ thống đóng băng. Deadlock không phải là crash — các thread vẫn sống, vẫn chiếm bộ nhớ, vẫn giữ lock — chỉ là chúng không bao giờ làm được việc gì có ích nữa.\n\nNăm 1971, Edward Coffman và các cộng sự đã chỉ ra bốn điều kiện phải **cùng lúc** thỏa mãn thì deadlock mới xảy ra — đây là các điều kiện *cần*. (Khi mỗi tài nguyên chỉ có một instance, như với lock thông thường, thì một circular wait dưới ba điều kiện còn lại *chính là* deadlock; với tài nguyên có nhiều instance, có thể tồn tại chu trình mà không có deadlock.) Hiểu từng điều kiện là chìa khóa để ngăn deadlock:\n\n**Điều kiện 1 — Mutual Exclusion**: Ít nhất một tài nguyên phải được giữ ở chế độ không chia sẻ được. Mỗi lần chỉ một thread được dùng tài nguyên; nếu thread khác yêu cầu, nó phải chờ. Đây là tính chất nền tảng của lock — bạn không thể đơn giản bỏ nó đi mà không đánh mất sự bảo vệ mà lock mang lại.\n\n**Điều kiện 2 — Hold and Wait**: Một thread phải đang giữ ít nhất một tài nguyên, đồng thời chờ để lấy thêm tài nguyên khác hiện đang bị thread khác giữ. Đây là hành vi tự nhiên của bất kỳ chương trình nào cần hai lock cùng lúc — nó lấy lock thứ nhất, rồi vừa giữ lock đó vừa cố lấy lock thứ hai.\n\n**Điều kiện 3 — No Preemption**: Không thể cưỡng chế lấy tài nguyên khỏi thread đang giữ nó. Thread chỉ release tài nguyên một cách tự nguyện, sau khi đã làm xong việc. Thông thường hệ điều hành không thể giật lock khỏi một thread đang sống — làm vậy sẽ phá hỏng bất kỳ phép tính nào mà thread đó đang bảo vệ.\n\n**Điều kiện 4 — Circular Wait**: Phải tồn tại một chu trình trong **resource-wait graph**: Thread A chờ tài nguyên do Thread B giữ, Thread B chờ tài nguyên do Thread C giữ, Thread C lại chờ tài nguyên do Thread A giữ (hoặc trực tiếp hơn: A chờ B và B chờ A). Không có chu trình thì trong mọi chuỗi chờ luôn có ít nhất một thread chạy tiếp được, và rốt cuộc tất cả các thread đều chạy tiếp được.\n\nNhận thức sâu sắc ở đây: phá vỡ **bất kỳ một** trong bốn điều kiện này là deadlock trở nên bất khả. Mỗi điều kiện tương ứng với một chiến lược prevention khác nhau — và mỗi chiến lược có chi phí cùng trade-off riêng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Cả bốn điều kiện Coffman phải cùng lúc thỏa mãn thì mới có deadlock. Mỗi chiến lược prevention nhắm vào một điều kiện."
+    },
+    {
+      "type": "explanation",
+      "title": "Resource-wait graph: hình dung deadlock",
+      "content": "**Resource-allocation graph** là công cụ hình thức để lập luận về deadlock. Đây là một directed graph với hai loại node: **thread** (hình tròn) và **tài nguyên** (hình vuông). Có hai loại edge có hướng:\n\n- **Assignment edge**: tài nguyên R → thread T (R đang bị T giữ)\n- **Request edge**: thread T → tài nguyên R (T đang chờ R)\n\nGộp các node tài nguyên lại, ta được **wait-for graph** đơn giản hơn: có edge T1 → T2 mỗi khi T1 chờ một lock mà T2 đang giữ. Khi mỗi tài nguyên chỉ có một instance (đúng với lock thông thường), **deadlock tồn tại khi và chỉ khi graph này có chu trình**; với tài nguyên nhiều instance, chu trình là điều kiện cần nhưng chưa đủ. Nhờ vậy, việc phát hiện deadlock trở thành bài toán thuật toán: định kỳ quét wait-for graph để tìm chu trình. Nếu tìm thấy, bạn có deadlock, và biết chính xác những thread và tài nguyên nào liên quan.\n\nVới deadlock đơn giản giữa hai thread: Thread A → Lock B (A chờ B), Lock B → Thread B (B giữ Lock B), Thread B → Lock A (B chờ A), Lock A → Thread A (A giữ Lock A). Chu trình A→B→A hiện ra ngay lập tức.\n\nTrong hệ quản trị database, đây chính xác là việc lock manager làm. PostgreSQL, MySQL InnoDB và SQL Server đều lưu thông tin wait-for và tìm chu trình, rồi abort một transaction **victim** (nạn nhân). InnoDB kiểm tra ngay khi một transaction bắt đầu chờ và rollback transaction đã sửa ít row nhất; PostgreSQL chờ `deadlock_timeout` (mặc định 1 s) rồi mới chạy bộ phát hiện và abort chính transaction đã chạy nó; còn monitor chạy nền của SQL Server chọn victim \"rẻ\" nhất, trừ khi `DEADLOCK_PRIORITY` quy định khác. Đó là lý do bạn gặp những lỗi như `deadlock detected` của PostgreSQL hay \"…chosen as the deadlock victim. Rerun the transaction.\" của SQL Server.\n\nTrong code ứng dụng, người ta hiếm khi duy trì wait-for graph một cách tường minh. Thay vào đó, developer dựa vào **các chiến lược prevention** (trình bày ngay sau đây) để bảo đảm chu trình không bao giờ hình thành, thay vì phát hiện rồi khôi phục sau khi sự đã rồi."
+    },
+    {
+      "type": "diagram",
+      "caption": "Resource-wait graph cho thấy một deadlock kinh điển giữa hai thread. Chu trình Thread A → Lock 2 → Thread B → Lock 1 → Thread A xác nhận có deadlock."
+    },
+    {
+      "type": "explanation",
+      "title": "Chiến lược prevention 1: lock ordering (phá Circular Wait)",
+      "content": "**Lock ordering** là kỹ thuật ngăn deadlock được dùng rộng rãi nhất, vì nó không tốn chút overhead nào lúc runtime và rất dễ lập luận. Quy tắc: **gán một thứ tự toàn phần cho mọi lock trong hệ thống, và bắt buộc mọi thread acquire lock theo thứ hạng tăng dần**.\n\nVì sao cách này hiệu quả? Nếu mọi thread luôn acquire Lock 1 trước Lock 2 trước Lock 3 (theo thứ hạng toàn cục), thì circular wait không thể hình thành. Để có chu trình, Thread A sẽ phải giữ một lock hạng cao hơn trong khi chờ một lock hạng thấp hơn — nhưng quy tắc thứ tự cấm acquire lock hạng thấp sau khi đã giữ lock hạng cao. Chu trình bất khả về mặt cấu trúc.\n\nTrong thực tế, lock thường được xếp hạng theo ID của tài nguyên mà nó bảo vệ. Một hàm chuyển tiền giữa hai tài khoản luôn lock tài khoản có ID nhỏ hơn trước. Cùng mẹo này ngăn được phần lớn deadlock trong database: các transaction cập nhật nhiều row nên chạm vào chúng theo một thứ tự primary key nhất quán (ví dụ `SELECT … ORDER BY id FOR UPDATE`).\n\nThách thức: lock ordering đòi hỏi **hiểu biết toàn cục**. Mọi developer viết code acquire nhiều lock đều phải biết thứ tự này. Đây là bài toán về tài liệu và kỷ luật. Một số hệ thống tự động ép buộc quy tắc bằng cách bọc các lock object trong một class theo dõi thứ hạng lock gần nhất mà thread hiện tại đã acquire, và panic nếu bạn cố acquire một lock hạng thấp hơn; bộ kiểm tra `lockdep` của Linux kernel kiểm tra lock ordering lúc runtime và báo vi phạm ngay lần đầu nó xảy ra, kể cả khi deadlock chưa hề xảy ra.\n\nLock ordering thực tế, không tốn chi phí runtime, và là lựa chọn mặc định đúng cho đa số hệ thống."
+    },
+    {
+      "type": "explanation",
+      "title": "Chiến lược prevention 2: acquire mọi lock một cách atomic (phá Hold and Wait)",
+      "content": "Điều kiện **Hold and Wait** có thể bị phá bằng cách bắt một thread phải acquire **tất cả các lock nó sẽ cần trước khi bắt đầu thực thi**, và hoặc lấy được hết, hoặc không lấy cái nào. Cách này gọi là **all-or-nothing lock acquisition**.\n\nNếu thread không lấy được toàn bộ lock cần thiết cùng lúc, nó release những lock đã lỡ lấy được và thử lại sau. Kịch bản giữ Lock 1 trong khi chờ Lock 2 bị loại bỏ, vì bạn hoặc giữ cả hai hoặc chẳng giữ cái nào.\n\nMặt trái là **giảm concurrency**: thread giữ mọi lock trong suốt quá trình tính toán, chặn các thread khác dùng những tài nguyên mà thread này chỉ cần trong chốc lát ở cuối. Nó cũng buộc thread phải biết trước mình cần tài nguyên nào — điều không phải lúc nào cũng làm được nếu nhu cầu tài nguyên phụ thuộc vào kết quả tính toán trung gian.\n\nTrong database, ý tưởng tương ứng là **conservative (static) two-phase locking**: transaction acquire mọi lock nó cần trước khi bắt đầu, nên không bao giờ deadlock. Còn **2PL** thông thường (strict) — acquire lock dần dần, chỉ release khi commit — bảo đảm serializability nhưng **không** ngăn được deadlock, và đó chính là lý do database vẫn phải chạy bộ phát hiện deadlock như đã nói ở trên."
+    },
+    {
+      "type": "explanation",
+      "title": "Chiến lược prevention 3: timeout và retry (phá No Preemption)",
+      "content": "**No Preemption** có thể bị phá bằng cách cho thread một cách để tự nguyện nhả lock khi không thể tiến triển. Cách hiện thực thực tế nhất là **lock timeout kèm retry**: thay vì block vô thời hạn ở `lock()`, hãy dùng `tryLock(timeout)`. Nếu không acquire được lock trong thời gian timeout, release mọi lock đang giữ và retry toàn bộ thao tác sau một khoảng backoff ngẫu nhiên.\n\nBackoff ngẫu nhiên rất quan trọng: nếu hai thread cùng timeout một lúc và cùng retry ngay lập tức, chúng có thể lại deadlock. Thêm yếu tố ngẫu nhiên (jitter) phá vỡ sự đối xứng này — một thread sẽ thành công trước thread kia.\n\nChiến lược này phá điều kiện No Preemption vì chính *thread* tự nguyện nhả tài nguyên khi không thể tiến triển — thực chất là tự preempt mình. Điểm yếu là **livelock**: các thread có thể cứ timeout rồi retry mãi mà không tiến triển, tốn CPU mà chẳng làm được việc gì có ích. Exponential backoff (nhân đôi thời gian chờ sau mỗi lần thất bại) giảm thiểu livelock.\n\nEthernet kiểu môi trường truyền dùng chung cổ điển (CSMA/CD) là ví dụ thực tế nổi tiếng: sau lần va chạm thứ n, bên gửi chờ một số slot time ngẫu nhiên trong khoảng 0 đến 2ⁿ − 1 (binary exponential backoff). Ethernet hiện đại dùng switch, full-duplex nên không còn va chạm, nhưng pattern này vẫn sống tiếp trong Wi-Fi và trong logic retry của các hệ phân tán."
+    },
+    {
+      "type": "explanation",
+      "title": "Avoidance: thuật toán Banker",
+      "content": "**Avoidance** (né tránh) deadlock khác với prevention: thay vì phá các điều kiện Coffman về mặt cấu trúc, avoidance quyết định một cách động có nên cấp một yêu cầu tài nguyên hay không, dựa trên việc cấp nó có thể dẫn tới deadlock hay không.\n\nThuật toán avoidance kinh điển là **Banker's Algorithm** (thuật toán chủ ngân hàng) của Dijkstra (1965), được đặt tên theo hình ảnh một ngân hàng chỉ cho vay khi biết chắc mình đáp ứng được mọi nhu cầu tiềm năng trong tương lai. Trước khi cấp một yêu cầu tài nguyên, thuật toán tự hỏi: \"Nếu cấp yêu cầu này, trạng thái thu được có **an toàn (safe)** không?\" Một trạng thái là safe nếu tồn tại một thứ tự mà theo đó mọi thread rốt cuộc đều chạy được đến khi hoàn tất (gọi là **safe sequence**).\n\nĐể kiểm tra tính an toàn, thuật toán mô phỏng việc hoàn tất từng thread một: tìm một thread mà nhu cầu tài nguyên còn lại có thể được đáp ứng bằng lượng tài nguyên đang sẵn có, mô phỏng thread đó hoàn tất và trả lại toàn bộ tài nguyên, rồi lặp lại với các thread còn lại. Nếu hoàn tất được mọi thread theo cách này, trạng thái là safe. Nếu việc cấp phát sẽ tạo ra trạng thái unsafe, yêu cầu bị hoãn lại (thread bị block) kể cả khi tài nguyên hiện đang sẵn có.\n\nBanker's Algorithm đẹp về mặt lý thuyết nhưng có những hạn chế thực tế đáng kể:\n- Nó yêu cầu thread **khai báo trước nhu cầu tài nguyên tối đa** — thường là không thực tế.\n- Nó giả định **số thread cố định** — hệ thống thật tạo và hủy thread một cách động.\n- Mỗi lần kiểm tra an toàn tốn **O(m × n²)** với n thread và m loại tài nguyên, và chạy ở mọi yêu cầu — ổn với hệ thống nhỏ, quá đắt với hàng nghìn thread.\n\nVì những lý do đó, Banker's Algorithm hiếm khi được dùng trong thực tế (trừ một số hệ điều hành real-time và nhúng, nơi tài nguyên và tác vụ được biết trước một cách tĩnh). Trong phần lớn hệ thống thật, người ta ưu tiên deadlock prevention (lock ordering) hơn avoidance."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`transferSafe` loại bỏ deadlock bằng lock ordering: mọi caller đều lock tài khoản có ID nhỏ hơn trước, nên wait-for graph không thể có chu trình — và các khối `try/finally` lồng nhau release cả hai lock kể cả khi thao tác cập nhật ném exception. `transferWithTimeout` không bao giờ chờ vô thời hạn trong khi đang giữ lock: nếu không lấy được lock thứ hai kịp thời, `finally` sẽ release lock thứ nhất, rồi nó backoff theo cấp số nhân kèm jitter ngẫu nhiên để hai thread tranh chấp không retry nhịp nhàng cùng nhau (livelock).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Starvation và livelock: những mối nguy concurrency khác",
+      "content": "Deadlock không phải là cách duy nhất để concurrency hỏng ở tầng lock. Có hai vấn đề có liên quan mật thiết, thường bị nhầm với deadlock nhưng thực ra khác hẳn:\n\n**Starvation** (chết đói) xảy ra khi một thread liên tục bị từ chối truy cập tài nguyên mà nó cần, dù không hề có deadlock. Các thread vẫn tiến triển — chỉ là không phải *thread này*. Nguyên nhân kinh điển là lập lịch theo độ ưu tiên: nếu các thread ưu tiên cao liên tục giành lock trước khi thread ưu tiên thấp có cơ hội, thread ưu tiên thấp có thể phải chờ vô thời hạn. Các cơ chế công bằng — như lock queue kiểu FIFO (thread chờ tiếp theo là thread được lock tiếp theo) hay **priority inheritance** (tạm thời nâng độ ưu tiên của thread ưu tiên thấp khi nó giữ một lock mà thread ưu tiên cao đang cần) — giúp ngăn starvation.\n\n**Livelock** là \"người anh em trớ trêu\" của deadlock. Các thread không bị block — chúng vẫn đang chạy — nhưng bị mắc kẹt trong một vòng lặp hành động và phản ứng khiến không thread nào tiến triển được. Hãy nghĩ đến hai người gặp nhau trong hành lang hẹp: mỗi người bước sang phải để nhường đường, lại đối mặt nhau, mỗi người bước sang trái, cứ thế mãi. Cả hai đều đang di chuyển, nhưng chẳng ai qua được. Cách tiếp cận timeout-và-retry dễ dính livelock nếu mọi thread xung đột cứ đồng loạt timeout rồi retry cùng lúc. Exponential backoff kèm jitter ngẫu nhiên là cách chữa tiêu chuẩn.\n\n**Priority inversion** (đảo ngược độ ưu tiên) là mối nguy đặc biệt nguy hiểm trong hệ thống real-time. Thread ưu tiên cao H chờ một lock do thread ưu tiên thấp L giữ. Trong khi đó, một thread ưu tiên trung bình M (không cần lock) lại được chạy thay cho L, vì M có độ ưu tiên cao hơn L. H bị block chờ L, nhưng L không chạy được vì M preempt nó. Thực chất H đang chạy ở mức ưu tiên của L — độ ưu tiên đã bị đảo ngược. Sứ mệnh Mars Pathfinder năm 1997 đã dính bug này một cách nổi tiếng, khiến máy tính của tàu vũ trụ liên tục bị reset. Bản sửa — priority inheritance — được áp dụng từ xa, ngay từ Trái Đất."
+    },
+    {
+      "type": "explanation",
+      "title": "Atomic operation và cấu trúc dữ liệu lock-free",
+      "content": "Với code đòi hỏi hiệu năng cao, việc lấy và nhả lock — kể cả khi không tranh chấp — vẫn có overhead: invalidate cache line, memory barrier, có thể cả context switch của hệ điều hành. Lập trình **lock-free** (và **wait-free**) dùng **atomic operation của phần cứng** để xây dựng cấu trúc dữ liệu concurrent mà không cần lock.\n\nPrimitive atomic nền tảng trên CPU hiện đại là **Compare-And-Swap (CAS)**: một cách atomic, so sánh một vị trí bộ nhớ với một giá trị kỳ vọng, nếu bằng thì thay bằng giá trị mới; trả về việc swap có thành công hay không. Trên x86 đây là một lệnh duy nhất (`LOCK CMPXCHG`); trên ARM nó là cặp load-exclusive/store-exclusive (`LDXR`/`STXR`) hoặc, từ ARMv8.1, một lệnh `CAS` duy nhất.\n\nCAS cho phép dùng **vòng lặp retry** (đôi khi gọi là optimistic concurrency): đọc giá trị hiện tại, tính giá trị mới mong muốn, CAS từ cũ sang mới. Nếu CAS thất bại (vì một thread khác đã thay đổi giá trị giữa lúc bạn đọc và lúc bạn CAS), thì retry. Cách này đúng vì CAS thất bại nghĩa là một bên khác đã tiến triển rồi — toàn hệ thống không bị kẹt.\n\nStack, queue và hash map lock-free đều được xây theo cách này. API `Atomics` của JavaScript (dành cho SharedArrayBuffer) phơi bày các primitive này. Package `java.util.concurrent.atomic` của Java (AtomicInteger, AtomicReference) cung cấp counter và reference dựa trên CAS. Hầu hết các runtime hiện đại dùng CAS rất nhiều trong garbage collector và bộ cấp phát bộ nhớ.\n\nTrade-off: code lock-free **khó viết đúng hơn nhiều** so với code được bảo vệ bằng mutex. Bài toán ABA (một giá trị đổi A→B→A giữa lúc bạn đọc và lúc bạn CAS, nên CAS thành công dù cấu trúc bên dưới đã thay đổi — ví dụ một node đã bị giải phóng và địa chỉ của nó được dùng lại; xem chủ đề Lock-Free Programming) là một cái bẫy kinh điển. Với code ở tầng ứng dụng, dùng các cấu trúc dữ liệu concurrent đã được kiểm thử kỹ trong standard library gần như luôn là lựa chọn đúng hơn so với tự viết code lock-free."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Bài toán deadlock được xác định một cách chính thức vào đầu những năm 1960, khi các hệ điều hành time-sharing bắt đầu cho phép nhiều chương trình chạy đồng thời. Edsger Dijkstra hình thức hóa khái niệm semaphore năm 1965 và đặt ra bài toán Dining Philosophers (bữa tối của các triết gia — về sau được Tony Hoare đặt tên) — năm triết gia luân phiên suy nghĩ và ăn, dùng chung năm chiếc nĩa — như một minh họa chính xác cho việc deadlock nảy sinh thế nào và ngăn chặn ra sao. Các điều kiện Coffman được công bố năm 1971. Dijkstra mô tả Banker's Algorithm trong cùng giai đoạn (EWD 108). Những ý tưởng nền tảng này đã 60 năm tuổi nhưng vẫn áp dụng trực tiếp cho mọi hệ thống concurrent được xây dựng hôm nay."
+    },
+    {
+      "type": "callout",
+      "content": "**Lỗi thường gặp và kinh nghiệm interview:**\n- **Quên release lock trên nhánh lỗi**: luôn dùng try/finally (hoặc RAII trong C++) để bảo đảm unlock kể cả khi exception bị ném ra.\n- **Giữ lock quá lâu**: thu nhỏ critical section. Nếu bạn giữ lock trong lúc làm I/O hay gọi HTTP, bạn đang chặn mọi thread khác trong suốt một vòng round-trip mạng.\n- **Dùng sai primitive**: dùng mutex khi quyền sở hữu quan trọng (một thread acquire và release); dùng semaphore để đếm hoặc báo hiệu giữa các thread khác nhau.\n- **Lock ordering là câu trả lời interview**: khi được hỏi 'làm sao ngăn deadlock?', câu trả lời được kỳ vọng là thứ tự lock toàn cục nhất quán để loại bỏ circular wait — đơn giản, không overhead, áp dụng được ở mọi nơi.\n- **Database phát hiện deadlock và hy sinh victim**: nếu transaction của bạn bị abort với lỗi deadlock, hãy luôn retry nó — database đã chọn transaction của bạn vì nó rẻ nhất để chạy lại.\n- **JavaScript chạy single-thread nhưng code async vẫn có race**: shared state bị thay đổi qua các ranh giới `await` có thể bị race — event loop chuyển task ở mỗi `await`. Một async mutex (chuỗi promise) là phiên bản JS của mutex lock."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Race condition** xảy ra khi nhiều thread truy cập shared mutable state mà không có synchronization; hệ điều hành có thể preempt một thread giữa bất kỳ hai lệnh máy nào, làm hỏng các thao tác nhiều bước như read-modify-write.",
+        "**Mutex** cung cấp mutual exclusion — mỗi lần chỉ một thread giữ được nó, bảo vệ một critical section; **semaphore** là một bộ đếm tổng quát cho phép tối đa N truy cập đồng thời, dùng cho resource pool và báo hiệu giữa các thread.",
+        "**Condition variable** cho phép một thread ngủ cho đến khi shared state thay đổi: `wait()` một cách atomic release mutex rồi ngủ, và điều kiện phải được kiểm tra lại trong vòng `while` (Mesa semantics, spurious wakeup). Mutex + condition variable = **monitor**.",
+        "**Deadlock** đòi hỏi cả bốn điều kiện Coffman cùng lúc (chúng là điều kiện cần): Mutual Exclusion, Hold and Wait, No Preemption và Circular Wait — phá bất kỳ một điều kiện nào là ngăn được deadlock.",
+        "**Lock ordering** (luôn acquire lock theo một thứ tự toàn cục nhất quán) loại bỏ Circular Wait mà không tốn chi phí runtime, và là kỹ thuật ngăn deadlock thực tế nhất trong các hệ thống thật.",
+        "**Timeout và retry** (kèm exponential backoff và jitter) phá No Preemption bằng cách để thread tự nguyện nhả lock khi không thể tiến triển — nhưng có nguy cơ livelock nếu thiếu jitter.",
+        "**Banker's Algorithm** tránh deadlock bằng cách chỉ cấp những yêu cầu tài nguyên giữ hệ thống ở trạng thái safe, nhưng cần biết trước nhu cầu tối đa và hiếm khi thực tế ngoài các hệ thống nhúng.",
+        "**Starvation**, **livelock** và **priority inversion** là các mối nguy concurrency có liên quan: starvation nghĩa là một thread không bao giờ lấy được lock; livelock nghĩa là các thread lặp mãi mà không tiến triển; priority inversion có thể nguy hiểm ngang deadlock trong hệ thống real-time (xem: Mars Pathfinder 1997)."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Race condition trên một biến đếm xảy ra vì `balance = balance + 1` được biên dịch thành ba lệnh máy. Thứ tự thực thi nào gây ra lost update?",
+      "options": [
+        "Thread A chạy LOAD, bị preempt, Thread B chạy cả ba lệnh, Thread A chạy tiếp và ghi một giá trị đã cũ",
+        "Thread A hoàn tất cả ba lệnh trước khi Thread B bắt đầu bất kỳ lệnh nào",
+        "Cả hai thread cùng lúc chạy STORE, và CPU lấy trung bình hai giá trị",
+        "Hệ điều hành phát hiện xung đột và tự động rollback một thread"
+      ],
+      "explanation": "Sau lệnh LOAD của Thread A, scheduler có thể chuyển sang Thread B; Thread B hoàn tất trọn chu trình read-modify-write và ghi giá trị đã tăng. Thread A chạy tiếp với register vẫn giữ giá trị cũ, tính cũ+1, rồi ghi đè kết quả của Thread B — một lost update."
+    },
+    {
+      "id": "q2",
+      "question": "Tính chất nào phân biệt mutex với binary semaphore?",
+      "options": [
+        "Mutex cho tối đa 2 thread vào critical section; semaphore chỉ cho 1",
+        "Mutex được sở hữu bởi thread đã lock nó — chỉ thread đó mới được unlock; semaphore không có chủ sở hữu",
+        "Semaphore dùng lệnh atomic của phần cứng; mutex dùng spin-wait bằng phần mềm",
+        "Chúng giống hệt nhau về chức năng — hai cái tên chỉ là từ đồng nghĩa có nguồn gốc lịch sử"
+      ],
+      "explanation": "Quyền sở hữu mutex là khác biệt then chốt: chỉ thread đã acquire mới được release mutex, khiến nó phù hợp để bảo vệ critical section. Binary semaphore không có chủ sở hữu — thread nào cũng có thể signal nó — điều này cho phép các pattern báo hiệu producer-consumer nhưng cũng khiến nó dễ bị dùng sai hơn."
+    },
+    {
+      "id": "q3",
+      "question": "Một semaphore được khởi tạo bằng 3. Các thread T1, T2, T3 và T4 lần lượt gọi wait(). Chuyện gì xảy ra với T4?",
+      "options": [
+        "T4 chạy tiếp ngay vì bộ đếm của semaphore quay vòng về 0",
+        "T4 giành semaphore từ thread có độ ưu tiên thấp nhất",
+        "T4 ném exception vì bộ đếm không thể âm",
+        "T4 bị block cho đến khi một trong T1, T2 hoặc T3 gọi signal()"
+      ],
+      "explanation": "T1, T2, T3 lần lượt giảm bộ đếm (3→2→1→0). Khi T4 gọi wait(), bộ đếm đang là 0 nên T4 bị block. Nó chỉ được bỏ block khi một trong các thread kia gọi signal(), tăng bộ đếm trở lại 1."
+    },
+    {
+      "id": "q4",
+      "question": "Phát biểu nào về bốn điều kiện Coffman là đúng?",
+      "options": [
+        "Chỉ riêng mutual exclusion đã đủ gây ra deadlock",
+        "Chỉ riêng circular wait đã gây deadlock, kể cả khi tài nguyên có thể bị preempt",
+        "Cả bốn đều là điều kiện cần — chỉ cần ngăn được một trong số đó thì deadlock không thể xảy ra",
+        "Bất kỳ hai trong bốn điều kiện cùng lúc là chắc chắn có deadlock"
+      ],
+      "explanation": "Các điều kiện Coffman là điều kiện cần: deadlock chỉ có thể xảy ra khi mutual exclusion, hold-and-wait, no preemption và circular wait cùng thỏa mãn một lúc. Vì thế mỗi chiến lược prevention chỉ cần phá một trong số chúng. Với tài nguyên chỉ có một instance như lock thông thường, một chu trình dưới ba điều kiện còn lại chính là deadlock."
+    },
+    {
+      "id": "q5",
+      "question": "Thread A giữ Lock 1 và chờ Lock 2. Thread B giữ Lock 2 và chờ Lock 1. Kịch bản này minh họa trực tiếp nhất điều kiện Coffman nào?",
+      "options": [
+        "No Preemption — không thread nào bị buộc phải nhả lock của mình",
+        "Hold and Wait — cả hai thread đều giữ một tài nguyên trong khi chờ tài nguyên khác",
+        "Circular Wait — Thread A chờ tài nguyên của B, B chờ tài nguyên của A",
+        "Mutual Exclusion — mỗi lock chỉ có thể bị một thread giữ"
+      ],
+      "explanation": "Đặc trưng xác định của kịch bản này là chu trình trong wait-for graph: A→Lock2→B→Lock1→A. Chu trình đó chính xác là điều kiện Circular Wait. Hold and Wait và No Preemption cũng có mặt, nhưng Circular Wait là mô tả trực tiếp nhất cho pattern này."
+    },
+    {
+      "id": "q6",
+      "question": "Vì sao luôn acquire lock theo thứ tự ID tăng dần lại ngăn được deadlock?",
+      "options": [
+        "Nó khiến Circular Wait bất khả về mặt cấu trúc, vì không thread nào chờ một lock hạng thấp hơn mà nó chưa giữ",
+        "Nó loại bỏ Mutual Exclusion, nên không thread nào có quyền truy cập độc quyền",
+        "Nó loại bỏ Hold and Wait, vì mỗi lần thread chỉ acquire một lock",
+        "Nó cho phép hệ điều hành preempt lock khỏi thread khi cần"
+      ],
+      "explanation": "Lock ordering phá điều kiện Circular Wait. Để có chu trình, phải có thread nào đó giữ một lock hạng cao hơn trong khi chờ một lock hạng thấp hơn. Quy tắc thứ tự cấm điều này — thread nào cũng chỉ chờ lock hạng cao hơn — nên không chu trình nào hình thành được."
+    },
+    {
+      "id": "q7",
+      "question": "Trong ví dụ race condition với JavaScript async, vì sao mutex (chuỗi promise) sửa được bug lost update?",
+      "options": [
+        "Nó làm phép toán số học trở nên atomic ở tầng CPU",
+        "Nó buộc mỗi lần rút tiền phải hoàn tất (kể cả phần await) trước khi lần kế tiếp đọc balance",
+        "Nó ngăn event loop chuyển task trong lúc chạy code đồng bộ",
+        "Nó sao chép balance vào một biến cục bộ trước khi await"
+      ],
+      "explanation": "Chuỗi promise tuần tự hóa việc thực thi: hàm của lần rút thứ hai chỉ được gọi sau khi promise của lần rút thứ nhất resolve hoàn toàn (sau await của nó). Vì vậy lần rút thứ hai luôn đọc được balance đã phản ánh lệnh STORE của lần thứ nhất — chu trình read-modify-write thực chất trở thành atomic ở tầng async."
+    },
+    {
+      "id": "q8",
+      "question": "Banker's Algorithm được xếp vào loại deadlock ___. Nó làm gì?",
+      "options": [
+        "Prevention — nó loại bỏ Mutual Exclusion khỏi hệ thống",
+        "Detection — nó định kỳ quét wait-for graph để tìm chu trình",
+        "Recovery — nó abort thread bị deadlock \"rẻ\" nhất để phá chu trình",
+        "Avoidance — nó chỉ cấp những yêu cầu tài nguyên giữ hệ thống ở trạng thái safe"
+      ],
+      "explanation": "Banker's Algorithm là deadlock avoidance: trước khi cấp bất kỳ yêu cầu tài nguyên nào, nó mô phỏng trạng thái thu được và kiểm tra xem còn tồn tại một thứ tự thực thi an toàn hay không. Nếu cấp yêu cầu sẽ dẫn tới trạng thái unsafe, nó hoãn yêu cầu lại — kể cả khi tài nguyên đang sẵn có."
+    },
+    {
+      "id": "q9",
+      "question": "Livelock là gì, và nó khác deadlock thế nào?",
+      "options": [
+        "Livelock là khi các thread bị block chờ nhau; deadlock là khi chúng busy-wait",
+        "Livelock là khi các thread vẫn đang chạy nhưng không tiến triển do phản ứng qua lại; deadlock là khi các thread bị block hoàn toàn",
+        "Livelock nghĩa là đúng hai thread bị kẹt; deadlock có thể liên quan đến bất kỳ số thread nào",
+        "Chúng là cùng một hiện tượng — livelock là thuật ngữ hiện đại của deadlock"
+      ],
+      "explanation": "Trong livelock, các thread không bị block — chúng đang chạy và phản ứng với nhau — nhưng phản ứng của bên này cứ triệt tiêu tiến triển của bên kia. Ví dụ kinh điển là vòng timeout-và-retry khi cả hai thread cùng timeout một lúc và cùng retry một lúc, mãi mãi. Deadlock nghĩa là các thread bị block và hoàn toàn không chạy được."
+    },
+    {
+      "id": "q10",
+      "question": "Database abort transaction của bạn với thông báo 'Deadlock detected — your transaction was chosen as the victim.' Bạn nên làm gì?",
+      "options": [
+        "Retry transaction từ đầu — database đã release các lock của bạn rồi",
+        "Ngắt kết nối — database đang ở trạng thái không nhất quán",
+        "Chờ transaction kia xong rồi mới retry — lúc đó lock sẽ sẵn có",
+        "Chuyển sang một database node khác — node này có lock table bị hỏng"
+      ],
+      "explanation": "Khi phát hiện một chu trình deadlock, database abort một transaction (là 'victim') và rollback nó hoàn toàn, release mọi lock của nó. Transaction victim có thể được retry lại từ đầu một cách an toàn. Transaction còn lại trong chu trình được phép chạy xong. Retry là phản ứng tiêu chuẩn và đúng đắn khi gặp lỗi deadlock victim."
+    }
+  ]
+}

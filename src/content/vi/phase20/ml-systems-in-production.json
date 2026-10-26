@@ -1,0 +1,224 @@
+{
+  "sourceHash": "008bc6a2868d",
+  "title": "Hệ thống ML trên production (ML Systems in Production)",
+  "tagline": "Đưa model lên 95% accuracy chỉ là 10% công việc; giữ cho nó đáng tin cậy trên production mới là 90% còn lại.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Bạn đã dành nhiều tuần thu thập dữ liệu, làm feature engineering, tinh chỉnh hyperparameter, và cuối cùng model của bạn đạt 95% accuracy trên tập test giữ riêng. Đáng để ăn mừng. Nhưng đây là sự thật khó nghe mà phần lớn khóa học nhập môn không nói với bạn: **khoảnh khắc đó chỉ chiếm khoảng 10% tổng công sức kỹ thuật**. 90% còn lại là xây hạ tầng xung quanh model: pipeline, hệ thống serving, monitoring, vòng lặp retrain và khung quản trị biến một sản phẩm nghiên cứu thành một service production đáng tin cậy.\n\nKhoảng cách này là lý do lĩnh vực **MLOps** (Machine Learning Operations) tồn tại. MLOps vay mượn từ DevOps (continuous integration, tự động hóa deploy, observability) và thêm vào những mối quan tâm riêng của ML: versioning dữ liệu, theo dõi thí nghiệm, tính nhất quán của feature, và sự suy giảm âm thầm xảy ra khi thế giới thực trôi dạt khỏi thế giới mà model được train. Một bug phần mềm thường ồn ào: exception bị ném ra, service crash. Một model ML suy giảm do data drift thì im lặng: nó chỉ bắt đầu trả về những câu trả lời sai một cách tự tin, và không ai nhận ra trong nhiều ngày hay nhiều tuần.\n\nChương này trình bày toàn bộ vòng đời của một hệ thống ML production từ đầu đến cuối: **data pipeline** tính feature một cách đáng tin cậy, **feature store** ngăn sự thiếu nhất quán giữa training và serving, **model registry** version mọi thí nghiệm, **hạ tầng serving** xử lý traffic thật ở quy mô lớn, **phát hiện drift** để bắt sớm sự suy giảm âm thầm, **các pattern deploy an toàn** như shadow mode và canary release, và **khung đánh giá** đo những gì thật sự quan trọng ngoài đời thực. Ta sẽ đi sâu vào từng thành phần, xem xét các kiểu lỗi, và xây dựng mô hình tư duy bạn cần để thiết kế hay suy luận về bất kỳ hệ thống ML nào.\n\nBản đồ nhanh về những gì sắp tới: (1) kiến trúc tổng thể của hệ thống và lý do mỗi thành phần tồn tại, (2) data pipeline, nền móng, (3) feature store và vấn đề training-serving skew, (4) theo dõi thí nghiệm và model registry, (5) hạ tầng serving và kỹ thuật tối ưu latency, (6) model drift: các loại, cách phát hiện và cách phản ứng, (7) các pattern deploy an toàn, (8) đánh giá trên production vượt ra ngoài accuracy offline, và (9) các mô hình tổ chức giúp MLOps vận hành ở quy mô lớn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng lặp ML production hoàn chỉnh: dữ liệu chảy qua các pipeline đã kiểm chứng vào feature store, nuôi quá trình training tái lập được, model có version được serve qua API, và monitoring liên tục kích hoạt retrain khi thế giới thay đổi."
+    },
+    {
+      "type": "analogy",
+      "title": "Một hãng hàng không, không chỉ là chiếc máy bay",
+      "content": "Khi bạn lên một chuyến bay, bạn đang đặt niềm tin vào nhiều thứ hơn hẳn động cơ máy bay. Bạn tin vào **pipeline dữ liệu thời tiết** (liên tục nhận các chỉ số khí quyển từ hàng nghìn cảm biến), **hệ thống lập kế hoạch bay** (feature engineering trên dữ liệu thô đó: vector gió, chỉ số nhiễu động, tối ưu đường bay), **sổ đăng ký bảo dưỡng** (mọi lần kiểm tra, thay phụ tùng và bất thường trước đây, tức lịch sử training của model), **tầng serving của kiểm soát không lưu** (quyết định thời gian thực dựa trên dữ liệu trực tiếp), và **hệ thống monitoring và cảnh báo** (thiết bị đo trong buồng lái lập tức báo khi có sai lệch khỏi thông số an toàn).\n\nĐộng cơ máy bay chính là model ML: cực kỳ quan trọng, nhưng vô dụng nếu thiếu hệ thống xung quanh. Một hãng hàng không dồn hết vào việc chế tạo động cơ tốt nhất thế giới nhưng bỏ qua hồ sơ bảo dưỡng, monitoring thời gian thực và tích hợp dữ liệu thời tiết thì bay cùng họ sẽ rất đáng sợ. Logic tương tự áp dụng cho ML trên production.\n\nCòn một điểm tương đồng quan trọng nữa: **các kiểu lỗi âm thầm**. Một động cơ có thể chạy hơi rung trong nhiều giờ trước khi hỏng thảm khốc. Một model ML có thể đưa ra dự đoán sai một cách tinh vi trong nhiều tuần trước khi có người nhận ra, vì không có crash, không có exception, không có alert. Model chỉ lặng lẽ trôi xa khỏi thực tế. Đây là lý do **observability** (biết được sức khỏe hệ thống theo thời gian thực) không phải là tùy chọn."
+    },
+    {
+      "type": "explanation",
+      "title": "Data pipeline: nền móng mà mọi thứ phụ thuộc vào",
+      "content": "Mọi hệ thống ML đều bắt đầu từ dữ liệu, và độ tin cậy của data pipeline quyết định trần của mọi thứ phía sau. Dữ liệu thô đến từ database, event stream, API bên thứ ba, log hoạt động người dùng và cảm biến IoT. Trước khi bất kỳ phần nào trong đó có thể nuôi model, nó phải được **làm sạch** (xử lý null, outlier, bản ghi hỏng), **kiểm chứng** (khẳng định kỳ vọng về schema, ràng buộc khoảng giá trị, toàn vẹn tham chiếu), **biến đổi** (tính các feature dẫn xuất, normalise, mã hóa biến phân loại), và **giao đúng hạn** (xử lý dữ liệu đến trễ một cách êm thấm).\n\nData pipeline thường được tổ chức thành **DAG (Directed Acyclic Graph)**: các task có dependency tường minh, được điều phối bởi công cụ như **Apache Airflow**, **Prefect** hoặc **Dagster**. Airflow biểu diễn pipeline bằng code Python, lên lịch chạy theo kiểu cron, và có giao diện web để theo dõi sức khỏe task và xem lịch sử các lần chạy. Prefect đi theo hướng Pythonic hơn, ưu tiên code, với việc thực thi task động. Dagster nhấn mạnh vào data asset và theo dõi lineage, giúp dễ hiểu mỗi bước sinh ra và tiêu thụ dữ liệu nào.\n\n**Những gì có thể sai trong data pipeline, và thường xuyên sai:**\n\n**Dữ liệu đến trễ** là khi các bản ghi sự kiện tới sau khung xử lý của pipeline. Một giao dịch mua lúc 11:58 PM có thể chưa xuất hiện trong database cho tới 12:03 AM, sau khi batch job lúc nửa đêm đã chạy. Pipeline ngây thơ sẽ bỏ sót các bản ghi này. Giải pháp gồm watermarking (chấp nhận bản ghi trễ tới N giờ sau khi khung đóng lại) và xử lý lại các khung sau một khoảng ân hạn.\n\n**Schema drift** xảy ra khi nguồn dữ liệu phía trên thay đổi mà không báo trước. Một cột mới xuất hiện, một cột cũ đổi kiểu, một enum có thêm giá trị mới. Pipeline nên kiểm chứng schema của mọi batch với các kỳ vọng tường minh (công cụ như **Great Expectations** hoặc **dbt tests**) và fail một cách ồn ào, chứ không âm thầm bỏ qua bản ghi, khi có vi phạm.\n\n**Idempotency** là đặc tính chạy một bước pipeline nhiều lần cho cùng kết quả như chạy một lần. Điều này cực kỳ quan trọng vì pipeline sẽ fail và cần được retry. Một pipeline không idempotent có thể đếm trùng sự kiện hoặc sinh ra giá trị feature không nhất quán khi retry.\n\n**Data lineage** (biết chính xác bản ghi thô nào đã đóng góp vào giá trị feature nào và lần train model nào) là thiết yếu cho debug, kiểm toán và tuân thủ. Các công cụ hiện đại tự động theo dõi lineage, tạo ra một graph từ nguồn thô tới dự đoán."
+    },
+    {
+      "type": "diagram",
+      "caption": "Dữ liệu chảy qua bước kiểm chứng (fail ồn ào với bản ghi tệ), tới bước biến đổi rồi vào feature store, nơi phục vụ cả batch job training lẫn request serving thời gian thực."
+    },
+    {
+      "type": "explanation",
+      "title": "Feature store: loại bỏ vấn đề training-serving skew",
+      "content": "**Training-serving skew** là một trong những nguyên nhân phổ biến và nguy hiểm nhất gây lỗi ML trên production. Nó xảy ra khi feature được tính lúc training khác (dù chỉ một chút) so với feature được tính lúc serving. Model được train trên một phiên bản của thực tế nhưng lại bị yêu cầu dự đoán trên một phiên bản khác.\n\nHãy tưởng tượng bạn train một model phát hiện gian lận. Lúc training, bạn tính một feature `transactions_last_7_days` bằng cách query database lịch sử với một window function SQL cụ thể. Lúc serving, một kỹ sư viết một phép tổng hợp hơi khác ở tầng ứng dụng, có thể dùng cửa sổ trượt 7 ngày neo theo ngày UTC hiện tại thay vì timestamp của sự kiện. Giờ feature có ngữ nghĩa khác đi một cách tinh vi. Model nhận được input không giống bất cứ thứ gì trong phân phối training và cho ra dự đoán không đáng tin, nhưng không có lỗi nào bị ném ra, và debug cực kỳ khó.\n\n**Feature store** giải quyết điều này bằng cách thiết lập **một nguồn sự thật duy nhất cho logic tính feature**. Cùng một đoạn code chạy cho cả đường training (tính toán batch lịch sử trên dữ liệu quá khứ) lẫn đường serving (tính toán thời gian thực cho request trực tiếp). Nó có hai thành phần chính:\n\n**Offline store**: Một database dạng cột (Hive, BigQuery, Redshift) được tối ưu cho việc đọc hàng loạt các giá trị feature lịch sử. Được dùng để tạo dataset training bằng cách join các giá trị feature tại đúng các timestamp lịch sử, một kỹ thuật gọi là **point-in-time join**, giúp ngăn dữ liệu tương lai rò rỉ vào training.\n\n**Online store**: Một kho key-value latency thấp (Redis, DynamoDB, Cassandra) giữ các giá trị feature mới nhất cho mỗi thực thể (người dùng, sản phẩm, session). API serving query vào đây để ráp feature vector cho một dự đoán thời gian thực chỉ trong vài mili giây.\n\nFeature store cũng cho phép **tái sử dụng feature**: một khi bạn đã tính một feature cho một model, mọi model khác đều có thể dùng nó. Điều này tránh tính toán trùng lặp và đảm bảo tính nhất quán trên toàn bộ danh mục model.\n\nCác công cụ trong mảng này: **Feast** (open source, được dùng rộng rãi), **Tecton** (dịch vụ managed, cấp doanh nghiệp), **Vertex AI Feature Store** (có sẵn trên Google Cloud), **Databricks Feature Store** (tích hợp với MLflow). Chọn cái nào tùy vào môi trường cloud, yêu cầu latency thời gian thực và quy mô team của bạn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Feature store dùng một định nghĩa feature duy nhất cho cả training (qua offline store với point-in-time join) lẫn serving (qua online store với tra cứu mili giây), loại bỏ skew."
+    },
+    {
+      "type": "explanation",
+      "title": "Theo dõi thí nghiệm và model registry: version control cho ML",
+      "content": "Kỹ sư phần mềm coi version control là chuyện hiển nhiên: mọi thay đổi code đều được git theo dõi, mọi bản release đều được gắn tag. Các team ML thường bắt đầu mà không có thứ tương đương, và điều đó gây hỗn loạn: 'Lần train nào đã sinh ra model đang chạy trên production?' 'Ta đã dùng hyperparameter nào?' 'Model này được train trên dataset v3 hay v4?' 'Vì sao model tuần trước chạy tốt hơn?'\n\n**Theo dõi thí nghiệm** (experiment tracking) trả lời các câu hỏi này bằng cách log mọi lần train: hyperparameter đã dùng, metric training và validation ở mỗi epoch, version của dataset, commit hash của code, môi trường (version library, phần cứng), và artifact model thu được. Các công cụ như **MLflow Tracking**, **Weights & Biases (W&B)** và **Neptune** tự động ghi lại thông tin này và cung cấp dashboard để so sánh các lần chạy cạnh nhau.\n\n**Model registry** là tầng tiếp theo: một kho có version dành riêng cho các model đã qua đánh giá và sẵn sàng để cân nhắc deploy. Hãy coi nó như 'release branch' trong một workflow git. Mỗi version model được đăng ký có:\n- Artifact của model (weight đã serialise, file ONNX, pickle, SavedModel)\n- Metric đánh giá (accuracy, AUC, RMSE, các KPI liên quan tới business)\n- ID của lần train (lineage đầy đủ ngược về dữ liệu và code)\n- Một nhãn giai đoạn: Staging, Production, Archived\n- Metadata deploy: ai đã duyệt, khi nào, cho use case nào\n\nWorkflow deploy trở thành: train → đánh giá → đăng ký → review → promote lên Staging → A/B test → promote lên Production. Tại bất kỳ thời điểm nào, rollback nghĩa là hạ cấp version Production hiện tại và promote version trước đó: một lời gọi API duy nhất. Model registry của MLflow, tính năng quản lý model của W&B và SageMaker Model Registry đều hỗ trợ workflow này.\n\n**Vì sao khả năng tái lập quan trọng ngoài chuyện kiểm toán**: Nếu một model đưa ra một quyết định có hệ quả lớn (từ chối khoản vay, gắn cờ y tế, chặn vì nghi gian lận), cơ quan quản lý có thể yêu cầu bạn tái hiện đúng dự đoán đó nhiều tháng sau. Không có experiment tracking, điều này là bất khả."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Kiểm chứng feature từ chối các input sai định dạng trước khi chúng kịp làm hỏng một dataset training hoặc sinh ra dự đoán rác lúc serving. Hàm `computeFeatures` được cố ý viết thuần, không có side effect, và giống hệt nhau cho cả batch job training lẫn handler serving thời gian thực. Các hằng số bên trong nó (mean 30, std 20) cũng phải được version cùng model: tính lại chúng trên dữ liệu mới mà không retrain là một nguồn skew kinh điển khác. Vòng đời của model registry (staging → production → archived) phản chiếu một workflow release của git, với việc promote tường minh và rollback an toàn về bất kỳ version nào đã được lưu trữ trước đó.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Hạ tầng serving: đưa dự đoán tới người dùng",
+      "content": "Một model đã train nằm trong registry không tạo ra giá trị gì. Nó cần được **serve**: phơi ra dưới dạng một API mà ứng dụng có thể gọi với một feature vector và nhận về một dự đoán. Hạ tầng serving là nơi ML gặp kỹ thuật hệ thống phân tán, và yêu cầu hiệu năng khác nhau rất nhiều tùy use case.\n\n**Phổ SLA về latency**: Phát hiện gian lận lúc checkout cần dự đoán dưới 10ms (p99); thêm 200ms vào luồng checkout là không chấp nhận được về mặt thương mại. Một recommendation engine nội dung có thể chịu được 100ms. Batch scoring cho báo cáo qua đêm có thể chạy nhiều giờ. Kiến trúc serving của bạn phải được thiết kế quanh budget latency.\n\n**Các lựa chọn model server**: Thay vì deploy model như code thô, các model server chuyên dụng lo phần cơ khí: nạp weight, quản lý bộ nhớ GPU, gom batch request và phơi ra một API chuẩn hóa:\n- **TorchServe**: Framework serving của project PyTorch, không còn được bảo trì tích cực: nó đã bị đánh dấu \"Limited Maintenance\" (không có cập nhật, sửa bug hay bản vá bảo mật theo kế hoạch) và repository GitHub của nó nay đã được archive. Các team dùng Triton, KServe, Ray Serve, BentoML hoặc vLLM thay thế.\n- **TensorFlow Serving**: Server gRPC/REST hiệu năng cao cho SavedModel. Đã được kiểm chứng ở quy mô Google.\n- **NVIDIA Triton Inference Server**: Không phụ thuộc định dạng model (TensorFlow, PyTorch, ONNX, tùy chỉnh). Được tối ưu cho inference trên GPU với các chiến lược gom batch tinh vi.\n- **vLLM** / **SGLang** / **TensorRT-LLM**: Được xây chuyên cho serving large language model: continuous batching (request mới gia nhập một batch đang chạy giữa các bước decode), quản lý KV-cache kiểu PagedAttention, và speculative decoding.\n\n**Dynamic batching** là một tối ưu then chốt: thay vì xử lý từng request một, server gom request trong một khung ngắn (ví dụ 5ms) rồi xử lý cả batch cùng lúc. GPU song song hóa ở quy mô cực lớn; serve từng request một để phần lớn phần cứng ngồi không. Dynamic batching tăng throughput đáng kể, đổi lại latency của từng request tăng nhẹ.\n\n**Lựa chọn phần cứng**: Neural network dùng phép nhân ma trận, thứ GPU làm cực giỏi. Một GPU A100 duy nhất có thể xử lý hàng nghìn request inference mỗi giây với các model điển hình. Với model nhỏ hơn hoặc yêu cầu latency nghiêm ngặt, CPU (kèm lượng tử hóa và ONNX Runtime) có thể là lựa chọn tốt hơn: không có latency khởi động GPU, rẻ hơn khi chạy, độ phức tạp vận hành thấp hơn. Quyết định phụ thuộc vào kích thước model, budget latency, yêu cầu throughput và chi phí.\n\n**Hạ tầng A/B testing**: Tầng serving phải hỗ trợ định tuyến một phần traffic tới một model thách đấu (challenger) trong khi model đương nhiệm (champion) xử lý phần còn lại, theo cách tất định (cùng một người dùng luôn thấy cùng một model trong một khung thí nghiệm), kiểm toán được, và rollback được ngay lập tức."
+    },
+    {
+      "type": "explanation",
+      "title": "Model drift: sát thủ thầm lặng của accuracy trên production",
+      "content": "Một model không tự nó xuống cấp. Thế giới xung quanh nó xuống cấp. **Model drift** là sự suy giảm dần dần hoặc đột ngột hiệu năng của model khi các đặc tính thống kê của dữ liệu thực tế tách xa khỏi phân phối dữ liệu training. Đây là mối quan tâm vận hành quan trọng nhất trong một hệ thống ML trưởng thành, và gần như luôn diễn ra âm thầm.\n\nCó hai loại khác biệt cần hiểu riêng:\n\n**Data drift (covariate shift)** nghĩa là phân phối của các feature input X thay đổi, nhưng quan hệ giữa X và mục tiêu Y vẫn giữ nguyên. Ví dụ: một model được train trên giao dịch mua trên web năm 2022 gặp một nhóm người dùng mới ưu tiên mobile vào năm 2024. Phân phối tuổi trẻ hơn, các nhóm sản phẩm được mua chuyển sang loại khác. Weight của feature trong model được học trên một quần thể khác; dự đoán có thể suy giảm dù các pattern bên dưới không đổi, vì model giờ đang vận hành ở những vùng của không gian feature mà nó hiếm khi thấy lúc training (và calibration trôi đi theo tổ hợp mới). Retrain trên dữ liệu mới thường sửa được điều này.\n\n**Concept drift** thì căn bản hơn: chính quan hệ giữa feature và label thay đổi. Một model phát hiện gian lận học được rằng pattern A (các giao dịch xuyên quốc gia liên tiếp) là gian lận. Kẻ gian quan sát thấy điều này và chuyển sang pattern B. Phân phối feature có thể trông tương tự, nhưng ánh xạ ngữ nghĩa đã thay đổi. Ngay cả một tập training hoàn toàn mới cũng không giúp được gì trừ khi nó chứa đủ ví dụ về pattern mới. Điều này đòi hỏi các vòng phản hồi chủ động và đôi khi phải thay đổi kiến trúc model.\n\n**Label shift** (prior probability shift) là loại thứ ba: phân phối biên của label thay đổi. Nếu tỷ lệ gian lận là 0.1% lúc training và vọt lên 2% ở một thị trường mới, một model được calibrate cho tỷ lệ nền 0.1% sẽ đánh giá thấp nghiêm trọng xác suất gian lận.\n\n**Cách phát hiện drift trước khi nó gây ra vấn đề:**\n\nTiêu chuẩn vàng là monitor accuracy thật của model, nhưng điều này cần có **label ground truth** kịp thời. Trong phát hiện gian lận, bạn nhận được chargeback trong vài ngày. Với model vỡ nợ khoản vay, bạn phải chờ nhiều tháng. Chiến lược monitoring phải tính tới độ trễ của label này.\n\nĐể monitor ở cấp feature, bạn không cần label. Các metric phổ biến:\n- **Population Stability Index (PSI)**: So sánh các phân phối đã chia bin. PSI < 0.1 = ổn định; 0.1–0.25 = cần điều tra; > 0.25 = drift đáng kể, cần hành động.\n- **KL divergence / Jensen-Shannon divergence**: Các thước đo khoảng cách phân phối dựa trên lý thuyết thông tin.\n- **Kolmogorov-Smirnov test**: Kiểm định thống kê phi tham số xem hai mẫu có đến từ cùng một phân phối không.\n- **Wasserstein distance**: Đo 'chi phí dời đất' để biến một phân phối thành phân phối kia; trực quan và rất hợp với feature liên tục.\n\nĐể monitor output (kể cả khi không có label): theo dõi phân phối của các xác suất dự đoán hoặc giá trị regression. Nếu model gian lận đột nhiên dự đoán xác suất cao cho 30% giao dịch thay vì mức 0.5% thường ngày, chắc chắn có gì đó đã thay đổi.\n\nPhản ứng vận hành khi phát hiện drift thường đi theo một chiếc thang: alert → điều tra nguyên nhân gốc (vấn đề dữ liệu? phân phối thật sự dịch chuyển?) → kích hoạt retrain → kiểm chứng model mới → deploy qua canary."
+    },
+    {
+      "type": "diagram",
+      "caption": "Chiếc thang phản ứng với drift: monitor feature và output liên tục, leo thang từ alert sang điều tra rồi retrain tùy mức độ nghiêm trọng, sau đó kiểm chứng model mới qua canary deployment trước khi promote toàn bộ."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Hàm PSI chia bin cả hai mẫu theo các decile của phân phối training (quy ước thông thường), tính tỷ phần của mỗi mẫu trong từng bin, rồi cộng `(actual − expected) × ln(actual / expected)`, tức một KL divergence đã đối xứng hóa. Bản demo đối chiếu một cửa sổ lấy từ cùng quần thể (PSI gần 0) với một nhóm người dùng trẻ hơn (vượt xa 0.25). Một giá trị sàn nhỏ ngăn các bin rỗng sinh ra giá trị vô cùng, và đó cũng là lý do PSI bùng nổ khi hai phân phối gần như không chồng lấn. Bộ monitor output không cần label: với bài toán dương tính hiếm như gian lận, tỷ lệ dự đoán vượt ngưỡng quyết định là tín hiệu nhạy hơn nhiều so với điểm trung bình; và một cú nhảy nghĩa là *có gì đó* đã thay đổi, hoặc là thế giới, hoặc là một feature phía trên bị hỏng, nên bước đầu tiên luôn là kiểm tra data pipeline.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Các pattern deploy an toàn: kiểm soát blast radius",
+      "content": "Deploy ngay một model mới cho 100% traffic production giống như đẩy code chưa test lên production mà không có kế hoạch rollback. Phiên bản ML của deploy theo giai đoạn dùng vài pattern phơi model mới ra dần dần trong khi giới hạn rủi ro.\n\n**Shadow mode (dark launch)**: Model mới chạy song song với champion, nhận cùng các request và tính dự đoán, nhưng các dự đoán đó **không được serve cho người dùng**. Thay vào đó, chúng được log vào một database. Sau đó kỹ sư có thể so sánh offline output của model mới với champion, tính metric, kiểm tra bất thường, và xây dựng niềm tin vào hành vi của model mới. Không có rủi ro gì cho người dùng; cái giá là tính toán thêm. Shadow mode là lựa chọn đúng khi bạn chưa chắc model mới đã sẵn sàng và không thể để người dùng gặp các dự đoán có thể tệ hơn.\n\n**Canary deployment**: Khi shadow mode trông khả quan, định tuyến một lát nhỏ traffic thật (thường 1-5%) tới model mới. Người dùng thật nhận dự đoán từ model mới; metric kinh doanh (click-through rate, tỷ lệ chuyển đổi, tỷ lệ quay lại) và metric kỹ thuật (latency, tỷ lệ lỗi) được theo dõi. Nếu metric chấp nhận được, traffic được chuyển dần: 1% → 5% → 25% → 50% → 100%. Tại bất kỳ thời điểm nào, rollback là tức thì: định tuyến traffic về lại champion. Canary deployment tìm ra những vấn đề mà shadow mode không thể: phản ứng hành vi của người dùng, ảnh hưởng kinh doanh thật, các edge case trong phân phối dữ liệu production vốn ít được đại diện trong bước đánh giá.\n\n**A/B testing**: Nghiêm ngặt hơn canary, A/B test chủ động phân người dùng vào nhóm đối chứng (champion) hoặc nhóm thử nghiệm (model mới) và đo tác động nhân quả lên metric kinh doanh với ý nghĩa thống kê. Bài test chạy đủ lâu để tính tới hiệu ứng mới lạ và tính mùa vụ theo tuần. A/B test trả lời câu hỏi 'model này có thật sự cải thiện metric ta quan tâm không?', điều mà accuracy offline không cho bạn biết được.\n\n**Blue-green deployment**: Duy trì hai môi trường production giống hệt nhau (blue = champion hiện tại, green = model mới). Khi model mới sẵn sàng, chuyển load balancer để định tuyến toàn bộ traffic sang green. Nếu có vấn đề, chuyển về blue chỉ mất vài giây. Cách này hợp khi không cần độ chi tiết của canary và rollback tức thì là ưu tiên hàng đầu.\n\n**Chiến lược rollback**: Mọi lần deploy model đều nên có quy trình rollback được ghi lại: revert về version model nào, ai có quyền khởi động rollback, ngưỡng monitoring nào kích hoạt rollback tự động, và cách xác nhận rollback đã hoàn tất. Đây không phải chuyện tính sau; nó nên được xây sẵn vào tự động hóa deploy."
+    },
+    {
+      "type": "diagram",
+      "caption": "State machine của deploy an toàn: shadow mode trước (không rủi ro cho người dùng), rồi canary (một ít traffic thật), rồi promote toàn bộ. Vấn đề ở bất kỳ giai đoạn nào cũng kích hoạt rollback về champion trước đó."
+    },
+    {
+      "type": "explanation",
+      "title": "Đánh giá trên production: đo những gì thật sự quan trọng",
+      "content": "Accuracy offline trên tập test là thước đo cần nhưng chưa đủ về chất lượng model. Trên production, bạn cần một chiến lược đánh giá nhiều tầng, trả lời câu hỏi ở nhiều mức trừu tượng.\n\n**Metric offline** (điểm khởi đầu): Accuracy, AUC-ROC, precision/recall, RMSE, MAE, tính trên tập test giữ riêng. Chúng tính nhanh, tái lập được và hữu ích để so sánh các model ứng viên. Nhưng chúng giả định phân phối của tập test khớp với production, điều hiếm khi hoàn toàn đúng. Chúng cũng đo những gì model có thể làm, chứ không phải những gì nó thực sự làm trong hệ thống.\n\n**Đánh giá theo lát cắt** (bắt các lỗi ẩn): Accuracy tổng hợp che giấu các vấn đề hiệu năng ở nhóm con. Một model duyệt khoản vay có thể đạt 88% accuracy tổng thể nhưng chỉ 72% với người nộp đơn thuộc một nhóm nhân khẩu học cụ thể: một vấn đề công bằng nghiêm trọng và thường là vi phạm quy định. **Đánh giá theo lát cắt** (slice-based evaluation) tính metric (accuracy, AUC, RMSE, sai số calibration) cho mọi nhóm con có ý nghĩa: độ tuổi, khu vực địa lý, loại thiết bị, tuổi tài khoản, nhóm sản phẩm. Các công cụ như **TensorFlow Model Analysis (TFMA)** và **Fairlearn** tự động hóa việc tính toán và trực quan hóa theo lát cắt. Kết quả thường được công bố trong một **model card** (Mitchell và cộng sự, 2019), một tài liệu ngắn mô tả mục đích sử dụng, dữ liệu training, hạn chế và hiệu năng của model chia theo các lát cắt liên quan.\n\n**Calibration**: Một model có thể xếp hạng đúng các ví dụ (AUC cao) nhưng gán xác suất không khớp thực tế. Một model gian lận dự đoán xác suất 80% cho một sự kiện chỉ xảy ra 20% số lần là đã bị lệch calibration. Điều này cực kỳ quan trọng cho việc ra quyết định: ngưỡng, chấm điểm rủi ro và tính giá trị kỳ vọng đều phụ thuộc vào xác suất được calibrate tốt. **Calibration curve** (reliability diagram) và **Expected Calibration Error (ECE)** định lượng điều này. **Platt scaling** và **isotonic regression** là các phương pháp calibration hậu kiểm phổ biến.\n\n**Metric của A/B test online** (trọng tài cuối cùng): Metric kinh doanh (doanh thu trên mỗi người dùng, tỷ lệ tương tác, tỷ lệ quay lại, churn) đo xem model có thật sự cải thiện kết quả quan trọng hay không. Đây là những metric khó cải thiện nhất và quan trọng nhất. Một team ML nâng AUC từ 0.92 lên 0.95 mà không thấy metric kinh doanh thay đổi thì chưa tạo ra giá trị. Ngược lại, một cải thiện AUC nhỏ mà chuyển thành mức tăng doanh thu 0.5% trên một mảng kinh doanh $100M thì đáng giá $500K/năm.\n\n**SLA latency như một ràng buộc của model**: Nếu p99 latency inference của model vi phạm SLA, cải thiện accuracy bao nhiêu cũng vô nghĩa: dự đoán tới quá muộn. Monitor các percentile latency (p50, p95, p99) cùng với accuracy là thiết yếu. Trong nhiều hệ thống production, một model kém chính xác hơn một chút nhưng nhanh gấp đôi lại là lựa chọn kinh doanh tốt hơn."
+    },
+    {
+      "type": "explanation",
+      "title": "Mô hình tổ chức và độ trưởng thành MLOps",
+      "content": "Hệ thống ML không chỉ hỏng vì lý do kỹ thuật. Nhiều thất bại mang tính tổ chức: không rõ ai sở hữu chất lượng model, không có quy trình retrain, không có đường escalation khi phát hiện drift, và các model 'thuộc về' một team nhưng output lại ảnh hưởng tới nhiều team khác.\n\n**Các mức độ trưởng thành MLOps** mô tả bao nhiêu phần vòng đời ML được tự động hóa:\n\n**Level 0: Thủ công**: Data scientist train model trong notebook, export artifact thủ công và deploy bằng các script tùy hứng. Mỗi lần deploy là một sự kiện độc nhất và căng thẳng. Không có monitoring. Retrain chỉ diễn ra khi có ai đó nhận ra hiệu năng đã suy giảm. Đây là mô tả của phần lớn các team ở giai đoạn đầu áp dụng ML.\n\n**Level 1: Tự động hóa pipeline ML**: Training được tự động hóa thành pipeline (DAG của Airflow/Prefect). Model được đăng ký trong registry. Continuous training chạy theo lịch hoặc theo trigger dữ liệu. Có dashboard monitoring. Deploy vẫn còn phần nào thủ công nhưng theo một quy trình đã được ghi lại.\n\n**Level 2: CI/CD đầy đủ cho ML**: Thay đổi code mới ở pipeline model sẽ kích hoạt tự động việc training, đánh giá và deploy. Một model mới chỉ được promote nếu qua được các cổng chất lượng tự động (ngưỡng accuracy, kiểm tra calibration, benchmark latency, hiệu năng theo lát cắt). Rollback được tự động hóa khi ngưỡng monitoring bị vi phạm. Mức này đòi hỏi đầu tư đáng kể nhưng cho phép team lặp trên model một cách an toàn, nhanh như các team phần mềm ship code.\n\n**Team ML platform**: Ở quy mô lớn, một team platform chuyên trách xây và duy trì feature store, hạ tầng experiment tracking, model registry, hạ tầng serving và dashboard monitoring. Họ che đi sự phức tạp của hạ tầng để data scientist tập trung vào việc xây model. Thiếu khoản đầu tư này, mỗi team ML lại tự xây lại cùng một hạ tầng từ đầu, kém hiệu quả và thiếu nhất quán.\n\n**Quản trị model và tuân thủ**: Các ngành bị quản lý chặt (tài chính, y tế, bảo hiểm) yêu cầu tài liệu về lineage của dữ liệu training, kiểm toán quyết định của model, đánh giá tính công bằng, và đôi khi cả việc con người review quyết định của model. Xây khả năng kiểm toán vào hệ thống ngay từ đầu (không phải tính sau) rẻ hơn rất nhiều so với gắn thêm sau này. Nghĩa là cần ghi lại: dữ liệu nào đã được dùng để train model, nó đã qua bước đánh giá nào, ai đã duyệt deploy, và với các dự đoán có hệ quả lớn, những giá trị feature nào đã dẫn tới mỗi quyết định."
+    },
+    {
+      "type": "explanation",
+      "title": "Hệ thống LLM trên production: điều gì thay đổi",
+      "content": "Hệ thống xây trên large language model thừa hưởng mọi thứ ở trên và thêm vào các kiểu lỗi riêng, vì \"model\" thường là một API bên thứ ba có hành vi có thể thay đổi, và output là văn bản tự do thay vì một điểm số.\n\n**Đánh giá là phần khó.** Không có một con số accuracy duy nhất. Các team xây một **evaluation set** (bộ đánh giá) gồm các prompt tiêu biểu kèm câu trả lời tham chiếu hoặc rubric chấm điểm, rồi chấm từng thay đổi về prompt, model hay retrieval với bộ đó trước khi ship: dùng exact-match và unit test ở chỗ output kiểm tra được (JSON schema, code phải pass test), và chấm bằng **LLM-as-judge** (một model chấm câu trả lời theo rubric, có con người kiểm tra ngẫu nhiên) ở chỗ không kiểm tra được. Chạy các eval này trong CI như regression test.\n\n**Version mọi thứ định hình hành vi**: template prompt, định danh model (pin một snapshot có ngày, không dùng alias di động), thiết lập sampling, định nghĩa tool và index retrieval. Một lần sửa prompt \"vô hại\" cũng là một lần deploy và xứng đáng được áp cùng kỷ luật canary và rollback như một model mới.\n\n**Monitor các tín hiệu khác**: latency tới token đầu tiên và tổng latency, số token và chi phí mỗi request, tỷ lệ từ chối và tỷ lệ lỗi, số lần fail kiểm tra schema, chất lượng retrieval cho RAG, và phản hồi của người dùng. Lấy mẫu và review các cuộc hội thoại thật (có kiểm soát quyền riêng tư), vì cái đuôi dài của input người dùng là nơi vấn đề ẩn nấp.\n\n**Guardrail**: kiểm chứng structured output, lọc hoặc che dữ liệu nhạy cảm ở cả đầu vào lẫn đầu ra, phòng thủ trước prompt injection từ tài liệu được truy xuất và kết quả của tool (coi chúng là dữ liệu không đáng tin, giới hạn những gì tool có thể làm), và giữ con người trong vòng lặp với các hành động có tác động lớn."
+    },
+    {
+      "type": "callout",
+      "content": "**Chi phí ẩn của technical debt trong hệ thống ML**: Technical debt trong ML khác technical debt phần mềm ở một điểm then chốt: nó tích tụ âm thầm và làm suy giảm chất lượng model thay vì tốc độ của developer. Các bài báo của Google *'Machine Learning: The High-Interest Credit Card of Technical Debt'* (2014) và *'Hidden Technical Debt in Machine Learning Systems'* (NeurIPS 2015) đã chỉ ra các pattern như **undeclared consumers** (các model khác phụ thuộc vào feature của bạn mà bạn không hề biết), **correction cascades** (model A sửa lỗi cho model B, nên sửa B lại làm hỏng A), và **feedback loops** (dự đoán của model ảnh hưởng tới dữ liệu training tương lai). Các pattern debt riêng của ML này đòi hỏi kỷ luật kiến trúc (interface gọn gàng, dependency tường minh và kiểm toán định kỳ) để giữ trong tầm kiểm soát."
+    },
+    {
+      "type": "callout",
+      "content": "**Insight cho interview và production: khoảng cách offline-online**: Khi được hỏi vì sao một model có 95% accuracy offline lại chạy kém trên production, các câu trả lời kinh điển là: (1) **training-serving skew**: feature được tính khác nhau lúc train và lúc serve; (2) **data drift**: phân phối production đã dịch chuyển kể từ lúc training; (3) **label leakage**: bước đánh giá offline vô tình dùng thông tin không có sẵn vào lúc dự đoán (ví dụ tổng hợp thống kê có bao gồm cả sự kiện mục tiêu); (4) **feedback loop**: dự đoán của model làm thay đổi hành vi người dùng, từ đó thay đổi dữ liệu training tương lai theo cách làm suy giảm tín hiệu ban đầu. Bốn nhóm này bao quát phần lớn các khoảng cách offline-online gặp trong thực tế. Cách sửa luôn bắt đầu bằng việc instrument pipeline serving để log các giá trị feature thực tế và so sánh chúng với dữ liệu training."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**MLOps coi ML là một ngành kỹ thuật phần mềm**: mọi model đều cần versioning, CI/CD, monitoring và runbook; một model thiếu hạ tầng này sẽ âm thầm suy giảm và không đáng tin cậy để dùng trên production.",
+        "**Feature store ngăn training-serving skew** bằng cách mã hóa logic tính feature một lần và dùng nó cho cả batch training lịch sử (offline store) lẫn serving thời gian thực (online store); đây là pattern kiến trúc có tác động lớn nhất trong ML production.",
+        "**Model drift là mối quan tâm vận hành hàng đầu**: data drift (phân phối input thay đổi) và concept drift (quan hệ feature-label thay đổi) gây mất accuracy âm thầm. Hãy chủ động monitor phân phối feature bằng PSI và KL divergence trước khi các metric accuracy suy giảm.",
+        "**Model registry cung cấp version control cho artifact**: mỗi lần train nên log hyperparameter, version dataset, metric đánh giá và commit hash của code. Deploy lấy từ registry; rollback là một thao tác promote duy nhất.",
+        "**Deploy an toàn dùng cách phơi ra theo nhiều tầng**: shadow mode trước (không rủi ro cho người dùng, log đầy đủ), rồi canary (một ít traffic thật, theo dõi metric kinh doanh), rồi tăng dần traffic lên 100%. Mọi lần deploy đều phải có quy trình rollback đã được kiểm thử.",
+        "**Accuracy offline là cần nhưng chưa đủ**: đánh giá theo lát cắt bắt được các lỗi công bằng ẩn; calibration kiểm tra xác suất dự đoán có khớp thực tế không; metric kinh doanh từ A/B test online là trọng tài cuối cùng về giá trị của model.",
+        "**Độ trưởng thành MLOps tăng từ thủ công (Level 0) tới CI/CD đầy đủ (Level 2)**: các team nên đầu tư dần vào pipeline training tự động, model registry, dashboard monitoring, và cuối cùng là retrain và deploy hoàn toàn tự động dựa trên các cổng chất lượng.",
+        "**Hệ thống dựa trên LLM** cần eval set (với test hoặc chấm bằng LLM-as-judge) chạy trong CI, prompt có version và model snapshot được pin, monitoring chi phí/latency/tỷ lệ từ chối, và guardrail chống prompt injection; một thay đổi prompt cũng là một lần deploy."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vấn đề chính mà feature store giải quyết là gì?",
+      "options": [
+        "Nó lưu dữ liệu training thô theo định dạng được tối ưu cho truy cập từ GPU",
+        "Nó loại bỏ training-serving skew bằng cách đảm bảo cùng một logic tính feature chạy cho cả training lẫn serving thời gian thực",
+        "Nó cung cấp một cache key-value cho weight của model để giảm thời gian nạp",
+        "Nó quản lý việc tìm kiếm hyperparameter trên các worker training phân tán"
+      ],
+      "explanation": "Training-serving skew xảy ra khi feature được tính với logic hơi khác nhau lúc training và lúc serving, khiến model nhận input không giống những gì nó đã học. Feature store định nghĩa cách tính feature một lần và dùng nó cho cả batch training offline (offline store) lẫn tra cứu khi serving thời gian thực (online store), đảm bảo tính nhất quán."
+    },
+    {
+      "id": "q2",
+      "question": "Concept drift khác data drift ở điểm nào?",
+      "options": [
+        "Concept drift chỉ việc phân phối feature input thay đổi; data drift chỉ việc phân phối label thay đổi",
+        "Concept drift phát hiện được mà không cần label; data drift cần ground truth mới phát hiện được",
+        "Concept drift chỉ ảnh hưởng model regression; data drift chỉ ảnh hưởng model classification",
+        "Concept drift nghĩa là quan hệ giữa feature và label đã thay đổi; data drift nghĩa là phân phối feature input đã dịch chuyển trong khi quan hệ giữ nguyên"
+      ],
+      "explanation": "Data drift (covariate shift) nghĩa là phân phối của feature input X đã thay đổi nhưng quan hệ bên dưới P(Y|X) vẫn như cũ; retrain trên dữ liệu mới thường sửa được. Concept drift nghĩa là chính P(Y|X) đã thay đổi: quan hệ ngữ nghĩa giữa feature và label đã dịch chuyển. Ví dụ, pattern gian lận thay đổi khi kẻ gian thích nghi là concept drift; một nhóm người dùng mới với phân phối tuổi khác là data drift."
+    },
+    {
+      "id": "q3",
+      "question": "Trong shadow mode deployment, điều gì xảy ra với các dự đoán của model mới?",
+      "options": [
+        "Chúng được tính và log lại nhưng không bao giờ được serve cho người dùng, cho phép so sánh offline an toàn với champion",
+        "Chúng được serve cho 1% người dùng để kiểm tra tác động thực tế với rủi ro tối thiểu",
+        "Chúng chỉ được serve cho nhân viên nội bộ trước khi rollout ra bên ngoài",
+        "Chúng được lưu trong một hàng đợi và serve vào giờ thấp điểm để giảm tải"
+      ],
+      "explanation": "Shadow mode chạy model mới song song với champion. Dự đoán cho người dùng thật vẫn hoàn toàn đến từ model champion. Output của model mới được log vào một kho dữ liệu, nơi kỹ sư so sánh chúng offline: kiểm tra bất thường, đo tỷ lệ bất đồng, và xây dựng niềm tin. Không có rủi ro nào phía người dùng, nhưng chi phí tính toán thêm là có thật."
+    },
+    {
+      "id": "q4",
+      "question": "Giá trị Population Stability Index (PSI) bằng 0.32 cho thấy điều gì?",
+      "options": [
+        "Phân phối feature ổn định và không cần hành động gì",
+        "Có drift ở mức vừa phải, đáng theo dõi nhưng chưa cần hành động",
+        "Có drift đáng kể: cần hành động như retrain hoặc điều tra nguyên nhân gốc",
+        "Feature đã bị gỡ khỏi model và có thể bỏ qua"
+      ],
+      "explanation": "Ngưỡng PSI: < 0.1 = ổn định (không cần hành động); 0.1–0.25 = drift vừa phải (cần điều tra); > 0.25 = drift đáng kể (cần hành động: thường là kích hoạt retrain, báo on-call và điều tra nguồn dữ liệu phía trên). PSI bằng 0.32 cao hơn hẳn ngưỡng 0.25, cho thấy một sự dịch chuyển phân phối có ý nghĩa."
+    },
+    {
+      "id": "q5",
+      "question": "Vì sao đánh giá model theo lát cắt lại quan trọng trong ML production?",
+      "options": [
+        "Nó tăng tốc đánh giá bằng cách chỉ test một tập con ngẫu nhiên của dữ liệu đánh giá",
+        "Nó chia weight của model thành các lát để inference song song nhanh hơn",
+        "Nó giảm overfitting bằng cách train model đồng thời trên các lát dữ liệu khác nhau",
+        "Nó phơi bày các lỗi hiệu năng ở nhóm con mà metric tổng hợp che giấu, giúp phát hiện vấn đề công bằng và các điểm yếu"
+      ],
+      "explanation": "Một model có 90% accuracy tổng thể có thể chỉ đạt 70% accuracy với một nhóm nhân khẩu học cụ thể: một vấn đề công bằng nghiêm trọng, có thể cả về pháp lý, vô hình trong các con số tổng hợp. Đánh giá theo lát cắt tính metric (accuracy, AUC, calibration) riêng cho từng nhóm con có ý nghĩa (nhóm tuổi, khu vực địa lý, loại thiết bị, ngôn ngữ) và là phương pháp tiêu chuẩn để phân tích tính công bằng và tìm điểm yếu trong độ phủ của model."
+    },
+    {
+      "id": "q6",
+      "question": "Mục đích của model registry trong workflow MLOps là gì?",
+      "options": [
+        "Cung cấp một kho có version chứa artifact và metadata của model đã train, cho phép tái lập, promote theo giai đoạn và rollback an toàn",
+        "Lưu request dự đoán của người dùng để tuân thủ GDPR và kiểm toán",
+        "Đăng ký định nghĩa feature mới trước khi chúng được dùng trong training",
+        "Quản lý rate limit API và khóa xác thực cho các endpoint serving model"
+      ],
+      "explanation": "Model registry lưu artifact model có version (weight, config) cùng metadata training (version dataset, hyperparameter, metric đánh giá, commit code). Model di chuyển qua các giai đoạn: staging → production → archived. Điều này cho phép so sánh các version model, tái lập bất kỳ model nào trong quá khứ, deploy một version cụ thể, và rollback ngay lập tức nếu model mới chạy kém, tương tự các bản release được gắn tag trong repository code."
+    },
+    {
+      "id": "q7",
+      "question": "Calibration của model là gì, và vì sao nó quan trọng trên production?",
+      "options": [
+        "Calibration là quá trình tinh chỉnh hyperparameter trước khi deploy",
+        "Calibration là việc khớp latency của model với SLA serving",
+        "Xác suất dự đoán của một model đã calibrate khớp với tần suất thực nghiệm: một model dự đoán 80% là gian lận thì nên sai khoảng 20% số lần",
+        "Một model đã calibrate là model đã được test trên dữ liệu từ mọi khu vực địa lý"
+      ],
+      "explanation": "Calibration đo xem xác suất dự đoán có tương ứng với tần suất sự kiện thực tế hay không. Nếu một model nói 'xác suất gian lận = 0.8' cho một tập giao dịch, thì khoảng 80% số giao dịch đó nên thật sự là gian lận. Model bị lệch calibration cho ước lượng xác suất sai ngay cả khi xếp hạng chính xác (AUC cao). Calibration quan trọng cho chấm điểm rủi ro, đặt ngưỡng và tính giá trị kỳ vọng."
+    },
+    {
+      "id": "q8",
+      "question": "Trong canary deployment cho model ML, tiến trình định tuyến traffic điển hình là gì?",
+      "options": [
+        "Deploy ngay cho 100% traffic, rồi rollback nếu có vấn đề",
+        "Định tuyến một tỷ lệ nhỏ (ví dụ 1-5%) tới model mới, theo dõi metric, rồi tăng dần traffic khi niềm tin tăng lên",
+        "Chỉ deploy cho người dùng đăng ký tham gia tính năng beta, rồi release rộng rãi",
+        "Luân phiên định tuyến traffic giữa model cũ và mới theo ngày trong hai tuần"
+      ],
+      "explanation": "Canary deployment bắt đầu với một lát nhỏ traffic (1-5%) tới model mới trong khi champion xử lý phần còn lại. Metric kinh doanh (tỷ lệ chuyển đổi, latency, tỷ lệ lỗi) được theo dõi sát. Nếu metric vẫn khỏe, traffic được chuyển dần: 1% → 5% → 25% → 50% → 100%. Tại bất kỳ thời điểm nào, rollback là tức thì: định tuyến traffic về champion giúp giới hạn blast radius nếu có vấn đề xuất hiện."
+    },
+    {
+      "id": "q9",
+      "question": "'Label leakage' là gì và vì sao nó gây ra khoảng cách accuracy offline-online?",
+      "options": [
+        "Label leakage là khi bước đánh giá offline dùng feature chứa thông tin tương lai không có sẵn vào lúc dự đoán thực tế, làm thổi phồng metric offline",
+        "Label leakage là khi label training vô tình bị ghi vào database production",
+        "Label leakage là khi cùng một label được dùng để train đồng thời hai model khác nhau",
+        "Label leakage là khi label dự đoán từ một model được truyền làm feature cho model khác"
+      ],
+      "explanation": "Label leakage xảy ra khi một feature trong dataset training/đánh giá vô tình mã hóa thông tin về kết quả mà vào lúc dự đoán thực tế sẽ không có. Ví dụ, đưa timestamp của sự kiện xử lý gian lận vào làm feature, hoặc tính một phép tổng hợp cấp người dùng có bao gồm cả giao dịch mục tiêu. Model học cách khai thác tín hiệu này, đạt accuracy offline cao nhưng thất bại trên production, nơi thông tin đó thật sự chưa tồn tại."
+    },
+    {
+      "id": "q10",
+      "question": "Thành phần nào của hạ tầng MLOps giải quyết vấn đề 'dữ liệu đến trễ' trong data pipeline?",
+      "options": [
+        "Model registry, bằng cách lưu nhiều version model để xử lý các trạng thái dữ liệu khác nhau",
+        "Shadow mode deployment, vốn giữ đệm dự đoán cho tới khi dữ liệu tới",
+        "Online store của feature store, vốn chỉ nhận dữ liệu thời gian thực",
+        "Watermarking và các khung xử lý lại sau khoảng ân hạn trong data pipeline"
+      ],
+      "explanation": "Dữ liệu đến trễ xảy ra khi các bản ghi sự kiện xuất hiện trong database nguồn sau khi khung xử lý của pipeline đã đóng. Watermarking định nghĩa bản ghi trễ tới mức nào vẫn được chấp nhận (ví dụ tới 2 giờ sau khi khung đóng). Xử lý lại sau khoảng ân hạn chạy lại pipeline sau một khoảng trễ để đưa vào các bản ghi tới muộn. Các stream processor như Apache Flink, Spark Structured Streaming và Apache Beam có sẵn watermark; các orchestrator batch như Airflow triển khai pattern khoảng ân hạn bằng cách lên lịch các lần chạy xử lý lại."
+    }
+  ]
+}

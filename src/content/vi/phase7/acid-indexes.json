@@ -1,0 +1,235 @@
+{
+  "sourceHash": "890961b645da",
+  "title": "ACID, Transaction & Index",
+  "tagline": "Bốn đảm bảo giữ cho dữ liệu của bạn luôn đúng, và những cấu trúc tree giúp query chạy nhanh.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy hình dung một lệnh chuyển khoản: $100 rời tài khoản A và đến tài khoản B. Đó là hai thao tác ghi riêng biệt, cách nhau vài micro giây. Chuyện gì xảy ra nếu server crash sau khi trừ tiền nhưng trước khi cộng tiền? Nếu không có đảm bảo đặc biệt nào, số tiền đó đơn giản là biến mất: bị trừ ở một tài khoản, nhưng không bao giờ được cộng vào tài khoản kia. Database giải quyết vấn đề này bằng **transaction** và một “hợp đồng” gọi là **ACID**.\n\n**ACID** là viết tắt của Atomicity, Consistency, Isolation và Durability. Bốn tính chất này được Jim Gray và Andreas Reuter hệ thống hóa vào cuối thập niên 1970, mô tả những gì database phải đảm bảo cho mọi đơn vị công việc nó xử lý. Chúng không phải tính năng “có thì tốt” — chúng là mức tối thiểu cho phần mềm xử lý tiền thật, hồ sơ y tế, hay bất kỳ dữ liệu nào không được phép sai.\n\nNhưng chỉ đúng thôi là chưa đủ. Một database ACID hoàn chỉnh mà mất ba giây để trả lời `SELECT * FROM orders WHERE user_id = 42` trên bảng một triệu dòng thì gần như vô dụng trên production. Tốc độ đến từ **index** — các cấu trúc dữ liệu phụ cho phép database nhảy thẳng tới các dòng khớp điều kiện thay vì quét từng page trên đĩa. Loại index phổ biến nhất, **B-tree**, là một kiệt tác của khoa học máy tính ứng dụng: tự cân bằng, thân thiện với đĩa, hỗ trợ cả tra cứu chính xác lẫn range query trong thời gian O(log n).\n\nChương này giúp bạn hiểu sâu cả hai trụ cột. Ta sẽ theo dõi một transaction qua cả bốn tính chất ACID, xem database thực sự làm gì trên đĩa để cung cấp các đảm bảo đó, tìm hiểu các anomaly về isolation và cách các isolation level ngăn chúng, rồi chuyển sang index — B-tree được tổ chức thế nào, khi nào query planner chọn dùng nó, và cách đọc output của `EXPLAIN ANALYZE` để chẩn đoán query chậm. Thiết kế schema và normalization có chương riêng; ở đây ta tập trung vào transaction và index."
+    },
+    {
+      "type": "diagram",
+      "caption": "Transaction là một đơn vị “được ăn cả, ngã về không”. COMMIT flush write-ahead log (WAL) để đảm bảo durability; ROLLBACK xóa mọi thao tác ghi dang dở."
+    },
+    {
+      "type": "analogy",
+      "title": "Hóa đơn nhà hàng — và chiếc két sắt khách sạn",
+      "content": "Hãy tưởng tượng bạn chia hóa đơn nhà hàng với một người bạn. Người phục vụ quẹt thẻ của bạn và đánh dấu bàn đã thanh toán. Nếu máy POS bị treo giữa chừng, giao dịch được rollback — thẻ của bạn không bị trừ tiền và bàn vẫn ở trạng thái chưa thanh toán. Không có gì bị mất hay bị tính hai lần. Đó là **Atomicity**: việc trừ tiền và đánh dấu bàn cùng xảy ra, hoặc không cái nào xảy ra.\n\nGiờ giả sử người phục vụ còn ghi mọi giao dịch vào một sổ cái không thể sửa đổi trước khi làm bất cứ việc gì khác. Kể cả nhà hàng có cháy rụi sau khi bạn ký hóa đơn, cuốn sổ (được cất ở nơi khác) vẫn chứng minh bạn đã trả tiền. Đó là **Durability** — write-ahead log chính là cuốn sổ cái cất ngoài nhà hàng của database.\n\n**Isolation** là tấm vách ngăn giữa bàn của bạn và bàn bên cạnh. Món bạn gọi dở dang không xuất hiện trên hóa đơn của họ, và đồ uống của họ cũng không hiện lên hóa đơn của bạn, dù nhà bếp xử lý cả hai cùng lúc.\n\n**Consistency** là bộ quy tắc của nhà hàng: bữa ăn nào cũng phải có chỗ ngồi, khoản thu nào cũng phải ứng với một order. Không transaction nào được phép để database ở trạng thái vi phạm các quy tắc đó."
+    },
+    {
+      "type": "explanation",
+      "title": "Atomicity — được ăn cả, ngã về không",
+      "content": "**Atomicity** là tính chất ACID dễ hiểu nhất nhưng lại khó cài đặt đúng một cách bất ngờ. Nó đảm bảo mọi câu lệnh SQL trong một transaction thực thi như một đơn vị không thể chia cắt. Hoặc mọi câu lệnh đều thành công và transaction commit, hoặc có lỗi xảy ra và database rollback mọi câu lệnh, để dữ liệu y nguyên như trước `BEGIN`.\n\nCách cài đặt atomicity khác nhau tùy engine. **MySQL/InnoDB** và **Oracle** ghi phiên bản *cũ* của mỗi dòng bị sửa vào **undo log** (rollback segment) trước khi thay đổi nó. Khi `ROLLBACK` — hoặc trong lúc crash recovery — chúng áp dụng các bản ghi undo đó theo thứ tự ngược lại. Vì vậy chi phí rollback tỷ lệ với lượng công việc đã làm: một transaction đã update hàng triệu dòng có thể mất vài phút để undo.\n\n**PostgreSQL** không có undo log. Mỗi lần update đều ghi một phiên bản dòng *mới* (xem MVCC bên dưới), và việc abort chỉ đơn giản là đánh dấu transaction ID là aborted trong commit log (`pg_xact`). Sau đó các reader sẽ bỏ qua các phiên bản dòng của transaction đó, nên `ROLLBACK` gần như tức thì; các phiên bản chết được `VACUUM` dọn dẹp sau. Dù engine nào, hãy giữ transaction ngắn: transaction dài giữ lock, ngăn VACUUM thu hồi dung lượng, và — với engine dựa trên undo — rất tốn kém khi rollback.\n\nMột điểm tinh tế: **các câu lệnh DDL** (`CREATE TABLE`, `ALTER TABLE`, thậm chí `DROP TABLE`) có tính transaction đầy đủ trong PostgreSQL — bạn có thể chạy cả một migration trong `BEGIN … COMMIT` rồi rollback nó (một vài lệnh, như `CREATE INDEX CONCURRENTLY`, từ chối chạy bên trong transaction block). MySQL thì khác: DDL kích hoạt một **implicit commit** cho mọi transaction đang mở, nên một migration nhiều bước không thể rollback như một khối; “atomic DDL” của MySQL 8.0 chỉ làm cho *từng* câu lệnh DDL riêng lẻ có tính được-ăn-cả-ngã-về-không. Oracle cũng implicit commit quanh DDL."
+    },
+    {
+      "type": "explanation",
+      "title": "Consistency — những quy tắc không được phá vỡ",
+      "content": "**Consistency** là tính chất ACID duy nhất mà *ứng dụng* cùng chịu trách nhiệm với database. Database thực thi các quy tắc consistency do bạn định nghĩa — primary key, foreign key constraint, `NOT NULL`, `CHECK` constraint, `UNIQUE` constraint — và đảm bảo không transaction nào commit được nếu nó vi phạm bất kỳ quy tắc nào. Nhưng định nghĩa đúng các quy tắc đó là việc của developer.\n\nVí dụ: nếu bạn định nghĩa foreign key từ `orders.user_id` tới `users.id`, database sẽ từ chối mọi nỗ lực insert một order tham chiếu tới user không tồn tại, hoặc xóa một user vẫn còn order (tùy vào mệnh đề `ON DELETE` của bạn). Consistency nghĩa là database luôn ở **trạng thái hợp lệ** đối với các bất biến (invariant) này.\n\nĐể ý rằng Consistency chồng lấn với Atomicity và Isolation — thực ra nó được *suy ra* từ hai tính chất đó. Nếu mỗi transaction giữ được các invariant khi chạy một mình, thì atomicity và isolation đảm bảo các invariant đó vẫn đúng khi các transaction chạy đồng thời hoặc crash giữa chừng. Đây là lý do một số nhà lý thuyết database cho rằng chữ C trong từ viết tắt hơi thừa, nhưng nó vẫn quan trọng như một lời nhắc rằng ứng dụng phải khai báo các invariant của mình cho database.\n\nCác quy tắc trên một dòng như “số dư không bao giờ được âm” nên đặt vào constraint `CHECK (balance >= 0)`. **Invariant trên nhiều dòng** — “phải có ít nhất một bác sĩ trực”, “các bút toán của một lần chuyển khoản phải có tổng bằng 0” — không thể biểu diễn bằng `CHECK`. Chúng cần logic ứng dụng bên trong transaction cộng với isolation `SERIALIZABLE` hoặc lock tường minh; ở các isolation level yếu hơn, hai transaction đồng thời có thể mỗi bên đều qua được bước kiểm tra nhưng cùng nhau phá vỡ quy tắc (**write skew**)."
+    },
+    {
+      "type": "explanation",
+      "title": "Isolation — transaction đồng thời và các anomaly",
+      "content": "**Isolation** là tính chất ACID phức tạp nhất. Trên production, hàng chục hay hàng nghìn transaction chạy đồng thời. Isolation kiểm soát mỗi transaction được phép *nhìn thấy* gì từ các thay đổi của transaction khác, và database cho phép những cách đan xen (interleaving) nào.\n\nChuẩn SQL định nghĩa các level dựa trên ba anomaly kinh điển:\n\n**Dirty read**: Transaction A đọc một dòng mà Transaction B đã sửa nhưng chưa commit. Nếu sau đó B rollback, A đã đọc dữ liệu chưa từng chính thức tồn tại.\n\n**Non-repeatable read**: Transaction A đọc một dòng, Transaction B update và commit dòng đó, rồi A đọc lại cùng dòng và nhận giá trị khác.\n\n**Phantom read**: Transaction A chạy một range query (ví dụ `SELECT count(*) FROM orders WHERE total > 100`) và nhận được 50. Transaction B insert một order mới có total 150 và commit. A chạy lại đúng query đó và nhận 51 — một dòng “ma” (phantom) vừa xuất hiện.\n\nHai anomaly nữa cũng quan trọng không kém trong thực tế: **lost update** (hai chu trình read-modify-write trên cùng một dòng, một bên lặng lẽ ghi đè bên kia) và **write skew** (hai transaction đọc cùng dữ liệu, mỗi bên update một dòng *khác nhau* dựa trên những gì đã đọc, và cùng nhau phá vỡ một invariant).\n\nBốn **isolation level** chuẩn:\n\n- **Read Uncommitted** — có thể cho phép dirty read. PostgreSQL ngầm coi nó như Read Committed.\n- **Read Committed** — mặc định trong **PostgreSQL, Oracle và SQL Server**. Mỗi *câu lệnh* chỉ thấy dữ liệu đã commit trước khi câu lệnh đó bắt đầu. Ngăn dirty read; vẫn cho phép non-repeatable read, phantom và lost update.\n- **Repeatable Read** — mặc định trong **MySQL/InnoDB**. Mỗi *transaction* đọc từ một snapshot chụp tại query đầu tiên của nó. Trong PostgreSQL, level này là **snapshot isolation**: nó còn ngăn được phantom (mạnh hơn yêu cầu của chuẩn) và abort transaction nào cố update một dòng mà người khác đã đồng thời thay đổi — nhưng nó vẫn cho phép **write skew**. Các `SELECT` thường của InnoDB cũng đọc từ snapshot, nhưng `UPDATE` và locking read của nó tác động lên các dòng đã commit mới nhất (dùng next-key lock), nên lost update vẫn có thể xảy ra ở đó.\n- **Serializable** — kết quả phải bằng với *một* thứ tự chạy lần lượt từng transaction nào đó. Ngăn mọi anomaly ở trên, kể cả write skew. PostgreSQL cài đặt nó bằng **Serializable Snapshot Isolation (SSI)**: theo dõi các phụ thuộc read/write và abort một transaction với SQLSTATE `40001`, và ứng dụng phải retry. MySQL cài đặt bằng locking (read thường cũng lấy shared lock).\n\nPhần lớn ứng dụng PostgreSQL chạy ở Read Committed và xử lý tường minh các luồng read-modify-write — bằng một `UPDATE … SET balance = balance - 100` atomic, bằng `SELECT … FOR UPDATE`, hoặc chuyển riêng transaction đó sang `SERIALIZABLE`. Chương Transaction Isolation Levels sẽ đi sâu hơn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mỗi level loại bỏ thêm anomaly, đổi lại là giảm khả năng chạy đồng thời. Mặc định: Read Committed trong PostgreSQL, Oracle và SQL Server; Repeatable Read trong MySQL InnoDB."
+    },
+    {
+      "type": "explanation",
+      "title": "Durability — sống sót qua crash nhờ write-ahead log",
+      "content": "**Durability** đảm bảo rằng một khi transaction đã commit, các thay đổi sẽ tồn tại qua mọi sự cố sau đó — mất điện, OS panic, lỗi phần cứng. Database đạt được điều này nhờ **write-ahead log (WAL)**, ở một số hệ thống còn gọi là redo log.\n\nWAL hoạt động thế này: trước khi database sửa bất kỳ data page nào trong bộ nhớ (buffer pool), nó ghi mô tả của thay đổi vào một file log tuần tự trên đĩa trước. Log được ghi tuần tự, nhanh hơn rất nhiều so với ghi ngẫu nhiên vào các data page. Chỉ sau khi bản ghi WAL đã nằm an toàn trên đĩa, `COMMIT` mới trả về cho ứng dụng.\n\nSau crash, quá trình recovery replay (redo) WAL từ **checkpoint** gần nhất, đưa mọi data page về trạng thái mới nhất. Còn các transaction chưa bao giờ commit thì tùy engine: InnoDB (theo thiết kế ARIES) redo mọi thứ rồi dùng undo log để rollback các transaction chưa commit; PostgreSQL để nguyên các phiên bản dòng của chúng nhưng đánh dấu là thuộc về transaction đã abort, nên không reader nào nhìn thấy chúng.\n\nCách tiếp cận hai pha này — **WAL trước, data page sau** — cho bạn cả hai lợi ích: ghi log tuần tự để có hiệu năng, và đảm bảo khả năng khôi phục. PostgreSQL gọi nó là **WAL**; MySQL/InnoDB gọi là **redo log**; Oracle cũng gọi là **redo log**.\n\nMột điểm tinh tế then chốt: `fsync`. Một lệnh `write()` thông thường chỉ đưa dữ liệu vào page cache của OS; database phải gọi `fsync()`/`fdatasync()` (hoặc mở log với `O_DSYNC`) để ép bản ghi commit xuống bộ lưu trữ bền vững trước khi xác nhận `COMMIT`. Database bận rộn sẽ gom nhiều commit đồng thời vào một lần flush (**group commit**) để chia nhỏ chi phí đó. Bộ lưu trữ cũng phải “trung thực”: một ổ đĩa có write cache không bền vững mà xác nhận flush quá sớm có thể làm mất các commit “durable” khi mất điện.\n\nĐặt `fsync = off` trong PostgreSQL không phải một trade-off nhẹ nhàng: sau OS crash hoặc mất điện, database có thể bị **hỏng (corrupted)**, chứ không chỉ mất vài transaction gần nhất — chỉ dùng nó cho dữ liệu test dùng xong bỏ. Nếu muốn đánh đổi một chút durability lấy tốc độ một cách an toàn, hãy dùng `synchronous_commit = off`: database vẫn nhất quán, và crash chỉ làm mất tối đa vài trăm mili giây commit đã được xác nhận gần nhất (tối đa 3 × `wal_writer_delay`, mặc định 200 ms)."
+    },
+    {
+      "type": "diagram",
+      "caption": "WAL được ghi và fsync trước khi COMMIT trả về. Data page được cập nhật bất đồng bộ để có hiệu năng."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Khối DO thực thi quy tắc số dư không âm bằng tay; một constraint `CHECK (balance >= 0)` sẽ làm điều tương tự một cách tự động và không bao giờ bị quên. Trong PostgreSQL, một lỗi không tự kết thúc transaction — nó đưa transaction vào trạng thái aborted, và khi đó `COMMIT` sẽ rollback. `FOR UPDATE` lấy row-level lock để các transaction read-modify-write đồng thời trên cùng một dòng chạy lần lượt, ngăn **lost update**. Các `SELECT` thường không bị nó chặn, nhờ MVCC.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "MVCC — cách database hiện đại đạt mức đồng thời cao",
+      "content": "Lock mọi dòng mà transaction đọc sẽ tuần tự hóa toàn bộ công việc đồng thời và hủy hoại throughput. Thay vào đó, database hiện đại dùng **Multi-Version Concurrency Control (MVCC)**. Ý tưởng chính: thay vì lock, database giữ *nhiều phiên bản* của mỗi dòng, được đóng dấu bằng transaction ID. Reader nhìn thấy phiên bản hiện hành tại thời điểm transaction (hoặc câu lệnh, tùy isolation level) của nó bắt đầu. Writer tạo phiên bản mới thay vì ghi đè phiên bản cũ.\n\nTrong PostgreSQL, mỗi dòng có các cột hệ thống ẩn: `xmin` (transaction ID đã tạo phiên bản này) và `xmax` (transaction ID đã xóa hoặc thay thế nó). Khi bạn đọc một dòng, PostgreSQL kiểm tra snapshot của transaction — tập các transaction ID đã commit tại thời điểm chụp snapshot — và trả về phiên bản dòng có `xmin` nằm trong snapshot còn `xmax` thì không.\n\nHệ quả là **reader không bao giờ chặn writer và writer không bao giờ chặn reader**. Hai transaction có thể cùng đọc và ghi một bảng đồng thời mà không bên nào phải chờ bên nào (trừ khi chúng ghi *cùng* một dòng, khi đó cần một lock ngắn).\n\nCái giá của MVCC là **dead tuple** (các phiên bản dòng cũ không còn khớp với snapshot nào đang sống). Tiến trình `VACUUM` của PostgreSQL định kỳ thu hồi chúng. Một bảng nhận nhiều update mà không được VACUUM đều đặn sẽ phình to vì dead tuple, gây table bloat và làm giảm hiệu năng scan — một vấn đề thực sự trên production.\n\nMySQL/InnoDB cài đặt MVCC theo cách khác, dùng một **undo tablespace** riêng để dựng lại các phiên bản dòng cũ thay vì lưu chúng chung với dữ liệu đang sống. Cơ chế khác nhau, nhưng hành vi bên ngoài tương tự: đọc đồng thời cao với rất ít blocking."
+    },
+    {
+      "type": "explanation",
+      "title": "Index — vì sao full table scan giết chết hiệu năng",
+      "content": "Xét bảng `users` có 5 triệu dòng. Mỗi dòng khoảng 200 byte. Tức là 1 GB dữ liệu nằm rải trên hàng chục nghìn disk page 8 KB. Khi bạn chạy `SELECT * FROM users WHERE email = 'alice@example.com'` mà không có index, database phải đọc *từng page một* — gọi là **sequential scan**. Trên một ổ đĩa thông thường, đọc 1 GB mất hàng trăm mili giây. Trên server đang chịu tải, với nhiều query đồng thời tranh nhau I/O, con số đó thành vài giây.\n\n**Index** là một cấu trúc dữ liệu riêng ánh xạ giá trị cột tới vị trí vật lý của các dòng khớp (heap tuple). Thay vì quét cả 5 triệu dòng, database đi xuống một tree trong O(log n) bước — khoảng 23 phép so sánh cho 5 triệu dòng — rồi nhảy thẳng tới các page khớp. Chênh lệch giữa sequential scan và index scan trên bảng lớn thường là ba đến bốn bậc độ lớn về thời gian thực.\n\nMọi index đều đánh đổi **chi phí ghi lấy tốc độ đọc**. Khi bạn insert hoặc update một dòng, mọi index trên bảng đó cũng phải được cập nhật. Đây là lý do một bảng có 20 index có thể ghi chậm hơn đáng kể so với bảng có 3 index — mỗi lần ghi kéo theo 20 lần cập nhật index riêng biệt. Nghệ thuật đánh index là chọn cột nào xứng đáng có index dựa trên pattern query thực tế và tỷ lệ ghi/đọc của workload."
+    },
+    {
+      "type": "explanation",
+      "title": "B-tree — cấu trúc đứng sau 99% index của database",
+      "content": "**B-tree** (Balanced tree) được Rudolf Bayer và Edward McCreight phát minh tại Boeing năm 1970, trong bài báo 'Organization and Maintenance of Large Ordered Indexes' (đăng trên Acta Informatica năm 1972). Nó được thiết kế riêng để hoạt động hiệu quả với *bộ lưu trữ đĩa* — nơi đọc một page từ đĩa chậm hơn đọc word bộ nhớ kế tiếp nhiều bậc độ lớn, nên giảm thiểu số lần đọc đĩa là cực kỳ quan trọng.\n\nB-tree có ba loại node:\n\n**Root node**: đỉnh của tree. Mọi lượt tìm kiếm bắt đầu từ đây. Trong một index lớn, root thường được cache vĩnh viễn trong bộ nhớ.\n\n**Internal node**: mỗi node chứa một array các key và pointer tới các node con. Các key phân vùng không gian tìm kiếm: nếu bạn tìm key K, bạn đi theo pointer nằm giữa key ngay nhỏ hơn K và key ngay lớn hơn K.\n\n**Leaf node**: tầng dưới cùng. Mỗi leaf chứa các index entry thực sự — giá trị cột được index cộng với một pointer (vị trí vật lý, gọi là `ctid` trong PostgreSQL hoặc `rowid` trong Oracle) tới dòng thực trong heap. Trong **B+ tree** (biến thể mà hầu hết database dùng), toàn bộ dữ liệu nằm ở leaf node, và các leaf được liên kết với leaf kề bên để range scan hiệu quả. Trong MySQL/InnoDB, bản thân bảng *chính là* một B+ tree được cluster theo primary key: leaf của nó chứa toàn bộ dòng, còn leaf của secondary index lưu giá trị primary key thay vì pointer vật lý — nên một lần tra cứu qua secondary index là hai lần đi xuống tree.\n\nChữ `B` trong B-tree có người bảo là Bayer, có người bảo là Boeing, có người bảo là Balanced. Tính chất định nghĩa của nó là **mọi leaf node nằm ở cùng độ sâu**, và mọi node được giữ ở mức từ đầy một nửa đến đầy hoàn toàn. Sau mỗi lần insert và delete là bước tái cân bằng (split và merge) để duy trì bất biến này. Điều đó đảm bảo chiều cao O(log n) bất kể thứ tự insert.\n\nMột tính chất then chốt thân thiện với đĩa: mỗi node tương ứng với một disk page (thường 8 KB trong PostgreSQL). Một node có thể chứa hàng trăm key. Một B-tree trên 1 tỷ dòng thường chỉ cao 4–5 tầng — nghĩa là một lần tra cứu chạm tối đa 5 disk page, bất kể bảng lớn đến đâu. So với binary search tree trên cùng dữ liệu, cây đó sẽ cao khoảng ~30 và cần 30 lần đọc đĩa ngẫu nhiên."
+    },
+    {
+      "type": "diagram",
+      "caption": "B+ tree: một node có k key thì có k+1 con (key ≥ separator đi sang phải). Internal node chỉ định tuyến tìm kiếm; mọi entry nằm ở leaf, các leaf cùng độ sâu và được liên kết từ trái sang phải để range scan (không vẽ các liên kết)."
+    },
+    {
+      "type": "explanation",
+      "title": "Range scan, composite index và index-only scan",
+      "content": "B-tree không chỉ hỗ trợ tra cứu chính xác (`WHERE id = 42`) mà còn hỗ trợ **range query** (`WHERE created_at BETWEEN '2024-01-01' AND '2024-06-30'`). Vì các leaf node được sắp xếp và liên kết với nhau, database đi xuống leaf khớp đầu tiên, rồi duyệt linked list sang phải cho đến khi ra khỏi khoảng. Đây là lý do B-tree vượt trội hẳn hash index (chỉ hỗ trợ tra cứu bằng) với range query.\n\n**Composite index** (index nhiều cột) rất mạnh nhưng đòi hỏi bạn hiểu **leftmost prefix rule**. Index trên `(last_name, first_name)` phục vụ được query trên riêng `last_name` hoặc trên cả `(last_name, first_name)`, nhưng *không thể* đi xuống tree bình thường cho riêng `first_name`. Index được sắp xếp trước theo `last_name`, rồi theo `first_name` trong từng nhóm `last_name`, nên các giá trị `first_name` khớp nằm rải rác khắp mọi nhóm. Tốt nhất thì planner quét toàn bộ index (chỉ đáng khi index nhỏ hơn bảng nhiều hoặc cover được query); PostgreSQL 18 có thêm **B-tree skip scan**, nhưng chỉ có ích khi cột đầu có ít giá trị phân biệt. Nếu bạn thường xuyên lọc riêng theo `first_name`, hãy cho nó một index riêng.\n\nThứ tự cột trong composite index rất quan trọng: đặt các cột so sánh **bằng** lên trước và cột dùng cho **range** hoặc `ORDER BY` ở cuối — một khi việc đi xuống tree gặp điều kiện range, các cột phía sau không thể thu hẹp thêm nữa. Giữa các cột so sánh bằng, hãy chọn thứ tự giúp các query *khác* của bạn có leftmost prefix dùng được; “cột có tính chọn lọc cao nhất đặt trước” chỉ là tiêu chí phụ yếu, không phải quy tắc chính. Index trên `(status, created_at)` hoạt động tốt cho `WHERE status = 'pending' AND created_at > '2024-01-01'` — điều kiện bằng trên `status` thu hẹp về một tập con nhỏ, rồi `created_at` được quét theo range trong tập con đó.\n\n**Index-only scan** là một “siêu năng lực” về hiệu năng. Nếu mọi cột query cần đều có trong chính index (dưới dạng cột được index hoặc cột được `INCLUDE` trong PostgreSQL 11+), database không cần chạm vào heap chút nào. `SELECT email FROM users WHERE email = 'alice@example.com'` với index trên `email` chỉ cần index — dòng trong heap không bao giờ bị fetch. Điều này loại bỏ phần tốn kém nhất của index scan: truy cập heap ngẫu nhiên."
+    },
+    {
+      "type": "diagram",
+      "caption": "Tra cứu composite index: điều kiện bằng thu hẹp về một subtree, rồi range scan duyệt các leaf đã sắp xếp trong subtree đó."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mệnh đề `INCLUDE` lưu thêm cột ở leaf node mà không ảnh hưởng thứ tự sắp xếp — chúng vô hình với việc tìm kiếm nhưng dùng được cho index-only scan. Partial index là công cụ rất mạnh: một partial index trên `status = 'pending'` rất nhỏ (chỉ chứa order đang chờ) và cực nhanh cho trường hợp phổ biến là query các việc còn mở. `EXPLAIN (BUFFERS)` cho biết query phải đọc đĩa hay được phục vụ từ cache — một tín hiệu then chốt khi tuning trên production.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Đọc EXPLAIN ANALYZE — chẩn đoán query chậm",
+      "content": "`EXPLAIN ANALYZE` của PostgreSQL là công cụ chính để hiểu vì sao một query chậm. Nó thực thi query, ghi lại số dòng và thời gian thực tế ở từng plan node, và trả về toàn bộ execution plan. Đọc thành thạo nó là một trong những kỹ năng database đem lại hiệu quả cao nhất.\n\nCác thuật ngữ chính trong output:\n\n**Seq Scan**: planner đang đọc mọi dòng trong bảng. Với bảng nhỏ (<10,000 dòng), cách này thường nhanh hơn index scan vì chi phí dùng index không đáng. Với bảng lớn có mệnh đề WHERE chọn lọc cao, nó gần như luôn có nghĩa là thiếu index.\n\n**Index Scan**: planner dùng index để tìm dòng, rồi fetch từng dòng heap khớp theo vị trí vật lý. Mỗi lần fetch heap là một random I/O, rất tốn nếu nhiều dòng khớp (giả sử >5-10% bảng). Với tập kết quả lớn, planner có thể chọn sequential scan.\n\n**Index Only Scan**: mọi cột cần thiết đều có trong index; không cần truy cập heap. Đường đọc nhanh nhất.\n\n**Bitmap Heap Scan**: dùng khi nhiều dòng khớp điều kiện index. Database trước tiên gom mọi vị trí heap khớp từ index vào một bitmap, sắp xếp theo vị trí vật lý, rồi quét heap theo thứ tự (biến random I/O thành sequential I/O). Hiệu quả hơn Index Scan thường khi nhiều dòng khớp.\n\n**Hash Join / Nested Loop / Merge Join**: các chiến lược join. Nested Loop nhanh khi bảng bên trong nhỏ hoặc có index. Hash Join dựng một phía thành hash table — tốt cho equi-join lớn. Merge Join dùng được khi cả hai phía đã được sắp xếp theo join key.\n\n**`rows=X` so với `actual rows=Y`**: chênh lệch lớn nghĩa là thống kê của planner đã cũ. Chạy `ANALYZE table_name` để cập nhật. Thống kê cũ là một trong những nguyên nhân hàng đầu gây ra query plan tồi.\n\nCon số cần giảm thiểu là **cost** (đơn vị tùy ý) và đặc biệt là **actual time** tính bằng mili giây. Các Filter node loại bỏ nhiều dòng sau khi đã fetch chúng cho thấy dùng sai index hoặc thiếu một composite index bao gồm cột lọc."
+    },
+    {
+      "type": "explanation",
+      "title": "Đôi lời về thiết kế schema",
+      "content": "Index không cứu được một schema có hình dạng tồi. **Normalization** (1NF/2NF/3NF) loại bỏ các bản sao thừa của cùng một sự kiện để một lần update chỉ chạm một dòng thay vì nhiều dòng; **denormalization** có chủ đích sao chép dữ liệu ngược lại vào các luồng đọc nóng để tránh join, đổi lại phải giữ các bản sao đồng bộ ở mỗi lần ghi. Cả hai quyết định đều thay đổi việc bạn cần index nào — chương Normalization & Data Modeling sẽ đi sâu vào chúng. Trước khi denormalize vì tốc độ, hãy kiểm tra bằng `EXPLAIN ANALYZE`: một phép join trên foreign key được index đúng cách thường đã đủ nhanh."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mỗi transaction đọc cùng các dòng nhưng ghi vào một dòng *khác nhau*, nên không bao giờ có xung đột write-write — đó là lý do snapshot isolation (REPEATABLE READ của PostgreSQL) cho cả hai commit. SERIALIZABLE (SSI) phát hiện chu trình phụ thuộc read/write nguy hiểm và abort một transaction; khi retry, nó chỉ thấy một bác sĩ đang trực và dừng lại. Phiên bản dùng `FOR UPDATE` buộc hai bên gọi phải xếp hàng: sau khi bên thứ nhất commit, PostgreSQL kiểm tra lại query đang chờ với các phiên bản dòng mới nhất, bên thứ hai chỉ nhận lại một dòng, và bước kiểm tra trong ứng dụng từ chối tiếp tục.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Các loại index khác ngoài B-tree**: PostgreSQL hỗ trợ nhiều loại index chuyên biệt. **Hash index** chỉ hỗ trợ tra cứu bằng (không range, không sắp xếp). Trước PostgreSQL 10, chúng không được ghi WAL, nên phải rebuild sau crash và không hoạt động trên replica; từ PostgreSQL 10 chúng đã crash-safe, nhưng dù sao B-tree thường cũng nhanh ngang cho tra cứu bằng. **GIN (Generalized Inverted Index)** dùng cho full-text search và query cột JSONB — nó ánh xạ mỗi từ hoặc key tới danh sách các dòng chứa nó. **GiST (Generalized Search Tree)** hỗ trợ dữ liệu hình học, nearest-neighbor query và kiểm tra địa chỉ IP thuộc một dải. **BRIN (Block Range Index)** cực kỳ gọn nhẹ và hữu ích cho bảng rất lớn có dữ liệu sắp theo thứ tự tự nhiên (như time-series), nơi nó chỉ lưu giá trị min/max cho mỗi khối page thay vì một entry cho mỗi dòng. Chọn đúng loại index cũng quan trọng như chọn cột nào để index."
+    },
+    {
+      "type": "callout",
+      "content": "**Lỗi thường gặp và bẫy interview**: (1) Đánh index cột có cardinality thấp như `status` khi 90% dòng là 'active' — planner bỏ qua index cho giá trị phổ biến, vì fetch heap ngẫu nhiên cho 90% số dòng chậm hơn scan. Cách sửa là một *partial* index trên giá trị hiếm (`WHERE status = 'pending'`). (2) Quên rằng index phải được cập nhật ở mỗi lần ghi — một bảng có 15 index có thể insert chậm hơn vài lần so với bảng có 2. (3) Dùng `SELECT *` khi index chỉ cover một phần các cột — buộc phải fetch heap, điều mà index-only scan lẽ ra tránh được. (4) Chạy transaction khổng lồ: chúng giữ lock, chặn VACUUM, và trong các engine dùng undo log (InnoDB, Oracle) việc rollback có thể lâu bằng chính công việc đã làm. (5) Đặt `fsync = off` để test nhanh hơn rồi mang nguyên lên production — nó có nguy cơ làm hỏng dữ liệu, chứ không chỉ mất commit; `synchronous_commit = off` mới là núm chỉnh tốc độ an toàn. (6) Cho rằng `REPEATABLE READ` của PostgreSQL là serializable — nó là snapshot isolation: không có phantom (mạnh hơn chuẩn) nhưng vẫn cho phép write skew. Và nhớ rằng mặc định mỗi nơi khác nhau: PostgreSQL dùng READ COMMITTED, MySQL InnoDB dùng REPEATABLE READ."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Atomicity** đảm bảo thực thi theo kiểu được ăn cả, ngã về không. InnoDB/Oracle cài đặt nó bằng undo log (chi phí rollback tăng theo lượng công việc đã làm); PostgreSQL ghi phiên bản dòng mới và chỉ cần đánh dấu transaction là aborted, nên ROLLBACK gần như tức thì.",
+        "Các **isolation** level đánh đổi anomaly lấy throughput. Mặc định: Read Committed trong PostgreSQL/Oracle/SQL Server, Repeatable Read trong MySQL InnoDB. Repeatable Read của PostgreSQL là snapshot isolation — không có phantom, nhưng write skew vẫn có thể xảy ra; chỉ Serializable mới ngăn được.",
+        "**Serializable** trong PostgreSQL (SSI) abort các transaction xung đột với SQLSTATE 40001 — ứng dụng phải retry toàn bộ transaction.",
+        "**Durability** đến từ WAL: bản ghi commit được fsync (thường qua group commit) trước khi COMMIT trả về, và recovery replay log từ checkpoint gần nhất. Đừng bao giờ đặt `fsync = off` trên production; `synchronous_commit = off` mới là trade-off an toàn.",
+        "**MVCC** cho phép reader và writer chạy mà không chặn nhau bằng cách giữ nhiều phiên bản dòng — cái giá là các dead tuple mà VACUUM phải thu hồi.",
+        "**B+ tree** giữ mọi leaf ở cùng độ sâu, định tuyến qua internal node và liên kết các leaf để range scan; với hàng trăm key mỗi page, một tỷ dòng chỉ cần 4–5 tầng.",
+        "**Thứ tự cột trong composite index**: các cột so sánh bằng trước, cột range/ORDER BY sau cùng; index trên `(a, b)` không thể tra cứu bình thường cho riêng `WHERE b = ?`.",
+        "**Covering index và partial index** (`INCLUDE`, `WHERE status = 'pending'`) cho phép index-only scan và giữ index nhỏ gọn; mỗi index thêm vào đều làm chậm mọi lần ghi.",
+        "**DDL có tính transaction trong PostgreSQL** (rollback được migration thất bại); MySQL và Oracle implicit commit quanh DDL."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Tính chất ACID nào đảm bảo rằng nếu server crash ngay sau khi COMMIT trả về, dữ liệu đã commit vẫn được lưu?",
+      "options": [
+        "Atomicity",
+        "Consistency",
+        "Isolation",
+        "Durability"
+      ],
+      "explanation": "Durability đảm bảo dữ liệu đã commit tồn tại qua crash. Nó được cài đặt qua write-ahead log (WAL), được fsync xuống đĩa trước khi COMMIT trả về cho ứng dụng. Khi recovery, database replay WAL để khôi phục trạng thái đã commit."
+    },
+    {
+      "id": "q2",
+      "question": "Transaction A đọc một dòng. Transaction B update và commit dòng đó. Transaction A đọc lại cùng dòng và thấy giá trị khác. Đây là isolation anomaly nào?",
+      "options": [
+        "Dirty read",
+        "Non-repeatable read",
+        "Phantom read",
+        "Serialization failure"
+      ],
+      "explanation": "Non-repeatable read xảy ra khi cùng một dòng được đọc hai lần trong một transaction và cho giá trị khác nhau, vì một transaction khác đã commit thay đổi giữa hai lần đọc. Isolation level Repeatable Read ngăn được điều này."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao B-tree (dùng trong index của database) có branching factor lớn hơn nhiều so với binary tree, thường chứa hàng trăm key mỗi node?",
+      "options": [
+        "Để giảm mức dùng bộ nhớ trong buffer pool",
+        "Để so sánh key nhanh hơn bằng lệnh SIMD",
+        "Để giảm thiểu số lần đọc disk page mỗi lần tra cứu",
+        "Để hỗ trợ nhiều writer đồng thời mà không cần lock"
+      ],
+      "explanation": "Mỗi node B-tree tương ứng với một disk page. Branching factor lớn nghĩa là tree có ít tầng hơn, nên một lần tra cứu chạm ít disk page hơn. Disk I/O chậm hơn truy cập bộ nhớ nhiều bậc độ lớn, nên giảm thiểu số lần đọc page là mục tiêu thiết kế chính của B-tree."
+    },
+    {
+      "id": "q4",
+      "question": "Bạn có một composite index trên (status, created_at). Query nào dùng được index này một cách hiệu quả?",
+      "options": [
+        "WHERE created_at > '2024-01-01'",
+        "WHERE status = 'pending' AND created_at > '2024-01-01'",
+        "WHERE created_at > '2024-01-01' AND status = 'pending'",
+        "Cả B và C"
+      ],
+      "explanation": "Query optimizer có thể sắp xếp lại các điều kiện WHERE, nên cả B và C thực chất dùng index theo cùng một cách: điều kiện bằng trên status thu hẹp về một subtree của B-tree, rồi điều kiện range trên created_at được quét trong subtree đó. Phương án A không thể đi xuống tree trực tiếp vì cột đầu (status) không bị ràng buộc — tốt nhất thì planner quét toàn bộ index, hoặc (PostgreSQL 18+) skip-scan nó một lần cho mỗi giá trị status phân biệt, nhưng không bao giờ hiệu quả bằng B hay C."
+    },
+    {
+      "id": "q5",
+      "question": "Dưới REPEATABLE READ của PostgreSQL, hai transaction mỗi bên chạy \"SELECT count(*) FROM doctors WHERE on_call\" (cả hai đều thấy 2), rồi mỗi bên cho một bác sĩ *khác nhau* nghỉ trực và commit. Chuyện gì xảy ra?",
+      "options": [
+        "Cả hai commit và không còn bác sĩ nào trực — write skew, điều mà snapshot isolation không ngăn được",
+        "UPDATE thứ hai bị chặn cho đến khi bên thứ nhất commit, rồi thất bại với serialization error",
+        "Transaction thứ hai thấy thay đổi của bên thứ nhất vì Repeatable Read đọc lại các dòng đã bị sửa",
+        "Cả hai commit an toàn, vì Repeatable Read trong PostgreSQL cũng ngăn được phantom"
+      ],
+      "explanation": "Hai transaction update các dòng khác nhau, nên không có xung đột write-write nào để snapshot isolation phát hiện, và mỗi bên quyết định dựa trên snapshot của riêng mình. Cả hai commit và invariant bị phá vỡ — write skew. Chỉ SERIALIZABLE (SSI) phát hiện được chu trình phụ thuộc read/write và abort một bên, hoặc bạn phải lock các dòng mà quyết định phụ thuộc vào (SELECT ... FOR UPDATE)."
+    },
+    {
+      "id": "q6",
+      "question": "MVCC (Multi-Version Concurrency Control) chủ yếu loại bỏ điều gì?",
+      "options": [
+        "Nhu cầu cần write-ahead log",
+        "Việc read và write chặn nhau giữa các transaction đồng thời",
+        "Nhu cầu cần table-level lock khi chạy DDL",
+        "Phantom read ở isolation level Read Committed"
+      ],
+      "explanation": "MVCC cho phép reader thấy một snapshot nhất quán của dữ liệu mà không cần lấy lock, trong khi writer tạo phiên bản dòng mới thay vì ghi đè. Nghĩa là reader không bao giờ chặn writer và writer không bao giờ chặn reader, tăng mức đồng thời lên đáng kể."
+    },
+    {
+      "id": "q7",
+      "question": "EXPLAIN ANALYZE hiện 'Seq Scan' trên bảng 2 triệu dòng với điều kiện WHERE email = ?. Cách sửa tức thời hiệu quả nhất là:",
+      "options": [
+        "Chạy VACUUM trên bảng",
+        "Tăng giá trị cấu hình work_mem",
+        "CREATE INDEX trên cột email",
+        "Viết lại query thành subquery"
+      ],
+      "explanation": "Sequential scan trên bảng lớn cho một lần tra cứu điểm trên cột có cardinality cao nghĩa là không có index nào dùng được. Tạo một B-tree index trên email biến table scan O(n) thành index lookup O(log n), thường giảm thời gian query nhiều bậc độ lớn."
+    },
+    {
+      "id": "q8",
+      "question": "'Phantom read' là gì và isolation level nào được đảm bảo ngăn được nó?",
+      "options": [
+        "Dòng mới xuất hiện trong range query chạy lại do một transaction khác commit; được Serializable ngăn",
+        "Đọc phải một dòng đã bị xóa; được Repeatable Read ngăn",
+        "Đọc dữ liệu chưa commit từ transaction khác; được Read Committed ngăn",
+        "Hai transaction ghi cùng một dòng đồng thời; được Repeatable Read ngăn"
+      ],
+      "explanation": "Phantom read xảy ra khi một range query chạy hai lần trong cùng transaction trả về các dòng khác nhau, vì một transaction khác đã insert (hoặc delete) các dòng khớp khoảng đó giữa hai lần đọc. Theo chuẩn SQL, chỉ Serializable bắt buộc phải ngăn phantom. (Repeatable Read của PostgreSQL tình cờ cũng ngăn được, nhưng đó là mạnh hơn mức chuẩn yêu cầu.)"
+    },
+    {
+      "id": "q9",
+      "question": "Vì sao bạn gần như không bao giờ nên tạo quá vài index trên một bảng ghi nhiều?",
+      "options": [
+        "Query planner không thể xét quá 8 index cho mỗi query",
+        "Mỗi index phải được cập nhật ở mọi INSERT, UPDATE và DELETE, nhân lên write I/O",
+        "Index chiếm quá nhiều bộ nhớ trong shared buffer pool",
+        "Có hơn 5 index khiến autovacuum daemon bỏ qua bảng"
+      ],
+      "explanation": "Mỗi index là một B-tree riêng phải luôn đồng bộ với bảng heap. Mỗi INSERT thêm một key vào mọi index; mỗi UPDATE thay đổi cột được index sẽ xóa key cũ và insert key mới trong mọi index bị ảnh hưởng. Trên bảng ghi nhiều, chi phí này có thể làm ghi chậm đi đáng kể, thậm chí khiến write throughput của bảng bị giới hạn bởi index."
+    },
+    {
+      "id": "q10",
+      "question": "Index Only Scan nhanh hơn Index Scan vì:",
+      "options": [
+        "Nó dùng hash table thay vì B-tree để tra cứu",
+        "Nó dùng nén BRIN để giảm I/O",
+        "Nó tự động chạy song song trên mọi CPU core",
+        "Nó bỏ qua hoàn toàn heap — mọi cột cần thiết đều có trong index"
+      ],
+      "explanation": "Trong Index Only Scan, mọi cột query cần (trong SELECT, WHERE và ORDER BY) đều có sẵn trong chính index. Database tìm các dòng trong index và trả kết quả mà không cần fetch các heap page tương ứng, loại bỏ việc truy cập heap bằng random I/O vốn tốn kém, thứ khiến Index Scan thường chậm hơn."
+    }
+  ]
+}

@@ -1,0 +1,224 @@
+{
+  "sourceHash": "be35b4649917",
+  "title": "Lock-Free Programming và Atomics",
+  "tagline": "Cấu trúc dữ liệu concurrent không cần mutex",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mọi chương trình hiện đại có chạm vào trạng thái chia sẻ đều đối mặt cùng một thế khó cơ bản: hai thread cùng đọc và sửa một biến tại cùng một thời điểm sẽ cho ra kết quả không thể đoán trước, thường là thảm họa. Giải pháp kinh điển là **mutex** — một lock chỉ cho phép mỗi lúc một thread đi vào critical section. Mutex dùng được, nhưng nó có những chi phí thực sự, cộng dồn lên khi ở quy mô lớn.\n\nMột thread bị block trên mutex sẽ bị đẩy ra khỏi lịch chạy (descheduled) và chẳng đóng góp gì trong lúc chờ. Khi contention cao, thread tốn nhiều thời gian ngủ và thức dậy hơn là làm việc thật. Tệ hơn, nếu thread đang giữ lock bị đứng — bị đẩy ra khỏi lịch rất lâu, kẹt trong một page fault, hoặc (với lock nằm trong bộ nhớ chia sẻ giữa các process) bị kill hẳn — mọi thread đang chờ lock đó đều kẹt phía sau. Mutex \"robust\" của POSIX tồn tại chính là để phục hồi từ trường hợp cuối này. Priority inversion thêm một lớp đau đầu nữa: một thread độ ưu tiên cao bị block phía sau một thread độ ưu tiên thấp thực chất bị hạ cấp, phá hỏng hoàn toàn mục đích của độ ưu tiên thread.\n\n**Lock-free programming** đưa ra một giao ước khác: thiết kế cấu trúc dữ liệu sao cho các thread không bao giờ block nhau. Không thread nào có thể ngăn thread khác tiến triển bằng cách ngủ trong khi đang giữ lock. Cơ chế nằm bên dưới mọi thuật toán lock-free là **atomic operation** — một lệnh CPU được thực thi như một bước duy nhất không thể chia cắt. Không thread nào khác có thể quan sát kết quả dở dang của một atomic operation; từ góc nhìn của mọi người quan sát, thao tác đó hoặc chưa bắt đầu, hoặc đã hoàn tất.\n\nChương này trình bày đầy đủ mô hình tư duy: atomic operation là gì ở mức phần cứng, cách **Compare-And-Swap (CAS)** biến một primitive đơn giản thành khối xây dựng vạn năng cho các thuật toán lock-free, **ABA problem** khét tiếng và các cách giải quyết, sự khác biệt giữa đảm bảo tiến triển **lock-free** và **wait-free**, vì sao **memory ordering** không hề đơn giản, và những trade-off hiệu năng thực tế quyết định khi nào lock-free nhanh hơn và khi nào không."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng lặp retry của CAS: đọc giá trị hiện tại, tính giá trị mới ở local, thử swap một cách nguyên tử. Nếu va chạm, retry với một lần đọc mới. Không thread nào bị block — cuối cùng tất cả đều thành công."
+    },
+    {
+      "type": "analogy",
+      "title": "Optimistic locking: Google Doc khi offline",
+      "content": "Hãy tưởng tượng bạn sửa một Google Doc chia sẻ trong lúc offline. Bạn tải về một snapshot của tài liệu (đây là bước **đọc**), sửa ở local mà không cần điều phối với ai (đây là bước **tính toán**), rồi thử đồng bộ thay đổi lên server (đây là bước **CAS**). Server kiểm tra: tài liệu có thay đổi gì kể từ lúc bạn tải bản sao về không?\n\nNếu không ai đụng vào tài liệu trong lúc bạn offline, các chỉnh sửa của bạn được áp dụng gọn gàng — **thành công, CAS thắng**. Nếu ai đó đã đẩy thay đổi lên trước, bạn nhận thông báo xung đột và phải merge hoặc thử lại với phiên bản mới nhất — **thất bại, CAS trả về giá trị hiện tại và bạn lặp lại**.\n\nĐó là **optimistic concurrency** (concurrency lạc quan): giả định rằng không xung đột là trường hợp phổ biến, thực hiện thao tác ngay, và chỉ retry trong những lần va chạm hiếm hoi. Nó tương phản rõ rệt với **pessimistic concurrency** (concurrency bi quan — mô hình mutex): trước khi sửa gì, khóa tài liệu một cách tường minh để không ai khác có thể đọc nó trong lúc bạn làm việc. Mọi người sửa khác đều bị block trong suốt phiên chỉnh sửa của bạn.\n\nCách lạc quan hiệu quả nhất khi **xung đột hiếm** — đọc nhiều hơn hẳn ghi, hoặc các thread có xu hướng chạm vào những phần dữ liệu khác nhau. Khi xung đột thường xuyên — mọi người tranh nhau sửa cùng một counter \"nóng\" cùng lúc — vòng lặp retry thoái hóa thành một vòng spin bận rộn, đốt CPU mà không tiến triển gì hữu ích. Đây là nhận thức trung tâm quyết định khi nào bạn chọn lock-free thay vì thiết kế dựa trên mutex."
+    },
+    {
+      "type": "explanation",
+      "title": "Điều gì khiến một thao tác trở nên atomic: góc nhìn phần cứng",
+      "content": "Từ **atomic** bắt nguồn từ tiếng Hy Lạp *atomos* — không thể chia cắt. Trong ngữ cảnh bộ nhớ chia sẻ, một thao tác là atomic nếu mọi core CPU khác đều thấy nó xảy ra tức thời: không có khoảnh khắc nào thao tác đó mới làm được một nửa.\n\nTrên một bộ xử lý x86 hiện đại, các lệnh đọc và ghi đơn giản, được căn chỉnh (aligned), với giá trị có kích thước native (1, 2, 4 hoặc 8 byte) vốn đã atomic, vì một truy cập aligned nằm gọn trong một cache line được thực hiện như một giao dịch duy nhất — không core nào khác có thể quan sát được một nửa của nó. Nhưng các thao tác phức hợp — đọc một giá trị, sửa nó, ghi lại — mặc định không atomic. Ba bước này có thể bị lệnh ghi của core khác chen vào giữa bất kỳ hai bước nào, tạo ra **data race**.\n\nĐể các thao tác phức hợp trở nên atomic, CPU cung cấp **locked instruction**. Trên x86, prefix `LOCK` có thể được gắn trước các lệnh như `XADD` (exchange-and-add) và `CMPXCHG` (compare-and-exchange). Trên CPU hiện đại, prefix `LOCK` không khóa toàn bộ memory bus: core giành quyền sở hữu độc quyền cache line thông qua giao thức coherence (MESI) và giữ nó tới khi lệnh hoàn tất, nên không core nào khác có thể chạm vào line đó giữa chừng. Bus lock thật sự chỉ xảy ra với các truy cập \"split\" không aligned, vắt ngang hai cache line — rất chậm, và là thứ mà các Linux kernel gần đây phát hiện và phạt.\n\nCác atomic primitive then chốt có trên các kiến trúc hiện đại:\n- **Load** (`Atomics.load` trong JS, `std::atomic::load` trong C++) — đọc một giá trị kèm đảm bảo về thứ tự.\n- **Store** (`Atomics.store`) — ghi một giá trị kèm đảm bảo về thứ tự.\n- **Fetch-And-Add** (`Atomics.add`) — cộng nguyên tử một lượng delta và trả về giá trị cũ. Tương ứng với `LOCK XADD` trên x86. Thao tác này là **wait-free**: mọi bên gọi đều thành công trong đúng một lệnh, không retry. (Trên các core ARM không có LSE atomics của v8.1, nó được biên dịch thành một vòng retry LL/SC — lock-free chứ không hẳn wait-free.)\n- **Compare-And-Swap / Compare-And-Exchange** (`Atomics.compareExchange`, `CMPXCHG`) — primitive vạn năng: kiểm tra một cách nguyên tử xem một vị trí bộ nhớ có đang giữ giá trị kỳ vọng không, nếu có thì thay bằng giá trị mới. Trả về giá trị tìm thấy, bất kể swap thành công hay không.\n- **Fetch-And-Or / Fetch-And-And** — để bật/tắt bit trên các flag chia sẻ một cách nguyên tử.\n\nARM dùng một cơ chế khác: **Load-Link / Store-Conditional (LL/SC)**. Load-link đọc một giá trị và gắn tag cho cache line. Store-conditional chỉ ghi nếu không core nào khác chạm vào cache line đó kể từ lần load-link. Phần cứng phát hiện sự can thiệp và store-conditional trả về flag thành công/thất bại. Cách này đạt cùng ngữ nghĩa với CAS nhưng linh hoạt hơn — về nguyên tắc nó miễn nhiễm với ABA, vì bất kỳ lần ghi nào chen vào line đó cũng khiến store-conditional thất bại. Trên thực tế, reservation cũng bị mất khi có interrupt hoặc context switch, nên LL/SC luôn nằm trong một vòng retry. ARMv8.1 bổ sung các atomic một lệnh (LSE: `CAS`, `LDADD`, …), mở rộng tốt hơn khi có contention."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hai cách tiếp cận phần cứng cho tính nguyên tử: x86 giữ quyền sở hữu độc quyền cache line trong suốt một locked instruction; ARM dùng việc gắn tag cache line với Load-Link/Store-Conditional. Cả hai đều cung cấp ngữ nghĩa CAS cần thiết cho các thuật toán lock-free."
+    },
+    {
+      "type": "explanation",
+      "title": "Compare-And-Swap: khối xây dựng vạn năng của lock-free",
+      "content": "**Compare-And-Swap (CAS)** có lẽ là primitive quan trọng nhất trong lập trình hệ thống concurrent. Giao ước của nó đơn giản:\n\n```\nCAS(address, expected, new_value) -> actual_value\n  atomically:\n    actual = *address\n    if actual == expected:\n      *address = new_value\n    return actual\n```\n\nBên gọi kiểm tra: nếu `actual == expected`, swap đã thành công và `*address` giờ giữ `new_value`. Nếu `actual != expected`, một thread khác đã thay đổi giá trị kể từ lần ta đọc gần nhất — swap không xảy ra, và ta retry.\n\nVòng lặp retry của CAS là bộ khung của gần như mọi thuật toán lock-free:\n\n1. **Đọc** giá trị hiện tại của biến chia sẻ.\n2. **Tính** giá trị mới dựa trên giá trị cũ (ở local, không chạm vào trạng thái chia sẻ nào).\n3. **CAS**: thử ghi giá trị mới chỉ khi biến chia sẻ vẫn đang giữ giá trị cũ.\n4. Nếu CAS thất bại, một thread khác đã sửa nó trước — quay lại bước 1 với giá trị mới mà CAS trả về.\n\nPattern này dùng được cho **counter**, **stack** (cập nhật pointer head), **queue** (cập nhật pointer tail), và nhiều cấu trúc khác. Bất biến then chốt là phép tính ở bước 2 chỉ phụ thuộc vào giá trị đọc ở bước 1 — không có trạng thái chia sẻ nào khác được đọc giữa bước 1 và bước 3.\n\nKhông phải bài toán nào cũng quy gọn được về một CAS duy nhất. Cập nhật nguyên tử nhiều word — khi bạn cần thay đổi hai biến trở lên một cách nguyên tử — đòi hỏi những kỹ thuật tinh vi hơn như **double-wide CAS** (DCAS, có trên một số kiến trúc dưới dạng `CMPXCHG16B`), **software transactional memory (STM)**, hoặc tái cấu trúc dữ liệu để một lần cập nhật pointer duy nhất nắm trọn toàn bộ thay đổi trạng thái (một pattern phổ biến trong các cấu trúc dữ liệu hàm dùng node bất biến persistent)."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`Atomics.add` là một lệnh `LOCK XADD` duy nhất — không thể chia cắt trên x86. Dù có bao nhiêu worker chạy đồng thời, mỗi lần tăng đều được đảm bảo là được ghi nhận. Counter bị race dùng một lần load và một lần store tách rời, để lại một khe hở nơi thread khác có thể đọc giá trị cũ, khiến cả hai thread cùng ghi một kết quả đã tăng giống nhau và mất một lần cập nhật. Chạy thử đi, và slot 1 gần như luôn thấp hơn nhiều so với tổng kỳ vọng — một lần chạy trên laptop 8 core in ra 800000 cho counter atomic và 335193 cho counter bị race.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "ABA problem: khi CAS thành công nhưng lẽ ra không nên",
+      "content": "CAS có một khiếm khuyết tinh vi khiến lock-free programming thực sự khó: nó kiểm tra **sự bằng nhau về giá trị**, chứ không kiểm tra **sự ổn định của giá trị theo thời gian**. Điều này tạo ra **ABA problem** khét tiếng.\n\nHãy tưởng tượng một lock-free stack được cài đặt bằng CAS trên một pointer `top` duy nhất, hiện đang là `top → A → B → C`. Thread T1 bắt đầu **pop**: nó đọc `top = A` và `A.next = B`, và sắp chạy `CAS(top, A, B)`. T1 bị preempt. Trong lúc T1 ngủ:\n\n1. Thread T2 pop `A`. Giờ `top = B`.\n2. Thread T2 pop `B`. Giờ `top = C`, và `B` bị giải phóng hoặc trả về một pool.\n3. Thread T2 push `A` trở lại (có thể là một node được tái sử dụng). Giờ `top = A → C`.\n\nT1 thức dậy và chạy `CAS(top, A, B)`. Phép kiểm tra `top == A` vượt qua — pointer trông vẫn vậy — nên CAS thành công và `top` trở thành `B`: một node không còn nằm trong stack và có thể đã bị giải phóng. `C` biến mất khỏi stack. Các thao tác ở giữa đã phá vỡ giả định của T1 rằng `A.next` vẫn là `B`, nhưng T1 không có cách nào phát hiện ra vì `top` đã quay về `A`.\n\n**Vì sao nó tệ nhất khi quản lý bộ nhớ thủ công:** Nếu T2 đã *giải phóng* node `A` và một lần cấp phát mới *tình cờ* trả về đúng địa chỉ đó, T1 sẽ thao tác trên một node đã bị tái chế, có thể không hợp lệ. Đây là một bug use-after-free kinh điển sinh ra từ việc dùng sai cấu trúc dữ liệu lock-free.\n\nCó một số cách khắc phục tiêu chuẩn:\n\n**1. Version stamp (tagged pointer):** Ghép mỗi pointer với một counter tăng đơn điệu. Lưu cả hai như một giá trị 128-bit duy nhất (hoặc nhét counter vào các bit không dùng của pointer). CAS kiểm tra cả pointer lẫn version. `A@v1 → B@v2 → A@v3`: CAS của T1 kỳ vọng `A@v1` nhưng thấy `A@v3` — phát hiện ABA, retry.\n\n**2. Hazard pointer:** Trước khi dereference một pointer, thread công bố nó vào một slot \"hazard pointer\" riêng của thread đó. Thread nào muốn giải phóng một node phải kiểm tra mọi slot hazard trước; nếu có thread nào đang giữ hazard pointer tới node đó, việc giải phóng được hoãn lại. Cách này ngăn use-after-free mà không dừng các thao tác concurrent.\n\n**3. Epoch-based reclamation (EBR):** Chia thời gian thành các epoch. Thread chỉ được giải phóng các node từ hai epoch trước trở lên, lúc đó mọi thread hoạt động trong epoch ấy chắc chắn đã tiến lên. Cách này thường nhanh hơn hazard pointer (`crossbeam-epoch` của Rust dùng nó), và grace period của Linux RCU áp dụng cùng ý tưởng.\n\n**4. LL/SC (ARM, RISC-V, POWER):** store-conditional thất bại sau *bất kỳ* lần ghi nào chen vào, nên A→B→A không thể lừa được nó — nhưng chỉ khi toàn bộ chuỗi đọc-kiểm tra-ghi nằm trong một cặp LL/SC, thứ mà các ngôn ngữ cấp cao không phơi ra. C++, Rust và Java cung cấp ngữ nghĩa CAS ngay cả trên ARM, nên code portable vẫn phải xử lý ABA.\n\n**5. Garbage collection:** trong Java, Go hay JavaScript, một node không thể bị giải phóng và tái sử dụng khi T1 vẫn đang giữ reference tới nó, điều này loại bỏ biến thể use-after-free (dù không loại bỏ mọi bug ABA về mặt logic)."
+    },
+    {
+      "type": "diagram",
+      "caption": "ABA khi pop trên lock-free stack: CAS của T1 thành công vì top lại là A, nhưng phần tử kế tiếp của A không còn là B. Stack giờ trỏ vào một node đã bị giải phóng và C bị mất."
+    },
+    {
+      "type": "explanation",
+      "title": "Lock-free và wait-free: các đảm bảo tiến triển",
+      "content": "Lock-free programming có các định nghĩa lý thuyết chính xác. Đây không phải từ ngữ marketing — chúng định nghĩa các đảm bảo về cách thread hành xử dưới sự lập lịch bất lợi nhất.\n\n**Blocking (dựa trên mutex):** Một thread bị block trên mutex có thể bị đẩy ra khỏi lịch chạy vô thời hạn. Nếu thread giữ mutex bị hệ điều hành tạm dừng, mọi thread đang chờ đều bị block trong khoảng thời gian không giới hạn. Toàn bộ hệ thống bị đứng.\n\n**Lock-free:** Trong bất kỳ chuỗi bước hữu hạn nào, *ít nhất một thread* tiến triển. Không thread nào có thể đồng thời ngăn tất cả thread khác tiến lên. Tuy nhiên, một thread kém may mắn có thể bị **starve** (chết đói) — nếu scheduler luôn preempt nó đúng vào thời điểm tệ nhất, CAS của nó cứ thất bại mãi. Hệ thống vẫn tiến triển, nhưng một thread có thể phải spin rất lâu.\n\n**Wait-free:** Mọi thread riêng lẻ đều hoàn tất thao tác của mình trong một số bước **có giới hạn**, bất kể các thread khác làm gì. Wait-free mạnh hơn hẳn lock-free. Starvation là không thể xảy ra.\n\n**Obstruction-free:** Đảm bảo non-blocking yếu nhất. Một thread tiến triển được nếu nó chạy một mình (các thread khác bị tạm dừng). Được dùng trong software transactional memory như điểm khởi đầu, kèm các cơ chế bổ sung để phát hiện và xử lý xung đột.\n\nTrên thực tế:\n- **`Atomics.add` (Fetch-And-Add)** là **wait-free**: tương ứng với một lệnh `LOCK XADD` duy nhất. Mọi thread hoàn tất trong O(1) bước.\n- **Vòng retry CAS** là **lock-free** nhưng không wait-free: dưới sự lập lịch bất lợi, một thread có thể retry vô hạn trong khi các thread khác thành công. Trên thực tế, va chạm hiếm và vòng lặp kết thúc nhanh.\n- **Mutex** là **blocking**: thread đang giữ lock có thể làm đứng mọi thread chờ vô thời hạn.\n\nThứ bậc: wait-free ⊂ lock-free ⊂ obstruction-free — mọi thuật toán wait-free đều là lock-free, và mọi thuật toán lock-free đều là obstruction-free. Cả ba đều là *non-blocking*; các thuật toán dùng lock là blocking và nằm ngoài thứ bậc này. Phần lớn code lock-free trên production dùng vòng lặp CAS (lock-free, không wait-free), đủ cho hầu hết trường hợp. Các thuật toán wait-free phức tạp hơn đáng kể để cài đặt và thường có hằng số lớn hơn, khiến chúng chậm hơn trên thực tế dù có đảm bảo lý thuyết mạnh hơn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Thứ bậc đảm bảo tiến triển: mỗi mức non-blocking mạnh hơn hẳn mức bên dưới, còn code blocking (dựa trên lock) không đảm bảo tiến triển nếu thread giữ lock bị đứng. Phần lớn code lock-free dùng vòng lặp CAS (lock-free). Counter Fetch-and-Add là wait-free. Mutex là blocking."
+    },
+    {
+      "type": "explanation",
+      "title": "Memory ordering: vì sao chỉ atomic thôi là chưa đủ",
+      "content": "Một quan niệm sai phổ biến là chỉ cần atomic operation là đủ để có chương trình concurrent đúng. Không phải vậy. **Memory ordering** — các quy tắc quyết định khi nào lệnh ghi của một thread trở nên hiển hiện với thread khác — là một mối quan tâm riêng và quan trọng không kém.\n\nCPU hiện đại thực thi lệnh **out of order** (không theo thứ tự) để tối đa hóa throughput. CPU có thể đổi chỗ một lệnh store với một lệnh load phía sau nếu chúng chạm vào các địa chỉ khác nhau, vì giữa chúng không có phụ thuộc dữ liệu. Compiler cũng thực hiện những lần đổi chỗ tương tự để tối ưu. Trong chương trình single-threaded, điều này vô hình — kết quả cuối cùng luôn giống như khi các lệnh chạy tuần tự. Trong chương trình multi-threaded, thread khác có thể quan sát các lệnh ghi theo thứ tự khác với thứ tự mà thread ghi đã thực hiện.\n\nXét một ví dụ kinh điển. Thread A ghi vào một data buffer rồi bật flag `ready`. Thread B đọc flag `ready` rồi đọc buffer. Không có memory barrier, Thread B có thể thấy `ready = true` *trước khi* nó thấy được các lệnh ghi của Thread A vào buffer — vì CPU đã đổi thứ tự các lệnh store của A, hoặc cache của Thread B đã cũ.\n\n```\nThread A:                        Thread B:\ndata.value = 42;  // store 1    while (!ready) {}  // spin\nready = true;     // store 2    print(data.value); // may print 0!\n```\n\nĐây không phải chuyện giả định — nó xảy ra trên kiến trúc ARM và PowerPC. x86 có memory model mạnh hơn (Total Store Order) ngăn được nhiều kiểu đổi chỗ như vậy, nhưng ngay cả x86 cũng cho phép một lệnh load phía sau hoàn tất trước khi một lệnh store phía trước tới địa chỉ khác trở nên hiển hiện (do store buffer) — đủ để phá vỡ các thuật toán như Peterson's lock nếu không có fence. Thêm hai cái bẫy nữa trong ví dụ trên: compiler có thể kéo lệnh đọc `ready` không atomic ra khỏi vòng lặp và spin mãi mãi, và trên ARM phần cứng thực sự có thể làm `ready` hiển hiện trước `data`.\n\n**Memory barrier** (còn gọi là **fence**) là các lệnh ngăn một số kiểu đổi chỗ nhất định. **Store barrier** đảm bảo mọi lệnh store phía trước đều hiển hiện với các core khác trước bất kỳ lệnh store nào phía sau. **Load barrier** đảm bảo mọi lệnh load phía trước hoàn tất trước bất kỳ lệnh load nào phía sau. **Full barrier** áp đặt cả hai.\n\nAPI `std::atomic` của C++ và `Atomics` của JavaScript phơi điều này ra qua các tham số **memory order**:\n- `relaxed` — chỉ có tính nguyên tử, không có ràng buộc thứ tự. Phù hợp cho counter thống kê, nơi thứ tự chính xác không quan trọng.\n- `acquire` — cho lệnh load: không lệnh đọc/ghi nào phía sau có thể bị đổi chỗ lên trước lệnh load này. Dùng khi đọc một flag trước khi truy cập dữ liệu được bảo vệ.\n- `release` — cho lệnh store: không lệnh đọc/ghi nào phía trước có thể bị đổi chỗ ra sau lệnh store này. Dùng khi ghi dữ liệu trước khi bật một flag.\n- `acq_rel` — cho các thao tác read-modify-write (CAS, fetch-add) vừa tiêu thụ vừa công bố.\n\nKhi ghép cặp, acquire và release tạo thành pattern cốt yếu: khi **lệnh acquire load của một thread đọc được giá trị do lệnh release store của thread khác ghi**, mọi thứ bên ghi đã làm trước release đều hiển hiện với bên đọc sau acquire (một cạnh *synchronizes-with*, hay happens-before). Đó chính xác là điều ví dụ `data`/`ready` cần — và đó cũng là cách mọi mutex hoạt động: lock là một acquire, unlock là một release.\n- `seq_cst` (sequentially consistent) — mặc định trong atomic của C++ và mọi thao tác `Atomics` của JavaScript. Cung cấp một thứ tự toàn phần duy nhất cho mọi thao tác seq_cst trên mọi thread. Đúng nhưng đắt nhất.\n\n`Atomics` của JavaScript luôn dùng ngữ nghĩa `seq_cst` — mọi `Atomics.load`, `Atomics.store` và `Atomics.compareExchange` đều đóng vai trò full memory barrier. Điều này an toàn và đúng nhưng ngăn một số tối ưu cấp thấp có trong C++ với memory order tường minh. Các lệnh đọc và ghi thông thường (không qua `Atomics`) trên SharedArrayBuffer không có thứ tự, nên phiên bản JavaScript của flag `ready` phải dùng `Atomics.store` và `Atomics.load`."
+    },
+    {
+      "type": "code_concept",
+      "explanation": "Lệnh release store và lệnh acquire load đọc nó tạo ra một cạnh happens-before, nên lệnh ghi thông thường `data = 42` được đảm bảo hiển hiện với consumer — trên mọi kiến trúc. Chỉ có flag là atomic; payload là bộ nhớ bình thường được bảo vệ bởi thứ tự. Đây cũng chính là pattern publish/subscribe mà RCU, Disruptor và mọi mutex dựa vào.",
+      "label": "Memory order trong C++"
+    },
+    {
+      "type": "explanation",
+      "title": "Xây dựng một lock-free stack: ví dụ chi tiết",
+      "content": "Lock-free stack là một trong những cấu trúc dữ liệu lock-free đơn giản và giàu tính minh họa nhất. Thao tác push và pop của nó quy về một CAS duy nhất trên pointer `top`.\n\n**Push (chèn node mới):**\n1. Cấp phát một node mới, điền giá trị.\n2. Đọc `top` (đỉnh stack hiện tại).\n3. Đặt `new_node.next = top`.\n4. CAS `top` từ giá trị cũ sang `new_node`. Nếu thread khác đã push giữa bước 2 và bước 4, CAS thất bại và ta retry từ bước 2 với giá trị `top` mới.\n\n**Pop (gỡ node trên cùng):**\n1. Đọc `top`. Nếu null, stack rỗng.\n2. Đọc `top.next` (node bên dưới).\n3. CAS `top` từ `top` cũ sang `top.next`. Nếu thread khác đã pop trước, retry từ bước 1.\n\nLập luận về tính đúng đắn: CAS trong push đảm bảo hai thread không thể đồng thời chèn và cùng tự nhận là head mới — mỗi lần thử chỉ đúng một CAS thắng. Pop cũng tương tự.\n\n**Hiểm họa ABA:** Thao tác pop dễ bị ABA nếu node có thể được cấp phát lại. Một thread đọc `top = A`, bị preempt, thread khác pop A, pop node kế tiếp, rồi push A trở lại. CAS của thread đầu tiên thành công với `top = A.next` — nhưng `A.next` giờ trỏ tới một node đã bị giải phóng hoặc tái sử dụng. Cách khắc phục là pointer có version: `top` được lưu dưới dạng `{pointer, version}` và CAS kiểm tra cả hai.\n\nTrong JavaScript, node sẽ là các đối tượng và `top` là một reference atomic tại một offset trong `SharedArrayBuffer`. Trên thực tế, garbage collector của JavaScript khiến kịch bản ABA use-after-free là không thể (GC ngăn việc tái sử dụng địa chỉ của các reference còn sống), nhưng ABA về mặt logic (sự hỏng cấu trúc mô tả ở trên) vẫn có thể xảy ra trong các cấu trúc liên kết."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`lockFreeAdd` là vòng lặp CAS chuẩn mực: đọc, tính ở local, CAS, và nếu thất bại thì retry với giá trị mà CAS trả về — không cần load thêm, vì `compareExchange` đã báo luôn giá trị nó tìm thấy. Nó là lock-free (có thể retry), trong khi `Atomics.add` là wait-free trên x86. Ô có version gói giá trị và version vào một word 64-bit để *một* lần CAS trên `BigInt64Array` kiểm tra cả hai — tách chúng ra hai slot atomic riêng sẽ mở lại một race giữa lúc kiểm tra và lúc ghi. Sau chuỗi A→B→A, giá trị quay về 100, nhưng version là 2, nên CAS cũ của T1 thất bại đúng như mong muốn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Ứng dụng thực tế của các cấu trúc lock-free",
+      "content": "Các kỹ thuật lock-free không phải trò tò mò học thuật — chúng đang chạy trên production trong những hệ thống có throughput cao nhất thế giới.\n\n**RCU (Read-Copy-Update) của Linux kernel:** RCU là một cơ chế công bố-rồi-hoãn-thu-hồi (các *grace period* của nó là họ hàng của epoch-based reclamation), cho phép các critical section phía đọc chạy hoàn toàn lock-free và wait-free — thậm chí không cần một atomic instruction nào để đọc. Bên ghi tạo bản sao dữ liệu, sửa bản sao, rồi công bố phiên bản mới bằng một lệnh release store duy nhất lên pointer (`rcu_assign_pointer`); các bên ghi đồng thời vẫn phải tuần tự hóa với nhau, thường bằng một lock bình thường. Các phiên bản cũ được thu hồi sau khi mọi bên đọc từ epoch trước đã hoàn tất. Network stack, việc tra cứu đường dẫn file system, và lập lịch của Linux dùng RCU rất nhiều vì số lần đọc vượt xa số lần ghi.\n\n**LMAX Disruptor (giao dịch tần suất cao):** Disruptor là một ring buffer lock-free được thiết kế cho việc gửi message giữa các thread ở mức hàng chục triệu sự kiện mỗi giây. Nó thay một blocking queue bằng một ring buffer, nơi producer CAS một sequence number để giành một slot, và consumer đọc tới sequence đã được giành. Cache-line padding ngăn false sharing giữa trạng thái của producer và consumer.\n\n**Package `java.util.concurrent` của Java:** `AtomicLong`, `AtomicReference`, `ConcurrentLinkedQueue` — tất cả được cài đặt bằng vòng lặp CAS. `LongAdder` giải quyết bài toán counter contention cao bằng cách duy trì các ô riêng cho từng CPU và cộng dồn một cách lười biếng, giảm đáng kể tỷ lệ retry CAS khi workload ghi nhiều.\n\n**`SharedArrayBuffer` + `Atomics` của JavaScript:** Được đưa vào để cho phép các Web Worker chia sẻ bộ nhớ mà không cần copy. Trên trình duyệt, nó chỉ có trên các trang **cross-origin isolated**: từ 2020–21 — sau khi Spectre cho thấy bộ nhớ chia sẻ có thể bị biến thành một timer độ phân giải cao — trang phải được phục vụ với `Cross-Origin-Opener-Policy: same-origin` và `Cross-Origin-Embedder-Policy: require-corp` (hoặc `credentialless`), và `self.crossOriginIsolated` phải là `true`. Node.js không có yêu cầu này. API `Atomics` cung cấp các primitive cần thiết để cài đặt cấu trúc lock-free trong JavaScript: `add`, `sub`, `and`, `or`, `xor`, `load`, `store`, `compareExchange`, và `exchange`. `Atomics.wait` và `Atomics.notify` cài đặt một cơ chế giống futex cho việc điều phối có block khi bạn thực sự cần block (main thread của trình duyệt không được phép block, nên `Atomics.wait` sẽ throw ở đó — hãy dùng `Atomics.waitAsync` (ES2024) non-blocking thay thế; Node.js cho phép `Atomics.wait` trên main thread).\n\n**Hệ thống database (MVCC):** Multi-Version Concurrency Control, dùng trong PostgreSQL, MySQL InnoDB và hầu hết database hiện đại, là họ hàng về mặt khái niệm của optimistic locking. Bên đọc thấy một snapshot nhất quán mà không block bên ghi; bên ghi tạo phiên bản mới thay vì sửa dữ liệu tại chỗ. Xung đột ghi–ghi vẫn được xử lý bằng row lock trong PostgreSQL và InnoDB, hoặc được phát hiện lúc commit trong các cơ chế optimistic và serializable."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern LMAX Disruptor: producer giành slot trong ring buffer bằng CAS trên một sequence number, ghi dữ liệu, rồi công bố. Consumer poll tới sequence đã được công bố. Không cần mutex ở bất kỳ đâu trên đường đi then chốt."
+    },
+    {
+      "type": "explanation",
+      "title": "Trade-off hiệu năng: khi nào lock-free thắng và khi nào thua",
+      "content": "Lock-free không phải lúc nào cũng nhanh hơn code dựa trên mutex. Đặc điểm hiệu năng phụ thuộc nhiều vào mức contention, độ dài critical section và đặc tính phần cứng.\n\n**Lock-free thắng khi:**\n- **Đọc chiếm áp đảo.** Các thuật toán kiểu RCU cho phép đọc mà không tốn chút overhead atomic nào. Một counter được hàng nghìn thread đọc và hiếm khi bị ghi là trường hợp kinh điển.\n- **Critical section rất ngắn.** Một cặp lock + unlock mutex không có contention tốn khoảng 15–50 ns (hai atomic operation cộng phần sổ sách); một atomic read-modify-write đơn lẻ không có contention như `Atomics.add` tốn khoảng 5–20 ns. Khi có contention, cả hai đều chậm đi nhiều, vì cache line phải nảy qua lại giữa các core.\n- **Contention thấp.** Tỷ lệ retry CAS gần bằng không, nên overhead của vòng lặp retry không đáng kể.\n- **Cần tránh priority inversion.** Hệ thống real-time, nơi thread độ ưu tiên cao không bao giờ được block sau thread độ ưu tiên thấp.\n- **Cần tránh deadlock.** Một hệ thống mà process có thể chết khi đang giữ lock sẽ ưu tiên thiết kế lock-free vì an toàn.\n\n**Lock-free thua khi:**\n- **Contention cao.** Khi contention ghi lớn — nhiều thread cùng CAS trên một biến — phần lớn các lần thử CAS thất bại. Thread spin, tiêu tốn CPU và làm cache line bị giằng co giữa các core (cache line bouncing). Khi contention cao, mutex thực ra cho hiệu năng tốt hơn: thread thua bị đẩy ra khỏi lịch chạy và CPU được giải phóng để làm việc có ích.\n- **Critical section dài.** Lock-free giả định bước tính toán (giữa lần đọc và CAS) là nhanh. Nếu nó dài, contention tăng và tỷ lệ retry tăng vọt.\n- **Cập nhật nhiều word.** CAS hoạt động trên một word aligned duy nhất (4 hoặc 8 byte). Cập nhật nguyên tử hai field không liên quan đòi hỏi hoặc lock, hoặc DCAS, hoặc tái cấu trúc để trỏ tới một struct bất biến được cập nhật bằng một CAS pointer duy nhất.\n\n**Hướng dẫn thực tế:** Với counter chia sẻ chịu contention ghi cao, hãy dùng **striped counter** kiểu `LongAdder` — duy trì mỗi core CPU một counter, tăng ở local, và chỉ cộng dồn qua các core khi cần tổng. Cách này loại bỏ hoàn toàn lưu lượng CAS giữa các core. Với queue chia sẻ, hãy benchmark trước khi chọn: `ArrayBlockingQueue` (dựa trên mutex) thường nhanh hơn `ConcurrentLinkedQueue` (dựa trên CAS) khi cả producer lẫn consumer đều rất bận rộn, vì mutex tiện lợi ở chỗ nó báo cho consumer thức dậy thay vì spin.\n\n**Quy tắc sắt:** đo trước đã. Code lock-free khó viết hơn, khó suy luận hơn và dễ sai một cách tinh vi hơn. Đừng dùng tới nó cho tới khi bạn đã profile và xác nhận rằng mutex chính là nút thắt."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Nền tảng lý thuyết của lock-free programming được Maurice Herlihy đặt ra trong bài báo mang tính bước ngoặt năm 1991 *Wait-Free Synchronization*. Bài báo đưa ra khái niệm *consensus number* của một primitive và chứng minh rằng các đối tượng có consensus number N có thể xây dựng cài đặt wait-free cho bất kỳ đối tượng nào với N thread. Các lệnh đọc và ghi atomic thông thường có consensus number 1, trong khi CAS (và LL/SC) có consensus number vô hạn — đó là lý do CAS, chứ không phải chỉ load và store, là primitive *vạn năng* để xây dựng bất kỳ cấu trúc dữ liệu concurrent nào. Bài báo đoạt giải Dijkstra năm 2003. Cuốn *The Art of Multiprocessor Programming* của Herlihy và Shavit (2008; tái bản lần 2 năm 2020) vẫn là giáo trình chuẩn mực về chủ đề này."
+    },
+    {
+      "type": "callout",
+      "content": "**Những lỗi thường gặp và bẫy interview:**\n- **'Lock-free nghĩa là không có đồng bộ hóa.'** Sai. Code lock-free dùng atomic operation và memory barrier — đó CHÍNH LÀ đồng bộ hóa. Nó chỉ tránh việc block.\n- **'Atomics.add chỉ là một mutex nhanh hơn.'** Mô hình tư duy sai. `Atomics.add` là một lệnh duy nhất wait-free; nó không có khái niệm block, lập lịch hay sở hữu.\n- **'Vòng lặp CAS luôn nhanh hơn mutex.'** Sai khi contention cao. Hãy benchmark, đừng giả định.\n- **'ABA problem chỉ ảnh hưởng tới cấu trúc dựa trên pointer.'** Nó ảnh hưởng tới bất kỳ CAS nào mà về mặt ngữ nghĩa phụ thuộc vào sự ổn định, không chỉ sự bằng nhau. Một free list dựa trên chỉ số mảng, hoặc một counter dùng để kiểm tra \"có gì thay đổi chưa?\", cũng có thể dính phải.\n- **'Memory ordering không quan trọng trong JavaScript.'** `Atomics` của JavaScript luôn dùng seq_cst, nên bạn an toàn *miễn là mọi truy cập chia sẻ đều đi qua `Atomics`* — các lệnh đọc và ghi typed array thông thường trên SharedArrayBuffer không có đảm bảo thứ tự nào. Hiểu *vì sao* sẽ giúp ích khi đọc code concurrent C++ hay Java.\n- **'SharedArrayBuffer bị undefined trên trình duyệt của tôi.'** Trang chưa được cross-origin isolated — hãy phục vụ nó với COOP `same-origin` và COEP `require-corp` (hoặc `credentialless`).\n- **Góc interview:** Hãy sẵn sàng giải thích vòng lặp CAS, vẽ kịch bản ABA, định nghĩa lock-free và wait-free, và đưa ra một ví dụ thực tế (`LongAdder`, `ConcurrentLinkedQueue`, Linux RCU). Bốn điểm này bao quát ~80% câu hỏi interview về chủ đề này."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Atomic operation** là các lệnh CPU không thể chia cắt — không thread nào khác có thể quan sát một lần thực thi dở dang — loại bỏ race condition read-modify-write mà không cần lock nào.",
+        "**Compare-And-Swap (CAS)** là khối xây dựng vạn năng: ghi nguyên tử một giá trị mới chỉ khi giá trị hiện tại bằng giá trị kỳ vọng; retry nếu thất bại. Gần như mọi cấu trúc dữ liệu lock-free đều quy về vòng lặp CAS.",
+        "**ABA problem** xảy ra khi một giá trị đổi A→B→A giữa lần đọc của CAS và lần swap; CAS thành công một cách sai lầm vì nó kiểm tra sự bằng nhau về giá trị chứ không kiểm tra sự ổn định. Khắc phục bằng version stamp được cập nhật trong cùng lần CAS, hazard pointer, epoch-based reclamation, hoặc (với biến thể use-after-free) garbage collection.",
+        "**Lock-free** đảm bảo tiến triển trên toàn hệ thống (ít nhất một thread tiến lên sau hữu hạn bước); **wait-free** đảm bảo tiến triển có giới hạn cho từng thread (mọi thread hoàn tất trong số bước có giới hạn). `Atomics.add` là wait-free; vòng retry CAS là lock-free nhưng không wait-free.",
+        "**Memory ordering** quyết định khi nào lệnh ghi của một thread trở nên hiển hiện với thread khác. Một lệnh **release** store ghép cặp với một lệnh **acquire** load đọc được nó sẽ khiến mọi thứ được ghi trước store hiển hiện sau load; **seq_cst** thêm một thứ tự toàn cục trên mọi thao tác seq_cst. `Atomics` của JavaScript luôn là seq_cst; C++ và Rust cho phép bạn chọn các thứ tự yếu hơn.",
+        "**Lock-free không phải lúc nào cũng nhanh hơn.** Nó vượt trội với workload đọc nhiều và ghi ít contention. Khi contention ghi cao, vòng lặp retry CAS đốt CPU; một mutex cho thread ngủ thường nhanh hơn và luôn đơn giản hơn.",
+        "**Ví dụ trên production:** Linux RCU (đọc wait-free), LMAX Disruptor (ring buffer lock-free), `LongAdder` của Java (striped counter), và `SharedArrayBuffer` + `Atomics` của JavaScript (bộ nhớ chia sẻ giữa các worker) đều áp dụng những kỹ thuật này trên các đường đi nhạy cảm với latency.",
+        "Trên trình duyệt, **SharedArrayBuffer** (và do đó `Atomics` trên bộ nhớ chia sẻ) đòi hỏi trang phải **cross-origin isolated**: `Cross-Origin-Opener-Policy: same-origin` + `Cross-Origin-Embedder-Policy: require-corp`/`credentialless`. `Atomics.wait` không được phép trên main thread của trình duyệt — hãy dùng `Atomics.waitAsync`."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Điều gì khiến một thao tác là 'atomic' trong ngữ cảnh lập trình concurrent?",
+      "options": [
+        "Nó hoàn tất như một bước duy nhất không thể chia cắt — không thread nào khác có thể quan sát một lần thực thi dở dang",
+        "Nó thực thi nhanh hơn mọi thao tác không atomic trên cùng CPU",
+        "Nó lấy một mutex ở bên trong để ngăn sự can thiệp",
+        "Nó chạy trên một hardware thread chuyên trách, tách biệt với các worker thread"
+      ],
+      "explanation": "Một atomic operation trông như tức thời với mọi thread khác. Từ góc nhìn của bất kỳ người quan sát nào, thao tác đó hoặc chưa bắt đầu, hoặc đã hoàn tất trọn vẹn — không có trạng thái trung gian nào quan sát được. Thuộc tính này loại bỏ data race mà không cần lock."
+    },
+    {
+      "id": "q2",
+      "question": "Trong một thao tác CAS (Compare-And-Swap) `CAS(addr, expected, new)`, khi nào swap THẤT BẠI?",
+      "options": [
+        "Khi giá trị mới bằng giá trị kỳ vọng",
+        "Khi có hơn hai thread cùng thử CAS một lúc",
+        "Khi giá trị hiện tại tại addr khác giá trị kỳ vọng",
+        "Khi địa chỉ bộ nhớ không được căn chỉnh theo biên 4 byte"
+      ],
+      "explanation": "CAS đọc nguyên tử `*addr` và so sánh với `expected`. Nếu thread khác đã sửa `*addr` kể từ lần kiểm tra gần nhất của thread đang đọc, hai giá trị khác nhau và CAS trả về mà không ghi. Giá trị trả về là giá trị thực tế tìm thấy, được bên gọi dùng làm `expected` mới cho lần retry."
+    },
+    {
+      "id": "q3",
+      "question": "ABA problem trong lock-free programming là gì?",
+      "options": [
+        "Một deadlock khi ba thread lấy lock theo thứ tự bảng chữ cái",
+        "Một memory leak gây ra bởi atomic operation không giảm reference count",
+        "Một thuật toán đòi hỏi xen kẽ đọc atomic và ghi không atomic",
+        "Một CAS thành công sai lầm vì giá trị đã đổi A→B→A, khiến swap trông có vẻ an toàn trong khi các bất biến của cấu trúc bên dưới đã bị vi phạm"
+      ],
+      "explanation": "ABA: Thread T1 đọc giá trị A và bị preempt. Thread T2 đổi A→B→A. CAS của T1 thành công vì giá trị lại bằng A — nhưng các thay đổi ở giữa có thể đã làm mất hiệu lực các bất biến (ví dụ giải phóng rồi cấp phát lại một node ở cùng địa chỉ, hoặc pop các phần tử ở giữa khỏi stack)."
+    },
+    {
+      "id": "q4",
+      "question": "Khác biệt then chốt giữa đảm bảo tiến triển lock-free và wait-free là gì?",
+      "options": [
+        "Lock-free đảm bảo tiến triển trên toàn hệ thống (ít nhất một thread tiến lên); wait-free đảm bảo mọi thread riêng lẻ hoàn tất trong một số bước có giới hạn",
+        "Lock-free nghĩa là hoàn toàn không có lock; wait-free nghĩa là các thread có thể chờ nhau một lần",
+        "Chúng là các đảm bảo tương đương, chỉ khác tên gọi ở các cộng đồng khác nhau",
+        "Wait-free yếu hơn lock-free vì từng thread có thể bị đứng vô thời hạn"
+      ],
+      "explanation": "Lock-free đảm bảo hệ thống tiến triển — ít nhất một thread hoàn tất sau hữu hạn bước. Wait-free mạnh hơn hẳn: mọi thread riêng lẻ đều hoàn tất trong một số bước có giới hạn bất kể các thread khác làm gì. Starvation là không thể trong một thuật toán wait-free. `Atomics.add` là wait-free; vòng retry CAS là lock-free nhưng không wait-free."
+    },
+    {
+      "id": "q5",
+      "question": "Vì sao một counter lock-free dựa trên CAS có thể cho hiệu năng TỆ HƠN counter được bảo vệ bằng mutex khi contention ghi cao?",
+      "options": [
+        "Lệnh CAS không được hỗ trợ trên các bộ xử lý multi-core hiện đại",
+        "Nhiều thread spin trong vòng retry CAS, đốt CPU mà không tiến triển thực chất, trong khi các thread thua mutex bị đẩy ra khỏi lịch chạy",
+        "Mutex dùng tăng tốc phần cứng chuyên dụng mà CAS không truy cập được",
+        "Hệ điều hành bóp lệnh CAS để tránh quá nhiệt"
+      ],
+      "explanation": "Khi contention cao, nhiều thread cùng thử CAS và phần lớn thất bại. Chúng retry ngay lập tức, đốt CPU trong một vòng spin chặt — hiện tượng gọi là 'CAS storm'. Thread thua mutex bị hệ điều hành đẩy ra khỏi lịch chạy và không lãng phí CPU trong lúc chờ. Với các biến đơn lẻ bị tranh chấp nặng, striped counter (mỗi core CPU một counter, cộng dồn lười biếng) thường nhanh hơn cả hai."
+    },
+    {
+      "id": "q6",
+      "question": "Thread A ghi `data = 42` rồi thực hiện `ready.store(true, release)`. Thread B spin cho tới khi `ready.load(acquire)` trả về true, rồi đọc `data`. Cặp acquire/release đảm bảo điều gì?",
+      "options": [
+        "Không có gì thêm — chỉ thứ tự seq_cst mới làm lệnh ghi vào data hiển hiện với B",
+        "B chắc chắn đọc được 42, vì các lệnh ghi thực hiện trước một release store sẽ hiển hiện với bất kỳ thread nào có acquire load đọc được store đó",
+        "Mọi thao tác của cả hai thread giờ rơi vào một thứ tự toàn cục duy nhất, dùng chung với mọi thread khác",
+        "Bản thân lệnh ghi thông thường vào data trở thành atomic"
+      ],
+      "explanation": "Release trên lệnh store của A ngăn các lệnh ghi phía trước bị dời ra sau nó; acquire trên lệnh load của B ngăn các lệnh đọc phía sau bị dời lên trước nó. Khi acquire load của B đọc được giá trị do release store của A ghi, một cạnh happens-before hình thành, nên mọi lệnh ghi A thực hiện trước release — kể cả data = 42 — đều hiển hiện với B. Nó không tạo ra thứ tự toàn cục trên các thao tác không liên quan (đó là thứ seq_cst bổ sung), và nó không biến data thành atomic; nó sắp thứ tự cho data."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao CPU hiện đại đổi thứ tự các lệnh bộ nhớ, và điều này có ý nghĩa gì với code concurrent?",
+      "options": [
+        "CPU không bao giờ đổi thứ tự lệnh — đây là chuyện hoang đường do các lập trình viên cấp thấp lan truyền",
+        "Việc đổi thứ tự chỉ quan sát được trên bộ xử lý ARM; x86 luôn cung cấp sequential consistency",
+        "Việc đổi thứ tự chỉ ảnh hưởng tới lệnh đọc, không bao giờ ảnh hưởng tới lệnh ghi, nên store luôn được quan sát theo thứ tự chương trình",
+        "Việc đổi thứ tự tối ưu throughput single-threaded nhưng có thể khiến thread khác quan sát thấy lệnh ghi đã cũ hoặc sai thứ tự nếu không có memory barrier"
+      ],
+      "explanation": "Thực thi out-of-order và store buffer là nền tảng cho hiệu năng của CPU hiện đại. Trong code single-threaded, các lần đổi thứ tự là vô hình vì CPU đảm bảo tính tự nhất quán. Trong code multi-threaded, thread khác có thể quan sát các lệnh ghi theo thứ tự khác. Memory barrier (fence) áp đặt thứ tự. Ngay cả x86 (Total Store Order) cũng có thể đổi chỗ một lệnh store theo sau bởi một lệnh load tới địa chỉ khác."
+    },
+    {
+      "id": "q8",
+      "question": "Cách khắc phục tiêu chuẩn cho ABA problem trong các cấu trúc dữ liệu lock-free dựa trên pointer là gì?",
+      "options": [
+        "Bảo vệ mọi thao tác CAS bằng một mutex toàn cục để đảm bảo truy cập độc quyền",
+        "Tránh hoàn toàn các cấu trúc dựa trên pointer và chỉ dùng cấu trúc đánh chỉ số mảng",
+        "Ghép mỗi pointer với một version stamp tăng đơn điệu và đưa cả hai vào phép kiểm tra của CAS",
+        "Yêu cầu mọi thread lấy read lock trước khi thực hiện bất kỳ CAS nào"
+      ],
+      "explanation": "Version stamp (hay tag) tăng lên ở mỗi lần ghi. CAS kiểm tra cả pointer lẫn version, nên A→B→A cho ra các version v1→v2→v3. CAS của T1 kỳ vọng pointer A với version v1 nhưng thấy version v3, phát hiện đúng chu trình ABA dù giá trị pointer đã quay về. Version thường được nhét vào các bit cao không dùng tới của pointer (tagged pointer)."
+    },
+    {
+      "id": "q9",
+      "question": "`Atomics.add(view, 0, 1)` được xếp loại wait-free (thay vì lock-free) vì:",
+      "options": [
+        "Nó dùng một vòng retry CAS luôn hội tụ trong vòng hai lần thử",
+        "Nó lấy một lock độc quyền trên SharedArrayBuffer trong đúng một lệnh",
+        "Nó tương ứng với một lệnh phần cứng duy nhất (LOCK XADD trên x86) luôn hoàn tất mà không cần retry",
+        "Nó lên lịch việc tăng trên một atomic thread chuyên trách nên bên gọi không bao giờ phải chờ"
+      ],
+      "explanation": "Fetch-and-Add tương ứng với lệnh `LOCK XADD` trên x86 — một lệnh máy atomic duy nhất. Mọi thread gọi đều hoàn tất ngay bất kể có bao nhiêu thread khác gọi đồng thời. Không có vòng retry và không thread nào có thể bị thread khác làm chậm. Đây là thuộc tính định nghĩa của wait-free: mọi thread hoàn tất trong O(1) bước một cách vô điều kiện."
+    },
+    {
+      "id": "q10",
+      "question": "Linux RCU (Read-Copy-Update) đạt được việc đọc wait-free bằng cách:",
+      "options": [
+        "Dùng một reader-writer mutex cho phép nhiều bên đọc đồng thời mà không có bên ghi nào chờ",
+        "Yêu cầu bên đọc lấy một sequence lock và retry nếu đã có lệnh ghi xảy ra",
+        "Cho phép bên đọc chạy mà không cần primitive đồng bộ hóa nào; bên ghi copy, sửa, rồi công bố nguyên tử một pointer phiên bản mới, hoãn việc thu hồi cho tới khi mọi bên đọc của epoch trước hoàn tất",
+        "Gom mọi lệnh đọc vào một event loop single-threaded để loại bỏ truy cập đồng thời"
+      ],
+      "explanation": "Nhận thức cốt lõi của RCU: nếu bên đọc chỉ luôn đọc một snapshot nhất quán, chúng hoàn toàn không cần đồng bộ hóa. Bên ghi copy dữ liệu, sửa bản sao, rồi công bố nó bằng một lệnh release store duy nhất lên pointer (các bên ghi đồng thời tự điều phối với nhau, thường bằng một lock bình thường). Các phiên bản cũ được thu hồi sau khi một ranh giới epoch đảm bảo không còn bên đọc nào đang dùng chúng. Bên đọc thực sự wait-free — không có lấy một atomic operation nào trên đường đọc."
+    }
+  ]
+}

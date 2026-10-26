@@ -1,0 +1,228 @@
+{
+  "sourceHash": "7dacdbeb3d79",
+  "title": "Bên trong tầng lưu trữ của database (Database Storage Internals)",
+  "tagline": "Byte di chuyển từ RAM xuống đĩa thế nào — page, B+ tree, LSM tree, và write-ahead log gắn kết tất cả lại với nhau.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mỗi lần bạn chạy `SELECT * FROM orders WHERE id = 42`, bên dưới là cả một chuỗi quyết định được phối hợp chính xác: đọc block nào trên đĩa, kiểm tra địa chỉ RAM nào trước, duyệt một tree các key đã sắp xếp ra sao, và làm sao đảm bảo một lần ghi bị gián đoạn không làm hỏng bảng của bạn. Câu trả lời cho từng câu hỏi được định hình bởi storage engine — tầng phần mềm nằm giữa SQL và các byte thô trên đĩa.\n\nHiểu tầng lưu trữ bên trong database không chỉ là kiến thức hàn lâm. Đó là kiến thức giúp bạn giải thích vì sao thêm một index làm query nhanh hơn 1000×, vì sao một ứng dụng ghi nhiều nên cân nhắc Cassandra thay vì PostgreSQL, vì sao `VACUUM` quan trọng, và vì sao một lần crash không đúng lúc vẫn không làm mất transaction đã commit. Nó định hình mọi lần chẩn đoán hiệu năng và mọi quyết định kiến trúc bạn từng đưa ra với database.\n\nỞ cốt lõi là hai triết lý cạnh tranh nhau. Storage engine dựa trên **B+ tree** (MySQL InnoDB và SQLite lưu bảng dưới dạng B+ tree; PostgreSQL lưu bảng dưới dạng heap không thứ tự và dùng B+ tree cho index) được tối ưu quanh giả định rằng dữ liệu phải đọc được theo thứ tự đã sắp xếp với ít lần seek đĩa nhất — lý tưởng cho workload OLTP đọc/ghi hỗn hợp. Storage engine dựa trên **LSM tree** (RocksDB, Cassandra, LevelDB, HBase) được tối ưu quanh giả định rằng việc ghi phải nhanh nhất có thể và việc đọc có thể trả thêm một chút chi phí — lý tưởng cho workload ghi nhiều, throughput cao. Cả hai triết lý đều đứng trên cùng một thực tế vật lý: ổ đĩa quay và SSD đều cung cấp byte theo các block kích thước cố định, và random I/O đắt hơn sequential I/O — chênh lệch cực lớn trên ổ đĩa quay, ít hơn (nhưng vẫn đo được) trên SSD.\n\nTrong chương này, ta xây dựng các ý tưởng đó từ nền móng: page là đơn vị I/O nguyên tử, buffer pool là cache trong RAM cho các page nóng, cấu trúc leaf có thứ tự của B+ tree, thiết kế ghi-nối-tiếp tối ưu cho ghi của LSM tree, write-ahead log là cơ chế khôi phục sau crash phổ quát, và những trade-off cụ thể chi phối việc chọn database trong thực tế."
+    },
+    {
+      "type": "diagram",
+      "caption": "Storage engine nằm giữa SQL và đĩa. Buffer pool cache các page nóng trong RAM; WAL ghi lại mọi thay đổi trước khi nó chạm tới data page."
+    },
+    {
+      "type": "analogy",
+      "title": "Thư viện có kệ tạm và cuốn sổ ghi chép chống cháy",
+      "content": "Hãy tưởng tượng một thư viện khổng lồ, nơi mỗi cuốn sách (một dòng) nằm trong một trong hàng nghìn tủ hồ sơ, mỗi tủ chứa đúng 8 KB trang. Tủ thẻ thư mục (một B+ tree index) được sắp theo thứ tự chữ cái — bạn tìm được bất kỳ tác giả nào trong vài giây bằng cách lần theo các tấm phân cách xuống tận ngăn kéo chính xác, rồi đọc từ trái sang phải qua các ngăn kéo nối tiếp để lấy một dải tác giả. Tủ thẻ được sắp xếp rất đẹp, nhưng xếp lại mọi tấm thẻ khi có sách mới thì chậm — mỗi lần chèn có thể phải xáo lại nửa ngăn kéo.\n\nMột thư viện kiểu LSM tree làm khác. Có một kệ tạm đặt ở lối vào. Mọi cuốn sách mới đều được đặt lên kệ này trước — tức thì. Định kỳ, một thủ thư gom đủ một kệ sách, sắp xếp chúng, rồi trộn vào các tủ chính trong một lượt duy nhất. Việc đọc phải kiểm tra cả kệ tạm lẫn các tủ chính, nhưng việc ghi là tức thì vì nó không bao giờ chạm trực tiếp vào các tủ.\n\nCuốn sổ ghi chép chống cháy (write-ahead log) được đặt cạnh cửa. Mỗi lần có cuốn sách nào được di chuyển — trước khi động vào tủ — thủ thư ghi lại việc di chuyển đó vào sổ bằng bút mực. Nếu động đất xảy ra giữa lúc đang xếp sách, cuốn sổ cho phép bạn làm lại chính xác từng cuốn sách lẽ ra phải đi đâu. Không có cuốn sổ, bạn có thể thấy một nửa cuốn sách đã được chuyển, còn nửa kia thì mất."
+    },
+    {
+      "type": "explanation",
+      "title": "Page: đơn vị nguyên tử của disk I/O",
+      "content": "Nhận thức nền tảng của mọi hệ thống lưu trữ dựa trên đĩa là: đĩa không đọc hay ghi từng byte riêng lẻ. Mỗi lần truy cập đĩa — dù bạn cần một byte hay một nghìn byte — đều truyền nguyên các **sector** (512 byte hoặc 4 KB), và OS cache file theo các page 4 KB. Database engine xây dựng đơn vị kích thước cố định của riêng mình, thường lớn hơn, bên trên đó, gọi là **page**, và luôn đọc và ghi nguyên page.\n\nPostgreSQL mặc định dùng **page 8 KB** (có thể cấu hình lúc biên dịch thành 4, 8, 16 hoặc 32 KB). MySQL InnoDB mặc định 16 KB. SQLite dùng 4 KB. Kích thước page là một đòn bẩy tuning: page lớn giảm số tầng index cần thiết (tốt cho range scan) nhưng lãng phí chỗ khi dòng nhỏ; page nhỏ giảm read amplification cho tra cứu điểm nhưng tăng độ sâu của tree.\n\nMỗi page có một **header** chứa:\n- **LSN (Log Sequence Number)**: bản ghi WAL đã sửa page này gần nhất, dùng trong crash recovery\n- **Checksum**: phát hiện hư hỏng (torn write, lỗi phần cứng). Trong PostgreSQL, data checksum là tùy chọn và từ PostgreSQL 18 được bật mặc định cho cluster mới\n- **Pointer chỉ vùng trống** (`pd_lower` / `pd_upper`): array line-pointer mọc xuống từ header, dữ liệu tuple mọc lên từ cuối page, và vùng trống nằm ở giữa\n- **Pointer tới special space**: các page index giữ dữ liệu bổ sung ở đó, như liên kết tới page kề bên và tầng của B-tree\n\nCác dòng (tuple, theo thuật ngữ của PostgreSQL) được lưu cùng nội dung của chúng cộng với một **tuple header** mã hóa thông tin visibility cho MVCC — transaction nào đã insert dòng này, transaction nào đã xóa nó, và hiện nó có hiển thị với transaction đang đọc hay không. Nghĩa là cùng một dòng vật lý có thể tồn tại nhiều phiên bản cùng lúc; các **dead tuple** (phiên bản cũ không còn hiển thị với transaction nào) tích tụ cho đến khi `VACUUM` thu hồi chỗ.\n\nNgay cả việc thay đổi **một byte** trong một dòng cũng có nghĩa là cuối cùng toàn bộ page 8 KB sẽ được ghi lại vào data file (ngược lại, WAL chỉ ghi phần thay đổi — trừ lần thay đổi đầu tiên sau mỗi checkpoint, xem phần torn page bên dưới). Mục tiêu của buffer pool là gom nhiều thay đổi trên một page nóng trong RAM để một lần ghi page bao trọn tất cả."
+    },
+    {
+      "type": "explanation",
+      "title": "Buffer pool: RAM làm cache cho đĩa",
+      "content": "**Buffer pool** (trong PostgreSQL gọi là **shared buffer cache**) là một vùng RAM giữ bản sao của các page vừa được truy cập. Mọi lần đọc đều đi qua buffer pool:\n\n1. Storage engine tính xem page nào trên đĩa chứa dòng được yêu cầu.\n2. Nó kiểm tra **page table** của buffer pool (một hash map từ địa chỉ page tới slot buffer).\n3. Nếu page có trong pool (**cache hit**), dòng được trả từ RAM — không có disk I/O.\n4. Nếu không (**cache miss**), engine tìm một slot buffer trống (có thể phải evict một page lạnh), đọc page từ đĩa và đưa nó vào pool.\n\nTham số `shared_buffers` của PostgreSQL kiểm soát kích thước buffer pool. Điểm khởi đầu quen thuộc là **25% tổng RAM**; vượt quá ~40% hiếm khi có ích, vì PostgreSQL còn đọc qua page cache của OS (page thực chất bị cache hai lần). MySQL InnoDB thì khác: nó bỏ qua cache của OS (`O_DIRECT`), nên `innodb_buffer_pool_size` thường là 50–75% RAM trên một server chuyên dụng. Một hệ thống OLTP được tuning tốt thường cho thấy **buffer hit rate trên ~99%** trong `pg_statio_user_tables` — nhưng lưu ý một lần \"read\" ở đó vẫn có thể được phục vụ từ cache của OS chứ không phải từ đĩa.\n\n**Dirty page** là page đã bị sửa trong RAM nhưng chưa được ghi xuống đĩa. Engine dùng eviction policy kiểu **clock-sweep** (PostgreSQL) hoặc **midpoint-insertion LRU** (InnoDB — page mới vào giữa danh sách để một lượt scan lớn không thể đẩy hết tập page nóng ra ngoài). Khi một dirty page cần bị evict, nó được flush xuống đĩa trước. **Checkpoint** chủ động flush mọi dirty page theo chu kỳ đều đặn (trong PostgreSQL được điều khiển bởi `checkpoint_timeout` và `max_wal_size`), giảm lượng WAL phải replay khi crash và làm cho việc evict page trong vận hành bình thường rẻ hơn.\n\nBuffer pool được dùng chung giữa mọi connection. Connection A và connection B đọc cùng một page sẽ thấy cùng một slot buffer — khiến dung lượng hiệu dụng của pool là working set của toàn bộ database, chứ không chỉ của một session."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường đọc qua buffer pool. Cache hit tốn micro giây; miss tốn mili giây. Đặt shared_buffers đủ lớn để working set nóng nằm gọn trong RAM sẽ loại bỏ phần lớn lần đọc đĩa."
+    },
+    {
+      "type": "explanation",
+      "title": "B+ tree: cấu trúc index thống trị",
+      "content": "**B+ tree** là cấu trúc dữ liệu đứng sau gần như mọi index của SQL database. Nó là một biến thể của **B-tree** tổng quát với một thay đổi then chốt: **toàn bộ dữ liệu thực nằm ở leaf node**. Internal node chỉ chứa routing key — đủ thông tin để đi xuống, nhưng không đủ để tự trả lời một query.\n\n**Cấu trúc:**\n- **Root**: điểm vào duy nhất, có thể có tối thiểu 2 con\n- **Internal node**: mỗi node lưu k routing key và k+1 pointer tới con (fan-out, được quyết định bởi kích thước page và kích thước key)\n- **Leaf node**: lưu mọi cặp (key, value), sắp theo key; điều then chốt là các leaf node được **liên kết thành một doubly-linked list**, cho phép range scan hiệu quả mà không phải quay lại root\n\n**Vì sao chọn B+ tree thay vì binary search tree?** Một binary tree 100 triệu node có độ sâu ~27. Mỗi tầng có thể nằm ở một page khác nhau, tức là 27 lần đọc đĩa cho mỗi lần tra cứu. Một B+ tree với page 8 KB và key 8 byte chứa được khoảng 400–500 entry mỗi page (mỗi entry còn mang theo một pointer và một header nhỏ). Một tree cao 3 tầng — root, một tầng internal, leaf — đạt khoảng 500 × 500 = 250,000 leaf page, và với ~400 entry mỗi leaf thì đó là **~100 triệu key trong ba lần đọc page**. Thêm một tầng nữa nhân dung lượng lên thêm ~500 lần.\n\n**Tra cứu** (`SELECT WHERE id = X`): bắt đầu từ root, so sánh X với các routing key để chọn đúng pointer con, lặp lại cho đến khi tới leaf. O(log_B n) với B là branching factor. Trong thực tế, page root và các internal node tầng trên gần như luôn có trong buffer pool (chúng được truy cập ở mọi query), nên một lần tra cứu chỉ tốn 1-2 lần đọc đĩa thực sự.\n\n**Range scan** (`SELECT WHERE id BETWEEN X AND Y`): tìm leaf chứa X, rồi đi theo pointer tới leaf kề phải, đọc các leaf liên tiếp cho đến khi vượt quá Y. Đây là lý do index có thứ tự giúp range query nhanh — danh sách leaf được liên kết chính là một linked list có thứ tự trên đĩa.\n\n**Insert**: tìm đúng leaf, chèn key vào. Nếu leaf đã đầy, **split** nó — tạo một leaf mới, chia lại các key, và đẩy separator key mới lên node cha. Split có thể lan dây chuyền lên tới root, khi đó tree cao thêm một tầng. Split tương đối hiếm; nguồn write amplification chính của B+ tree là mỗi page bị sửa cuối cùng đều được ghi lại toàn bộ tại một vị trí ngẫu nhiên, kể cả khi chỉ một dòng nhỏ thay đổi.\n\n**Delete**: B+ tree trong sách giáo khoa sẽ **merge** hoặc tái cân bằng các node bị thiếu. Engine thực tế “lười” hơn: PostgreSQL không bao giờ merge các page đầy một nửa — VACUUM xóa các index entry chết và chỉ xóa một page khi nó hoàn toàn trống — đánh đổi dung lượng lấy cơ chế đồng thời đơn giản hơn và ít lần ghi hơn."
+    },
+    {
+      "type": "diagram",
+      "caption": "B+ tree: internal node chỉ chứa routing key (k key → k+1 con; key ≥ separator đi sang phải). Mọi entry nằm ở leaf, các leaf được liên kết từ trái sang phải để range scan. Chỉ vẽ ba tầng, nhưng mỗi node có thể fan-out tới hàng trăm con."
+    },
+    {
+      "type": "explanation",
+      "title": "LSM tree: tối ưu cho ghi",
+      "content": "**Log-Structured Merge-tree (LSM tree)**, được Patrick O'Neil và cộng sự giới thiệu năm 1996, đảo ngược trade-off của B+ tree: làm cho việc ghi rẻ nhất có thể, đổi lại việc đọc đắt hơn một chút.\n\nNhận thức then chốt là **ghi tuần tự rẻ hơn rất nhiều so với ghi ngẫu nhiên** — chênh nhiều bậc độ lớn trên ổ đĩa quay, và vẫn đáng kể trên SSD, nơi các lần ghi tuần tự lớn còn giảm write amplification nội bộ và độ hao mòn của flash translation layer. Một lần insert vào B+ tree có thể cần đọc leaf page đích, sửa nó, rồi ghi lại vào một vị trí cụ thể trên đĩa — một lần ghi ngẫu nhiên. LSM tree không bao giờ ghi đè thứ gì. Nó chỉ ghi nối thêm.\n\n**Đường ghi:**\n1. **WAL (Write-Ahead Log)**: lần ghi trước tiên được nối tuần tự vào một log trên đĩa (WAL của RocksDB, commit log của Cassandra). Nếu tiến trình crash trước khi MemTable được flush, log sẽ được replay để dựng lại nó.\n2. **MemTable**: sau đó lần ghi được chèn vào một cấu trúc có thứ tự trong bộ nhớ (thường là skip list). Hoàn toàn trong RAM — rất nhanh.\n3. **Flush SSTable**: khi MemTable chạm giới hạn kích thước (thường 64-256 MB), nó được flush thành một **Sorted String Table (SSTable)** bất biến — một file các cặp key-value sắp theo key, ghi tuần tự từ đầu đến cuối. Sau đó MemTable được bỏ đi.\n\n**SSTable** là bất biến sau khi được ghi. Chúng không bao giờ được cập nhật tại chỗ. Thay vào đó, các phiên bản mới của key (kể cả tombstone cho key đã xóa) xuất hiện trong các SSTable mới hơn.\n\n**Đường đọc**: để tìm một key, kiểm tra MemTable trước (các lần ghi gần nhất). Sau đó kiểm tra từng tầng SSTable từ mới nhất đến cũ nhất. Lần xuất hiện đầu tiên của key là giá trị đúng (mới nhất). Một **tombstone** (dấu xóa) nghĩa là key đã bị xóa.\n\n**Bài toán compaction**: theo thời gian, hàng chục hay hàng trăm SSTable tích tụ lại. Trong worst case, việc đọc phải kiểm tra tất cả. **Compaction** giải quyết điều này: một tiến trình nền trộn nhiều SSTable thành một SSTable lớn hơn, đã loại trùng, bỏ đi các phiên bản cũ và tombstone. Kết quả là ít SSTable phải kiểm tra khi đọc hơn và dung lượng đĩa được thu hồi."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường ghi của LSM: MemTable trong RAM flush xuống L0, rồi compact vào L1/L2. Việc đọc kiểm tra MemTable trước, sau đó dùng Bloom filter để loại bớt các lần đọc SSTable không cần thiết."
+    },
+    {
+      "type": "explanation",
+      "title": "Chiến lược compaction: leveled và size-tiered",
+      "content": "Cách tổ chức SSTable thành các tầng và cách kích hoạt compaction là một quyết định thiết kế lớn, ảnh hưởng tới trade-off giữa read amplification và write amplification.\n\n**Size-tiered compaction** (STCS, mặc định lâu năm của Cassandra, cũng dùng trong HBase và ScyllaDB): SSTable được nhóm theo kích thước. Khi một tier tích tụ N SSTable có kích thước tương tự, chúng được trộn thành một SSTable lớn hơn ở tier kế tiếp. Cách này hiệu quả cho ghi (ít lần ghi lại hơn) nhưng có thể dẫn tới read amplification cao — một lần đọc có thể phải kiểm tra nhiều SSTable trên mọi tier. Ngoài ra, space amplification cao trong lúc compaction: bạn tạm thời phải giữ cả SSTable cũ lẫn mới trên đĩa.\n\n**Leveled compaction** (mặc định của RocksDB, LevelDB, và chế độ LCS của Cassandra): SSTable được tổ chức thành các tầng (L0, L1, L2, ...) với hạn mức kích thước chặt chẽ cho mỗi tầng. Mỗi tầng lớn khoảng 10× tầng trước. Trong một tầng (trừ L0), các SSTable có **dải key không chồng lấn** — một key bất kỳ tồn tại trong tối đa một SSTable mỗi tầng. Nghĩa là một lần đọc ở tầng L1+ chỉ cần kiểm tra **một SSTable** mỗi tầng, giảm mạnh read amplification. Nhược điểm là **write amplification** cao hơn — một key có thể bị ghi lại nhiều lần khi được compact qua các tầng.\n\n**Time-window và FIFO compaction**: với dữ liệu time-series, **TWCS** của Cassandra chỉ compact các SSTable trong cùng một cửa sổ thời gian, để cả cửa sổ hết hạn cùng lúc; **FIFO** của RocksDB đơn giản là xóa các file cũ nhất khi chạm giới hạn kích thước hoặc TTL, không trộn gì cả. Cassandra 5.0 còn thêm **Unified Compaction Strategy (UCS)**, có thể tinh chỉnh ở bất kỳ đâu giữa hành vi tiered và leveled.\n\n**Trade-off nền tảng** được thể hiện qua ba chỉ số amplification:\n- **Write amplification (WA)**: bao nhiêu byte được ghi vật lý cho mỗi byte ghi logic. B+ tree: biến động lớn — ghi lại một page 8 KB để đổi một dòng 100 byte là ~80× trước khi buffer pool gom được nhiều thay đổi, cộng thêm WAL. LSM leveled: ~10–30×. LSM size-tiered: thấp hơn, khoảng ~3–10×.\n- **Read amplification (RA)**: bao nhiêu lần đọc đĩa cho mỗi lần đọc logic. B+ tree: 1-5 (chiều cao tree). LSM: 1-L (số tầng), được giảm nhờ Bloom filter.\n- **Space amplification (SA)**: dung lượng đĩa tiêu tốn so với kích thước dữ liệu logic. B+ tree: ~1.3–2× (page đầy một phần, bloat). LSM leveled: ~1.1×. LSM size-tiered: tới 2× hoặc hơn, vì một lần compaction lớn tạm thời cần giữ file cũ và mới song song.\n\nBloom filter là công cụ then chốt để kiểm soát read amplification của LSM. Mỗi SSTable có một Bloom filter đi kèm — một bit array gọn có thể trả lời chắc chắn 'chắc chắn không có trong SSTable này', hoặc trả lời theo xác suất 'có thể có trong SSTable này'. Một false positive (kiểm tra một SSTable không cần thiết) là chấp nhận được; một false negative (bỏ qua một SSTable có chứa key) là không thể xảy ra theo cách xây dựng."
+    },
+    {
+      "type": "explanation",
+      "title": "Write-ahead logging: cơ chế khôi phục sau crash phổ quát",
+      "content": "**Durability** — chữ D trong ACID — nghĩa là một khi transaction đã commit, các thay đổi của nó sống sót qua mọi lần crash sau đó. Nhưng data page nằm trong buffer pool ở RAM, và RAM thì mất dữ liệu khi mất điện. Nếu máy crash trước khi các dirty page được ghi xuống đĩa, những thay đổi đó sẽ mất.\n\nGiải pháp là **Write-Ahead Log (WAL)**, trong MySQL còn gọi là **redo log**, trong Cassandra là **commit log**. Quy tắc rất đơn giản: **một dirty data page không được ghi xuống đĩa cho đến khi các bản ghi WAL mô tả thay đổi của nó đã nằm trên đĩa** (mỗi page mang LSN của thay đổi gần nhất, và engine flush WAL tới LSN đó trước). Page có thể được sửa thoải mái trong RAM; thứ giao thức WAL kiểm soát là *thứ tự ghi xuống đĩa*. WAL được ghi tuần tự — luôn nối vào cuối file segment hiện tại — nên nhanh trên cả ổ đĩa quay (không phải seek đầu đọc) lẫn SSD.\n\nKhi một transaction commit, PostgreSQL đảm bảo các bản ghi WAL của transaction đó đã được **fsync** xuống đĩa trước khi trả thành công cho client. Chỉ khi đó commit mới thực sự durable. Các data page thực có thể vẫn còn dirty trong buffer pool — chúng sẽ được ghi xuống đĩa sau, tại một checkpoint.\n\nQuy trình **crash recovery**:\n1. Tìm **checkpoint record** gần nhất trong WAL. Checkpoint là thời điểm mà mọi dirty page tính đến lúc đó được đảm bảo đã nằm trên đĩa.\n2. Bắt đầu từ LSN của checkpoint, **replay tuần tự mọi bản ghi WAL** (pha redo), áp dụng từng thay đổi lên data page. Vì bản ghi WAL là idempotent (mỗi bản ghi được gắn với LSN của page nó nhắm tới), replay một bản ghi đã được ghi xuống đĩa rồi cũng vô hại.\n3. **Undo các transaction chưa commit** (InnoDB và các engine kiểu ARIES khác) — rollback mọi transaction đang dở dang lúc crash bằng cách áp dụng các bản ghi undo của chúng. PostgreSQL không có pha undo: các phiên bản dòng do transaction chưa hoàn tất ghi ra đơn giản là vẫn vô hình, vì những transaction đó chưa bao giờ ghi nhận commit.\n\nWAL còn cho phép **replication**: một server standby có thể nhận bản ghi WAL từ primary và replay liên tục, chỉ chậm hơn primary vài giây (streaming replication). Point-in-time recovery (PITR) lưu trữ các WAL segment để bạn có thể khôi phục database về bất kỳ giây nào trong lịch sử.\n\n**LSN (Log Sequence Number)** là định danh duy nhất, tăng đơn điệu cho mỗi bản ghi WAL. Mỗi page trong data file của PostgreSQL lưu LSN của bản ghi WAL gần nhất đã sửa nó. Trong lúc recovery, nếu LSN của page đã >= LSN của bản ghi WAL đang replay, bản ghi đó được bỏ qua (nó đã được flush trước khi crash)."
+    },
+    {
+      "type": "explanation",
+      "title": "Torn page: full-page write và doublewrite buffer",
+      "content": "Có một giả định ẩn trong câu \"replay WAL lên data page\": rằng page trên đĩa còn nguyên vẹn. Nhưng một page database 8 KB (hoặc 16 KB) trải trên nhiều sector đĩa 4 KB, và bộ lưu trữ chỉ đảm bảo tính nguyên tử cho từng sector. Nếu mất điện giữa lúc ghi, page trên đĩa có thể bị **torn** (rách) — một nửa mới, một nửa cũ — và một bản ghi WAL nói \"đổi byte 320–340\" không thể sửa một page mà nửa kia là rác.\n\nCác engine giải quyết theo hai cách:\n\n- **PostgreSQL — full-page write** (`full_page_writes = on`, mặc định): *lần đầu tiên* một page bị sửa sau mỗi checkpoint, bản ghi WAL chứa một ảnh hoàn chỉnh của page. Recovery bắt đầu từ ảnh đó, nên một torn page đơn giản là bị ghi đè. Đây là lý do lượng WAL tăng vọt ngay sau checkpoint, và vì sao checkpoint quá dày làm WAL phình to.\n- **MySQL InnoDB — doublewrite buffer**: trước khi ghi các dirty page vào vị trí thật của chúng, InnoDB ghi tuần tự chúng vào một vùng doublewrite riêng và fsync vùng đó. Nếu một page bị rách trong lần ghi thật, recovery sẽ sao chép phiên bản nguyên vẹn từ vùng doublewrite.\n\nCả hai đều tốn thêm I/O, và chỉ có thể tắt khi filesystem hoặc thiết bị lưu trữ đảm bảo ghi nguyên tử theo kích thước page (ví dụ ZFS, hoặc thiết bị có ghi nguyên tử 16 KB). Tắt chúng trên phần cứng thông thường có nguy cơ gây hư hỏng âm thầm, không thể khôi phục."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường ghi WAL: bản ghi WAL được fsync trước khi COMMIT trả về. Data page chỉ được ghi xuống đĩa sau đó, tại một checkpoint. Nếu crash giữa commit và checkpoint, replay WAL sẽ khôi phục thay đổi."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Các offset `lower` và `upper` trong page header cho biết chính xác còn bao nhiêu vùng trống trên một page. `t_xmax = 0` nghĩa là tuple còn sống; khác 0 nghĩa là nó đã bị xóa hoặc update bởi transaction ID đó. `dead_pct` cao từ `pg_stat_user_tables` báo hiệu autovacuum đang không theo kịp — hãy cân nhắc tuning `autovacuum_vacuum_scale_factor` hoặc chạy `VACUUM ANALYZE orders` bằng tay. Hit rate thấp kéo dài trên một bảng OLTP nóng gợi ý working set không vừa trong `shared_buffers` — nhưng hãy kiểm tra xem những lần \"read\" đó có thực sự chạm đĩa không (thống kê I/O ở mức OS) trước khi chỉ đơn giản là tăng nó lên.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "MVCC: Multi-Version Concurrency Control",
+      "content": "Phần lớn database hiện đại — PostgreSQL, MySQL InnoDB, Oracle và SQL Server (khi bật snapshot isolation hoặc RCSI) — cài đặt **MVCC** để reader và writer chạy đồng thời mà không lock lẫn nhau. Ý tưởng chính: giữ phiên bản cũ của một dòng cho các transaction đã bắt đầu trước lần update. Các engine khác nhau ở chỗ phiên bản cũ nằm *ở đâu*: **PostgreSQL** ghi một tuple mới hoàn chỉnh vào heap và để nguyên tuple cũ; **InnoDB và Oracle** update dòng tại chỗ và giữ phiên bản trước trong **undo log**, dựng lại nó cho các snapshot cũ hơn.\n\nTrong PostgreSQL, mỗi phiên bản dòng (tuple) có hai field ẩn:\n- `xmin`: transaction ID (XID) đã tạo phiên bản này\n- `xmax`: XID đã xóa/update phiên bản này (0 nếu vẫn là phiên bản hiện hành)\n\nKhi một transaction đọc một dòng, nó áp dụng **quy tắc visibility**: một phiên bản là hiển thị nếu `xmin` đã commit trước timestamp snapshot của transaction, và `xmax` hoặc bằng 0 hoặc chưa commit. Nghĩa là một `SELECT` chạy lâu sẽ thấy một snapshot nhất quán của database như lúc query bắt đầu, kể cả khi các transaction khác đang đồng thời insert và update dòng.\n\nCái giá: **dead tuple**. Khi một dòng được update, phiên bản cũ vẫn nằm trên đĩa (với `xmax` đã được đặt) cho đến khi không còn transaction nào có snapshot đủ cũ để thấy nó. `VACUUM` thu hồi các dead tuple này, trả lại vùng trống trên page. `AUTOVACUUM` chạy quá trình này tự động ở chế độ nền.\n\nMột mối lo liên quan là **transaction ID wraparound**: PostgreSQL dùng XID 32-bit. Sau 2^31 (~2.1 tỷ) transaction, XID sẽ quay vòng, khiến các dòng cũ trông như nằm trong tương lai. PostgreSQL dùng **FREEZE** (qua VACUUM FREEZE) để đánh dấu các dòng rất cũ là hiển thị vĩnh viễn, ngăn wraparound. Theo dõi `age(datfrozenxid)` trong `pg_database` là việc quan trọng với các database có lượng transaction lớn."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Field `level` trong kết quả `bt_metap` cho bạn biết B+ tree sâu bao nhiêu — thường là 2-4 với phần lớn bảng production. Số shared hit/read trong output của `EXPLAIN (BUFFERS)` là cách trực tiếp nhất để xem một lần tra cứu index được phục vụ từ buffer pool hay phải đọc đĩa. Số `read` cao so với `hit` sau giai đoạn warm-up báo hiệu các index page đang dùng không vừa trong `shared_buffers`.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường update của MVCC: một phiên bản tuple mới được tạo thay vì ghi đè phiên bản cũ. Phiên bản cũ trở thành dead tuple khi không còn snapshot nào thấy nó, và cuối cùng VACUUM sẽ thu hồi vùng page của nó."
+    },
+    {
+      "type": "explanation",
+      "title": "So sánh B+ tree và LSM tree: bức tranh toàn cảnh",
+      "content": "Hiểu cả hai cấu trúc cho phép bạn lập luận về việc chọn và cấu hình database một cách chính xác thay vì theo cảm tính.\n\n**Hiệu năng ghi**: LSM tree thắng áp đảo với workload ghi nhiều. Mọi lần ghi đi vào MemTable (RAM) và WAL (ghi nối tuần tự trên đĩa). Ghi vào B+ tree cần tìm đúng page, nạp nó vào buffer pool, sửa nó, và cuối cùng ghi lại vào một vị trí ngẫu nhiên trên đĩa. Trên ổ đĩa quay, ghi ngẫu nhiên chậm hơn ghi tuần tự 100-1000×; trên SSD NVMe, khoảng cách thu hẹp còn 5-20× nhưng vẫn tồn tại.\n\n**Hiệu năng đọc**: B+ tree thắng ở tra cứu điểm trong các workload OLTP điển hình. Một lượt duyệt B+ tree chạm O(chiều cao tree) page, và các tầng trên gần như luôn có trong buffer pool. Một lần đọc LSM trong worst case phải kiểm tra MemTable cộng một SSTable mỗi tầng — được Bloom filter giảm nhẹ, nhưng vẫn tốn công hơn B+ tree. Tuy nhiên, với các workload mà việc đọc chủ yếu là range scan trên dữ liệu vừa ghi (ví dụ đọc time-series N phút gần nhất), LSM tree có thể cạnh tranh được vì dữ liệu mới nhất nằm trong MemTable.\n\n**Chi phí dung lượng**: B+ tree update tại chỗ (với một chút vùng trống mỗi page cho các lần insert sau), nên chi phí dung lượng ở mức vừa phải — thường page đầy 30-70% sau các chu kỳ insert/delete dày đặc. LSM tree tích tụ các phiên bản chết cho đến khi compaction chạy, tạo ra space amplification tạm thời cao hơn. Sau compaction, dung lượng dùng xấp xỉ tỷ lệ với dữ liệu còn sống.\n\n**Độ phức tạp vận hành**: B+ tree có mô hình vận hành đơn giản hơn — backup một data file và WAL. LSM tree đòi hỏi quản lý lịch compaction, giám sát write stall (khi thread compaction bị tụt lại), và tuning chiến lược compaction theo từng workload.\n\n**Đối chiếu với database thực tế**:\n- **PostgreSQL** (B+ tree, heap MVCC): xuất sắc cho workload OLTP hỗn hợp, query phức tạp, consistency mạnh\n- **MySQL InnoDB** (B+ tree, primary key dạng clustered): OLTP, đặc biệt với các tra cứu primary key hẹp\n- **SQLite** (B+ tree): nhúng, workload một writer\n- **RocksDB** (LSM, leveled compaction): engine key-value nhúng đứng sau MyRocks (MySQL), TiKV, state store của Kafka Streams và nhiều hệ thống khác; CockroachDB dùng Pebble, một LSM viết bằng Go lấy cảm hứng từ RocksDB\n- **Cassandra** (LSM, size-tiered hoặc leveled): ghi nhiều, phân tán, eventual consistency\n- **ClickHouse** (MergeTree tùy biến, lấy cảm hứng từ LSM): phân tích OLAP, time-series"
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: B-tree được Rudolf Bayer và Edward McCreight phát minh tại Boeing Scientific Research Labs năm 1970 (đăng trên Acta Informatica năm 1972) để tối ưu truy cập đĩa cho các index lớn có thứ tự. Biến thể '+' (B+ tree) — tách routing key khỏi dữ liệu ở leaf — trở thành chuẩn trong database suốt thập niên 1970-80. LSM tree được Patrick O'Neil và cộng sự hình thức hóa trong một bài báo năm 1996, xuất phát trực tiếp từ giới hạn của B+ tree với các workload ghi nhiều kiểu log. Bigtable của Google (2006) phổ biến LSM tree ở quy mô lớn, truyền cảm hứng cho LevelDB (2011), RocksDB (fork từ LevelDB năm 2012), và làn sóng database phân tán dựa trên LSM hiện đại."
+    },
+    {
+      "type": "callout",
+      "content": "**Bẫy interview và hiểu lầm hiệu năng thường gặp**: (1) 'Thêm index luôn làm query nhanh hơn' — index làm giảm hiệu năng ghi (mỗi lần insert/update/delete phải duy trì index) và có thể làm chậm việc đọc nếu query planner chọn một index tồi. Hãy dùng `EXPLAIN ANALYZE` trước và sau. (2) 'VACUUM chỉ là dọn dẹp tùy chọn' — việc tích tụ dead tuple của MVCC là công việc bắt buộc phải xử lý; không có VACUUM, bảng sẽ phình to và cuối cùng gặp transaction ID wraparound. (3) 'Đọc trên LSM lúc nào cũng chậm' — với Bloom filter được tuning tốt và block cache lớn, tra cứu điểm của RocksDB có thể sánh ngang B+ tree. (4) 'sequential_scan lúc nào cũng tệ' — với query trả về > 5-10% bảng, sequential scan đánh bại index scan vì nó tránh được việc seek ngẫu nhiên cho từng dòng. (5) `CHECKPOINT` flush các dirty page — nó KHÔNG rebuild index hay dọn dead tuple. (6) 'Xóa dữ liệu trong LSM store giải phóng dung lượng ngay lập tức' — một lần delete ghi ra một **tombstone**; dung lượng chỉ được trả lại sau compaction, và trong Cassandra tombstone được giữ trong `gc_grace_seconds` (mặc định 10 ngày) để các replica không thể “hồi sinh” dòng đó. Xóa hàng loạt có thể làm việc đọc chậm đi trước khi làm đĩa trống ra."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Page** (thường 8 KB trong PostgreSQL) là đơn vị nguyên tử của disk I/O. Ngay cả thay đổi một byte cũng phải đọc và ghi lại toàn bộ page. **Buffer pool** cache các page nóng trong RAM — đặt `shared_buffers` vừa với working set là tham số tuning PostgreSQL hiệu quả nhất.",
+        "**B+ tree** lưu toàn bộ dữ liệu ở leaf node được liên kết để range scan. Internal node chỉ chứa routing key. Tra cứu điểm O(log_B n) với thường chỉ 1-2 lần đọc đĩa thực; range scan xuất sắc; ghi ngẫu nhiên tốn kém do split page.",
+        "**LSM tree** nối mỗi lần ghi vào WAL và một MemTable trong RAM, flush ra các SSTable bất biến, và trộn chúng qua compaction nền. Việc ghi là tuần tự và rẻ ở bước đầu; tổng write amplification phụ thuộc chiến lược compaction; Bloom filter giữ chi phí đọc trong tầm kiểm soát; delete là tombstone cho đến khi compaction.",
+        "**Write-Ahead Logging (WAL)**: một dirty page chỉ được xuống đĩa sau khi các bản ghi WAL của nó đã xuống, và COMMIT chỉ trả về sau khi bản ghi commit được fsync. Recovery replay WAL từ checkpoint gần nhất; các engine kiểu ARIES (InnoDB) sau đó undo các transaction chưa hoàn tất, còn PostgreSQL chỉ để chúng vô hình.",
+        "**Torn page**: một page database trải trên nhiều sector đĩa, nên crash có thể khiến nó chỉ được ghi một nửa. PostgreSQL ghi một ảnh page đầy đủ ở lần thay đổi đầu tiên sau mỗi checkpoint (`full_page_writes`); InnoDB dùng doublewrite buffer.",
+        "**MVCC** cho phép reader và writer chạy đồng thời bằng cách giữ nhiều phiên bản dòng. Dead tuple tích tụ và phải được VACUUM thu hồi. Theo dõi tỷ lệ dead tuple và buffer pool hit rate là hai chỉ số sức khỏe lưu trữ hàng ngày quan trọng nhất.",
+        "**Chiến lược compaction** đánh đổi write amplification lấy read và space amplification. Leveled compaction (mặc định của RocksDB) giới hạn việc đọc ở khoảng một SSTable mỗi tầng và ~1.1× dung lượng; size-tiered compaction ghi ít hơn nhưng đọc nhiều file hơn và cần tới 2× dung lượng trong lúc compaction.",
+        "**Chọn database** gắn liền với chọn storage engine: PostgreSQL/MySQL (B+ tree) cho workload OLTP hỗn hợp; Cassandra/RocksDB (LSM) cho workload ghi nhiều, throughput cao. Lựa chọn đúng phụ thuộc vào tỷ lệ ghi/đọc, yêu cầu consistency và mức độ chịu đựng độ phức tạp vận hành của bạn."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Kích thước page mặc định trong PostgreSQL là bao nhiêu, và vì sao thay đổi một byte vẫn phải ghi lại cả page?",
+      "options": [
+        "4 KB; vì WAL ghi lại toàn bộ page",
+        "64 KB; vì node của B+ tree phải vừa đúng một page",
+        "16 KB; vì buffer pool evict theo đơn vị nguyên page",
+        "8 KB; vì page là đơn vị nguyên tử của disk I/O — đĩa truyền nguyên block"
+      ],
+      "explanation": "PostgreSQL mặc định dùng page 8 KB. Đĩa truyền dữ liệu theo các block kích thước cố định, và page được căn theo ranh giới block đó. Thay đổi bất kỳ byte nào cũng buộc engine đọc page 8 KB vào buffer pool, sửa ở đó, rồi sau đó ghi lại toàn bộ 8 KB — không có cơ chế nào để ghi một mảnh nhỏ hơn page."
+    },
+    {
+      "id": "q2",
+      "question": "Trong B+ tree, leaf node khác internal node thế nào?",
+      "options": [
+        "Leaf node chứa toàn bộ dữ liệu (key, value) thực và được liên kết thành một danh sách; internal node chỉ chứa routing key và pointer tới con",
+        "Leaf node chỉ chứa routing key; internal node chứa dữ liệu dòng thực",
+        "Leaf node được giữ trong RAM; internal node nằm trên đĩa",
+        "Leaf node không có thứ tự; internal node có thứ tự"
+      ],
+      "explanation": "Tính chất định nghĩa của B+ tree (so với B-tree thông thường) là toàn bộ dữ liệu thực nằm ở leaf node, được liên kết với nhau thành một doubly-linked list để range scan hiệu quả. Internal node chỉ chứa routing key để dẫn đường khi duyệt — chúng không chứa dữ liệu dòng thực nào."
+    },
+    {
+      "id": "q3",
+      "question": "Write-Ahead Log (WAL) đảm bảo điều gì, và nó được fsync xuống đĩa khi nào?",
+      "options": [
+        "Nó đảm bảo tính toàn vẹn của index; được fsync trong lúc VACUUM",
+        "Nó đảm bảo khả năng khôi phục sau crash; bản ghi WAL được fsync trước khi COMMIT trả về cho client",
+        "Nó đảm bảo read isolation; được fsync ở mỗi SELECT",
+        "Nó đảm bảo tính nhất quán của buffer pool; được fsync khi một page bị evict"
+      ],
+      "explanation": "WAL đảm bảo durability (chữ D trong ACID). Trước khi COMMIT trả thành công cho client, bản ghi WAL của transaction đó được fsync xuống đĩa. Khi crash, database replay WAL từ checkpoint gần nhất để khôi phục mọi thay đổi đã commit, kể cả khi data page chưa bao giờ được ghi xuống đĩa."
+    },
+    {
+      "id": "q4",
+      "question": "Trong LSM tree, chuyện gì xảy ra khi MemTable đầy?",
+      "options": [
+        "Các entry cũ bị evict khỏi MemTable theo policy LRU",
+        "MemTable được compact tại chỗ bằng cách xóa các key trùng",
+        "MemTable được flush xuống đĩa thành một SSTable (Sorted String Table) bất biến",
+        "MemTable được trộn trực tiếp vào B+ tree index"
+      ],
+      "explanation": "Khi MemTable chạm giới hạn kích thước đã cấu hình, nó bị đóng băng và flush xuống đĩa thành một SSTable bất biến — một file các cặp key-value sắp theo key, ghi tuần tự. Một MemTable trống mới được tạo cho các lần ghi tiếp theo. SSTable đã flush là bất biến và không bao giờ bị sửa tại chỗ."
+    },
+    {
+      "id": "q5",
+      "question": "Mục đích của Bloom filter trong đường đọc của LSM tree là gì?",
+      "options": [
+        "Để sắp xếp key trong MemTable trước khi flush",
+        "Để cache các cặp key-value vừa được đọc gần nhất",
+        "Để loại trừ theo xác suất các SSTable chắc chắn không chứa key, giảm I/O không cần thiết",
+        "Để đảm bảo một key tồn tại trong SSTable trước khi đọc nó"
+      ],
+      "explanation": "Bloom filter là một cấu trúc dữ liệu xác suất tiết kiệm bộ nhớ. Nó có thể nói 'chắc chắn KHÔNG có trong SSTable này' (không có false negative) hoặc 'có thể có trong SSTable này' (cho phép false positive). Khi đọc, engine kiểm tra Bloom filter của từng SSTable trước và bỏ qua mọi SSTable trả lời 'chắc chắn không có ở đây', giảm mạnh số SSTable thực sự phải đọc từ đĩa."
+    },
+    {
+      "id": "q6",
+      "question": "MVCC (Multi-Version Concurrency Control) cho phép reader và writer chạy mà không lock lẫn nhau bằng cách nào?",
+      "options": [
+        "Nó dùng optimistic locking và retry lần ghi nếu phát hiện xung đột",
+        "Nó giữ nhiều phiên bản dòng trên đĩa để reader thấy một snapshot nhất quán trong khi writer ghi thêm phiên bản mới",
+        "Nó định tuyến đọc và ghi tới các replica node riêng biệt",
+        "Nó dùng row-level lock chỉ được giữ trong lúc ghi, không phải lúc đọc"
+      ],
+      "explanation": "MVCC tránh xung đột reader-writer bằng cách giữ nhiều phiên bản của mỗi dòng. Mỗi phiên bản có xmin (transaction đã tạo nó) và xmax (transaction đã xóa nó). Reader áp dụng quy tắc visibility để chỉ thấy các phiên bản đã commit trước timestamp snapshot của mình — nhờ đó nó đọc được mà không chặn writer, vốn ghi thêm phiên bản mới thay vì ghi đè."
+    },
+    {
+      "id": "q7",
+      "question": "Write amplification là gì, và storage engine nào thường có write amplification thấp hơn với workload insert nhiều?",
+      "options": [
+        "Tỷ lệ giữa lần đọc logic và lần đọc vật lý; engine B+ tree có write amplification thấp hơn",
+        "Chi phí CPU cho việc tính checksum; LSM tree giảm nó bằng Bloom filter",
+        "Dung lượng đĩa thêm mà index tiêu tốn; cả hai có write amplification như nhau",
+        "Số lần một giá trị bị ghi lại cho mỗi lần ghi logic; LSM tree (size-tiered compaction) thường có write amplification thấp hơn B+ tree"
+      ],
+      "explanation": "Write amplification là số byte vật lý được ghi cho mỗi byte logic. B+ tree ghi lại cả một page 8 KB (cộng WAL) để đổi một dòng nhỏ — dễ dàng gấp hàng chục lần kích thước dòng, trừ khi nhiều thay đổi trên cùng page được gom lại trong buffer pool. Size-tiered LSM compaction chỉ ghi lại mỗi giá trị vài lần (~3–10×). Leveled compaction ghi lại nhiều hơn (~10–30×) để đổi lấy read amplification và space amplification tốt hơn."
+    },
+    {
+      "id": "q8",
+      "question": "Checkpoint trong PostgreSQL làm gì, và vì sao nó quan trọng với thời gian crash recovery?",
+      "options": [
+        "Nó flush mọi dirty page trong buffer pool xuống đĩa và ghi lại vị trí WAL hiện tại, giới hạn khoảng recovery phải replay ngược về",
+        "Nó rebuild mọi B+ tree index và xóa dead tuple",
+        "Nó tạo một snapshot database nhất quán cho mục đích backup",
+        "Nó nén các WAL segment thành một file lưu trữ duy nhất"
+      ],
+      "explanation": "Checkpoint ghi mọi dirty page từ buffer pool vào data file tương ứng và ghi lại WAL LSN tại thời điểm đó. Khi crash recovery, database chỉ cần replay WAL từ checkpoint gần nhất trở đi — các bản ghi WAL trước đó đã được phản ánh trong data file. Checkpoint dày hơn giảm thời gian recovery nhưng thêm chi phí I/O trong vận hành bình thường."
+    },
+    {
+      "id": "q9",
+      "question": "Vì sao một B+ tree cao 3 tầng với page 8 KB thường đủ để index hơn 100 triệu dòng?",
+      "options": [
+        "Vì mỗi leaf page chứa 100 triệu dòng đã nén",
+        "Vì B+ tree dùng định tuyến dựa trên hash, loại bỏ phần lớn các tầng",
+        "Vì mỗi page chứa hàng trăm entry (fan-out ~400–500), nên root → internal → leaf đạt tới ~250,000 leaf page, mỗi page vài trăm key",
+        "Vì buffer pool cache toàn bộ tree trong RAM nên không cần duyệt đĩa"
+      ],
+      "explanation": "Với page 8 KB và key 8 byte, một page chứa khoảng 400–500 entry. Một tree cao 3 tầng (root + một tầng internal + leaf) đạt khoảng 500 × 500 = 250,000 leaf page; với ~400 key mỗi leaf, đó là ~100 triệu key trong đúng 3 lần đọc page — và root cùng tầng internal gần như luôn được cache trong buffer pool, nên thường chỉ leaf mới cần I/O thực."
+    },
+    {
+      "id": "q10",
+      "question": "Một bảng production có 10 triệu dòng hiển thị `n_dead_tup = 8,000,000` trong `pg_stat_user_tables`. Nguyên nhân có khả năng nhất và cách khắc phục đúng là gì?",
+      "options": [
+        "Index bị hỏng; chạy REINDEX để rebuild",
+        "Dead tuple của MVCC tích tụ vì autovacuum không theo kịp; chạy VACUUM ANALYZE và tuning các thiết lập autovacuum",
+        "Buffer pool quá nhỏ; tăng shared_buffers và chạy CHECKPOINT",
+        "WAL bị đầy; tăng max_wal_size để cho phép nhiều dirty page hơn"
+      ],
+      "explanation": "8 triệu dead tuple trên tổng ~18 triệu (44% là chết) là MVCC bloat nghiêm trọng. Mỗi UPDATE và DELETE để lại một phiên bản dòng chết cho đến khi VACUUM thu hồi nó. Cách sửa tức thời là `VACUUM ANALYZE tablename`. Về lâu dài, hãy tuning `autovacuum_vacuum_scale_factor` (mặc định 20% — quá cao với bảng lớn) xuống giá trị thấp hơn như 0.01-0.05, hoặc đặt storage parameter cho từng bảng bằng `ALTER TABLE ... SET (autovacuum_vacuum_scale_factor = 0.01)`."
+    }
+  ]
+}

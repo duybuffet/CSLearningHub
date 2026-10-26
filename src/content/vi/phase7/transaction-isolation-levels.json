@@ -1,0 +1,229 @@
+{
+  "sourceHash": "b0adeab413f5",
+  "title": "Transaction Isolation Levels",
+  "tagline": "Dirty read, phantom row, và phổ isolation giúp các transaction đồng thời không giẫm chân lên nhau.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy tưởng tượng hai giao dịch viên ngân hàng làm việc ở hai quầy cạnh nhau, cùng truy cập một tài khoản ở cùng một thời điểm. Một người đang đọc số dư trong khi người kia đang cập nhật nó. Nếu cả hai làm tiếp mà không có phối hợp nào, ngân hàng có thể rơi vào trạng thái không nhất quán — số dư của khách hàng có thể bị cộng hai lần, không bao giờ bị trừ, hoặc bị đọc giữa chừng ra một giá trị trung gian vô nghĩa. Đây không phải giả thuyết: đó chính xác là điều xảy ra khi một database xử lý hàng trăm hay hàng nghìn transaction đồng thời mà không có quy tắc isolation cẩn thận.\n\nMột **transaction** là một đơn vị công việc tuân theo các tính chất **ACID**: Atomicity (được ăn cả, ngã về không), Consistency (vào và ra đều ở trạng thái hợp lệ), Isolation (các transaction đồng thời trông như chạy tuần tự), và Durability (dữ liệu đã commit sống sót qua crash). Tính chất isolation là tinh tế nhất — và tốn kém nhất nếu thực thi đầy đủ. Thay vì cung cấp một chế độ \"cô lập\" duy nhất, SQL định nghĩa một **phổ gồm bốn isolation level**, mỗi level đưa ra một trade-off khác nhau giữa tính đúng đắn và khả năng chạy đồng thời.\n\nBốn level — **Read Uncommitted**, **Read Committed**, **Repeatable Read** và **Serializable** — được chuẩn SQL định nghĩa dựa trên ba anomaly kinh điển: **dirty read**, **non-repeatable read** và **phantom read**. Hệ thống thực tế còn phải đối mặt với những anomaly mà chuẩn chưa bao giờ gọi tên — **lost update**, **read skew** và **write skew** — và chính chúng mới gây ra phần lớn bug trên production. Đi lên trên phổ sẽ thêm đảm bảo nhưng có thể giảm throughput. Hiểu database của bạn nằm ở đâu trên phổ này, và khi nào nên thay đổi, là kiến thức backend nền tảng.\n\nCác database hiện đại như PostgreSQL cài đặt các level này không phải bằng locking thô bạo mà bằng **Multi-Version Concurrency Control (MVCC)** — một cơ chế tinh vi giữ nhiều phiên bản dòng cùng tồn tại, cho phép reader và writer chạy đồng thời mà không chặn nhau. Hiểu MVCC giúp bạn có trực giác về vì sao isolation hành xử như vậy, vì sao `autovacuum` quan trọng, và `transaction_id` wraparound có ý nghĩa gì trên PostgreSQL production."
+    },
+    {
+      "type": "diagram",
+      "caption": "Ba anomaly đồng thời kinh điển và isolation level nào ngăn mỗi loại. Mỗi level đều ngăn được mọi anomaly mà các level thấp hơn ngăn."
+    },
+    {
+      "type": "analogy",
+      "title": "Tấm bảng trắng trong phòng họp",
+      "content": "Hãy hình dung tấm bảng trắng dùng chung trong phòng họp mà nhiều đồng nghiệp sử dụng suốt cả ngày. Với **Read Uncommitted**, bạn có thể bước vào và đọc những nét nguệch ngoạc dở dang của đồng nghiệp — phương trình bị gạch, mũi tên vẽ dở, ghi chú xóa một nửa. Nếu họ quyết định xóa bảng trước khi xong (rollback), bạn đã dựa công việc của mình vào dữ liệu chưa từng chính thức tồn tại.\n\nVới **Read Committed**, bạn chỉ đọc được những gì đã được viết chốt bằng bút dạ không xóa được — thứ gì còn đang phác bằng bút chì đều vô hình với bạn. An toàn khỏi những phỏng đoán bị xóa, nhưng nếu cùng một đồng nghiệp chốt một con số khác giữa hai lần bạn liếc nhìn bảng, bạn có thể thấy các giá trị mâu thuẫn nhau.\n\nVới **Repeatable Read**, bạn chụp một tấm ảnh tấm bảng ngay lúc bước vào phòng. Dù đồng nghiệp xóa và viết lại bao nhiêu trong lúc bạn ở đó, bạn luôn xem tấm ảnh của riêng mình. Các lần đọc nhất quán — nhưng ảnh của bạn có thể đã cũ. Nếu bạn xóa một mục dựa trên những gì ảnh của bạn cho thấy trong khi một đồng nghiệp xóa một mục khác dựa trên ảnh *của họ*, cùng nhau hai bạn có thể để tấm bảng ở trạng thái mà không ai trong hai người cho phép (đó là write skew).\n\nVới **Serializable**, kết quả cuối cùng phải trông như thể chỉ một người dùng tấm bảng tại mỗi thời điểm — cửa phòng khóa lại. Một cài đặt ngây thơ thực sự khóa cửa, và throughput bị ảnh hưởng. PostgreSQL khéo hơn: nó cho mọi người vào cùng lúc, theo dõi ai đã đọc gì, và chỉ mời một người ra ngoài làm lại khi tổ hợp các chỉnh sửa không thể nào xảy ra nếu từng người làm lần lượt."
+    },
+    {
+      "type": "explanation",
+      "title": "Ba anomaly: điều gì có thể sai",
+      "content": "Trước khi tìm hiểu các giải pháp, cần hiểu chính xác các vấn đề. Mỗi anomaly có một định nghĩa cụ thể, không chỉ là cảm giác mơ hồ 'có gì đó sai sai'.\n\n**Dirty Read**: Transaction T2 đọc một dòng mà T1 đã sửa nhưng chưa commit. Nếu sau đó T1 rollback, T2 đã làm việc trên dữ liệu chưa bao giờ chính thức tồn tại trong database. Đây là anomaly nguy hiểm nhất, vì dữ liệu T2 thấy có thể khác hoàn toàn so với thứ cuối cùng được commit — hoặc có thể đại diện cho một trạng thái mà database đã chủ động từ chối.\n\nVí dụ: T1 chuyển $500 từ tài khoản A sang tài khoản B: nó trừ A (số dư xuống $0) nhưng chưa cộng vào B. T2 đọc số dư của A giữa chừng transaction và thấy $0. Sau đó T1 rollback do lỗi mạng. Số dư thật của A vẫn là giá trị trước lần chuyển, nhưng T2 đã đưa ra quyết định dựa trên con số $0.\n\n**Non-Repeatable Read**: Trong cùng một transaction, T1 đọc cùng một dòng hai lần và nhận giá trị khác nhau vì T2 đã commit một thay đổi giữa hai lần đọc. Dòng đó không dirty — T2 commit hợp lệ — nhưng hai lần đọc của T1 không nhất quán với nhau. Điều này quan trọng bất cứ khi nào một transaction dùng cùng dữ liệu ở nhiều bước, như đọc một giá trị, tính toán gì đó, rồi xác minh giá trị vẫn đúng như bạn mong đợi.\n\nVí dụ: T1 đọc số lượng tồn kho của một sản phẩm (10 đơn vị) và quyết định đặt hàng. Trước khi T1 commit, T2 bán nốt 10 đơn vị cuối cùng và commit. T1 đọc lại số lượng tồn kho để xác nhận (có thể trong một bước validation) và thấy 0. Cùng một câu SELECT trả về giá trị khác nhau trong một transaction.\n\n**Phantom Read**: T1 chạy một range query (ví dụ `WHERE salary > 100000`) và nhận 5 dòng. T2 insert một nhân viên mới có lương 150000 và commit. T1 chạy lại cùng range query và giờ thấy 6 dòng. Khác với non-repeatable read (cùng dòng, giá trị khác), phantom liên quan tới các dòng mới xuất hiện trong một khoảng đã được quét. 'Bóng ma' (phantom) là dòng mới hiện ra giữa hai query vốn giống hệt nhau.\n\nPhantom read tinh vi hơn vẻ ngoài. Ngay cả khi bạn ngăn non-repeatable read bằng cách lock từng dòng, các dòng mới vẫn có thể được insert giữa hai lần range scan, vì lock trên các dòng hiện có không ngăn được việc insert dòng mới. Ngăn phantom cần locking theo khoảng hoặc ngữ nghĩa snapshot MVCC bao trùm toàn bộ predicate của query."
+    },
+    {
+      "type": "explanation",
+      "title": "Vượt ra ngoài chuẩn: lost update và read skew",
+      "content": "Các định nghĩa của SQL-92 từng bị phê phán nổi tiếng trong bài báo năm 1995 *A Critique of ANSI SQL Isolation Levels* (Berenson, Bernstein, Gray và những người khác) là mơ hồ và chưa đầy đủ. Bài báo đã gọi tên những anomaly mà chuẩn bỏ qua — và chúng chính là những thứ “cắn” các ứng dụng thật:\n\n**Lost update**: T1 và T2 cùng đọc `balance = 100`, mỗi bên tính giá trị mới trong code ứng dụng (100 + 10 và 100 + 20) rồi ghi lại. Lần ghi thứ hai lặng lẽ ghi đè lần thứ nhất: số dư cuối cùng là 120 thay vì 130. Read Committed cho phép điều này. Repeatable Read của PostgreSQL ngăn được — writer thứ hai thất bại với `could not serialize access due to concurrent update` (SQLSTATE `40001`) — nhưng **Repeatable Read của MySQL InnoDB thì không**, vì các lệnh `UPDATE` của InnoDB tác động lên dòng đã commit mới nhất thay vì snapshot của transaction.\n\n**Read skew**: T1 đọc tài khoản A (500). Sau đó T2 chuyển 100 từ A sang B và commit. T1 đọc tài khoản B (600) và kết luận tổng là 1,100 — một trạng thái chưa từng tồn tại (trước: 1,000; sau: 1,000). Read Committed cho phép điều này giữa các câu lệnh; mọi level dựa trên snapshot (Repeatable Read trở lên) đều ngăn được. Nó quan trọng với báo cáo, backup (`pg_dump` dùng một snapshot duy nhất chính vì lý do này) và các bước kiểm tra tính nhất quán.\n\n**Write skew**: hai transaction đọc dữ liệu chồng lấn rồi ghi vào các dòng *khác nhau* — sẽ được bàn chi tiết bên dưới, vì snapshot isolation vẫn cho phép nó."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Cách 1 rẻ nhất và nên là lựa chọn mặc định của bạn: khi hai câu lệnh `balance = balance + 10` chạy đua nhau ở Read Committed, PostgreSQL bắt câu thứ hai chờ câu thứ nhất, rồi đánh giá lại nó trên dòng vừa được commit, nên cả hai lần cộng đều được giữ. Cách 2 dành cho logic quá phức tạp để gói trong một câu lệnh. Cách 3 tránh giữ lock trong suốt thời gian người dùng suy nghĩ (phổ biến với ORM và HTTP API). Cách 4 chỉ chạy được trên PostgreSQL — trên MySQL InnoDB, Repeatable Read sẽ để lost update lọt qua, nên ở đó hãy dùng Cách 1–3.",
+      "label": "Cách sửa lost update"
+    },
+    {
+      "type": "diagram",
+      "caption": "Dirty read: T2 thấy lần ghi chưa commit của T1. Khi T1 rollback, T2 đã hành động dựa trên một giá trị chưa từng tồn tại. Mọi isolation level của PostgreSQL đều ngăn được điều này."
+    },
+    {
+      "type": "explanation",
+      "title": "Chi tiết bốn isolation level",
+      "content": "**Read Uncommitted** là level yếu nhất. Transaction có thể thấy các thay đổi chưa commit của mọi transaction đồng thời khác. Dirty read, non-repeatable read và phantom read đều có thể xảy ra. Level này gần như không bao giờ được dùng trên production vì dữ liệu thấy được có thể không khớp với bất cứ thứ gì được commit. (MySQL InnoDB và SQL Server có tôn trọng nó, chủ yếu cho các query giám sát mang tính xấp xỉ.) Về mặt kỹ thuật PostgreSQL chấp nhận thiết lập này nhưng thực tế cài đặt nó như Read Committed — nó từ chối hiển thị dữ liệu chưa commit kể cả khi được yêu cầu.\n\n**Read Committed** là mặc định trong PostgreSQL, Oracle và SQL Server. Nó ngăn dirty read bằng cách đảm bảo mỗi câu lệnh chỉ thấy các dòng đã được commit *trước khi câu lệnh đó bắt đầu thực thi*. Sắc thái then chốt là snapshot tính theo từng câu lệnh, không phải theo từng transaction. Nếu bạn chạy hai câu SELECT giống hệt nhau trong một transaction, mỗi câu lấy một snapshot mới — nên các thay đổi đã commit từ transaction khác xảy ra giữa hai câu SELECT sẽ hiển thị ở câu thứ hai. Đây là nguồn gốc của non-repeatable read và phantom read ở level này.\n\nVới phần lớn workload OLTP, Read Committed là đủ. Phần lớn transaction ngắn ngủi và không dựa vào việc thấy cùng một dữ liệu hai lần trong cùng transaction. Level này mang lại sự cân bằng tốt giữa tính đúng đắn và khả năng chạy đồng thời.\n\n**Repeatable Read** lấy một snapshot cho cả transaction — trong PostgreSQL (và với các lần đọc thường của MySQL) là tại *câu lệnh đầu tiên* của transaction, không phải tại chính `BEGIN` — và dùng nó cho mọi lần đọc trong suốt vòng đời transaction. Điều này ngăn non-repeatable read vì cùng một dòng luôn trả về cùng một giá trị — nó luôn được đọc từ cùng một snapshot. Theo chuẩn SQL, Repeatable Read vẫn cho phép phantom read (các dòng mới do người khác insert), nhưng cài đặt dựa trên MVCC của PostgreSQL còn ngăn được phantom read ở level này như một hệ quả phụ của snapshot isolation. Nghĩa là Repeatable Read của PostgreSQL thực ra mạnh hơn mức chuẩn yêu cầu: nó là **snapshot isolation**. Nó cũng ngăn lost update — nếu bạn cố update một dòng mà transaction khác đã thay đổi sau snapshot của bạn, bạn nhận SQLSTATE `40001` và phải retry, nên ở level này cũng cần logic retry. Thứ nó vẫn cho phép là **write skew**. MySQL InnoDB dùng Repeatable Read làm level *mặc định*, với ngữ nghĩa khác (xem phần so sánh giữa các database bên dưới).\n\nHãy dùng Repeatable Read khi transaction của bạn đọc dữ liệu nhiều lần và tính nhất quán của các lần đọc đó quan trọng — tạo báo cáo tài chính, các bước validation phức tạp nhiều bước, hay bất kỳ quy trình nào mà bạn đọc một số dữ liệu, tính toán gì đó, rồi cần xác minh dữ liệu bên dưới chưa thay đổi.\n\n**Serializable** là tiêu chuẩn vàng. Nó đảm bảo kết quả của bất kỳ tập transaction serializable đồng thời nào cũng giống hệt một cách thực thi tuần tự (lần lượt từng cái) nào đó của các transaction ấy. Nó ngăn cả ba anomaly và còn ngăn các anomaly write-skew tinh vi hơn mà riêng snapshot MVCC không bắt được.\n\nPostgreSQL cài đặt Serializable bằng **Serializable Snapshot Isolation (SSI)**, một thuật toán tương đối mới (lần đầu triển khai trong PostgreSQL 9.1, năm 2011) theo dõi các phụ thuộc đọc và ghi giữa các transaction. Khi phát hiện một chu trình khiến việc thực thi đồng thời trở nên không serializable, nó abort một transaction với `SQLSTATE 40001` (serialization_failure). Ứng dụng phải được thiết kế để retry khi gặp lỗi này."
+    },
+    {
+      "type": "diagram",
+      "caption": "Phổ isolation. Mỗi level là tập cha thực sự của các đảm bảo ở level bên dưới. PostgreSQL, Oracle và SQL Server mặc định Read Committed; MySQL InnoDB mặc định Repeatable Read."
+    },
+    {
+      "type": "explanation",
+      "title": "MVCC: PostgreSQL cài đặt isolation mà không cần locking thế nào",
+      "content": "Các database truyền thống thực thi isolation bằng **locking**: reader lấy shared lock, writer lấy exclusive lock. Writer chặn reader; reader chặn writer. Điều này tuần tự hóa việc truy cập các dòng phổ biến và làm throughput sụp đổ khi mức đồng thời cao.\n\nThay vào đó, PostgreSQL dùng **Multi-Version Concurrency Control (MVCC)**. Ý tưởng cốt lõi: thay vì lock một dòng trong lúc sửa, hãy giữ phiên bản cũ sống và ghi một *phiên bản mới* của dòng. Reader đọc phiên bản cũ; writer tạo phiên bản mới. Reader và writer không bao giờ chặn nhau.\n\nMỗi dòng trong PostgreSQL có hai cột hệ thống ẩn:\n- **`xmin`**: transaction ID (`xid`) của transaction đã tạo (insert) phiên bản dòng này.\n- **`xmax`**: transaction ID của transaction đã xóa hoặc thay thế phiên bản dòng này. Nếu `xmax` bằng 0 hoặc trỏ tới một transaction đã abort, dòng vẫn còn sống.\n\nMột **snapshot** ghi lại những transaction nào đã kết thúc tại lúc nó được chụp: mọi xid nhỏ hơn `xmin` của nó đã kết thúc, mọi xid từ `xmax` của nó trở lên chưa bắt đầu, và một danh sách (`xip`) chứa các transaction đang chạy ở giữa. Một phiên bản dòng hiển thị với tôi nếu (1) `xmin` của nó đã commit *trước snapshot của tôi* (không đang chạy, không bị abort, không mới hơn), và (2) `xmax` của nó trống, thuộc về một transaction đã abort, hoặc chưa commit tính tới snapshot của tôi. Các thay đổi của chính transaction tôi luôn hiển thị với tôi. Mỗi isolation level định nghĩa 'snapshot của tôi' nghĩa là gì — theo từng câu lệnh với Read Committed, theo lúc bắt đầu transaction với Repeatable Read và Serializable.\n\nKhi một transaction update dòng R:\n1. Phiên bản cũ được đặt `xmax` bằng transaction ID hiện tại (đánh dấu 'đã bị transaction này xóa').\n2. Một phiên bản dòng mới được insert với `xmin` = transaction ID hiện tại.\n3. Cả hai phiên bản cùng tồn tại trên heap page cho đến khi được dọn dẹp.\n\nKhi transaction commit, phiên bản mới trở nên hiển thị với các snapshot sau đó. Khi nó rollback, `xmin` của phiên bản mới trỏ tới một transaction đã abort, khiến nó vô hình — thực chất bị xóa mà chưa bao giờ được hiển thị.\n\n**Cái giá của MVCC**: các phiên bản dòng cũ (gọi là **dead tuple**) tích tụ trên heap page. Chúng không bị xóa ngay vì các transaction chạy lâu có thể vẫn cần thấy chúng. Tiến trình nền **autovacuum** định kỳ quét các bảng và thu hồi vùng nhớ bị chiếm bởi các dead tuple không còn hiển thị với transaction đang hoạt động nào. Nếu autovacuum không theo kịp (do các transaction chạy cực lâu hoặc lượng ghi lớn), bảng sẽ phình to và hiệu năng query giảm sút. Đây là lý do các connection ở trạng thái `idle in transaction` nguy hiểm trên production — chúng giữ lùi \"xmin horizon\" của toàn database, nên autovacuum không thể thu hồi *bất kỳ* phiên bản dòng nào chết sau khi transaction đó bắt đầu — trên mọi bảng, không chỉ những bảng nó đã chạm vào."
+    },
+    {
+      "type": "diagram",
+      "caption": "MVCC hoạt động: writer tạo một phiên bản dòng mới trong khi reader tiếp tục thấy phiên bản cũ. Không có lock nào được giữ. Ở Read Committed, mỗi câu lệnh mới nhận một snapshot mới và có thể thấy lần ghi đã commit."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Khối thứ nhất cho thấy snapshot theo transaction của Repeatable Read ngăn non-repeatable read. Khối thứ hai cho thấy snapshot theo câu lệnh của Read Committed cho phép phantom. Khối thứ ba minh họa write-skew — một anomaly tinh vi mà chỉ Serializable bắt được. Lưu ý chỉ riêng MVCC không ngăn được write-skew; cần cơ chế theo dõi phụ thuộc của SSI.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Write-skew: anomaly khiến cả chuyên gia bất ngờ",
+      "content": "Write-skew có lẽ là anomaly đồng thời phản trực giác nhất, và là lý do chính khiến Serializable tồn tại bên trên Repeatable Read.\n\n**Định nghĩa**: hai transaction mỗi bên đọc một số dữ liệu dùng chung, rồi mỗi bên ghi vào một dòng *khác nhau* dựa trên những gì đã đọc — một lần ghi lẽ ra không hợp lệ nếu nó thấy được lần ghi của bên kia. Vì **tập ghi của chúng không chồng lấn**, snapshot isolation (vốn chỉ phát hiện xung đột write-write) cho cả hai commit, nhưng kết quả tổng hợp lại vi phạm một invariant của ứng dụng.\n\n**Ví dụ kinh điển — hệ thống trực của bác sĩ**: một bệnh viện yêu cầu luôn có ít nhất một bác sĩ trực. Hai bác sĩ, Alice và Bob, cùng kiểm tra danh sách trực. Cả hai đều thấy có hai người đang trực (chính mình và người kia). Cả hai quyết định an toàn để tự đánh dấu nghỉ trực. Mỗi bên commit thành công. Kết quả: không còn bác sĩ nào trực — một invariant bị vi phạm.\n\nDưới Repeatable Read (MVCC snapshot isolation), anomaly này có thể xảy ra vì:\n- Alice đọc số người trực: thấy 2. Ghi: đánh dấu mình nghỉ trực.\n- Bob đọc số người trực: thấy 2 (snapshot của anh ấy được chụp trước khi Alice commit). Ghi: đánh dấu mình nghỉ trực.\n- Cả hai lần commit đều thành công. Không transaction nào ghi vào dòng mà bên kia đã *ghi* (Alice update dòng của cô ấy, Bob update dòng của anh ấy), nên không có xung đột write-write. Nhưng mỗi bên đã ghi vào một dòng mà bên kia đã *đọc* — phụ thuộc read/write đó chính xác là thứ Serializable theo dõi.\n\nSerializable (SSI) ngăn điều này bằng cách theo dõi **read/write anti-dependency**. Alice phải đứng trước Bob (lần ghi của Bob thay đổi thứ Alice đã đọc) *và* Bob phải đứng trước Alice (cùng lý do theo chiều ngược lại) — không thứ tự tuần tự nào cho ra được kết quả này, nên một transaction bị abort.\n\n**Các kịch bản write-skew khác**: hệ thống đặt chỗ mà mỗi lần đặt là một dòng mới (hai người dùng cùng thấy phòng trống từ 3–5 giờ chiều, cả hai cùng insert các lần đặt chồng lấn), kiểm tra tính duy nhất trong code ứng dụng (cả hai xác minh một username còn trống, cả hai cùng insert), và hạn mức chi tiêu được kiểm tra dựa trên tổng của nhiều dòng (hai lần rút tiền, mỗi lần đều thấy còn đủ hạn mức).\n\n**Cách sửa không cần Serializable**: lock các dòng mà quyết định phụ thuộc vào (`SELECT … FOR UPDATE`) — cách này chỉ hiệu quả khi các dòng đó đã tồn tại; với \"kiểm tra chưa có gì, rồi insert\" thì không có gì để lock, nên hãy dùng **constraint** thay thế (`UNIQUE`, hoặc một constraint `EXCLUDE USING gist` cho các khoảng thời gian chồng lấn) hoặc **materialize xung đột** bằng cách tạo ra một dòng để lock (ví dụ mỗi phòng mỗi khung giờ một dòng)."
+    },
+    {
+      "type": "explanation",
+      "title": "Serializable Snapshot Isolation: PostgreSQL phát hiện chu trình thế nào",
+      "content": "Cài đặt SSI của PostgreSQL (của Kevin Grittner và Dan R. K. Ports, phát hành trong PostgreSQL 9.1 năm 2011 và được mô tả trong bài báo VLDB năm 2012 của họ) lập luận về ba loại phụ thuộc giữa các transaction serializable đồng thời:\n\n**rw-anti-dependency** (loại then chốt): transaction T1 đọc một phiên bản của dòng, rồi T2 ghi một phiên bản mới của chính dòng đó. Trong một cách thực thi tuần tự, hoặc T1 chạy trước (trước khi T2 ghi), hoặc T1 chạy sau (và lẽ ra phải thấy lần ghi của T2). Một rw-anti-dependency nghĩa là ta đang ở kịch bản thứ nhất — T1 đã đọc dữ liệu mà T2 sắp thay thế.\n\n**ww-dependency**: T2 update một dòng mà T1 cũng đã update. Một trong hai 'thắng'; không thể tuần tự hóa cả hai theo một thứ tự mà không bên nào ghi đè bên nào.\n\n**wr-dependency**: T1 đọc dữ liệu mà T2 đã ghi. T2 phải đứng trước trong mọi thứ tự tuần tự.\n\nMột **chu trình** trong graph phụ thuộc này nghĩa là không tồn tại thứ tự tuần tự hợp lệ nào. Theo dõi đầy đủ các chu trình rất tốn kém, nên PostgreSQL dùng lối tắt Cahill–Fekete: mọi cách thực thi không serializable dưới snapshot isolation đều chứa một **\"cấu trúc nguy hiểm\"** — hai rw-anti-dependency liên tiếp T1 → T2 → T3 (T1 và T3 có thể là cùng một transaction). Khi PostgreSQL thấy một cấu trúc như vậy, nó abort một bên tham gia chưa commit, được chọn sao cho việc retry ngay lập tức sẽ không gặp lại cùng xung đột. Bước kiểm tra này mang tính thận trọng: nó có thể abort những transaction mà thực ra vẫn serializable (**false positive**), nhưng không bao giờ để một anomaly thật lọt qua.\n\n**Trách nhiệm của ứng dụng**: vì serialization failure là điều được dự liệu chứ không phải bug, các ứng dụng dùng isolation Serializable phải cài đặt logic retry. Pattern điển hình là một vòng lặp: begin, thực thi logic nghiệp vụ, thử commit, bắt `SQLSTATE 40001`, và lặp lại. Exponential backoff có ích khi tranh chấp cao. Phần lớn ORM và library connection pool hỗ trợ retry hook cho đúng mục đích này.\n\n**Hệ quả về hiệu năng**: SSI có chi phí vì database theo dõi thêm metadata (SIREAD lock — loại lock đặc biệt trên các khoảng dữ liệu đã được đọc, không phải lock thật chặn writer). Lượng metadata này tăng theo số transaction serializable đồng thời và theo khối lượng dữ liệu chúng đọc. SIREAD lock được giữ theo từng dòng, nhưng được nâng cấp lên mức page hoặc cả bảng khi có quá nhiều (và một sequential scan sẽ lock cả bảng), làm tăng tỷ lệ abort false-positive. Với các transaction ngắn đọc qua index, chi phí so với Repeatable Read thường khiêm tốn; với các transaction dài quét tập dữ liệu lớn, cả chi phí theo dõi lẫn tỷ lệ abort đều có thể đáng kể. Khai báo các công việc chỉ đọc là `READ ONLY` (và `DEFERRABLE` cho các báo cáo dài) cho phép PostgreSQL bỏ qua phần lớn chi phí đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Write skew dưới dạng graph phụ thuộc: mỗi transaction đã đọc một dòng mà bên kia ghi, nên mỗi bên phải đứng trước bên kia. SSI phát hiện pattern này và abort một bên; khi retry, nó thấy bác sĩ kia đã nghỉ trực rồi."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Các cột xmin/xmax phơi bày cơ chế bên trong của MVCC vốn thường bị ẩn. `pg_current_snapshot()` cho thấy ranh giới snapshot của bạn — hữu ích khi debug các câu hỏi về visibility. Lưu ý `pg_stat_user_tables` đặt tên cột bảng là `relname`, không phải `tablename`. `n_dead_tup` cao cùng `last_autovacuum` đã cũ nghĩa là autovacuum đang tụt lại; query trên `pg_stat_activity` tìm ra các transaction mở lâu, thường chính là nguyên nhân.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Hướng dẫn thực tế: chọn đúng level",
+      "content": "Isolation level đúng phụ thuộc vào việc transaction của bạn đang làm gì và nó phải duy trì những invariant nào. Đây là một khung quyết định thực tế:\n\n**Dùng Read Committed (mặc định) khi**: transaction của bạn ngắn, mỗi câu lệnh đứng độc lập, và bạn không dựa vào việc thấy cùng dữ liệu hai lần trong một transaction. Điều này bao phủ phần lớn thao tác của ứng dụng web — insert một bản ghi, update một dòng, đọc danh sách item để hiển thị. PostgreSQL mặc định Read Committed là có lý do chính đáng. Read-modify-write ở level này vẫn cần cẩn thận: dùng update atomic (`SET stock = stock - 1`), `SELECT … FOR UPDATE`, hoặc kiểm tra version kiểu optimistic để tránh lost update.\n\n**Nâng lên Repeatable Read khi**: một transaction đọc dữ liệu ở một chỗ và dùng dữ liệu đó để đưa ra quyết định phụ thuộc vào việc dữ liệu không thay đổi cho đến lúc transaction commit. Ví dụ kinh điển: các transaction báo cáo tài chính đọc nhiều bảng và tạo ra kết quả tổng hợp, phân bổ tồn kho (đọc tồn kho khả dụng, tính phân bổ, ghi), hay bất kỳ quy trình nhiều bước nào phải hành động trên một góc nhìn dữ liệu nhất quán. Trong PostgreSQL, ở đây cũng hãy sẵn sàng retry khi gặp SQLSTATE `40001` — một lần update đồng thời vào dòng mà bạn cũng update sẽ abort transaction của bạn.\n\n**Dùng Serializable khi**: ứng dụng của bạn thực thi các invariant trải trên nhiều dòng và nhiều transaction, và các invariant đó không thể biểu diễn bằng unique constraint hay foreign key đơn giản. Ví dụ bác sĩ trực, ngăn đặt trùng một tài nguyên hữu hạn, và các ràng buộc số dư tối đa X đều là ứng viên tốt. Hãy chấp nhận gánh nặng retry — nó quản lý được và đảm bảo về tính đúng đắn rất có giá trị.\n\n**Không bao giờ dùng Read Uncommitted** trên production. Khả năng xảy ra dirty read đưa vào những bug về tính đúng đắn cực kỳ khó chẩn đoán, vì chúng phụ thuộc thời điểm và xảy ra chập chờn.\n\n**Độ dài transaction quan trọng không kém isolation level**: một transaction chạy lâu ở Read Committed giữ một snapshot ngăn autovacuum thu hồi các dead tuple kể từ thời điểm bắt đầu snapshot đó. Các connection bị bỏ ở trạng thái `idle in transaction` là một antipattern phổ biến trên production — chúng giữ snapshot vô thời hạn, gây table bloat và cuối cùng làm giảm hiệu năng query trên toàn database. Hãy đặt `idle_in_transaction_session_timeout` trong PostgreSQL để tự động chấm dứt các transaction bị bỏ quên."
+    },
+    {
+      "type": "explanation",
+      "title": "Isolation level trên các database khác nhau",
+      "content": "Các hệ database khác nhau cài đặt chuẩn SQL theo cách khác nhau, và cùng một tên level có thể mang ý nghĩa khác nhau giữa các hệ thống.\n\n**PostgreSQL**: Read Committed (mặc định, snapshot MVCC theo câu lệnh), Repeatable Read (snapshot MVCC theo transaction — mạnh hơn chuẩn, ngăn cả phantom), Serializable (SSI). Không cài đặt Read Uncommitted khác với Read Committed.\n\n**MySQL InnoDB**: Read Committed (snapshot theo câu lệnh), **Repeatable Read (mặc định)**, Serializable (dùng locking thay vì SSI — các SELECT thường trở thành đọc có shared lock, chặn writer). Repeatable Read của InnoDB là một dạng lai: các `SELECT` thường đọc từ snapshot theo transaction (không có phantom ở đó), nhưng `UPDATE`, `DELETE` và các locking read (`FOR UPDATE` / `FOR SHARE`) tác động lên các dòng **đã commit mới nhất** và lấy next-key lock (dòng + khoảng trống). Vì vậy một transaction có thể thấy một dòng trong snapshot của nó, rồi chính lệnh `UPDATE` của nó lại thấy dòng đó đã thay đổi — và lost update không được phát hiện theo cách PostgreSQL phát hiện.\n\n**Oracle**: chỉ hỗ trợ Read Committed (mặc định) và Serializable. Không có Repeatable Read trong Oracle — Serializable là bậc tiếp theo. Serializable của Oracle thực ra là snapshot isolation, không phải serializability thật theo định nghĩa chặt, dù nó ngăn được phần lớn anomaly phổ biến.\n\n**SQL Server**: hỗ trợ cả bốn level chuẩn cộng thêm hai chế độ snapshot không chuẩn. `READ_COMMITTED_SNAPSHOT` (RCSI) khiến Read Committed dùng row versioning thay vì shared lock — điều quan trọng vì Read Committed kiểu cổ điển của SQL Server dùng shared lock khiến reader và writer chặn nhau. RCSI mặc định tắt với SQL Server on-premises nhưng mặc định bật trong Azure SQL Database. Level `SNAPSHOT` riêng biệt cung cấp snapshot isolation ở mức transaction.\n\n**Hệ quả thực tế**: khi đọc tài liệu hay câu trả lời trên Stack Overflow về isolation level, hãy luôn kiểm tra đang nói về database nào. 'Repeatable Read ngăn phantom' đúng trong PostgreSQL, chỉ đúng một phần trong MySQL (đọc snapshot thường thì có, locking read thì thấy dòng mới), và không được chuẩn SQL yêu cầu."
+    },
+    {
+      "type": "diagram",
+      "caption": "Cây quyết định chọn isolation level. Phần lớn ứng dụng giữ ở Read Committed; chỉ nâng lên khi tính đúng đắn của transaction đòi hỏi."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: MVCC được David P. Reed đề xuất lần đầu trong luận án tiến sĩ năm 1978 tại MIT. Oracle là một trong những database thương mại đầu tiên cài đặt nó (giữa thập niên 1980). PostgreSQL áp dụng MVCC từ phiên bản 6.5 (1999). Thuật toán SSI đứng sau level Serializable của PostgreSQL được Michael J. Cahill, Uwe Rohm và Alan D. Fekete công bố trong bài báo SIGMOD năm 2008 'Serializable Isolation for Snapshot Databases' — lần đầu tiên chứng minh serializability thật sự có thể được cài đặt bên trên snapshot isolation với chi phí chấp nhận được. Cách tiếp cận của MySQL InnoDB dùng locking truyền thống để ngăn phantom theo khoảng trống (gap range), khiến nó khác căn bản bên dưới dù dùng tên level tương tự."
+    },
+    {
+      "type": "callout",
+      "content": "**Lỗi thường gặp và góc nhìn interview**: (1) Nhầm *số lượng* anomaly mà một level ngăn với *độ mạnh* của đảm bảo — Repeatable Read trong PostgreSQL mạnh hơn mức chuẩn SQL yêu cầu. (2) Cho rằng Serializable 'quá chậm để dùng' — với các transaction ngắn dựa trên index, chi phí SSI thường khiêm tốn, và lợi ích về tính đúng đắn là đáng kể với code mà invariant là sống còn; hãy tự đo tỷ lệ abort của bạn. (3) Quên rằng transaction chạy lâu ở *bất kỳ* level nào cũng gây table bloat qua dead tuple của MVCC — isolation level và thời lượng transaction là hai núm chỉnh riêng biệt. (4) Không xử lý `SQLSTATE 40001` ở Serializable — đây không phải lỗi để đẩy lên người dùng; nó là chuyện bình thường cần retry. (5) Cho rằng Repeatable Read mặc định của MySQL hành xử giống PostgreSQL — nó không phát hiện lost update, nên hãy dùng update atomic hoặc `FOR UPDATE`. (6) Trong interview: khi được hỏi 'MVCC hoạt động thế nào?', câu trả lời then chốt là: 'mỗi dòng có transaction ID xmin/xmax; reader lọc theo snapshot của mình mà không cần lấy lock; writer tạo phiên bản mới; các phiên bản chết được autovacuum dọn dẹp.'"
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Ba anomaly kinh điển**: dirty read (thấy dữ liệu chưa commit), non-repeatable read (cùng dòng, giá trị khác nhau trong một transaction), và phantom read (range query trả về dòng mới). Mỗi isolation level cao hơn ngăn thêm một anomaly.",
+        "**Read Committed** (mặc định trong PostgreSQL, Oracle, SQL Server) lấy snapshot mới cho mỗi câu lệnh — ngăn dirty read nhưng cho phép non-repeatable read, phantom, read skew và lost update.",
+        "**Repeatable Read** (mặc định của MySQL InnoDB) dùng một snapshot cho mỗi transaction. Trong PostgreSQL nó là snapshot isolation: không có phantom, lost update bị abort với 40001 — nhưng write skew vẫn có thể xảy ra. Phiên bản của InnoDB cho UPDATE thấy các dòng mới nhất, nên lost update lọt qua.",
+        "**Lost update** là race phổ biến nhất trong thực tế: đọc một giá trị, tính trong ứng dụng, ghi lại. Sửa bằng `SET x = x + 1` atomic, `SELECT … FOR UPDATE`, hoặc một cột version kiểu optimistic.",
+        "**Serializable** ngăn mọi anomaly kể cả write-skew (hai transaction mỗi bên đọc và ghi theo cách hợp lệ khi đứng riêng nhưng gộp lại thì vi phạm invariant). PostgreSQL dùng SSI, abort transaction với `SQLSTATE 40001`; ứng dụng phải cài đặt logic retry.",
+        "**Write skew khi không dùng Serializable**: lock các dòng mà quyết định phụ thuộc vào (`FOR UPDATE`), hoặc — khi xung đột liên quan tới các dòng chưa tồn tại — dùng constraint `UNIQUE`/`EXCLUDE` hay materialize một dòng để lock.",
+        "**MVCC** tránh lock đọc/ghi bằng cách gắn cho mỗi phiên bản dòng `xmin` (transaction ID tạo ra nó) và `xmax` (transaction ID xóa nó). Reader lọc theo transaction ID trong snapshot của mình; writer tạo phiên bản mới. Đây là lý do reader và writer không chặn nhau trong PostgreSQL.",
+        "**Dead tuple** tích tụ dưới MVCC và được autovacuum thu hồi. Các connection chạy lâu hoặc `idle in transaction` ngăn autovacuum dọn các phiên bản cũ, gây table bloat và giảm hiệu năng — đặt `idle_in_transaction_session_timeout` để giảm thiểu.",
+        "**Tên isolation level không portable**: Repeatable Read của PostgreSQL ngăn phantom, của MySQL thì không theo cùng cơ chế, còn Oracle gọi level kế tiếp của mình là Serializable (thực ra là snapshot isolation). Luôn kiểm tra hành vi riêng của từng database."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Isolation level nào cho phép một transaction đọc các thay đổi chưa commit của transaction khác, có thể đọc phải dữ liệu sau đó bị rollback?",
+      "options": [
+        "Read Committed",
+        "Repeatable Read",
+        "Read Uncommitted",
+        "Serializable"
+      ],
+      "explanation": "Read Uncommitted là level yếu nhất và cho phép dirty read — một transaction có thể thấy các thay đổi mà transaction khác chưa commit và vẫn có thể rollback, nghĩa là dữ liệu thấy được có thể chưa bao giờ chính thức tồn tại."
+    },
+    {
+      "id": "q2",
+      "question": "Transaction T1 đọc cùng một dòng hai lần trong một transaction và nhận giá trị khác nhau vì T2 đã commit một thay đổi giữa hai lần đọc. Anomaly này gọi là:",
+      "options": [
+        "Dirty read",
+        "Phantom read",
+        "Lost update",
+        "Non-repeatable read"
+      ],
+      "explanation": "Non-repeatable read xảy ra khi cùng một câu SELECT trong một transaction trả về giá trị khác nhau cho một dòng đã tồn tại, vì một transaction khác đã commit thay đổi dòng đó giữa hai lần đọc."
+    },
+    {
+      "id": "q3",
+      "question": "Dưới isolation Read Committed, vì sao hai query SELECT COUNT(*) giống hệt nhau trong cùng một transaction có thể trả về giá trị khác nhau?",
+      "options": [
+        "Mỗi câu lệnh lấy một snapshot mới, nên các dòng được commit giữa hai query trở nên hiển thị",
+        "Read Committed cho phép dirty read từ các transaction khác",
+        "COUNT(*) bỏ qua cơ chế isolation",
+        "Query planner cache rồi sau đó vô hiệu hóa kết quả đầu tiên"
+      ],
+      "explanation": "Read Committed lấy snapshot mới cho mỗi câu lệnh, không phải mỗi transaction. Nếu một transaction khác insert dòng và commit giữa hai query COUNT của bạn, snapshot của query thứ hai sẽ bao gồm những dòng đó — một phantom read."
+    },
+    {
+      "id": "q4",
+      "question": "Khác biệt then chốt giữa cách MVCC xử lý việc đọc so với cách tiếp cận locking truyền thống là gì?",
+      "options": [
+        "MVCC xếp hàng các lần đọc phía sau các lần ghi để đảm bảo truy cập tuần tự",
+        "MVCC sao chép toàn bộ bảng vào một read buffer khi transaction bắt đầu",
+        "MVCC giữ nhiều phiên bản dòng để reader nhận một snapshot mà không chặn writer",
+        "MVCC dùng shared lock mà reader lấy được mà không chặn các reader khác"
+      ],
+      "explanation": "MVCC lưu nhiều phiên bản của mỗi dòng, được gắn transaction ID. Reader tìm phiên bản phù hợp với snapshot của mình mà không cần lấy lock, nên reader không bao giờ chặn writer và writer không bao giờ chặn reader."
+    },
+    {
+      "id": "q5",
+      "question": "Hai bác sĩ cùng kiểm tra danh sách trực (thấy 2 người đang trực), cả hai quyết định an toàn để nghỉ trực, và cả hai commit — khiến không còn bác sĩ nào trực. Đây là anomaly nào?",
+      "options": [
+        "Dirty read",
+        "Non-repeatable read",
+        "Phantom read",
+        "Write-skew"
+      ],
+      "explanation": "Write-skew xảy ra khi hai transaction mỗi bên đọc dữ liệu dùng chung, rồi mỗi bên ghi vào các dòng khác nhau theo cách hợp lệ khi đứng riêng nhưng gộp lại vi phạm một invariant của ứng dụng. Tập ghi của chúng không chồng lấn, nên snapshot isolation (vốn chỉ kiểm tra xung đột write-write) bỏ sót nó; chỉ Serializable, vốn theo dõi phụ thuộc read/write, mới bắt được."
+    },
+    {
+      "id": "q6",
+      "question": "Một transaction ở isolation level Serializable thất bại với SQLSTATE 40001 (serialization_failure). Ứng dụng nên phản ứng thế nào cho đúng?",
+      "options": [
+        "Nâng lên một isolation level cao hơn",
+        "Retry toàn bộ transaction từ đầu",
+        "Báo lỗi cho người dùng và abort vĩnh viễn",
+        "Chuyển sang Read Committed và chỉ retry câu lệnh bị lỗi"
+      ],
+      "explanation": "Serialization failure là điều được dự liệu và bình thường với isolation Serializable — chúng cho biết việc thực thi đồng thời sẽ tạo ra kết quả không serializable. Phản ứng đúng là retry toàn bộ transaction; lần retry thường sẽ thành công khi transaction xung đột đã hoàn tất."
+    },
+    {
+      "id": "q7",
+      "question": "Trong cài đặt MVCC của PostgreSQL, các cột ẩn `xmin` và `xmax` trên một row tuple biểu diễn điều gì?",
+      "options": [
+        "Transaction ID của các transaction đã tạo và đã xóa/update phiên bản dòng này",
+        "Giá trị nhỏ nhất và lớn nhất được lưu trong dòng",
+        "Timestamp đầu tiên và cuối cùng khi dòng được truy cập",
+        "Transaction ID của reader đồng thời cũ nhất và mới nhất"
+      ],
+      "explanation": "xmin là transaction ID của transaction đã insert phiên bản dòng này; xmax là transaction ID của transaction đã xóa hoặc thay thế nó (0 nếu vẫn còn sống). Chúng được dùng để xác định visibility của dòng đối với snapshot của từng transaction."
+    },
+    {
+      "id": "q8",
+      "question": "Tiến trình nền nào của PostgreSQL chịu trách nhiệm thu hồi vùng lưu trữ bị chiếm bởi các phiên bản dòng MVCC đã chết?",
+      "options": [
+        "WAL writer",
+        "Checkpoint process",
+        "Autovacuum",
+        "Background writer"
+      ],
+      "explanation": "Autovacuum thu hồi vùng lưu trữ bị chiếm bởi dead tuple — các phiên bản dòng cũ có transaction xmax đã commit và không còn hiển thị với snapshot của transaction đang hoạt động nào. Không có autovacuum, bảng sẽ phình to không giới hạn dưới workload ghi nặng."
+    },
+    {
+      "id": "q9",
+      "question": "Theo chuẩn SQL, isolation level tối thiểu cần để ngăn phantom read là gì?",
+      "options": [
+        "Read Committed",
+        "Serializable",
+        "Repeatable Read",
+        "Mọi level đều ngăn phantom read"
+      ],
+      "explanation": "Chuẩn SQL chỉ yêu cầu Serializable ngăn phantom read. Repeatable Read chỉ được yêu cầu ngăn dirty read và non-repeatable read. Tuy vậy, Repeatable Read dựa trên MVCC của PostgreSQL trên thực tế cũng ngăn được phantom — mạnh hơn mức chuẩn quy định."
+    },
+    {
+      "id": "q10",
+      "question": "Vì sao các transaction chạy lâu hoặc connection bị bỏ ở trạng thái 'idle in transaction' lại nguy hiểm trong một hệ thống PostgreSQL production?",
+      "options": [
+        "Chúng giữ một snapshot ngăn autovacuum dọn dead tuple, gây table bloat",
+        "Chúng tiêu tốn thêm chu kỳ CPU để chạy các lần làm mới snapshot định kỳ",
+        "Chúng giữ exclusive lock chặn mọi lần đọc và ghi khác",
+        "Chúng buộc mọi transaction mới phải dùng isolation Serializable"
+      ],
+      "explanation": "Một transaction chạy lâu giữ một snapshot MVCC đang mở. Autovacuum không thể thu hồi các dead tuple vẫn còn hiển thị với bất kỳ snapshot đang hoạt động nào, nên bảng tích tụ các phiên bản dòng chết (bloat) chừng nào transaction đó còn mở — cuối cùng làm giảm hiệu năng query trên toàn database."
+    }
+  ]
+}

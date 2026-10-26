@@ -1,0 +1,234 @@
+{
+  "sourceHash": "34e43ada4862",
+  "title": "Async và Event Loop",
+  "tagline": "Cách JavaScript xử lý hàng nghìn thao tác chỉ trên một thread duy nhất",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "JavaScript là single-threaded. Tại mỗi thời điểm, chỉ có đúng một đoạn code JavaScript đang chạy. Vậy mà server Node.js vẫn xử lý hàng chục nghìn HTTP request đồng thời. UI trên trình duyệt vẫn mượt trong khi đang lấy dữ liệu từ năm API khác nhau. Một single-page app vẫn stream giá cổ phiếu real-time mà thanh cuộn không hề bị đơ. Làm sao những điều này có thể xảy ra?\n\nCâu trả lời là **event loop** — một cơ chế lập lịch trông thì đơn giản nhưng được cài sẵn trong mọi JavaScript runtime. Hiểu chính xác nó, bạn sẽ đoán được *chính xác khi nào* code của mình chạy, *vì sao* callback này chạy trước callback kia, và *cách* tổ chức công việc bất đồng bộ sao cho dễ đọc, đúng và hiệu năng tốt.\n\nBài này xây dựng bức tranh toàn cảnh theo từng lớp. Ta bắt đầu từ vấn đề vật lý: thao tác I/O tốn thời gian gấp hàng nghìn lần thao tác CPU, nên bạn không thể cứ ngồi chờ chúng. Ta lần theo cách runtime đối phó với thực tế đó — call stack, sandbox Web API, các task queue — và chỉ rõ event loop làm gì ở mỗi tick. Tiếp theo ta đi qua ba thế hệ cú pháp async: **callback** thuần, **Promise**, và **async/await**, giải thích không chỉ cách viết mà còn mỗi loại \"biên dịch\" xuống thành gì ở tầng event loop. Cuối cùng là các edge case khó — microtask starvation, unhandled rejection, mô hình phase của libuv trong Node.js — những thứ phân biệt kỹ sư chỉ biết *dùng* async với kỹ sư thực sự *hiểu* nó.\n\nMột lưu ý về thuật ngữ trước khi đi sâu: JavaScript, xét như một *ngôn ngữ*, không có event loop — đó là khái niệm của runtime. Event loop nằm trong **V8 + libuv** (Node.js) hoặc **V8 + môi trường trình duyệt** (Chrome). Đặc tả ngôn ngữ có định nghĩa Promise và thứ tự microtask, nhưng phần \"đường ống\" thực sự gọi code của bạn thuộc về môi trường nhúng (embedding environment)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bức tranh tổng thể: code JS chạy trên call stack. Công việc async được đẩy sang Web API hoặc libuv. Khi xong, kết quả rơi vào các queue. Event loop đưa chúng trở lại stack — microtask trước macrotask."
+    },
+    {
+      "type": "analogy",
+      "title": "Một nhân viên quầy duy nhất ở sân bay đông khách",
+      "content": "Hãy hình dung một **nhân viên quầy** duy nhất ở cửa lên máy bay (call stack của JavaScript) đang phục vụ hành khách (task). Quy tắc then chốt: mỗi lúc chỉ có một hành khách ở quầy — không phục vụ song song, không ngoại lệ.\n\nKhi một hành khách cần in lại thẻ lên máy bay, nhân viên chuyển yêu cầu đó sang **phòng in** (Web API / libuv) và ngay lập tức phục vụ người tiếp theo trong hàng. Nhân viên không đứng không chờ máy in. Trong lúc nhân viên làm việc, phòng in hoàn thành và đặt một tờ phiếu vào một trong hai khay: **khay khẩn** (microtask queue, cho các callback của Promise) hoặc **khay thường** (macrotask queue, cho callback của setTimeout và sự kiện I/O).\n\nQuy trình của nhân viên — chính là event loop — có một quy tắc nghiêm ngặt: sau mỗi hành khách, phải kiểm tra **khay khẩn trước** và xử lý hết mọi phiếu trong đó, kể cả những phiếu mới rơi vào trong lúc đang xử lý, rồi mới lấy hành khách kế tiếp từ khay thường. Đây là lý do callback của `Promise.then` luôn chạy trước callback của `setTimeout` được lên lịch tại cùng một thời điểm logic: khay khẩn (microtask queue) luôn được làm trống hoàn toàn trước khi tới lượt hành khách thường kế tiếp (macrotask).\n\nPhòng in tương ứng với native code chạy trên các thread riêng của hệ điều hành — nó có thể làm việc song song thật sự. Nhưng bản thân nhân viên quầy, phần chạy JavaScript của bạn, luôn chỉ là một người, không bao giờ được nhân bản."
+    },
+    {
+      "type": "explanation",
+      "title": "Call stack: code đồng bộ được thực thi thế nào",
+      "content": "**Call stack** là một cấu trúc dữ liệu vào-sau-ra-trước (LIFO), theo dõi hàm đang thực thi và tất cả các hàm đã gọi tới nó. Khi script bắt đầu, runtime đẩy một global execution context lên stack. Mỗi lời gọi hàm đẩy thêm một **stack frame** mới chứa biến cục bộ của hàm và địa chỉ trả về. Khi hàm return, frame đó bị pop ra.\n\nXét ví dụ sau:\n\n```\nfunction greet(name) {\n  return 'Hello, ' + name;\n}\nfunction main() {\n  const msg = greet('Alice');\n  console.log(msg);\n}\nmain();\n```\n\nStack lớn dần: `[global] → [main] → [greet]`, rồi co lại khi `greet` return về `[main]`, sau đó `main` return về `[global]`, cuối cùng global context bị pop và stack rỗng.\n\n**Event loop chỉ chạy khi call stack rỗng.** Đây là ràng buộc nền tảng. Không callback nào, không lần resolve Promise nào, không setTimeout nào có thể ngắt ngang code đồng bộ đang chạy. JavaScript là cooperative, không phải preemptive. Một hàm chạy mất 5 giây sẽ \"bắt giữ\" toàn bộ runtime suốt 5 giây đó. Event loop chỉ đơn giản là ngồi chờ stack trống.\n\nĐộ sâu tối đa của stack là hữu hạn — khoảng 10.000–15.000 frame trong V8. Vượt quá là bạn gặp ngay lỗi kinh điển `RangeError: Maximum call stack size exceeded` — tức stack overflow. Đệ quy sâu mà không có tail-call optimisation (trên thực tế V8 không cài đặt) sẽ chạm giới hạn này."
+    },
+    {
+      "type": "explanation",
+      "title": "Sandbox Web API: nơi công việc async thực sự diễn ra",
+      "content": "Khi bạn gọi `setTimeout`, `fetch`, `fs.readFile` hay `addEventListener`, bạn không hề lên lịch công việc bên trong JavaScript. Bạn đang chuyển một yêu cầu cho **môi trường host** — tầng Web API của trình duyệt hoặc libuv của Node.js — rồi return ngay lập tức. Môi trường host xử lý yêu cầu bằng native code, thường trên một thread riêng của hệ điều hành hoặc qua async I/O của kernel (epoll, kqueue, IOCP).\n\n**Trình duyệt** cung cấp Web API dưới dạng các cài đặt C++ bên trong browser engine: `XMLHttpRequest`, `fetch`, `setTimeout`, `requestAnimationFrame`, `WebSockets`, `IndexedDB`, `Geolocation`. Chúng nằm bên ngoài V8.\n\n**Node.js dùng libuv**, một library C cung cấp:\n- Một **thread pool** (mặc định 4 thread, cấu hình qua `UV_THREADPOOL_SIZE`) cho thao tác file system, tra cứu DNS và crypto — những thao tác không có primitive non-blocking của hệ điều hành trên mọi nền tảng.\n- **Async I/O ở mức kernel** (`epoll` trên Linux, `kqueue` trên macOS, IOCP trên Windows) cho network socket và pipe — những thao tác thực sự non-blocking này không cần thread.\n\nĐiểm mấu chốt: **thread của libuv không phải thread JavaScript**. Chúng chạy native code C. Khi xong việc, chúng đưa một completion event vào hàng đợi để event loop của JavaScript nhặt lên và chạy callback JS trên main thread. Bản thân JavaScript luôn là single-threaded. Tính song song nằm ở tầng native, code JS không nhìn thấy.\n\nĐó là lý do `fs.readFile` là non-blocking: lời gọi JS return ngay, libuv giao việc đọc cho một worker trong thread pool, JavaScript của bạn tiếp tục chạy, và khi hệ điều hành đọc xong, libuv đẩy callback kết quả vào macrotask queue."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đọc file non-blocking: call stack của JS rảnh suốt thời gian hệ điều hành đang đọc. Callback chỉ chạy sau khi đoạn JS hiện tại kết thúc và stack rỗng."
+    },
+    {
+      "type": "explanation",
+      "title": "Microtask và macrotask: hai queue",
+      "content": "Runtime duy trì hai queue riêng biệt với độ ưu tiên khác nhau. Hiểu sai ngữ nghĩa của chúng là nguồn gốc của phần lớn các bug async tinh vi.\n\n**Macrotask queue** (còn gọi là task queue hay callback queue): chứa các callback được lên lịch bởi `setTimeout`, `setInterval`, `setImmediate` (Node.js), callback hoàn tất I/O từ libuv, và các handler sự kiện UI (click, keydown, v.v.). Mỗi vòng lặp, event loop lấy **đúng một macrotask**, chạy nó tới khi xong, rồi kiểm tra lại các queue.\n\n**Microtask queue**: chứa callback từ `Promise.then`, `Promise.catch`, `Promise.finally`, `queueMicrotask()`, và các lần tiếp tục (resumption) của `async/await`. Sau mỗi task (một đoạn đồng bộ hoặc một macrotask), runtime làm trống **toàn bộ** microtask queue trước khi làm bất cứ việc gì khác — kể cả việc render frame tiếp theo trên trình duyệt.\n\nQuy tắc thứ tự cho mỗi tick của event loop:\n1. Chạy code đồng bộ hiện tại cho tới khi call stack rỗng.\n2. Làm trống microtask queue: chạy mọi microtask, và nếu một microtask lại thêm microtask mới thì chạy luôn những cái đó — lặp tới khi queue hoàn toàn rỗng.\n3. (Chỉ trình duyệt) Nếu tới lúc render (thường mỗi ~16 ms để đạt 60 fps), cập nhật DOM và vẽ.\n4. Lấy **một** macrotask từ macrotask queue và chạy nó.\n5. Quay lại bước 2.\n\n**Vì sao thứ tự này quan trọng:** callback của Promise có thể làm \"chết đói\" macrotask queue. Nếu bạn viết `while(true) { await Promise.resolve(); }`, bạn tạo ra một dòng microtask vô tận, không bao giờ cho macrotask — hay việc render của trình duyệt — có cơ hội chạy. Vòng lặp trông có vẻ async (vì dùng `await`) nhưng trên thực tế hoạt động y như một vòng lặp vô hạn đồng bộ."
+    },
+    {
+      "type": "diagram",
+      "caption": "Chi tiết đầy đủ một tick của event loop. Microtask được làm trống hoàn toàn (kể cả những cái mới thêm vào) trước bất kỳ macrotask hay lần render nào. Đây là thứ tự do đặc tả WHATWG quy định."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Output này mang tính tất định và được đặc tả bắt buộc. Các con số cho thấy chính xác quy tắc ưu tiên: code đồng bộ trước, sau đó là mọi microtask (kể cả những cái mới nhất, tất cả theo thứ tự FIFO trong microtask queue), rồi mới tới một macrotask. Hãy nhớ kỹ pattern này — nó xuất hiện liên tục trong các buổi interview JavaScript cấp senior.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Callback: pattern async nguyên thủy",
+      "content": "Cách tiếp cận đầu tiên của JavaScript với async là **continuation-passing style (CPS)**: thay vì return một giá trị, hàm nhận vào một callback sẽ được gọi khi có kết quả. Các API lõi của Node.js chuẩn hóa **quy ước error-first callback**: tham số đầu tiên của callback là lỗi (hoặc `null` nếu thành công), tham số thứ hai là kết quả.\n\n```js\nfs.readFile('config.json', 'utf8', function(err, data) {\n  if (err) { console.error(err); return; }\n  const config = JSON.parse(data);\n  // use config...\n});\n```\n\nCallback dùng được, nhưng khi kết hợp chúng lại sẽ dẫn tới **callback hell** nổi tiếng (còn gọi là pyramid of doom — kim tự tháp diệt vong): callback lồng nhau sâu tới ba tầng, xử lý lỗi phải lặp lại ở mỗi tầng, và luồng điều khiển (rẽ nhánh, lặp, chạy song song) trở nên cực kỳ khó quản lý.\n\n```js\nfs.readFile('a.txt', 'utf8', function(err, a) {\n  if (err) return handleError(err);\n  fs.readFile('b.txt', 'utf8', function(err, b) {\n    if (err) return handleError(err);\n    fs.writeFile('c.txt', a + b, function(err) {\n      if (err) return handleError(err);\n      console.log('done');\n    });\n  });\n});\n```\n\nBa file, ba tầng lồng nhau, xử lý lỗi lặp lại ba lần. Tới năm, sáu tầng thì code thực sự không thể bảo trì nổi. Các library như `async.js` (2010) cung cấp các combinator (`async.waterfall`, `async.parallel`) để quản lý luồng điều khiển, nhưng mô hình nền tảng vẫn là callback. Promise mới là thứ giải quyết vấn đề này về mặt cấu trúc."
+    },
+    {
+      "type": "explanation",
+      "title": "Promise: async có cấu trúc với kết quả chain được",
+      "content": "**Promise** là một đối tượng đại diện cho việc hoàn tất (hoặc thất bại) trong tương lai của một thao tác bất đồng bộ. Nó chỉ có thể ở một trong đúng ba trạng thái: `pending` (chưa settle), `fulfilled` (thành công với một giá trị), hoặc `rejected` (thất bại với một lý do). Một khi đã settle — fulfilled hoặc rejected — trạng thái của Promise không bao giờ thay đổi nữa. Tính bất biến này là nền tảng: bạn có thể chia sẻ một Promise đã resolve một cách an toàn, gắn handler `.then` sau đó, và kết hợp các Promise mà không bị race condition.\n\nAPI của Promise:\n- `new Promise((resolve, reject) => { ... })` — tạo một Promise; gọi `resolve(value)` hoặc `reject(reason)` từ bên trong.\n- `.then(onFulfilled, onRejected)` — đăng ký handler; trả về một Promise *mới*.\n- `.catch(onRejected)` — viết tắt của `.then(undefined, onRejected)`.\n- `.finally(onFinally)` — chạy bất kể kết quả, truyền giá trị đi tiếp không đổi.\n- `Promise.resolve(value)` — trả về một Promise đã fulfilled sẵn.\n- `Promise.reject(reason)` — trả về một Promise đã rejected sẵn.\n- `Promise.all([p1, p2, ...])` — fulfilled khi tất cả fulfilled; rejected nếu có bất kỳ cái nào rejected.\n- `Promise.allSettled([p1, p2, ...])` — chờ tất cả settle (fulfilled hoặc rejected), không bao giờ rejected.\n- `Promise.race([p1, p2, ...])` — settle theo Promise settle đầu tiên.\n- `Promise.any([p1, p2, ...])` — fulfilled theo cái fulfilled đầu tiên; chỉ rejected nếu tất cả đều rejected.\n\nChaining là tính năng then chốt giúp thoát khỏi callback hell:\n\n```js\nreadFilePromise('config.json')\n  .then(data => JSON.parse(data))\n  .then(config => fetchUser(config.userId))\n  .then(user => saveToCache(user))\n  .catch(err => console.error('Pipeline failed:', err));\n```\n\nMỗi `.then` nhận giá trị đã resolve của Promise trước đó và trả về một Promise mới. Chỉ một `.catch` ở cuối là bắt được mọi rejection ở bất kỳ đâu trong chuỗi. Cấu trúc phẳng này tốt hơn hẳn so với callback lồng nhau.\n\nQuan trọng: **callback của `.then` luôn bất đồng bộ**, kể cả với Promise đã resolve sẵn. `Promise.resolve(42).then(v => console.log(v))` không in ra 42 một cách đồng bộ — callback được lên lịch như một microtask. Tính dễ đoán này là có chủ đích, giúp tránh các bug kiểu Zalgo (những hàm lúc thì gọi callback đồng bộ, lúc thì bất đồng bộ)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một Promise chuyển từ pending sang fulfilled hoặc rejected — không bao giờ quay lại, không bao giờ là cả hai. Khi đã settle, giá trị của nó là bất biến."
+    },
+    {
+      "type": "explanation",
+      "title": "async/await: code async trông như đồng bộ",
+      "content": "Ra đời trong ES2017, **async/await** là syntactic sugar trên nền Promise. Nó không tạo thread mới, không bỏ qua event loop, và không thay đổi bất kỳ ngữ nghĩa microtask nào. Nó chỉ đơn giản làm cho code bất đồng bộ *trông* tuần tự, khỏi phải tự tay chain các lời gọi `.then`.\n\nMột hàm `async` luôn trả về Promise. Nếu hàm return một giá trị không phải Promise, runtime sẽ bọc nó trong `Promise.resolve()`. Nếu hàm throw, Promise trả về sẽ bị rejected với lỗi được throw.\n\n`await expr` bên trong một hàm async sẽ:\n1. Đánh giá `expr` thành một Promise (hoặc bọc giá trị không phải Promise bằng `Promise.resolve`).\n2. **Tạm dừng hàm async** — gỡ frame của nó khỏi call stack — và trả quyền điều khiển cho nơi gọi.\n3. Khi Promise settle, lên lịch phần tiếp theo của hàm async như một **microtask**.\n4. Hàm async tiếp tục từ chỗ đã dừng, với giá trị đã resolve là kết quả của biểu thức `await`.\n\n**Mỗi `await` là một ranh giới microtask.** Code trước `await` chạy đồng bộ như một phần của task hiện tại. Code phía sau chạy trong một microtask sau đó. Nghĩa là hai `await` tạo ra hai ranh giới microtask — hai điểm mà code khác có thể chen vào chạy. Các microtask khác có thể chạy ở mọi ranh giới; còn macrotask (timer, callback I/O, rendering) chỉ được tới lượt nếu Promise đang được await vẫn còn pending. Await một giá trị đã resolve sẵn sẽ không bao giờ để callback của `setTimeout` chen vào giữa.\n\nPhiên bản async/await của pipeline đọc file ở trên:\n\n```js\nasync function processConfig() {\n  try {\n    const data = await readFilePromise('config.json');  // suspension point 1\n    const config = JSON.parse(data);                    // sync — no suspension\n    const user = await fetchUser(config.userId);        // suspension point 2\n    await saveToCache(user);                            // suspension point 3\n    console.log('done');\n  } catch (err) {\n    console.error('Pipeline failed:', err);\n  }\n}\n```\n\nVề chức năng, đoạn này giống hệt phiên bản chain `.then`. Engine tự biến đổi nó ở bên trong. Tại mỗi `await`, hàm async tạm dừng, và event loop được rảnh để xử lý các task khác ở giữa."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Pattern chạy đồng thời với `Promise.all` là điều cực kỳ quan trọng cần nắm. Các lời gọi `await` tuần tự sẽ tuần tự hóa các thao tác I/O một cách không cần thiết. Khởi động cả hai fetch trước khi await bất kỳ cái nào cho bạn tính đồng thời thật sự ở tầng mạng, giảm đáng kể tổng latency khi các request độc lập với nhau. Phiên bản tuần tự mất T1 + T2 mili giây; phiên bản đồng thời mất max(T1, T2) — không cần thêm thread nào, chính mạng làm việc chờ song song.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Các phase của event loop libuv trong Node.js",
+      "content": "Node.js không dùng event loop của trình duyệt — nó dùng **event loop dựa trên phase của libuv**, phức tạp hơn. Hiểu nó rất quan trọng với JavaScript phía server, đặc biệt khi trộn `setTimeout`, `setImmediate` và callback I/O.\n\nEvent loop của libuv có sáu phase, thực thi theo thứ tự:\n\n1. **timers**: Chạy callback từ `setTimeout` và `setInterval` đã hết thời gian chờ.\n2. **pending callbacks**: Chạy các callback I/O bị hoãn từ vòng lặp trước (ví dụ một số lỗi TCP).\n3. **idle, prepare**: Chỉ dùng nội bộ trong libuv; không lộ ra cho JS.\n4. **poll**: Lấy các sự kiện I/O mới và chạy callback của chúng. Nếu không có gì để chạy, nó block tại đây để chờ I/O — nhưng chỉ tới khi timer gần nhất tới hạn, và hoàn toàn không block nếu đang có callback `setImmediate` chờ. Đây là nơi Node.js dành phần lớn thời gian khi rảnh.\n5. **check**: Chạy callback của `setImmediate`. Phase này luôn chạy sau phase poll — nên callback của `setImmediate` chạy sau callback I/O trong cùng một vòng lặp.\n6. **close callbacks**: Chạy callback cho các socket và handle bị đóng đột ngột (ví dụ `socket.on('close', ...)`.\n\nNode.js làm trống queue `process.nextTick` rồi tới microtask queue của Promise **sau mỗi callback riêng lẻ** — sau mỗi timer, mỗi callback I/O, mỗi `setImmediate` (từ Node 11; các phiên bản cũ hơn chỉ làm trống giữa các phase, đó là lý do các bài viết cũ nói khác nhau). `process.nextTick` là trường hợp đặc biệt: queue của nó luôn được làm trống trước queue Promise, khiến nó thành một loại microtask có độ ưu tiên cao hơn. Một chi tiết nhỏ: trong ES module, code ở top level vốn đã chạy bên trong một microtask, nên ở top level của file `.mjs`, callback của Promise chạy *trước* callback của `process.nextTick` — ngược với CommonJS.\n\n**`setImmediate` và `setTimeout(fn, 0)`**: Khi được gọi từ bên trong một callback I/O, `setImmediate` luôn chạy trước `setTimeout(fn, 0)` vì phase check nằm ngay sau phase poll trong cùng vòng lặp, còn timer thuộc vòng lặp kế tiếp. Ngoài callback I/O, thứ tự phụ thuộc vào thời gian của hệ thống và không tất định."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các phase của event loop libuv trong Node.js. process.nextTick và microtask của Promise được làm trống sau mỗi callback riêng lẻ ở mọi phase (Node 11+). setImmediate chạy ở phase check — sau poll I/O — trước phase timers kế tiếp."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Thứ tự phase của Node.js có thể kiểm chứng và là tất định khi ở bên trong một callback I/O. process.nextTick hay gây nhầm lẫn: dù tên là vậy, nó không hoãn tới 'tick kế tiếp' theo nghĩa của libuv — nó chạy trước microtask của Promise, ngay trong lượt làm trống microtask của tick hiện tại. Pattern xử lý theo từng chunk là một kỹ thuật thực tế cho công việc nặng CPU trong ngữ cảnh async.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Xử lý lỗi trong code async",
+      "content": "Xử lý lỗi async từ lâu đã là một trong những nguồn phổ biến nhất gây ra lỗi \"im lặng\" trong chương trình JavaScript.\n\n**Lỗi trong callback**: Quy ước error-first `(err, result)` dùng được nhưng đòi hỏi tự tay truyền lỗi ở mọi tầng. Quên kiểm tra `err` là lỗi bị nuốt mất không một tiếng động.\n\n**Unhandled Promise rejection**: Nếu một Promise bị rejected mà không có handler `.catch` hay `try/catch` quanh `await` xử lý lỗi, nó trở thành **unhandled rejection**. Trên trình duyệt, việc này kích hoạt sự kiện `unhandledrejection`. Trong Node.js, các phiên bản trước 15 chỉ cảnh báo; từ Node.js 15 trở đi, unhandled rejection mặc định làm crash process. Đây là quyết định đúng — lỗi im lặng còn tệ hơn crash.\n\n**`try/catch` với await**: Pattern `try/catch` hoạt động tự nhiên với `await` vì `await` một Promise bị rejected sẽ throw một cách đồng bộ bên trong execution context của hàm async.\n\n```js\nasync function load() {\n  try {\n    const data = await fetch('/api/data');\n    return await data.json();\n  } catch (err) {\n    // catches both network errors AND JSON parse errors\n    console.error(err);\n  }\n}\n```\n\nHãy cẩn thận với phạm vi mà một block `catch` bao phủ. Lỗi được throw *đồng bộ trước* `await` đầu tiên sẽ bị `try/catch` bao ngoài bắt được. Lỗi được throw *bên trong* một Promise không được await (floating Promise) thì **không** bị bắt.\n\n**Promise.allSettled để tăng khả năng chịu lỗi**: Khi chạy các thao tác song song mà một số có thể thất bại, hãy ưu tiên `Promise.allSettled` thay vì `Promise.all`. `Promise.all` rejected ngay khi có rejection đầu tiên — các Promise khác vẫn tiếp tục chạy nhưng kết quả của chúng bị bỏ đi. `Promise.allSettled` luôn chờ tất cả và trả cho bạn mảng kết quả đầy đủ, cho phép bạn xử lý trường hợp thành công một phần.\n\n**Global error handler** làm chốt chặn cuối cùng:\n```js\n// Browser\nwindow.addEventListener('unhandledrejection', event => {\n  console.error('Unhandled rejection:', event.reason);\n  event.preventDefault(); // suppress default console error\n});\n\n// Node.js\nprocess.on('unhandledRejection', (reason, promise) => {\n  console.error('Unhandled Rejection at:', promise, 'reason:', reason);\n  process.exit(1); // recommended: fail fast\n});\n```"
+    },
+    {
+      "type": "explanation",
+      "title": "Hủy và timeout: AbortController",
+      "content": "Promise không thể bị hủy. `Promise.race([work, timeout])` chỉ dừng việc *chờ* — request, timer hay query bên dưới vẫn tiếp tục chạy, giữ socket và bộ nhớ. Cơ chế hủy chuẩn của JavaScript là **`AbortController`** (trình duyệt, Node.js, Deno, Bun):\n\n- `const c = new AbortController()` cho bạn `c.signal`; gọi `c.abort()` sẽ phát sự kiện `abort` và đặt `signal.reason` thành một `AbortError`.\n- `AbortSignal.timeout(ms)` là một signal dựng sẵn, tự abort với `TimeoutError`; `AbortSignal.any([a, b])` abort khi bất kỳ signal đầu vào nào abort.\n- Các API của nền tảng nhận signal và thực sự dừng công việc: `fetch(url, { signal })`, `fs.readFile(path, { signal })`, `timers/promises`, `events.once`, child process, và hầu hết library hiện đại.\n\nBa quy tắc giúp việc hủy đáng tin cậy: **truyền signal xuống tận cùng** (hàm nào khởi động công việc async thì nên nhận một signal), **dọn dẹp khi abort** (xóa timer, gỡ listener, đóng socket), và **phân biệt abort với lỗi thật** (kiểm tra `err.name === 'AbortError'` hoặc `'TimeoutError'` trước khi log lỗi hay retry). Mọi lời gọi mạng ra ngoài trong server đều nên có timeout — một dependency bị treo mà không có timeout sẽ từ từ vắt kiệt connection và bộ nhớ."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Hàm `sleep` tự viết cho thấy cách biến bất kỳ thao tác dựa trên callback nào thành có thể hủy được: reject với `signal.reason` và, quan trọng nhất, xóa timer bên dưới để không còn công việc nào chạy dở. `AbortSignal.timeout` tạo ra `TimeoutError`, còn `abort()` thủ công tạo ra `AbortError`, và `AbortSignal.any` kết hợp signal hủy của người dùng với một deadline để một signal duy nhất điều khiển cả nhóm thao tác — cái nhanh hoàn thành, cái chậm bị cắt sau 1 giây.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Khái niệm event loop có trước cả JavaScript. I/O hướng sự kiện được tiên phong bởi các hệ thống như `select(2)` trong Unix (1983) và sau đó là `epoll` (Linux 2002), `kqueue` (FreeBSD/macOS 2000), và IOCP (Windows). Node.js (2009) đưa mô hình này thành dòng chính cho JavaScript phía server thông qua libuv. Promise được chuẩn hóa trong ES6 (2015) sau nhiều năm có các cài đặt cạnh tranh (jQuery Deferred, Q, Bluebird). `async/await` xuất hiện trong ES2017 — cùng tính năng đó đã có trong C# từ 2012, và Python 3.5 năm 2015. ECMAScript định nghĩa các Promise *job*, còn WHATWG HTML Living Standard định nghĩa cách trình duyệt lên lịch chúng trên microtask queue so với task và rendering. Node.js không bị ràng buộc bởi đặc tả HTML, trước đây chỉ làm trống microtask giữa các phase của libuv; từ Node 11 nó làm trống sau mỗi callback, giống trình duyệt."
+    },
+    {
+      "type": "callout",
+      "content": "**Những lỗi thường gặp và bẫy interview:**\n\n**Lỗi 1 — await tuần tự cho các request độc lập:** `const a = await fetch(urlA); const b = await fetch(urlB);` mất T_A + T_B mili giây. Hãy dùng `Promise.all([fetch(urlA), fetch(urlB)])` để chỉ mất T_max(A,B).\n\n**Lỗi 2 — Quên await:** `async function save() { db.save(data); }` — `db.save` trả về một Promise không bao giờ được await. Lỗi bị mất trong im lặng. Luôn await Promise hoặc return nó.\n\n**Lỗi 3 — await bên trong callback của một hàm không chờ async:** `[1,2,3].forEach(async id => { await fetchUser(id); })` — `forEach` không await các callback async; cả ba chạy đồng thời và lỗi có thể không được xử lý. Dùng `for...of` với `await` nếu muốn tuần tự, hoặc `Promise.all(items.map(...))` nếu muốn song song.\n\n**Lỗi 4 — Microtask starvation:** `while (running) { await Promise.resolve(); }` làm chết đói macrotask. Hãy nhường cho macrotask queue sau mỗi N vòng lặp — `setImmediate` trong Node, `setTimeout(r, 0)` hoặc `scheduler.yield()` (Chromium) trên trình duyệt, nơi timer lồng nhau bị ép tối thiểu ≥ 4 ms — hoặc tốt hơn, chuyển công việc nặng CPU sang một worker.\n\n**Góc interview:** Khi được hỏi 'event loop là gì?', đừng dừng ở câu 'nó xử lý code async'. Hãy giải thích call stack, hai queue, quy tắc làm trống microtask, và ràng buộc single-thread. Chính độ sâu đó phân biệt ứng viên mạnh."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Event loop** cho phép non-blocking I/O trên một thread JavaScript duy nhất: khi call stack rỗng, nó lấy task sẵn sàng tiếp theo từ các queue và đẩy lên stack.",
+        "**Microtask** (`Promise.then`, `queueMicrotask`, các lần tiếp tục của `async/await`) chạy trước **macrotask** (`setTimeout`, callback I/O, `setImmediate`) — toàn bộ microtask queue được làm trống hoàn toàn trước khi một macrotask được thực thi.",
+        "**async/await** là syntactic sugar trên Promise với ngữ nghĩa event loop y hệt — mỗi `await` là một ranh giới microtask, nơi hàm tạm dừng và event loop được rảnh để chạy việc khác.",
+        "Chặn call stack bằng công việc CPU đồng bộ (vòng lặp lớn, `readFileSync`) sẽ làm chết đói event loop: không timer nào chạy, không callback I/O nào chạy, UI không render cho tới khi công việc đồng bộ xong.",
+        "**libuv** (Node.js) xử lý I/O trong một native thread pool và qua các primitive async của kernel — bản thân JavaScript không bao giờ block; chỉ tầng native làm việc song song thật sự rồi đẩy kết quả về queue của JS.",
+        "Vòng lặp libuv của Node.js có sáu phase; `setImmediate` chạy ở phase check (sau poll I/O), còn `setTimeout(fn, 0)` chạy ở phase timers của vòng lặp kế tiếp — khiến `setImmediate` là lựa chọn đáng tin cậy để lên lịch sau I/O. Từ Node 11, callback của `process.nextTick` rồi tới microtask của Promise được làm trống sau *mỗi* callback, giống trình duyệt.",
+        "Unhandled Promise rejection mặc định làm crash Node.js 15+ — luôn gắn handler `.catch()` hoặc dùng `try/catch` với `await`, và đăng ký một handler `unhandledRejection` toàn cục làm lưới an toàn trên server production.",
+        "Promise không thể bị hủy — hãy dùng **`AbortController`** / `AbortSignal.timeout()`, truyền signal xuống `fetch` và các API khác, và dọn timer cùng listener khi abort."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Event loop xử lý hai thứ sau, được đăng ký cùng thời điểm, theo thứ tự nào: callback của `setTimeout(fn, 0)` (A) và callback của `Promise.resolve().then(fn)` (B)?",
+      "options": [
+        "A rồi B — setTimeout được đăng ký trước",
+        "B rồi A — microtask chạy trước macrotask",
+        "Đồng thời — event loop chạy chúng song song",
+        "A rồi B — setTimeout có độ ưu tiên queue cao hơn"
+      ],
+      "explanation": "Callback của Promise.then là microtask; callback của setTimeout là macrotask. Event loop làm trống toàn bộ microtask queue trước khi chạy bất kỳ macrotask nào, nên B luôn chạy trước A bất kể thứ tự đăng ký."
+    },
+    {
+      "id": "q2",
+      "question": "Output của đoạn sau là gì: `console.log('A'); setTimeout(() => console.log('B'), 0); Promise.resolve().then(() => console.log('C')); console.log('D');`?",
+      "options": [
+        "A D C B",
+        "A B C D",
+        "A D B C",
+        "A C D B"
+      ],
+      "explanation": "Code đồng bộ chạy trước: A, rồi D. Sau đó toàn bộ microtask được làm trống: C (Promise.then). Rồi tới một macrotask: B (setTimeout 0). Thứ tự cuối cùng: A D C B."
+    },
+    {
+      "id": "q3",
+      "question": "`await somePromise` làm gì với hàm async đang thực thi?",
+      "options": [
+        "Tạo một OS thread mới để chờ Promise",
+        "Block toàn bộ JavaScript engine cho tới khi Promise resolve",
+        "Tạm dừng hàm async và lên lịch phần tiếp theo của nó như một microtask khi Promise resolve",
+        "Chuyển Promise thành giá trị đồng bộ bằng cách polling"
+      ],
+      "explanation": "`await` chỉ tạm dừng hàm async bao quanh nó, trả quyền điều khiển cho event loop. Code đồng bộ và async khác vẫn có thể chạy. Khi Promise được await resolve, phần tiếp theo được lên lịch như một microtask — không phải thread mới, không block."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao `fs.readFileSync('large.csv')` gây hại cho một HTTP server Node.js trên production?",
+      "options": [
+        "Nó gây memory leak trong V8 heap",
+        "Nó tạo quá nhiều OS thread trong libuv",
+        "Node.js hoàn toàn không hỗ trợ đọc file đồng bộ",
+        "Nó block thread của event loop, khiến mọi request khác không được xử lý trong suốt thời gian đọc"
+      ],
+      "explanation": "I/O đồng bộ chiếm call stack trong toàn bộ thời gian đọc. Vì Node.js chỉ có một thread event loop, không request, timer hay callback nào khác có thể chạy cho tới khi readFileSync return — mọi client đang kết nối đồng thời đều bị treo."
+    },
+    {
+      "id": "q5",
+      "question": "Cách nào sau đây chạy đúng hai fetch song song và chờ cả hai?",
+      "options": [
+        "`const [a, b] = await Promise.all([fetch(u1), fetch(u2)]);`",
+        "`const a = await fetch(u1); const b = await fetch(u2);`",
+        "`await fetch(u1); await fetch(u2);` bên trong một Promise.race",
+        "`setTimeout(() => fetch(u1), 0); setTimeout(() => fetch(u2), 0);`"
+      ],
+      "explanation": "`Promise.all` khởi động cả hai fetch cùng lúc và resolve khi cả hai hoàn tất, mất thời gian max(T1, T2). Await tuần tự mất T1 + T2. Các lựa chọn còn lại sai hoặc là pattern không liên quan."
+    },
+    {
+      "id": "q6",
+      "question": "Trong Node.js, libuv xử lý I/O file system bằng:",
+      "options": [
+        "Thread event loop của JavaScript thông qua các lời gọi kernel đồng bộ",
+        "Thời gian rảnh của garbage collector V8",
+        "Một native thread pool, đẩy completion event về event loop của JS",
+        "Một child process Node.js được spawn cho mỗi thao tác file"
+      ],
+      "explanation": "libuv duy trì một native thread pool (mặc định 4 worker) cho thao tác file system. Code JS không tham gia trong lúc I/O; khi hệ điều hành xong, libuv đẩy completion callback vào macrotask queue để event loop của JS thực thi."
+    },
+    {
+      "id": "q7",
+      "question": "Điều gì xảy ra nếu các microtask handler liên tục thêm microtask mới?",
+      "options": [
+        "Một RangeError được throw sau một số lượng microtask cố định",
+        "Event loop tự động chuyển chúng thành macrotask sau 1000 microtask",
+        "Không có gì bất thường — microtask được thêm bên trong microtask sẽ chạy ở tick sau",
+        "Macrotask queue và việc render của trình duyệt bị block vô thời hạn — microtask starvation"
+      ],
+      "explanation": "Event loop làm trống TẤT CẢ microtask trước bất kỳ macrotask nào. Nếu microtask handler cứ thêm microtask mới, vòng lặp không bao giờ tiến lên — block timer, callback I/O và việc render của trình duyệt. Hiện tượng này gọi là microtask starvation."
+    },
+    {
+      "id": "q8",
+      "question": "Trong Node.js, khi được gọi từ bên trong một callback I/O, cái nào chạy trước: `setImmediate` hay `setTimeout(fn, 0)`?",
+      "options": [
+        "setTimeout(fn, 0) — nó được thiết kế là cách hoãn sớm nhất có thể",
+        "setImmediate — nó chạy ở phase check ngay sau phase poll trong cùng vòng lặp",
+        "Chúng tương đương và chạy theo thứ tự đăng ký",
+        "Không cái nào — cả hai chờ tới khi mọi microtask được làm trống"
+      ],
+      "explanation": "Bên trong một callback I/O, event loop của libuv đang ở phase poll. Sau khi poll xong, nó vào phase check nơi callback của setImmediate chạy — trước khi quay lại phase timers cho callback của setTimeout. Thứ tự này là tất định bên trong callback I/O."
+    },
+    {
+      "id": "q9",
+      "question": "Đoạn sau sai ở đâu: `[1, 2, 3].forEach(async id => { const user = await fetchUser(id); await saveUser(user); })`?",
+      "options": [
+        "forEach không await các callback async — cả ba chạy đồng thời và lỗi không được truyền ra scope bên ngoài",
+        "Không thể dùng async/await bên trong callback của forEach",
+        "fetchUser và saveUser phải được gọi mà không có await bên trong forEach",
+        "Code đúng và xử lý user tuần tự"
+      ],
+      "explanation": "forEach gọi từng callback rồi chuyển ngay sang cái kế tiếp, bất kể Promise được trả về. Cả ba callback async bắt đầu đồng thời. Lỗi trở thành Promise không được xử lý — chúng sẽ không được truyền ra ngoài. Dùng `for...of` với `await` nếu muốn tuần tự, hoặc `Promise.all(items.map(...))` nếu muốn song song kèm xử lý lỗi đúng cách."
+    },
+    {
+      "id": "q10",
+      "question": "Trong Node.js, quan hệ giữa `process.nextTick` và `Promise.resolve().then` là gì?",
+      "options": [
+        "Chúng giống hệt nhau — đều là microtask với cùng độ ưu tiên",
+        "Promise.then chạy trước process.nextTick vì Promise có độ ưu tiên cao hơn theo đặc tả",
+        "process.nextTick chạy trước Promise.then — nó có queue riêng với độ ưu tiên cao hơn, được làm trống trước",
+        "process.nextTick là macrotask; Promise.then là microtask"
+      ],
+      "explanation": "Node.js xử lý queue nextTick trước microtask queue của Promise trong mỗi lượt làm trống microtask. Cả hai đều \"giống microtask\" nhưng process.nextTick có độ ưu tiên cao hơn. Đây là hành vi riêng của Node.js; trình duyệt không có thứ gì tương đương process.nextTick. (Ở top level của một ES module thì thứ tự bị đảo, vì code của module vốn đã chạy bên trong một microtask.)"
+    }
+  ]
+}

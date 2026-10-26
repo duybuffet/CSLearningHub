@@ -1,0 +1,228 @@
+{
+  "sourceHash": "7572a9ed7763",
+  "title": "Scalability",
+  "tagline": "Cách hệ thống lớn lên để phục vụ hàng triệu user mà không phải viết lại từ đầu — những pattern giúp việc mở rộng trở nên dễ đoán.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Một hệ thống chạy hoàn hảo với 100 user thường sụp đổ ở mức 10,000 — không phải vì logic sai, mà vì mọi đường tắt kiến trúc tưởng như vô hại ở quy mô nhỏ đều trở thành nút thắt ở quy mô lớn. **Scalability** (khả năng mở rộng) là kỷ luật kỹ thuật thiết kế hệ thống chịu được tải tăng dần một cách êm ái, lý tưởng nhất là bằng cách thêm tài nguyên thay vì viết lại code.\n\nĐây là một trong những chủ đề hệ trọng nhất của kỹ thuật phần mềm, vì các quyết định quyết định hệ thống có mở rộng được hay không phần lớn được đưa ra ngay từ đầu, trước khi ai biết sản phẩm sẽ thành công tới đâu. Lắp thêm khả năng mở rộng vào một monolith vốn không được thiết kế cho nó là một trong những việc tốn kém và nguy hiểm nhất mà một team engineering có thể làm. Các engineer xây Rails monolith ban đầu của Twitter không hề lên kế hoạch cho 100 triệu user; những người thừa kế hệ thống đó đã mất nhiều năm để chuyển khỏi nó.\n\nTrong chương này, ta đi qua scalability từ nguyên lý gốc: tải thực sự nghĩa là gì, hai trục mở rộng cơ bản, tính stateless như điều kiện tiên quyết để mở rộng ngang, phân cấp caching (và bài toán invalidation khét tiếng), các chiến lược mở rộng database gồm read replica và sharding, công việc bất đồng bộ qua message queue, kiến trúc CDN, connection pooling, tổng quan ngắn về load balancing (có chương riêng), và khái niệm suy giảm êm ái (graceful degradation). Chương có các ví dụ code cụ thể và sơ đồ kiến trúc thực tế. Đọc xong, bạn sẽ nhìn vào bất kỳ thiết kế hệ thống nào và chỉ ra được các nút thắt sẽ hình thành ở đâu khi tải tăng — và biết pattern nào hóa giải từng cái."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một kiến trúc mở rộng ngang hoàn chỉnh: CDN hấp thụ traffic tĩnh, các app server stateless đứng sau load balancer, một tầng cache dùng chung giảm số lần đọc DB, read replica mở rộng việc đọc, và message queue tách công việc chậm khỏi đường phản hồi HTTP."
+    },
+    {
+      "type": "analogy",
+      "title": "Quán cà phê mở rộng",
+      "content": "Hãy hình dung một quán cà phê chỉ có một barista. Cô ấy phục vụ thoải mái 20 khách mỗi giờ. Tới 200 khách, hàng chờ tràn ra cửa. Bạn có hai lựa chọn.\n\n**Mở rộng dọc** (vertical scaling) là thuê một barista siêu nhân làm nhanh gấp tám lần — có thể là một robot pha cà phê giá $500,000. Cô ấy phục vụ được nhiều khách hơn mỗi giờ, nhưng có giới hạn vật lý (bạn không mua được robot làm nhanh vô hạn) và nếu cô ấy hỏng, cả quán đóng cửa.\n\n**Mở rộng ngang** (horizontal scaling) là mở mười quán giống hệt nhau với mười barista bình thường. Mỗi barista phục vụ 20 khách mỗi giờ như cũ; cộng lại là 200. Nếu một quán đóng cửa sửa chữa, chín quán còn lại vẫn chạy. Mẹo ở đây: mọi khách phải bước vào được *bất kỳ* quán nào mà barista không cần nhớ lần ghé trước của họ. Nếu điểm thưởng của khách được lưu trong một app dùng chung (session store bên ngoài), barista nào cũng phục vụ được họ. Nếu điểm được ghi trên mẩu giấy nhớ ở Quán #3 (state cục bộ trên server), vị khách đó bị dính chặt vào Quán #3 mãi mãi.\n\nTính stateless — đưa dữ liệu session ra ngoài — là điều kiện tiên quyết khiến mở rộng ngang hoạt động được. Nó là phiên bản kiến trúc của cái app điểm thưởng dùng chung."
+    },
+    {
+      "type": "explanation",
+      "title": "Mở rộng dọc vs. mở rộng ngang — trade-off nền tảng",
+      "content": "**Mở rộng dọc** (scale-up) nghĩa là thêm tài nguyên cho một máy duy nhất: thêm core CPU, thêm RAM, SSD nhanh hơn, card mạng nhanh hơn. Ưu điểm của nó là đơn giản — code ứng dụng không cần sửa gì — và nhất quán về transaction, vì chỉ có một máy. Nhược điểm là có trần cứng (instance EC2 hay server bare-metal lớn nhất mà tiền mua được) và là single point of failure (một máy crash = sập toàn bộ).\n\nMở rộng dọc là bước đi đầu tiên đúng đắn với phần lớn hệ thống. Chuyển từ máy 2 core sang máy 16 core với 128 GB RAM nhanh, an toàn, và thường mua thêm được vài tháng dư địa. Riêng PostgreSQL mở rộng dọc tốt đáng kinh ngạc trước khi phải dùng tới sharding ngang — nhiều công ty có hàng triệu user chạy trên một PostgreSQL primary duy nhất được tinh chỉnh tốt.\n\n**Mở rộng ngang** (scale-out) nhân bản service ra nhiều máy và phân phối tải giữa chúng. Nó gỡ bỏ trần (cần bao nhiêu máy thì thêm bấy nhiêu) và single point of failure (mất một node chỉ giảm capacity chút ít chứ không làm sập service). Cái giá của nó là độ phức tạp: service có state phải đưa state ra ngoài, request có thể rơi vào các máy khác nhau, và hệ thống phân tán mang theo cả một lớp failure mode hoàn toàn không tồn tại trên một máy duy nhất — phân mảnh mạng, lệch đồng hồ, lỗi một phần.\n\n**Pattern thực tế ở quy mô Internet**: mở rộng dọc cho database (shard rất tốn kém), mở rộng ngang cho app server (thiết kế stateless ngay từ ngày đầu), và kết hợp cả hai cho tầng caching (Redis Cluster shard theo chiều ngang trong khi mỗi shard là một master duy nhất kèm replica)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mở rộng dọc chạm trần; mở rộng ngang không giới hạn nhưng đòi hỏi bắt buộc phải thiết kế ứng dụng stateless."
+    },
+    {
+      "type": "explanation",
+      "title": "Stateless — điều kiện tiên quyết để mở rộng ngang",
+      "content": "**Stateless** nghĩa là app server không giữ dữ liệu riêng của request nào trong bộ nhớ cục bộ giữa các request. Mỗi request đến mang theo mọi thứ server cần để xử lý (hoặc server biết lấy dữ liệu còn thiếu ở store dùng chung nào).\n\nVi phạm kinh điển là **lưu session phía server trong bộ nhớ cục bộ**. Khi user đăng nhập, server A tạo một object session trong RAM của nó và lưu session ID vào cookie. Request tiếp theo từ user đó đến — nhưng load balancer route nó sang server B. Server B không có object session nào cho ID đó. User trông như đã bị đăng xuất. Cách sửa ngây thơ là **sticky session** (còn gọi là session affinity): load balancer route mọi request từ một client tới cùng một server bằng cookie hoặc IP hash. Sticky session chạy được cho tới khi server đó crash, lúc đó mọi user của nó bị đăng xuất cùng lúc — một thundering herd traffic xác thực lại.\n\nCách sửa đúng là đưa session state ra một **store dùng chung** — gần như luôn là Redis. Khi user đăng nhập, server A ghi session vào Redis với session ID làm key. Server B (hay C hay N) lấy được nó ở request tiếp theo. Bản thân app server giờ là stateless; Redis giữ state. Giờ load balancer route tự do được, instance thêm bớt được, và rolling deploy không downtime trở nên dễ dàng vì không server nào giữ state riêng.\n\nNhững dạng state khác phải đưa ra ngoài: file upload (dùng S3/object storage, không dùng đĩa cục bộ), state của tính toán đang dở (dùng Redis hoặc database), state của WebSocket connection (cần một tầng phối hợp như Redis pub/sub).\n\nPattern `JWT` (JSON Web Token) là một cách tiếp cận khác: mã hóa dữ liệu session trong một token có chữ ký lưu ở trình duyệt client. Không cần session store phía server — chính token là session. Trade-off là JWT không thu hồi được trước khi hết hạn nếu không có danh sách chặn token (thứ lại mang theo yêu cầu về store dùng chung)."
+    },
+    {
+      "type": "explanation",
+      "title": "Caching — công cụ mở rộng có đòn bẩy cao nhất",
+      "content": "Nếu bạn phục vụ được một response từ bộ nhớ thay vì query database, bạn đã thay một thao tác ~20ms bằng một thao tác ~0.5ms — nhanh gấp 40 lần mỗi request. Ở quy mô lớn, khác biệt này chính là ranh giới giữa một hệ thống chịu được 10,000 request mỗi giây và một hệ thống sụp ở mức 500.\n\n**Cache ở đâu (phân cấp cache)**:\n\n**1. Phía client (cache trình duyệt)**: Header HTTP `Cache-Control` chỉ dẫn trình duyệt và CDN cache response trong bao lâu. Với asset bất biến có hash nội dung (ví dụ `app.a1b2c3.js`), đặt `Cache-Control: public, max-age=31536000, immutable`. Với response API cá nhân hóa, đặt `Cache-Control: no-store`.\n\n**2. Cache ở CDN edge**: Một Content Delivery Network như Cloudflare hay AWS CloudFront cache response tại các data center rải khắp toàn cầu. Một user ở Tokyo chạm vào CDN edge tại đó nhận response đã cache trong 5ms thay vì một round-trip 150ms tới origin server ở Virginia. CDN hấp thụ phần lớn traffic của các site nặng media — một CDN cấu hình tốt có thể phục vụ 90% request mà không chạm tới origin server.\n\n**3. Cache ở reverse proxy (Nginx, Varnish)**: Đứng trước app server và cache toàn bộ HTTP response cho các request ẩn danh, không cá nhân hóa.\n\n**4. Cache ở tầng ứng dụng (Redis, Memcached)**: Ngựa thồ cho phần lớn caching phía backend. Lưu kết quả của các query đắt đỏ, các giá trị gộp đã tính, hoặc response của API bên thứ ba. Đọc dưới mili giây. Redis còn hỗ trợ các cấu trúc dữ liệu phong phú (sorted set cho leaderboard, pub/sub cho real-time, stream cho event log).\n\n**5. Caching ở tầng database**: buffer pool của chính database (PostgreSQL `shared_buffers`, InnoDB buffer pool) giữ các page nóng trong RAM. Cache tập kết quả bên trong database phần lớn đã biến mất — query cache của MySQL bị gỡ bỏ trong MySQL 8.0 vì lock invalidation toàn cục của nó làm hại concurrency — và PostgreSQL chưa từng có (nó chỉ cache plan cho prepared statement, theo từng connection).\n\n**Cache invalidation — bài toán nổi tiếng là khó**: Câu nhận xét nổi tiếng của Phil Karlton rằng \"trong khoa học máy tính chỉ có hai thứ khó: cache invalidation và đặt tên\" vẫn còn là nói giảm. Các chiến lược:\n\n- **TTL (time-to-live)**: Đặt thời hạn hết hạn. Dữ liệu cũ được phục vụ tối đa TTL giây. Đơn giản, luôn đúng trong một khoảng có giới hạn.\n- **Write-through**: Mỗi lần ghi vào database, cập nhật luôn cache. Cache luôn mới nhưng ghi chậm hơn (hai lần ghi thay vì một).\n- **Write-around**: Lần ghi chỉ đi vào database; cache được nạp ở lần đọc kế tiếp (lười). Dữ liệu cũ cho tới khi hết TTL hoặc có invalidation tường minh.\n- **Cache-aside (lazy loading)**: Ứng dụng quản lý cache một cách tường minh. Đọc: kiểm tra cache → hit thì trả về ngay, miss thì lấy từ DB và nạp cache. Ghi: cập nhật DB và xóa (hoặc cập nhật) cache key. Đây là pattern phổ biến nhất vì nó tường minh và dễ kết hợp.\n- **Invalidation theo event**: Một hệ thống change data capture (CDC) như Debezium stream các event thay đổi của database tới một consumer, consumer này invalidate hoặc cập nhật các cache key bị ảnh hưởng theo thời gian thực. Mạnh nhưng phức tạp."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern cache-aside: việc đọc luôn kiểm tra Redis trước. Một lần miss sẽ lấy dữ liệu từ read replica và nạp lại cache. Việc ghi đi vào DB primary và xóa cache key, buộc lần đọc kế tiếp phải lấy dữ liệu mới."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Pattern cache-aside cơ bản gồm ba bước: get, trả về nếu hit, fetch-set-return. Chiến lược xóa khi ghi (thay vì cập nhật khi ghi) tránh được race condition khi một lần cập nhật cache và một lần đọc đang dở ghi đè lên nhau. Phiên bản có chống stampede cho phép đúng một request query database khi miss lúc cache lạnh, trong khi các request khác chờ và kiểm tra lại cache; thời gian chờ có giới hạn, lock có TTL riêng phòng khi bên giữ lock chết, và kết quả \"không tìm thấy user\" được cache ngắn hạn để các bên đang chờ không lần lượt lọt xuống database. Với một lock bảo vệ tính đúng đắn chứ không chỉ hiệu quả, hãy dùng owner token (xem chương Caching and Search Stores).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Mở rộng database — read replica và sharding",
+      "content": "Database thường là nút thắt đầu tiên trong một hệ thống đang lớn lên, vì nó là thành phần khó mở rộng ngang nhất. Hiểu lộ trình các chiến lược mở rộng database là điều thiết yếu.\n\n**Read replica (mở rộng việc đọc)**\n\nPhần lớn web application đọc nhiều hơn ghi rất nhiều — tỉ lệ điển hình là 90% đọc, 10% ghi. Read replica là các bản sao bất đồng bộ của database primary, phục vụ các query `SELECT`. Các lần ghi (INSERT, UPDATE, DELETE) đi vào primary và được replicate sang replica trong vài mili giây.\n\nVới read replica, bạn route query đọc tới replica và query ghi tới primary. Throughput đọc tăng xấp xỉ tuyến tính theo số replica (mỗi replica vẫn phải phát lại mọi lần ghi, nên hệ thống ghi nhiều được lợi ít hơn). Cái giá là **replication lag**: replica chậm hơn primary một chút (thường vài mili giây, nhưng có thể vài giây khi tải ghi cao). Nghĩa là đọc từ replica có thể trả về dữ liệu hơi cũ. Điều này chấp nhận được với phần lớn đường đọc (hiển thị số follower của một user) nhưng không chấp nhận được với một số đường khác (hiển thị cho user dữ liệu form họ vừa submit — read-your-writes consistency). Hãy route trường hợp sau tới primary.\n\n**Connection pooling (mở rộng số connection)**\n\nMô hình connection của PostgreSQL là mỗi connection một process OS, mỗi cái tốn vài megabyte bộ nhớ, và việc quản lý theo từng connection thêm tranh chấp khi số lượng tăng — phần lớn PostgreSQL server chạy tốt nhất với tối đa vài trăm connection đang hoạt động (thường ít hơn nhiều, cỡ một bội số nhỏ của số core CPU). Với 1,000 app server được mở rộng ngang, mỗi cái mở 10 connection, bạn có 10,000 connection DB — thảm họa.\n\nMột **connection pool proxy** (PgBouncer cho PostgreSQL, ProxySQL cho MySQL) đứng giữa app server và database. Nó nhận hàng nghìn connection từ ứng dụng nhưng chỉ duy trì vài chục connection database thật, multiplex các query của ứng dụng qua pool. PgBouncer ở chế độ pooling `transaction` chỉ cấp một connection DB thật trong suốt thời gian một transaction, rồi trả nó về pool — hiệu quả cực lớn. Điểm vướng: mọi thứ gắn với một *session* đều hỏng, vì các transaction liên tiếp có thể chạy trên các connection server khác nhau — `SET` không có `LOCAL`, session advisory lock, `LISTEN`, bảng tạm. (Prepared statement ở mức protocol được hỗ trợ từ PgBouncer 1.21 qua `max_prepared_statements`.)\n\n**Phân vùng dọc (chia theo chức năng)**\n\nTrước khi sharding, hãy cân nhắc tách theo domain. Chuyển bảng `users` sang một database `users`, `orders` sang một database `orders`, mỗi cái trên phần cứng riêng. Các team khác nhau sở hữu các database khác nhau. Đây là cách database của microservices hoạt động. Mỗi database mở rộng độc lập. JOIN giữa các database trở thành join ở tầng ứng dụng — một cái giá đáng chịu để đổi lấy sự cô lập.\n\n**Sharding ngang**\n\nSharding chia một bảng duy nhất ra nhiều instance database theo một **shard key** (ví dụ `hash(user_id)` ánh xạ tới một shard — hệ thống production dùng consistent hashing hoặc một tập hash slot cố định thay vì `% N`, để thêm một shard không làm di chuyển phần lớn dữ liệu). Dữ liệu của user 0 nằm trên shard 0; của user 1 trên shard 1. Mỗi shard gánh một phần tổng tải. Sharding là kỹ thuật mở rộng mạnh nhất và cũng phức tạp nhất.\n\nLựa chọn shard key là then chốt và gần như không thể đảo ngược. Một key tồi gây ra **hot shard** — một shard nhận traffic bất cân xứng (ví dụ shard tweet theo `user_id` trong khi các tài khoản người nổi tiếng sinh ra hàng triệu tweet mỗi ngày). Shard key tốt rải tải đều *và* khớp với cách dữ liệu được query — thường là entity mà phần lớn query filter theo (user, tenant, account), có hash. ID theo thứ tự thời gian (Snowflake ID, UUIDv7, auto-increment) là primary key tuyệt vời nhưng phải được hash trước khi dùng để đặt vị trí; phân vùng theo dải trên chúng sẽ dồn mọi lần ghi mới vào shard mới nhất.\n\nQuery xuyên shard — JOIN trải qua nhiều shard — rất đắt hoặc bất khả thi ở tầng database và phải được xử lý trong code ứng dụng (scatter-gather: query mọi shard, gộp kết quả). Đó là lý do schema phải được thiết kế với shard key trong đầu ngay từ đầu."
+    },
+    {
+      "type": "diagram",
+      "caption": "Read replica hấp thụ phần lớn tải query. PgBouncer multiplex hàng nghìn connection của app thành ~100 connection DB thật, ngăn PostgreSQL cạn kiệt connection (replica thường cũng có pooler riêng)."
+    },
+    {
+      "type": "explanation",
+      "title": "Công việc bất đồng bộ — message queue và background worker",
+      "content": "Không phải thao tác nào được kích hoạt bởi một HTTP request cũng cần hoàn tất trước khi gửi response. Gửi email xác nhận, resize ảnh upload, tạo PDF, gửi webhook, tính lại thống kê tổng hợp — tất cả đều là những thao tác có thể hoãn lại mà không làm giảm trải nghiệm user.\n\nPattern là: HTTP handler publish một **job** vào **message queue** và trả về ngay `202 Accepted`. Một process **worker** chạy nền lấy job và thực thi nó bất đồng bộ. User thấy response nhanh; công việc chậm diễn ra ở chế độ nền.\n\nLợi ích cộng dồn khi có tải:\n- **Cô lập latency**: một đợt tăng vọt lượng email không làm chậm response của API.\n- **Ngữ nghĩa retry**: nếu gửi email thất bại (SMTP timeout), queue retry với exponential backoff, chứ không phải HTTP connection của user.\n- **Rate limit API bên thứ ba**: queue đóng vai bộ đệm — worker tiêu thụ job theo tốc độ mà API phía sau cho phép.\n- **San phẳng tải**: traffic burst ghi job vào queue; worker rút queue với tốc độ đều, ngăn hệ thống phía sau bị quá tải.\n\nCác message queue phổ biến:\n- **Redis (BullMQ, Celery với Redis broker)**: Đơn giản, nhanh, đã có sẵn trong stack của bạn. Phù hợp với phần lớn use case. Độ bền phụ thuộc vào persistence của Redis — không có AOF thì một lần restart có thể làm mất job trong queue, và kể cả `appendfsync everysec` cũng có thể mất khoảng một giây job; BullMQ còn yêu cầu `maxmemory-policy noeviction` để Redis không bao giờ loại bỏ dữ liệu job.\n- **PostgreSQL (pg-boss, Graphile Worker)**: Dùng database có sẵn. Bền vững, có transaction (enqueue job và ghi DB trong cùng một transaction — không mất job), với worker giành job qua `SELECT … FOR UPDATE SKIP LOCKED`. Chậm hơn Redis nhưng đúng đắn ngay từ mặc định. Lý tưởng cho các team không có người vận hành Redis.\n- **RabbitMQ**: Broker AMQP đầy đủ tính năng, giao nhận tin cậy, routing phức tạp. Thêm overhead vận hành.\n- **Apache Kafka**: Không phải queue truyền thống — mà là một distributed commit log. Hợp với event streaming throughput cao (hàng triệu event/giây), event sourcing và stream processing. Quá tay cho background job đơn giản.\n- **AWS SQS**: Managed hoàn toàn, rẻ, tin cậy. Lựa chọn hiển nhiên cho các team trên AWS không muốn tự vận hành queue."
+    },
+    {
+      "type": "code_example",
+      "explanation": "HTTP handler enqueue một job và trả về trong ~5ms — user nhận response tức thì. Worker lấy job và gọi email service chậm chạp. BullMQ tự động xử lý retry: `attempts: 3` nghĩa là một lần chạy cộng hai lần retry, chờ 2 s rồi 4 s theo exponential backoff, trước khi đánh dấu job thất bại. Vì một job có thể chạy nhiều hơn một lần (worker có thể crash sau khi gửi nhưng trước khi xác nhận), bước gửi email nên idempotent — ví dụ truyền job ID làm idempotency key. Worker chạy như một process Node.js riêng (hoặc nhiều process), mở rộng độc lập với HTTP server.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Kiến trúc CDN — đẩy nội dung ra edge",
+      "content": "**Content Delivery Network** là một mạng lưới server cache phân tán địa lý (edge node hay PoP — Point of Presence) lưu bản sao nội dung của bạn gần user. Thay vì mọi request đi từ Tokyo tới origin server ở Virginia (round-trip 150ms), một response đã cache được phục vụ từ edge node ở Tokyo trong 5ms.\n\n**CDN cache những gì**:\n- Asset tĩnh: bundle JavaScript, CSS, ảnh, font. Cache vĩnh viễn với tên file có hash nội dung (`app.a1b2c3.js`).\n- Video và media lớn: CDN xử lý sẵn request theo byte-range và streaming bitrate thích ứng.\n- Response API: Các response API cache công khai được (danh sách sản phẩm công khai, tỉ giá) có thể được cache ở edge. Đặt `Cache-Control: public, max-age=60, stale-while-revalidate=300`.\n- Trang HTML: Với site tĩnh (Jamstack/SSG), CDN phục vụ HTML đã render sẵn — server không bao giờ bị chạm tới ở lần tải trang đầu.\n\n**Các directive Cache-Control quan trọng ở tầng CDN**:\n- `public`: CDN được phép cache response này.\n- `private`: CDN không được cache — chỉ trình duyệt.\n- `max-age=N`: Cache trong N giây trước khi revalidate.\n- `s-maxage=N`: Ghi đè `max-age` riêng cho shared cache (CDN).\n- `stale-while-revalidate=N`: Phục vụ ngay nội dung cũ trong khi revalidate ở chế độ nền — loại bỏ khoảng \"chờ dữ liệu cũ\" khi làm mới cache.\n- `immutable`: Kết hợp với tên file có hash nội dung, bảo CDN đừng bao giờ revalidate (nội dung theo đúng nghĩa đen không thể thay đổi với URL này).\n\n**CDN invalidation**: Khi cần purge nội dung cũ (deploy lỗi, nội dung bị thu hồi), CDN cung cấp API cache invalidation. Nhưng invalidation lan tới mọi PoP mất từ vài giây tới vài phút — không tức thì. Đó là lý do content hashing đáng ưu tiên hơn cache invalidation: thay vì purge `app.js`, hãy deploy `app.a1b2c3.js` và cập nhật tham chiếu trong HTML. Cache của URL cũ tự hết hạn; URL mới bắt đầu sạch sẽ.\n\n**Edge computing**: CDN hiện đại (Cloudflare Workers, AWS Lambda@Edge) cho phép chạy code tại edge node. Kiểm tra xác thực, redirect cho A/B testing, header cá nhân hóa và routing theo địa lý đều có thể diễn ra ở edge trước khi request tới origin — đồng thời giảm cả tải origin lẫn latency."
+    },
+    {
+      "type": "diagram",
+      "caption": "CDN edge node cache response ở vị trí địa lý gần user. Một cache hit ở Tokyo phục vụ trong 5ms so với 150ms nếu tới origin. Tên file có hash nội dung khiến invalidation trở nên không cần thiết — lần deploy mới chỉ đơn giản dùng URL mới."
+    },
+    {
+      "type": "explanation",
+      "title": "Load balancing — tổng quan ngắn",
+      "content": "**Load balancer** phân phối request qua một pool các app server stateless giống hệt nhau và ngừng gửi traffic tới những server không khỏe. Những điểm cốt yếu (chương Load Balancing đi sâu hơn):\n\n- **Thuật toán**: round-robin (mặc định, ổn khi các request tốn chi phí xấp xỉ nhau), weighted round-robin (máy lớn hơn nhận nhiều hơn), least connections / least outstanding requests (tốt hơn khi thời gian xử lý request chênh lệch), và hashing (cùng client hoặc key → cùng server, để có affinity hoặc tính cục bộ của cache — dùng consistent hashing để việc thay đổi server chỉ ánh xạ lại một phần nhỏ client).\n- **Health check**: các probe như `GET /health` loại server lỗi và đưa chúng trở lại khi hồi phục; kết hợp với **connection draining**, đây là thứ giúp rolling deploy không downtime hoạt động được.\n- **Layer 4 vs. Layer 7**: L4 (AWS NLB) chuyển tiếp TCP/UDP connection mà không đọc HTTP — rất nhanh, không phụ thuộc protocol. L7 (AWS ALB, Nginx, HAProxy, Envoy) parse HTTP, nên có thể route theo path hoặc header, kết thúc TLS và retry các request idempotent. Phần lớn web application dùng L7.\n- **Load balancer không được trở thành single point of failure mới**: chạy nó dưới dạng một cặp dự phòng hoặc dùng dịch vụ managed nhiều zone, và dùng DNS hoặc anycast để rải traffic qua các load balancer và region."
+    },
+    {
+      "type": "explanation",
+      "title": "Rate limiting và suy giảm êm ái",
+      "content": "Scalability không chỉ là chịu được nhiều tải hơn — mà còn là chịu được những đợt tăng vọt bất ngờ mà không sập, và phục vụ response suy giảm nhưng vẫn dùng được khi các dependency phía sau lỗi.\n\n**Rate limiting** bảo vệ hệ thống khỏi bị một client duy nhất làm quá tải (lạm dụng có chủ ý hoặc code chạy mất kiểm soát). Các chiến lược cài đặt:\n\n- **Token bucket**: Mỗi client có một bucket được bù lại với tốc độ cố định (ví dụ 100 token/giây). Mỗi request tốn một token. Khi bucket rỗng, request bị từ chối với 429. Cho phép burst ngắn tới kích thước bucket.\n- **Fixed window counter**: Đếm request của mỗi client mỗi phút. Từ chối khi vượt giới hạn. Đơn giản nhưng cho phép gấp 2 giới hạn ở ranh giới cửa sổ.\n- **Sliding window log**: Ghi lại timestamp của mọi request trong một cửa sổ trượt. Chính xác nhưng tốn bộ nhớ khi lên quy mô.\n- **Sliding window counter**: Bản lai xấp xỉ sliding window bằng hai counter fixed window. Hiệu quả và đủ chính xác cho production.\n\nRedis là backend tiêu chuẩn cho rate limiting phân tán — `INCR` + `EXPIRE` cho fixed window, sorted set cho sliding window log. Upstash Rate Limit và AWS API Gateway cung cấp rate limiting managed.\n\n**Suy giảm êm ái** (graceful degradation) nghĩa là trả về một response hữu ích dù chưa đầy đủ khi một dependency lỗi, thay vì một lỗi toàn phần. Ví dụ:\n\n- Recommendation service sập → trả trang chủ không có widget gợi ý, chứ không phải 500.\n- Cache cluster không truy cập được → phục vụ từ database (chậm hơn nhưng đúng), không báo lỗi.\n- API thanh toán bên thứ ba bị timeout → hiển thị cho user một trang thân thiện \"đang xử lý thanh toán, vui lòng chờ\" trong khi retry ở chế độ nền, chứ không phải một exception chưa được xử lý.\n\n**Circuit breaker** cài đặt pattern này một cách có hệ thống. Circuit breaker bọc các lời gọi tới một service remote. Khi tỉ lệ lỗi vượt ngưỡng (ví dụ 50% lời gọi trong 10 giây thất bại), mạch \"mở\" — các lời gọi tiếp theo thất bại ngay mà không chạm tới service (fail fast). Sau một khoảng timeout, một request thử duy nhất được cho đi qua. Nếu thành công, mạch đóng (hoạt động bình thường); nếu không, mạch tiếp tục mở. Điều này ngăn một dependency đang lỗi lan dây chuyền thành sự cố sập toàn hệ thống, nhờ **nguyên tắc fail fast**. Library: `opossum` (Node.js), `Resilience4j` (Java — người kế nhiệm của cộng đồng sau khi Netflix đưa Hystrix vào chế độ bảo trì năm 2018), `Polly` (.NET)."
+    },
+    {
+      "type": "diagram",
+      "caption": "State machine của circuit breaker: Closed (bình thường), Open (fail fast), Half-Open (thăm dò hồi phục). Ngăn một dependency đang lỗi lan dây chuyền thành sự cố sập toàn bộ."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Năm pattern trong một file: một Redis session store cho app server stateless, các pool `pg` sống lâu (mỗi đích một pool) để tái sử dụng connection và route giữa primary với replica, header Cache-Control có nhận biết hash nội dung, và một rate limiter sliding window dùng Redis sorted set. Limiter chạy như một Lua script duy nhất để chuỗi xóa-đếm-thêm là atomic — gửi chúng thành các command riêng sẽ để các request đồng thời cùng lọt qua bước kiểm tra — và mỗi request có một member duy nhất, vì hai request trong cùng một mili giây với member là `now` sẽ bị gộp thành một entry. Mỗi pattern có thể được áp dụng độc lập.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Các ngộ nhận về điện toán phân tán** (Fallacies of Distributed Computing — bảy điều đầu tiên được L. Peter Deutsch và đồng nghiệp ở Sun Microsystems tổng hợp khoảng năm 1994; James Gosling thêm điều thứ tám năm 1997) là 8 giả định mà các engineer mới làm hệ thống phân tán thường mặc định sai: (1) mạng là tin cậy, (2) latency bằng không, (3) bandwidth là vô hạn, (4) mạng là an toàn, (5) topology không thay đổi, (6) chỉ có một người quản trị, (7) chi phí vận chuyển bằng không, (8) mạng là đồng nhất. Mọi pattern scalability — caching, nhận biết replication lag, circuit breaker, queue bất đồng bộ — tồn tại để bù đắp cho việc một hay nhiều giả định sai này trở thành hiện thực khi lên quy mô. Khi một hệ thống phân tán hành xử bất ngờ, hãy kiểm tra ngộ nhận nào đã bị vi phạm."
+    },
+    {
+      "type": "callout",
+      "content": "**Khi nào nên mở rộng và khi nào KHÔNG**: Tối ưu sớm ở tầng kiến trúc có hại không kém tối ưu sớm ở tầng thuật toán. Một instance PostgreSQL duy nhất với index tốt có thể thoải mái xử lý hàng nghìn request mỗi giây. Trước khi thêm Redis, read replica và message queue, hãy đo: profile các query chậm, kiểm tra metric của database, và xem latency p95/p99. Nút thắt thực sự phổ biến nhất không phải database server — mà là một index bị thiếu, một N+1 query, hay các lời gọi đồng bộ tới một API bên thứ ba chậm chạp. **Sửa code trước khi mở rộng hạ tầng**. Các framework thực tế hiện thân những pattern này: Rails dùng ActiveJob với Sidekiq (Redis) hoặc Solid Queue (dựa trên database, mặc định của Rails 8); Django dùng Celery + Redis; NestJS dùng BullMQ; Laravel dùng Horizon. AWS ElastiCache (Redis OSS hoặc Valkey), RDS Read Replicas, CloudFront (CDN) và SQS ánh xạ trực tiếp các khái niệm này thành dịch vụ managed."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Stateless là điều kiện tiên quyết để mở rộng ngang**: app server phải lưu dữ liệu session trong một store dùng chung bên ngoài (Redis) thay vì bộ nhớ cục bộ, để instance nào cũng xử lý được request nào.",
+        "**Caching là công cụ mở rộng có đòn bẩy cao nhất**: tra cứu trong bộ nhớ (Redis, ~0.5ms) nhanh gấp 40 lần query database (~20ms); cache ở nhiều tầng — CDN edge, reverse proxy, ứng dụng và database — và luôn đặt TTL làm lưới an toàn phòng khi bỏ sót invalidation.",
+        "**Read replica mở rộng throughput đọc**: route phần lớn lần đọc tới replica, dành primary cho việc ghi và read-your-own-writes, và thiết kế đường đọc chịu được replica lag; dùng PgBouncer (chế độ transaction — lưu ý các tính năng gắn với session) để ngăn cạn kiệt connection khi số app server tăng.",
+        "**Sharding** là phương án cuối cùng để mở rộng việc ghi: hash key mà phần lớn query filter theo (user, tenant), tránh đặt vị trí theo dải trên ID có thứ tự thời gian, và chuẩn bị cho việc query xuyên shard phải dùng scatter-gather.",
+        "**Message queue tách công việc chậm khỏi đường phản hồi HTTP**: enqueue job cho email, xử lý ảnh và webhook để handler trả về trong <10ms bất kể latency phía sau, với ngữ nghĩa retry và backoff tự động có sẵn.",
+        "**Cache ở CDN edge giảm tải origin đáng kể**: tên file có hash nội dung kết hợp với `Cache-Control: public, max-age=31536000, immutable` cho phép CDN phục vụ asset tĩnh vô thời hạn mà không tốn overhead invalidation; `stale-while-revalidate` loại bỏ hình phạt hiệu năng do cache lạnh với response API.",
+        "**Circuit breaker ngăn lỗi dây chuyền**: khi tỉ lệ lỗi của một dependency vượt ngưỡng, mạch mở và các lời gọi tiếp theo fail fast — bảo vệ hệ thống khỏi việc một dependency chậm gây sập toàn bộ do timeout tích tụ.",
+        "**Đo trước khi mở rộng**: nút thắt phổ biến nhất là một index database bị thiếu hoặc một N+1 query, không phải thiếu server; hãy profile latency p95/p99 và query plan của database trước khi thêm độ phức tạp hạ tầng."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Yêu cầu kiến trúc nền tảng nào giúp mở rộng ngang app server trở nên khả thi?",
+      "options": [
+        "App server phải stateless — dữ liệu session được lưu trong một store dùng chung bên ngoài như Redis",
+        "Mỗi app server phải có một connection database riêng",
+        "Mọi app server phải chạy trên phần cứng có cấu hình giống hệt nhau",
+        "Load balancer phải dùng sticky session để ghim mỗi client vào một server"
+      ],
+      "explanation": "App server stateless nghĩa là instance nào cũng xử lý được request nào, vì session state nằm trong Redis chứ không phải trong bộ nhớ cục bộ của server. Load balancer route tự do được, instance thêm bớt được, và rolling deploy trở nên dễ dàng — không điều nào trong số đó khả thi khi session state nằm cục bộ."
+    },
+    {
+      "id": "q2",
+      "question": "Trong pattern cache-aside, trình tự thao tác đúng khi cache MISS với một request đọc là gì?",
+      "options": [
+        "Trả lỗi 404 và để client retry",
+        "Query database, trả kết quả, và nạp cache một cách lười ở request tiếp theo",
+        "Query database, nạp cache kèm TTL, rồi trả kết quả",
+        "Chuyển tiếp request tới database primary và bỏ qua hoàn toàn cache"
+      ],
+      "explanation": "Cache-aside (lazy loading): khi miss, ứng dụng query database, lưu kết quả vào cache kèm TTL cho các request sau, rồi trả kết quả. TTL đảm bảo dữ liệu cũ hết hạn kể cả khi sau này bỏ sót invalidation tường minh."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao \"xóa cache key khi ghi\" được ưu tiên hơn \"cập nhật cache key khi ghi\" trong pattern cache-aside?",
+      "options": [
+        "Xóa nhanh hơn set trong Redis",
+        "Cập nhật cache đòi hỏi cùng định dạng serialize đã dùng lúc đọc",
+        "Redis không hỗ trợ cập nhật key đã tồn tại bằng giá trị mới",
+        "Xóa tránh được race condition khi một lần đọc cũ đang dở ghi đè lên giá trị cache vừa được cập nhật"
+      ],
+      "explanation": "Nếu bạn cập nhật cache đồng thời với một lần đọc đang dở, response của lần đọc cũ có thể ghi đè lên giá trị cache mới sau lần ghi của bạn. Xóa key buộc lần đọc kế tiếp lấy dữ liệu mới từ database, tránh được race condition này."
+    },
+    {
+      "id": "q4",
+      "question": "Replication lag là gì, và pattern truy cập nào phải route tới database primary để tránh nó?",
+      "options": [
+        "Replication lag là thời gian để replica khởi động lại; báo cáo batch phải dùng primary",
+        "Replication lag là độ trễ giữa lúc ghi vào primary và lúc nó xuất hiện trên replica; read-your-own-writes phải dùng primary",
+        "Replication lag là độ trễ gây ra bởi connection pooling; query ưu tiên cao phải bỏ qua PgBouncer",
+        "Replication lag là một khái niệm của CDN; response API thay đổi thường xuyên phải bỏ qua CDN"
+      ],
+      "explanation": "Replica nhận các lần ghi từ primary một cách bất đồng bộ, tạo ra một độ trễ nhỏ (thường vài mili giây, đôi khi vài giây). Một user vừa submit form rồi đọc ngay dữ liệu của chính mình có thể thấy dữ liệu cũ từ replica. Hãy route các pattern \"read-your-writes\" tới primary để đảm bảo tính nhất quán."
+    },
+    {
+      "id": "q5",
+      "question": "Một connection pool proxy như PgBouncer giải quyết vấn đề mở rộng database cụ thể nào?",
+      "options": [
+        "Hàng nghìn app instance mỗi cái giữ connection DB mở, làm cạn giới hạn connection của PostgreSQL",
+        "Hiệu năng query chậm do thiếu index",
+        "Replication lag giữa primary và read replica",
+        "Hiệu năng JOIN xuyên shard trong một cluster database đã shard"
+      ],
+      "explanation": "PostgreSQL tạo một process OS cho mỗi connection. Mỗi connection tốn bộ nhớ, và vượt quá vài trăm connection đang hoạt động thì tranh chấp làm giảm hiệu năng. Với 1,000 app server instance mỗi cái giữ 10 connection, bạn có 10,000 connection DB — thảm họa. PgBouncer multiplex chúng thành ~100 connection database thật, giải quyết vấn đề mà không cần sửa code ứng dụng."
+    },
+    {
+      "id": "q6",
+      "question": "\"Cache stampede\" (thundering herd) là gì và pattern nào ngăn được nó?",
+      "options": [
+        "Khi CDN edge purge mọi key cùng lúc; ngăn bằng TTL rải đều",
+        "Khi một cache key phổ biến hết hạn và hàng trăm request đồng thời cùng miss và cùng dội vào database; ngăn bằng distributed lock hoặc revalidate sớm theo xác suất",
+        "Khi một Redis cluster failover và mọi key bị mất; ngăn bằng AOF persistence",
+        "Khi write-through caching gây khuếch đại ghi; ngăn bằng write-around caching"
+      ],
+      "explanation": "Khi một cache key phổ biến hết hạn lúc tải cao, mọi request đồng thời đều miss cache và tự query database — một thundering herd. Distributed lock đảm bảo chỉ một request lấy dữ liệu từ DB trong khi các request khác chờ. Revalidate sớm theo xác suất làm mới cache hơi sớm trước khi hết hạn để ngăn các lần miss đồng loạt."
+    },
+    {
+      "id": "q7",
+      "question": "Tổ hợp header Cache-Control nào phù hợp cho một bundle JavaScript có hash nội dung trong tên file (ví dụ app.a1b2c3d4.js)?",
+      "options": [
+        "Cache-Control: no-cache",
+        "Cache-Control: private, max-age=3600",
+        "Cache-Control: no-store",
+        "Cache-Control: public, max-age=31536000, immutable"
+      ],
+      "explanation": "Một tên file có hash nội dung (ví dụ app.a1b2c3d4.js) là duy nhất cho đúng nội dung đó — nội dung thay đổi sẽ cho ra tên file mới. Vì vậy URL có thể được cache mãi mãi. `public` cho phép CDN cache; `max-age=31536000` (1 năm) tối đa thời gian sống của cache; `immutable` bảo trình duyệt không revalidate kể cả khi refresh cưỡng bức."
+    },
+    {
+      "id": "q8",
+      "question": "Lợi ích chính của việc enqueue một background job để gửi email chào mừng thay vì gửi đồng bộ trong HTTP handler là gì?",
+      "options": [
+        "Các library email không thread-safe và crash dưới tải đồng thời",
+        "Latency của HTTP response được giữ thấp bất kể latency của SMTP, và lỗi được retry tự động qua queue",
+        "Background worker có giao diện mạng nhanh hơn HTTP server",
+        "HTTP handler không mở được TCP connection tới SMTP server vì rule của firewall"
+      ],
+      "explanation": "Một lời gọi email đồng bộ có thể mất 200–500ms và có thể timeout hoặc lỗi. Enqueue trả về HTTP response trong <10ms — user nhận xác nhận tức thì. Queue xử lý retry với exponential backoff nếu dịch vụ SMTP tạm thời không truy cập được, mà không chặn connection của user."
+    },
+    {
+      "id": "q9",
+      "question": "Một circuit breaker đang ở trạng thái OPEN. Điều này có nghĩa gì với các request đến service được bọc?",
+      "options": [
+        "Request thất bại ngay mà không gọi service remote (fail fast)",
+        "Request được tự động route tới một service dự phòng",
+        "Request được xếp hàng và phát lại khi service hồi phục",
+        "Request được cho đi qua ở mức 50% capacity để thăm dò hồi phục"
+      ],
+      "explanation": "Ở trạng thái Open, circuit breaker ngắt mạch mọi lời gọi — chúng thất bại ngay mà không cố tiếp cận service remote. Điều này ngăn một dependency chậm hoặc lỗi tích tụ timeout trên mọi request đồng thời, thứ mà nếu không sẽ lan dây chuyền thành cạn kiệt tài nguyên hoàn toàn."
+    },
+    {
+      "id": "q10",
+      "question": "Mối lo ngại nào về sharding khiến lựa chọn shard key gần như không thể đảo ngược một khi đã có dữ liệu production?",
+      "options": [
+        "Shard key phải là số nguyên duy nhất toàn cục, và đổi kiểu đòi hỏi dựng lại toàn bộ bảng",
+        "Shard key được lưu trong schema database và không đổi được bằng ALTER TABLE",
+        "Đổi shard key đòi hỏi phân phối lại toàn bộ dữ liệu hiện có qua các shard, điều cấm kỵ về mặt vận hành khi đã lên quy mô",
+        "Caching ở CDN dùng shard key làm key, nên đổi nó sẽ vô hiệu hóa mọi response đã cache"
+      ],
+      "explanation": "Khi bạn reshard — thay đổi cách dữ liệu được phân phối qua các node — mọi dòng phải được đọc, hash lại và ghi sang shard mới. Ở quy mô terabyte với traffic đang chạy, đây là một cuộc di chuyển khổng lồ và đầy rủi ro. Đó là lý do các team đầu tư rất nhiều vào việc chọn đúng shard key trước khi dữ liệu lớn tới mức reshard trở nên đau đớn."
+    }
+  ]
+}

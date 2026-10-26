@@ -1,0 +1,212 @@
+{
+  "sourceHash": "398f2e7b6f0c",
+  "title": "Case study thiết kế hệ thống (System Design Case Studies)",
+  "tagline": "URL shortener, news feed, ứng dụng chat — đi qua yêu cầu, ước lượng và thiết kế thành phần cho ba đề interview kinh điển.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Interview thiết kế hệ thống không phải bài kiểm tra kiến thức vụn vặt. Đó là những cuộc trò chuyện kỹ thuật mở, bộc lộ cách bạn suy nghĩ về trade-off, quy mô và lỗi. Các câu hỏi kinh điển — URL shortener, news feed mạng xã hội, chat real-time — cứ lặp lại vì chúng đủ phong phú để thử thách mọi khía cạnh kiến thức về hệ thống phân tán trong vòng chưa tới một giờ.\n\nThứ interviewer thực sự đo là **quá trình lập luận** của bạn, không phải việc bạn có đi tới một kiến trúc \"đúng\" định sẵn nào đó hay không. Mọi câu trả lời tốt đều theo cùng một bộ khung: làm rõ yêu cầu → ước lượng quy mô → chọn data store → thiết kế API → vẽ sơ đồ thành phần → bàn về nút thắt và trade-off → đề xuất giám sát và các failure mode.\n\nChương này đi trọn từ đầu tới cuối ba bài toán kinh điển với độ sâu đầy đủ, để quy trình này trở thành phản xạ. Ta sẽ đi qua URL shortener (kiểu bit.ly), news feed mạng xã hội (kiểu Twitter/Instagram) và chat real-time (kiểu WhatsApp/Slack). Mỗi phần xem xét yêu cầu, tính toán capacity, data model, đường đọc/ghi, chiến lược caching, và các quyết định kiến trúc then chốt phân biệt câu trả lời của junior với câu trả lời của senior.\n\nTrên đường đi, bạn sẽ gặp các khái niệm nền tảng của hệ thống phân tán — **fan-out**, **write amplification**, **làm ấm cache**, **routing WebSocket**, **eventual consistency** — trong ngữ cảnh cụ thể thay vì lý thuyết suông. Đọc xong, bạn sẽ có một khuôn mẫu tư duy tái sử dụng được cho bất kỳ bài toán thiết kế hệ thống mới nào."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bộ khung phổ quát cho interview thiết kế hệ thống — mọi câu trả lời tốt đều đi qua đủ bảy giai đoạn, xấp xỉ theo thứ tự này."
+    },
+    {
+      "type": "analogy",
+      "title": "Phép so sánh với bếp nhà hàng",
+      "content": "Hãy nghĩ về một hệ thống phân tán như một nhà hàng. **Thực đơn** là hợp đồng API — nó định nghĩa khách được gọi món gì. **Đội phục vụ** là các web server, route request tới đúng khu. **Người điều phối** ở quầy chuyển món là load balancer. Các **khu bếp** — nướng, xào, bánh ngọt — là các microservice hoặc worker chuyên biệt. **Kho lạnh** là database (nguồn sự thật, bền vững). **Khay sơ chế sẵn** (mise en place) ở mỗi khu là cache (nhanh, sẵn sàng, tạm thời). **Thanh treo phiếu order** là message queue — order dồn lại và được xử lý theo thứ tự.\n\nMột căn bếp chậm không tự nhanh lên bằng cách thuê một đầu bếp thiên tài. Bạn hoặc chia nhỏ thực đơn (ít món hơn mỗi khu = **chia tách service**), chuẩn bị trước nhiều hơn (**caching / tính toán sẵn**), thêm các khu song song (**mở rộng ngang**), hoặc thiết kế lại luồng phiếu order (**tách rời bằng queue**). Mọi trade-off trong thiết kế hệ thống đều ánh xạ gọn gàng vào phép ẩn dụ nhà hàng này."
+    },
+    {
+      "type": "explanation",
+      "title": "Case study 1: URL shortener (bit.ly / TinyURL)",
+      "content": "**Yêu cầu chức năng:** Cho một URL dài, sinh một short code duy nhất và lưu ánh xạ. Cho một short code, redirect client về URL gốc. Tùy chọn hỗ trợ ngày hết hạn, alias tùy chỉnh và analytics lượt click theo từng link.\n\n**Yêu cầu phi chức năng:** Đọc (redirect) phải hoàn tất dưới 100ms kể cả tra cache. Ghi (link mới) có thể chịu được tới 500ms. Hệ thống phải có availability cao — một dịch vụ redirect bị sập sẽ phá hủy lòng tin của user.\n\n**Ước lượng capacity:** Giả sử mỗi ngày tạo 100 triệu URL mới — khoảng 1,160 lần ghi mỗi giây. Giả sử số lần đọc gấp 100 lần ghi (link viral nhận rất nhiều click) — trung bình 116,000 lần đọc mỗi giây, và lên kế hoạch cho đỉnh gấp 2–3 lần (~250,000–350,000/s). Lưu trữ: mỗi dòng lưu short code (7 byte), URL dài (trung bình 200 byte), metadata (50 byte). 100M dòng/ngày × 365 = 36.5 tỉ dòng mỗi năm × ~260 byte = khoảng **9.5 TB mỗi năm**, ~50 TB sau năm năm. Con số đó vượt quá một PostgreSQL primary đơn lẻ thoải mái trong vòng một hai năm, nên hãy lên kế hoạch shard theo short code (hoặc dùng một distributed key-value store như DynamoDB hay Cassandra, rất hợp với kiểu tra cứu key→value thuần túy này).\n\n**Các quyết định thiết kế then chốt:**\n\n*Sinh short code — mã hóa Base62 cho ID auto-increment:* Một số nguyên auto-increment của database vốn đã duy nhất. Mã hóa nó bằng Base62 (ký tự a–z, A–Z, 0–9) để có một code chữ-số gọn. Đối chiếu độ dài code với ước lượng: `62^6 ≈ 56.8 billion` code, nhưng với 36.5 tỉ link mới mỗi năm, sáu ký tự sẽ cạn trong khoảng **18 tháng**. `62^7 ≈ 3.5 trillion` dùng được ~96 năm với tốc độ này, nên hãy dùng **7 ký tự**. (Luôn làm phép kiểm tra này — đây là lỗi kinh điển trong interview.) ID tuần tự khiến code đoán được, nên các dịch vụ quan tâm tới việc bị liệt kê sẽ xáo trộn không gian ID (ví dụ một phép hoán vị khả nghịch trên ID trước khi mã hóa) hoặc dùng code ngẫu nhiên kèm kiểm tra tính duy nhất. Một DB sequence duy nhất ở mức ~1,200 lần ghi/s là ổn; ở tốc độ cao hơn, app server thuê các **dải ID** (ví dụ mỗi lần 10,000) từ một coordinator. Cách còn lại — hash URL dài rồi cắt ngắn — có xác suất trùng tăng theo bình phương số link và cần vòng lặp retry phát hiện trùng.\n\n*Đường đọc — cache trước, DB dự phòng:* 116,000 lần đọc/giây vượt quá sức một instance Postgres (khoảng 10,000–50,000 query đơn giản có index mỗi giây trên phần cứng thông thường), nên database không thể là đường đọc. Cache các short code nóng trong Redis với TTL 24 giờ. Phân phối lượt click theo luật lũy thừa nghĩa là ~20% link nhận 80% traffic — cache hit rate trong production thường đạt 95%+. Cache miss sẽ đọc từ Postgres và nạp bù vào cache.\n\n*Redirect 301 hay 302:* `301 Moved Permanently` bảo trình duyệt (và CDN) cache redirect vĩnh viễn — các lần click sau đi thẳng tới đích mà không chạm tới server của bạn, giảm đáng kể chi phí hạ tầng. Tuy nhiên bạn mất dữ liệu analytics lượt click vì trình duyệt không bao giờ liên hệ lại redirect server. `302 Found` không được cache — mọi lần click đều đi qua server của bạn — cho phép làm analytics với cái giá là traffic cao hơn. Câu trả lời đúng phụ thuộc yêu cầu sản phẩm. Trong interview, nêu rõ trade-off quan trọng hơn việc chọn một bên.\n\n*Khử trùng:* Nếu cùng một URL dài được gửi hai lần, nên trả cùng short code hay tạo code mới? Trả cùng code (khử trùng theo URL dài) tiết kiệm lưu trữ nhưng cần thêm một index trên URL dài — rất lớn (key 200 byte × hàng tỉ dòng) và thêm một lần tra cứu ở mỗi lần ghi; những team cần tính năng này sẽ đánh index trên một hash kích thước cố định của URL. Tạo code mới mỗi lần thì phí chỗ nhưng tránh được chi phí tra cứu. Nhiều hệ thống production tạo code mới và chấp nhận dư thừa.\n\n*Alias tùy chỉnh:* Cho phép user tự chỉ định short code (ví dụ `bit.ly/launch2024`). Lưu trong cùng bảng kèm một cờ. Áp rate limiting để chống lạm dụng. Code tùy chỉnh bỏ qua bước mã hóa auto-increment.\n\n*Hết hạn:* Lưu `expires_at` dưới dạng một timestamp nullable. Redirect handler kiểm tra hạn trước khi redirect. Một background job (cron hoặc queue consumer) định kỳ xóa cứng hoặc xóa mềm các dòng đã hết hạn — đừng xóa trên đường đọc nóng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường ghi của URL shortener: web server gán một ID auto-increment, mã hóa nó sang Base62, lưu vào Postgres và làm ấm Redis. Đường đọc: CDN edge phục vụ phần lớn redirect; cache miss rơi xuống web server rồi Redis rồi Postgres."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Đường ghi insert trước để giành một ID duy nhất, rồi suy ra code từ đó — không trùng, không vòng lặp retry. Bảy ký tự Base62 cho ~3.5 nghìn tỉ code, đủ cho ước lượng 36.5 tỉ link/năm. Đường đọc ưu tiên cache: một lần hit Redis tốn khoảng 1ms và không thêm tải DB, và TTL khi nạp bù được chặn trần ở thời điểm hết hạn của link để cache không bao giờ phục vụ một link đã hết hạn. Field `source` hữu ích cho việc giám sát cache hit rate.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Case study 2: News feed mạng xã hội (Twitter / Instagram)",
+      "content": "**Yêu cầu chức năng:** User có thể đăng nội dung (văn bản, ảnh, video). User xem một feed gồm bài đăng từ các tài khoản họ follow, sắp theo thời gian mới nhất trước hoặc theo thuật toán xếp hạng. User có thể follow/unfollow tài khoản. Feed phải hiện ra gần như tức thì khi user mở app.\n\n**Yêu cầu phi chức năng:** 500 triệu DAU. Mỗi user xem feed 10 lần mỗi ngày = 5 tỉ lượt đọc feed mỗi ngày ≈ trung bình 57,900 lượt đọc mỗi giây (~150,000/s ở đỉnh gấp 2–3 lần). 5 triệu bài đăng mỗi ngày = 58 lần ghi mỗi giây. Tỉ lệ đọc/ghi xấp xỉ **1000:1** — đây là một hệ thống thiên về đọc một cách áp đảo. Lượt đọc feed phải hoàn tất dưới 200ms.\n\n**Trade-off cốt lõi — fan-out on write vs fan-out on read:**\n\n*Fan-out on write (mô hình push):* Khi một user đăng bài, ngay lập tức chép ID bài đăng vào danh sách feed của mọi follower. Một danh sách feed là một Redis sorted set: `ZADD feed:{userId} {timestamp} {postId}`. Đọc feed là một lệnh Redis duy nhất `ZRANGE feed:{userId} 0 19 REV` (dạng cũ hơn là `ZREVRANGE`) — dưới mili giây, không join, không chạm DB. Kiểm tra lưu trữ: 500M user × 1,000 ID × ~16 byte ≈ 8 TB RAM trước cả overhead của Redis, đó là lý do feed bị giới hạn độ dài (và thường chỉ được giữ cho user hoạt động gần đây). Cách này lý tưởng cho user có số follower bình thường (< 10,000 follower).\n\nVấn đề: một người nổi tiếng có 10 triệu follower đăng một bài, kích hoạt 10 triệu lần ghi Redis. Đây là **write amplification** (khuếch đại ghi) — một lần ghi logic trở thành hàng triệu lần ghi vật lý, làm CPU và mạng của Redis cluster tăng vọt và gây các đợt tăng latency trên toàn hệ thống.\n\n*Fan-out on read (mô hình pull):* Không tính sẵn feed. Lúc đọc, lấy danh sách tài khoản user follow, query bảng `posts` lấy bài đăng gần đây của từng tài khoản, gộp và sắp theo timestamp. Không có write amplification — đăng bài rất rẻ. Vấn đề: đọc feed đòi hỏi một lần scatter-gather qua có khi hàng trăm tài khoản. Với tải 57,900 lượt đọc/giây và mỗi lượt đọc chạm tới hàng chục dòng DB, cách này sụp đổ khi lên quy mô.\n\n*Fan-out lai (giải pháp production):* Dùng push cho user bình thường; dùng pull cho tài khoản người nổi tiếng (thường gọi là **celebrity** hay **hotspot** — tài khoản có số follower vượt ngưỡng, ví dụ 1 triệu). Khi render feed cho một follower, server đọc sorted set đã tính sẵn của họ từ Redis, rồi lấy bài đăng gần đây từ N tài khoản celebrity họ follow và gộp lại trong bộ nhớ. Cách này chặn trần write amplification mà vẫn giữ latency đọc thấp.\n\n**Data model:**\n- `users (id, username, follower_count)`\n- `follows (follower_id, followee_id, created_at)` — đánh index theo cả hai chiều\n- `posts (id, author_id, content, media_url, created_at)` — phân vùng theo `created_at`, lưu trữ sang cold storage sau 90 ngày\n- Redis sorted set `feed:{userId}` lưu tối đa 1,000 ID bài đăng mới nhất dưới dạng **member**, với timestamp của bài làm **score**\n\n**Lưu trữ media:** Ảnh và video đi vào object storage (S3/GCS). `posts.media_url` lưu key của object. Một CDN đứng trước object storage để phân phối — đừng bao giờ phục vụ media trực tiếp từ web server.\n\n**Hydrate bài đăng:** Sorted set của feed chỉ lưu ID bài đăng. Một bước riêng lấy nội dung bài đăng từ một cache `posts` (Redis hash hoặc Memcached) với key là ID bài đăng. Điều này tách cấu trúc feed (user nào thấy những ID bài nào) khỏi nội dung bài đăng (các bài đó thực sự viết gì), cho phép mỗi bên được cache và invalidate độc lập.\n\n**Xếp hạng hay theo thời gian:** Sắp thuần túy theo thời gian mới nhất trước thì đơn giản nhưng hiển thị mọi bài như nhau bất kể mức tương tác. Xếp hạng dựa trên ML (TikTok, Instagram) sắp lại theo mức tương tác dự đoán, dùng các đặc trưng như lượt thích, thời gian xem, độ mới và mức độ gần gũi trên mạng xã hội. Trong interview, hãy ghi nhận rằng có xếp hạng và nó không thay đổi kiến trúc fan-out cốt lõi — bạn vẫn cần cùng các danh sách Redis, chỉ là sắp xếp chúng khác đi trước khi trả về."
+    },
+    {
+      "type": "diagram",
+      "caption": "Fan-out lai: user bình thường nhận bài đăng qua các Redis sorted set tính sẵn (push). Bài đăng của celebrity được kéo từ Posts DB lúc đọc và gộp trong bộ nhớ — chặn trần write amplification mà không hy sinh tốc độ đọc."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Fan-out chạy trong một background worker, duyệt danh sách follower bằng keyset pagination (không quét OFFSET), và pipeline các lần ghi Redis theo từng lô 5,000. Đường đọc lấy các ID tính sẵn *kèm score timestamp của chúng*, kéo bài đăng của celebrity bằng một query duy nhất, rồi gộp hai danh sách theo timestamp trước khi cắt trang — nối hai danh sách mà không sắp xếp sẽ đặt mọi bài của celebrity sai chỗ. Bước chặn trùng lặp có ý nghĩa vì một bài đăng có thể xuất hiện ở cả hai nguồn nếu tác giả vượt ngưỡng celebrity.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Case study 3: Chat real-time (WhatsApp / Slack)",
+      "content": "**Yêu cầu chức năng:** Gửi và nhận tin nhắn trong hội thoại 1-1 và nhóm. Tin nhắn được giao đúng thứ tự trong một hội thoại. User thấy trạng thái online/offline. Lịch sử tin nhắn được lưu bền vững. User offline nhận push notification.\n\n**Yêu cầu phi chức năng:** 50 triệu DAU. Mỗi user gửi 40 tin nhắn mỗi ngày = 2 tỉ tin nhắn/ngày = 23,150 tin nhắn mỗi giây. Tin nhắn phải tới trong vòng 500ms với user đang online. Lịch sử tin nhắn phải bền vững — mất một tin nhắn đã gửi là thảm họa.\n\n**Vì sao HTTP polling thất bại khi lên quy mô:** DAU không phải là số user đồng thời — giả sử ~20% trong 50M DAU (10M user) online lúc cao điểm. Nếu mỗi người polling `GET /messages?since=last_seen` mỗi giây, đó là 10M HTTP request mỗi giây, gần như tất cả đều trả về rỗng. Không thể kham nổi. **WebSocket** giải quyết chuyện này: mỗi client một TCP connection lâu dài duy nhất, qua đó server có thể đẩy tin nhắn mà client không cần yêu cầu.\n\n**Bài toán routing — Connection Manager:** Với hàng nghìn instance chat server, khi User A gửi tin nhắn cho User B, tin nhắn đến server mà A đang kết nối (Server 1). Server 1 không có WebSocket của User B — User B có thể đang kết nối với Server 7. **Connection Manager** (một Redis hash) ánh xạ `userId → serverId`. Server 1 tra server của User B, rồi giao tin nhắn cho Server 7 qua một relay nội bộ.\n\n**Các lựa chọn relay tin nhắn:**\n- *Redis Pub/Sub:* Mỗi chat server subscribe một kênh mang tên chính nó (`server:7`). Server 1 publish tin nhắn lên `server:7`. Server 7 nhận và đẩy tới WebSocket của User B. Latency rất thấp (~1ms), nhưng tin nhắn bị mất nếu subscriber tạm thời sập — không có persistence.\n- *Kafka:* Bền vững hơn. Mỗi chat server tiêu thụ từ một Kafka partition. Server 1 produce vào partition dành cho Server 7. Kafka giữ tin nhắn cho tới khi được tiêu thụ, cung cấp khả năng phát lại. Latency cao hơn (5–15ms) nhưng chịu lỗi tốt hơn.\n\nVới một ứng dụng chat, Kafka được ưu tiên vì độ bền khớp với cam kết sản phẩm (\"tin nhắn không bao giờ bị mất\").\n\n**Lưu trữ tin nhắn — vì sao là Cassandra:** Tin nhắn chat là append-only (bạn không bao giờ sửa một tin nhắn đã gửi, trừ việc thêm metadata xóa mềm). Pattern query luôn là \"cho tôi các tin nhắn trong hội thoại X từ thời điểm T1 tới T2\". Data model của Cassandra khớp tốt: partition key = `(conversation_id, time_bucket)`, clustering key = `message_id DESC`, trong đó `message_id` là một ID duy nhất sắp xếp được theo thời gian (Snowflake/TimeUUID) để hai tin nhắn trong cùng một mili giây không bao giờ trùng. Time bucket (ví dụ mỗi hội thoại một partition cho mỗi 10 ngày) ngăn một group chat sôi nổi nhiều năm tuổi trở thành một partition không giới hạn — chính sơ đồ kênh + time bucket mà Discord dùng cho tin nhắn của họ trên Cassandra. Dù đã chia bucket, các kênh cực kỳ sôi nổi vẫn sinh ra hot partition, điều này (cùng với GC pause của JVM) là lý do Discord chuyển store sang ScyllaDB năm 2022. Đọc bucket mới nhất trả về các tin nhắn đã sắp theo thời gian của một hội thoại mà không cần join xuyên partition. Lưu trữ LSM-tree của Cassandra được tối ưu cho ghi tuần tự — điều sống còn ở mức 23,000 tin nhắn/giây. PostgreSQL xử lý được tốc độ ghi này với phần cứng đủ mạnh nhưng khó mở rộng ngang nếu không có Citus hoặc sharding.\n\n**Đảm bảo giao nhận và số thứ tự tin nhắn:** Mạng không đáng tin cậy. Một tin nhắn gửi qua WebSocket có thể bị mất nếu connection rớt đúng thời điểm xấu. Hệ thống chat production gán cho mỗi tin nhắn một **số thứ tự** (sequence number) theo từng hội thoại. Client theo dõi số thứ tự cao nhất đã nhận. Khi kết nối lại, client yêu cầu `messages?since=seqNum` để lấp các khoảng trống. At-least-once delivery này kết hợp với khử trùng phía client theo message ID mang lại trải nghiệm \"hiển thị đúng một lần\" cho user.\n\n**Presence service:** User muốn thấy chấm xanh cạnh những liên hệ đang online. Lưu một key cho mỗi user online kèm thời hạn: `SET presence:{userId} {serverId} EX 60`. Chat server vốn đã giữ WebSocket, nên nó đặt key khi kết nối, xóa key khi ngắt kết nối êm, và làm mới key theo heartbeat. Hãy kiểm tra số học trước khi chọn chu kỳ: với 10M user online đồng thời, heartbeat 5 giây là 2M lần ghi/giây; heartbeat 30 giây là ~333,000 lần ghi/giây — khả thi trên một Redis cluster đã shard. Presence thường chỉ được đẩy tới những liên hệ đang xem, không broadcast cho tất cả mọi người.\n\n**Mở rộng nhắn tin nhóm:** Một nhóm 1,000 thành viên tự nó đã là một bài toán fan-out. Khi một tin nhắn đến, server phải fan-out tới 1,000 WebSocket của thành viên, có thể trải trên 1,000 chat server khác nhau. Một message queue (ví dụ một Kafka topic chia partition theo conversation ID — không phải mỗi nhóm một topic, vì như vậy sẽ là hàng triệu topic) tách việc gửi khỏi việc fan-out, cho phép giao song song. Những nhóm hàng chục nghìn thành viên (kênh Slack, cộng đồng WhatsApp) đòi hỏi throttling cẩn thận và giao theo lô.\n\n**Push notification cho user offline:** Hệ điều hành mobile giết các WebSocket connection chạy nền. Khi chat server phát hiện user đích đang offline (không có mục nào trong Connection Manager), nó route tin nhắn tới một **Push Notification Service**, dịch vụ này gọi APNs (iOS) hoặc FCM (Android). Payload push thường chỉ chứa nội dung thông báo và metadata — client sẽ lấy toàn bộ lịch sử tin nhắn ở lần mở app kế tiếp qua REST API."
+    },
+    {
+      "type": "diagram",
+      "caption": "Luồng tin nhắn chat: server gửi tra server của người nhận trong Connection Manager, relay tin nhắn theo thời gian thực, đồng thời publish lên Kafka để lưu bền vững vào Cassandra."
+    },
+    {
+      "type": "diagram",
+      "caption": "Đường giao khi offline: khi Connection Manager không tìm thấy server nào cho User C, tin nhắn được route tới Push Notification Service để giao qua APNs/FCM — hoàn toàn bỏ qua WebSocket."
+    },
+    {
+      "type": "explanation",
+      "title": "Các mối quan tâm xuyên suốt: áp dụng cho cả ba hệ thống",
+      "content": "**Rate limiting:** Cả ba hệ thống đều cần rate limiting ở tầng API gateway để chống lạm dụng và bảo vệ các service phía sau. Thuật toán token bucket hoặc leaky bucket theo user ID và địa chỉ IP là chuẩn mực. Redis là nơi lưu tự nhiên cho counter rate limit với TTL ngắn. Không có rate limiting, chỉ một kẻ xấu cũng có thể vắt kiệt capacity ghi của bạn.\n\n**Mở rộng ngang và stateless:** Web server trong cả ba hệ thống nên stateless — không giữ dữ liệu session của user trong bộ nhớ. Token session (JWT) mang toàn bộ ngữ cảnh xác thực trong request. Nhờ vậy server nào cũng xử lý được request nào, cho phép mở rộng ngang đơn giản sau load balancer. Chat server là ngoại lệ — chúng giữ state của WebSocket. Chúng mở rộng bằng cách thêm server; client có thể kết nối tới bất kỳ server nào, và Connection Manager ghi lại mỗi user đã rơi vào đâu.\n\n**Chiến lược shard database:** Khi dữ liệu vượt quá capacity của một node, bạn cần shard. URL shortener: shard `url_mappings` theo `code` (sharding dựa trên hash). Posts: shard theo `author_id` — mọi bài đăng của một tác giả nằm trên cùng một shard, khiến việc \"lấy mọi bài của tác giả\" hiệu quả. Cassandra tự shard theo partition key (conversation_id với chat). Consistent hashing giảm thiểu việc di chuyển dữ liệu khi thêm shard.\n\n**Eventual consistency và định lý CAP:** Hệ thống news feed và chat chịu được bất nhất ngắn ngủi. Một follower có thể thấy bài đăng vài giây sau khi nó được đăng — chấp nhận được. Một tin nhắn có thể hiện \"đã giao\" trước khi được xác nhận đã ghi vào Cassandra — chấp nhận được. Nhưng URL shortener có analytics lượt click cần số đếm chính xác — bạn có thể chấp nhận một số đếm eventually consistent (gộp bất đồng bộ từ Kafka) trong khi bản thân redirect là nhất quán (Redis có ánh xạ). Nói rõ bạn nới lỏng tính nhất quán ở đâu trong interview là tín hiệu của sự hiểu biết cấp senior.\n\n**Observability:** Gọi tên các metric chính: latency p99 của redirect, cache hit rate, throughput tin nhắn/giây, số WebSocket connection, fan-out lag (thời gian từ lúc tạo bài đăng tới lúc nó xuất hiện trong feed của follower). Log correlation ID để trace một request qua các service. Thiết lập cảnh báo khi cache hit rate tụt (có thể báo hiệu vấn đề eviction của Redis) và khi fan-out lag tăng vọt (có thể báo hiệu edge case của một tài khoản celebrity nhiều follower)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern hạ tầng chung cho cả ba case study: web server stateless sau load balancer, một Redis cache cluster đứng trước các database primary có read replica, và một Kafka queue cho công việc bất đồng bộ."
+    },
+    {
+      "type": "explanation",
+      "title": "Chiến lược interview: cách cấu trúc câu trả lời",
+      "content": "**Bước 1 — Làm rõ yêu cầu (5 phút):** Hỏi các câu về chức năng (\"có cần analytics không?\", \"có alias tùy chỉnh không?\", \"có cần sửa/xóa tin nhắn không?\") và phi chức năng (\"bao nhiêu DAU?\", \"latency chấp nhận được là bao nhiêu?\", \"mô hình consistency nào — strong hay eventual?\"). Viết các giả định lên bảng. Đừng bao giờ thiết kế khi chưa làm bước này.\n\n**Bước 2 — Ước lượng capacity (5 phút):** Tính QPS đỉnh cho đọc và ghi. Ước lượng lưu trữ mỗi năm. Xác định trục chi phối: hệ thống này thiên về đọc (news feed), thiên về ghi (pipeline logging), hay thiên về tính toán (transcode video)? Câu trả lời định hình mọi quyết định sau đó.\n\n**Bước 3 — Thiết kế tổng quan (10 phút):** Vẽ các thành phần chính — client, API gateway, application server, cache, database, CDN, queue. Mô tả luồng request đường thuận lợi (happy path) cho endpoint quan trọng nhất. Chưa đi sâu vào thành phần nào.\n\n**Bước 4 — Đi sâu vào các thành phần then chốt (15–20 phút):** Interviewer thường sẽ dẫn dắt giai đoạn này. Những chỗ hay được đào sâu: schema database và lý do lựa chọn, chiến lược caching và chính sách eviction, cơ chế fan-out, hay logic routing WebSocket. Hãy sẵn sàng đi sâu vào bất kỳ thành phần nào mà bạn nói là thú vị.\n\n**Bước 5 — Xác định nút thắt và trade-off (10 phút):** Cái gì hỏng đầu tiên? Có single point of failure không? Bạn sẽ thêm replication, sharding hay circuit breaker ở đâu? Nêu rõ trade-off: \"fan-out on write giảm latency đọc với cái giá là write amplification cho tài khoản celebrity — tôi xử lý bằng cách tiếp cận lai\". Khả năng diễn đạt trade-off là tín hiệu cấp senior mạnh nhất trong cả buổi interview.\n\n**Sai lầm thường gặp cần tránh:** Nhảy thẳng vào microservices mà không có lý do. Nói \"cứ dùng Kafka\" hay \"cứ dùng Redis\" mà không giải thích vì sao. Không ước lượng quy mô trước khi chọn database. Chỉ thiết kế happy path và bỏ qua lỗi. Coi availability và consistency là nhị phân — chúng tồn tại trên một phổ liên tục."
+    },
+    {
+      "type": "callout",
+      "content": "**Ghi chú từ thực tế:** Twitter ban đầu dùng mô hình fan-out on write thuần túy và gặp vấn đề hiệu năng nghiêm trọng khi người nổi tiếng gia nhập nền tảng — họ phải lắp thêm cách tiếp cận lai. WhatsApp phục vụ 900 triệu user với một team engineering nổi tiếng là nhỏ bằng cách dùng Erlang (BEAM VM) và mô hình actor cho WebSocket connection — mỗi connection là một process nhẹ với khả năng cô lập lỗi có sẵn. Discord lưu hàng nghìn tỉ tin nhắn chat trong Cassandra, chia partition theo kênh và time bucket, rồi chuyển sang ScyllaDB (chuyển hẳn năm 2022, được mô tả trong bài engineering tháng 3/2023 của Discord) để kiểm soát tail latency, GC pause và hot partition. Những câu chuyện production này khẳng định rằng các trade-off được bàn trong interview không phải chuyện hàn lâm — chúng là lý do đứng sau các quyết định kiến trúc thực tế."
+    },
+    {
+      "type": "callout",
+      "content": "**Khi nào dùng data store nào:** Dùng **Redis** cho caching, sorted set (feed, leaderboard), pub/sub và counter rate limiting — đây là lựa chọn đúng bất cứ khi nào bạn cần đọc dưới mili giây với cấu trúc dữ liệu đơn giản. Dùng **PostgreSQL** cho dữ liệu có cấu trúc, quan hệ, với khối lượng ghi vừa phải (< 10k/giây trên một node) khi đảm bảo ACID là quan trọng. Dùng **Cassandra** khi bạn có workload nặng về append (log, tin nhắn, event) chia partition gọn theo một ID và query theo khoảng thời gian — và khi cần mở rộng việc ghi tuyến tính bằng cách thêm node. Dùng **Kafka** cho event stream bền vững, có thứ tự, phát lại được, khi nhiều consumer cần cùng dữ liệu — không phải làm task queue đơn giản (hãy dùng Redis queue hoặc SQS cho việc đó). Dùng **object storage (S3)** cho mọi blob nhị phân — ảnh, video, file — đừng bao giờ lưu BLOB trong database quan hệ ở bất kỳ quy mô đáng kể nào."
+    },
+    {
+      "type": "callout",
+      "content": "**Cheat sheet ước lượng nhanh (hãy học thuộc):**\n- 1 ngày = 86,400 s ≈ **10^5 s**, nên **1M event/ngày ≈ 12/s** và 100M/ngày ≈ 1,160/s. 1 năm ≈ 3.15 × 10^7 s.\n- **Đỉnh ≈ 2–3× trung bình**; định cỡ capacity theo đỉnh, không theo trung bình.\n- **DAU ≠ số user đồng thời**: giả định 10–25% online lúc cao điểm trừ khi được cho biết khác.\n- Lưu trữ/năm = số mục/ngày × byte/mục × 365; nhân với **replication factor** (thường là 3).\n- Kiểm tra không gian ID: 62^6 ≈ 5.7 × 10^10, 62^7 ≈ 3.5 × 10^12, 2^32 ≈ 4.3 × 10^9, 2^64 ≈ 1.8 × 10^19.\n- Throughput xấp xỉ mỗi node: Redis ~100k+ thao tác đơn giản/s, Postgres ~10k–50k query đơn giản/s, một Kafka broker ~vài trăm MB/s.\n- Latency: round trip trong cùng datacenter ~0.5 ms, xuyên lục địa ~70–150 ms, đọc ngẫu nhiên SSD ~0.1 ms."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Lần nào cũng theo bộ khung**: làm rõ yêu cầu → ước lượng QPS và lưu trữ → thiết kế data model → phác sơ đồ thành phần → xác định nút thắt → bàn về trade-off. Bỏ qua yêu cầu và ước lượng là sai lầm interview phổ biến nhất.",
+        "**Làm phép tính thành tiếng**: 1M/ngày ≈ 12/s, lên kế hoạch cho đỉnh gấp 2–3 lần, DAU không phải số user đồng thời, và kiểm tra tính hợp lý của mọi con số suy ra (tuổi thọ không gian ID, RAM cho cache, tốc độ ghi của heartbeat) — ước lượng tồn tại để dẫn dắt các quyết định thiết kế.",
+        "**Ước lượng bộc lộ ràng buộc chi phối**: tính tỉ lệ đọc/ghi trước tiên. Một hệ thống thiên về đọc 1000:1 (news feed) đòi hỏi caching mạnh tay và read replica. Một hệ thống thiên về ghi (logging, telemetry IoT) đòi hỏi một đường ghi bền vững, throughput cao — hai lời giải hoàn toàn khác nhau.",
+        "**Nền tảng của URL shortener**: mã hóa Base62 cho ID auto-increment để có short code không trùng — và định cỡ code từ ước lượng: 62^6 ≈ 57 tỉ sẽ cạn trong ~18 tháng ở mức 100M link/ngày, nên hãy dùng 7 ký tự (62^7 ≈ 3.5 nghìn tỉ). Phục vụ redirect từ Redis cache (LRU eviction giữ các link nóng trong bộ nhớ). Chọn redirect 301 hay 302 dựa trên việc có cần analytics lượt click hay không — 301 được trình duyệt cache, 302 thì không.",
+        "**Fan-out của news feed**: mô hình push (fan-out on write) nhanh lúc đọc nhưng gây write amplification với tài khoản celebrity. Giải pháp production là fan-out lai — push cho user bình thường, pull-và-gộp bài của celebrity lúc đọc. Redis sorted set (`ZADD`, `ZRANGE ... REV`) là nền cho các danh sách feed tính sẵn với lượt đọc trang O(log N + M).",
+        "**Các trụ cột của hệ thống chat**: WebSocket để giao real-time hai chiều; một Connection Manager (Redis hash) để route tin nhắn qua các chat server có state; Kafka để lưu tin nhắn bền vững, có thứ tự; Cassandra/ScyllaDB (chia partition theo conversation_id + time bucket, clustering theo một message ID sắp được theo thời gian) để lưu trữ tin nhắn mở rộng được; push notification APNs/FCM để giao khi offline.",
+        "**Nêu rõ trade-off**: \"Ở đây tôi chọn eventual consistency vì X\". \"Fan-out on write khuếch đại các lần ghi của celebrity, nên tôi giảm thiểu bằng Y\". \"Tôi chọn Cassandra thay vì Postgres vì pattern query time-series append-only khớp với data model của Cassandra\". Khả năng diễn đạt này là tín hiệu chính mà interviewer dùng để phân biệt ứng viên senior với mid-level.",
+        "**Các mối quan tâm xuyên suốt có ý nghĩa**: nhắc tới rate limiting, web server stateless, chiến lược shard database (hash hay range), observability (metric chính và cảnh báo), và nơi bạn nới lỏng các đảm bảo của định lý CAP. Những điều này thể hiện tư duy ở mức hệ thống, vượt ra ngoài happy path."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Một URL shortener dùng redirect 302 thay vì 301 cho các link rút gọn. Lý do chính của lựa chọn này khi cần analytics lượt click là gì?",
+      "options": [
+        "Redirect 302 được web server xử lý nhanh hơn redirect 301",
+        "Redirect 301 cần một header Content-Type mà shortener không cung cấp được",
+        "Redirect 302 hỗ trợ HTTPS còn redirect 301 chỉ giới hạn ở HTTP",
+        "Redirect 301 được trình duyệt cache vĩnh viễn, nên các lần click sau bỏ qua server của shortener và không đếm được"
+      ],
+      "explanation": "301 Moved Permanently bảo trình duyệt (và CDN) cache redirect mãi mãi. Ở lần click thứ hai, trình duyệt đi thẳng tới URL đích mà không liên hệ shortener — nên lượt click không bao giờ được ghi nhận. 302 Found không được trình duyệt cache, đảm bảo mọi lần click đều đi qua server của shortener, nơi analytics có thể được theo dõi. Trade-off là tải server cao hơn."
+    },
+    {
+      "id": "q2",
+      "question": "Vì sao một URL shortener dùng mã hóa Base62 cho ID auto-increment của database thay vì hash URL dài?",
+      "options": [
+        "ID auto-increment được database đảm bảo duy nhất, loại bỏ việc xử lý trùng; hash URL cắt còn 6 ký tự có xác suất trùng tăng theo quy mô",
+        "Hash quá chậm về mặt tính toán để dùng trong một web server production",
+        "Mã hóa Base62 chỉ hoạt động với input dạng số, nên không tương thích với hash",
+        "Hash URL luôn cho ra code dài hơn 6 ký tự"
+      ],
+      "explanation": "Một hash bị cắt ngắn có xác suất trùng khác không — và nó tăng lên khi số URL được lưu tăng (bài toán ngày sinh). Khi phát hiện trùng, bạn phải retry với một hash khác hoặc gắn thêm counter, làm tăng độ phức tạp. ID auto-increment từ một database sequence được đảm bảo duy nhất, nên mã hóa Base62 cho chúng tạo ra code duy nhất với rủi ro trùng bằng không và không cần logic retry."
+    },
+    {
+      "id": "q3",
+      "question": "Trong một hệ thống news feed dùng fan-out on write, \"write amplification\" là gì và nó trở thành vấn đề nghiêm trọng trong điều kiện nào?",
+      "options": [
+        "Ghi cùng một bài đăng vào nhiều database để dự phòng theo địa lý, nhân chi phí lưu trữ lên",
+        "Một lần ghi bài đăng kích hoạt một lần ghi cho mỗi follower vào danh sách feed Redis của họ — với một celebrity có 10M follower, điều này tạo ra 10M lần ghi Redis từ một thao tác của user",
+        "Mỗi bài đăng bị nén và mã hóa lại nhiều lần khi đi qua các tầng CDN",
+        "Write amplification xảy ra mỗi khi một Redis sorted set vượt 1000 phần tử và phải được cắt bớt"
+      ],
+      "explanation": "Fan-out on write tính sẵn danh sách feed bằng cách chép ID bài đăng vào sorted set của mọi follower. Với một user bình thường có 500 follower, đó là 500 lần ghi Redis — không đáng kể. Với một celebrity có 10 triệu follower đăng một bài, điều này tạo ra 10 triệu lần ghi Redis trong một đợt dồn dập, có thể làm quá tải tầng cache và gây tăng vọt latency trên toàn hệ thống. Giải pháp fan-out lai push cho user bình thường và pull bài của celebrity lúc đọc."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao Cassandra thường được ưu tiên hơn PostgreSQL để lưu tin nhắn chat ở quy mô lớn?",
+      "options": [
+        "Cassandra hỗ trợ SQL join, khiến query xuyên hội thoại hiệu quả hơn",
+        "Cassandra tự động mã hóa end-to-end nội dung tin nhắn ở tầng lưu trữ",
+        "Mô hình partition key (conversation_id) và clustering key (timestamp) của Cassandra khớp với pattern query append-only theo khoảng thời gian của tin nhắn chat, và nó mở rộng việc ghi tuyến tính bằng cách thêm node",
+        "PostgreSQL có giới hạn cứng 1 tỉ dòng và không hỗ trợ được chat ở quy mô lớn"
+      ],
+      "explanation": "Tin nhắn chat được ghi một lần và đọc theo hội thoại theo thứ tự thời gian — đúng thứ mà mô hình partition + clustering key của Cassandra tối ưu (với một time bucket trong partition key để các hội thoại khổng lồ không tạo ra partition không giới hạn). Lưu trữ LSM-tree của Cassandra hấp thụ khối lượng ghi lớn và mở rộng ngang bằng cách thêm node. PostgreSQL xử lý được khối lượng ghi cao nhưng cần sharding ở tầng ứng dụng hoặc extension (như Citus) để đạt khả năng mở rộng ghi theo chiều ngang tương đương."
+    },
+    {
+      "id": "q5",
+      "question": "Trong một hệ thống chat real-time, vai trò của Connection Manager là gì, và vì sao nó được lưu trong Redis?",
+      "options": [
+        "Nó quản lý kích thước connection pool database cho mỗi chat server để giảm overhead connection",
+        "Nó áp rate limit về số tin nhắn một user được gửi mỗi giây",
+        "Nó xác thực user và cấp JWT token trước khi thiết lập WebSocket connection",
+        "Nó lưu ánh xạ từ userId sang serverId để khi Server A nhận tin nhắn cho User B, nó tra được chat server nào đang giữ WebSocket của User B và route tin nhắn tới đó"
+      ],
+      "explanation": "Chat server có state — mỗi server giữ hàng nghìn WebSocket connection lâu dài. Với hàng trăm server, Server A không biết server nào đang giữ socket của User B. Connection Manager (một Redis hash: userId → serverId) cho phép tra cứu O(1). Redis là lý tưởng vì việc tra cứu phải dưới mili giây (nằm trên đường then chốt của mọi lần giao tin nhắn) và dữ liệu mang tính tạm thời — connection reset khi server khởi động lại, nên không có yêu cầu về độ bền."
+    },
+    {
+      "id": "q6",
+      "question": "Trong lúc làm rõ yêu cầu cho một news feed, interviewer nói: \"chúng tôi cần feed tải dưới 200ms cho 500M DAU với tỉ lệ đọc/ghi 1000:1\". Điều này dẫn dắt trực tiếp nhất tới quyết định kiến trúc nào?",
+      "options": [
+        "Tính sẵn danh sách feed trong Redis sorted set để việc đọc chỉ là một lần tra cache thay vì một query join qua bài đăng của mọi user được follow",
+        "Dùng redirect 301 thay vì 302 cho URL bài đăng để giảm tải server",
+        "Chọn Cassandra thay vì PostgreSQL làm database chính để hỗ trợ khối lượng đọc lớn",
+        "Thêm core CPU cho tầng web server để xử lý 500M user đồng thời"
+      ],
+      "explanation": "SLA 200ms với tỉ lệ đọc/ghi 1000:1 nghĩa là bạn không kham nổi một query fan-in lúc đọc quét bài đăng của mọi user được follow rồi sắp xếp ở mỗi request. Tính sẵn danh sách feed qua fan-out on write lưu kết quả trong một Redis sorted set — đọc feed trở thành một lệnh ZREVRANGE O(log N) duy nhất trả về các ID bài đăng đã cache, đạt được dưới 10ms kể cả round-trip mạng."
+    },
+    {
+      "id": "q7",
+      "question": "Một URL shortener phục vụ 116,000 redirect mỗi giây. Chính sách eviction Redis nào tối đa hóa cache hit rate cho workload này?",
+      "options": [
+        "allkeys-random — loại một key được chọn ngẫu nhiên mỗi khi bộ nhớ đầy",
+        "allkeys-lru — loại key được truy cập lâu nhất trước đây, tự nhiên giữ các link viral trong cache",
+        "volatile-ttl — loại key có TTL còn lại ngắn nhất để giải phóng chỗ nhanh",
+        "noeviction — từ chối lần ghi mới thay vì loại bỏ, đảm bảo mọi link đã cache vẫn truy cập được"
+      ],
+      "explanation": "Traffic redirect URL theo phân phối luật lũy thừa — một số ít short code viral nhận phần lớn lượt click. Trong các lựa chọn này, allkeys-lru là tốt nhất: các link vừa được click ở lại trong bộ nhớ còn link lạnh bị loại trước, cho hit rate 95%+ trong thực tế. (Redis còn có allkeys-lfu, theo dõi tần suất truy cập và có thể còn tốt hơn khi độ phổ biến ổn định; volatile-ttl bỏ qua độ phổ biến, còn noeviction khiến lần ghi thất bại khi bộ nhớ đã đầy.)"
+    },
+    {
+      "id": "q8",
+      "question": "Vì sao ứng dụng chat mobile cần push notification (APNs/FCM) bên cạnh WebSocket connection?",
+      "options": [
+        "WebSocket connection không hỗ trợ payload nhị phân cần cho việc gửi ảnh",
+        "APNs và FCM mã hóa tin nhắn bằng thuật toán mạnh hơn TLS của WebSocket",
+        "Hệ điều hành mobile ngắt các WebSocket connection chạy nền để tiết kiệm pin; push notification giao tin nhắn qua các kênh ở tầng hệ điều hành, hoạt động được cả khi app không chạy",
+        "Push notification có latency thấp hơn WebSocket với tin nhắn dưới 1 KB"
+      ],
+      "explanation": "iOS và Android mạnh tay tạm dừng các process chạy nền để tiết kiệm pin, đóng mọi WebSocket connection mà app đang mở. APNs (Apple Push Notification service) và FCM (Firebase Cloud Messaging) là các kênh giao nhận ở tầng hệ điều hành do Apple và Google duy trì — hệ điều hành có thể đánh thức app và hiển thị thông báo kể cả khi app hoàn toàn ở chế độ nền hoặc đã bị tắt. Chat server route tin nhắn tới push service khi Connection Manager cho thấy user không có WebSocket nào đang hoạt động."
+    },
+    {
+      "id": "q9",
+      "question": "Với một hệ thống news feed, một Redis sorted set lưu ID bài đăng với timestamp làm score. Lệnh nào lấy 10 bài mới nhất cho trang 2 (trang thứ hai của một feed phân trang)?",
+      "options": [
+        "ZRANGE feed:{userId} 0 9",
+        "ZRANGEBYSCORE feed:{userId} +inf -inf LIMIT 10 10",
+        "ZSCORE feed:{userId} 10 19",
+        "ZREVRANGE feed:{userId} 10 19"
+      ],
+      "explanation": "ZREVRANGE trả về các member theo thứ tự score giảm dần (score cao nhất = timestamp mới nhất trước). Trang 0 là ZREVRANGE feed:{id} 0 9; trang 1 là 10 19; trang N bắt đầu từ N*10. ZRANGE không có REV trả về theo thứ tự tăng dần (cũ nhất trước). ZSCORE trả về score của một member duy nhất. ZRANGEBYSCORE yêu cầu min đứng trước max, nên \"+inf -inf\" không trả về gì. Từ Redis 6.2, cách viết được ưu tiên là ZRANGE feed:{id} 10 19 REV — cùng kết quả."
+    },
+    {
+      "id": "q10",
+      "question": "Trong một interview thiết kế hệ thống, interviewer hỏi vì sao bạn chọn Kafka thay vì Redis Pub/Sub để relay tin nhắn chat giữa các server. Lý lẽ chính xác nhất là gì?",
+      "options": [
+        "Kafka lưu tin nhắn xuống đĩa và cho phép phát lại nếu một chat server tạm thời sập, trong khi Redis Pub/Sub bỏ tin nhắn với bất kỳ subscriber nào không kết nối đúng vào thời điểm publish",
+        "Kafka hỗ trợ nhiều subscriber đồng thời hơn Redis Pub/Sub, vốn bị giới hạn ở 10 consumer",
+        "Kafka có latency end-to-end thấp hơn Redis Pub/Sub với tin nhắn dưới 1 KB",
+        "Redis Pub/Sub cần license trả phí để dùng trong production, khiến Kafka tiết kiệm chi phí hơn"
+      ],
+      "explanation": "Redis Pub/Sub là bắn-rồi-quên — nếu một subscriber tạm thời sập, đang khởi động lại hay chậm, các tin nhắn được publish trong khoảng thời gian đó mất vĩnh viễn. Kafka lưu mọi tin nhắn vào một log được replicate. Một chat server khởi động lại có thể tiếp tục tiêu thụ từ offset đã commit gần nhất và giao mọi tin nhắn đến trong lúc nó sập. Với một sản phẩm chat nơi mất một tin nhắn đã giao là bug nghiêm trọng, đảm bảo độ bền của Kafka xứng đáng với latency cao hơn một chút (5–15ms so với ~1ms của Redis Pub/Sub)."
+    }
+  ]
+}

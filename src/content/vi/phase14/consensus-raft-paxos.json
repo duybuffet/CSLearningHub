@@ -1,0 +1,219 @@
+{
+  "sourceHash": "e1145a4d4602",
+  "title": "Consensus: Raft và Paxos",
+  "tagline": "Các node phân tán thống nhất một giá trị duy nhất bất chấp sự cố như thế nào — những thuật toán vận hành etcd, ZooKeeper và mọi database có replication.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy hình dung một ngân hàng có năm chi nhánh rải khắp đất nước. Một khách hàng bước vào một chi nhánh và gửi $1,000. Một lát sau, một khách hàng khác bước vào chi nhánh khác và định rút chính $1,000 đó. Để việc này diễn ra đúng, cả năm chi nhánh phải thống nhất về số dư hiện tại — và phải thống nhất ngay cả khi đường dây điện thoại đứt, một chi nhánh bốc cháy, hay một network switch hỏng giữa chừng giao dịch. Về bản chất, đây chính là **bài toán consensus**: làm sao để các node phân tán đạt được và duy trì sự đồng thuận về một giá trị duy nhất bất chấp các sự cố cục bộ?\n\n**Consensus** không chỉ là một chuyện học thuật thú vị. Nó là viên gạch nền mà mọi hệ phân tán đáng tin cậy được xây lên. Leader election, replicated state machine, distributed transaction, quản lý cấu hình và quản lý thành viên cluster về cốt lõi đều quy về consensus. Nếu giải được consensus, bạn xây được bất kỳ hệ phân tán chịu lỗi nào bên trên nó. Nếu không, hệ thống của bạn hoặc là không khả dụng khi có sự cố, hoặc là có nguy cơ dữ liệu phân kỳ — cả hai kết cục đều không chấp nhận được trên production.\n\nBài toán khó hơn vẻ ngoài rất nhiều. Năm 1985, Fischer, Lynch và Paterson chứng minh **kết quả bất khả FLP**: trong một mạng hoàn toàn bất đồng bộ mà chỉ cần một process có thể hỏng, không thuật toán consensus tất định nào đảm bảo được việc kết thúc. Hệ thống thực tế thoát khỏi cái bẫy này bằng cách giữ **safety** vô điều kiện và dựa vào **partial synchrony** cho liveness: Raft và Paxos không bao giờ quyết định hai giá trị khác nhau, nhưng chúng chỉ tiến triển được khi mạng đủ ổn định để timeout hoạt động (một số protocol dùng ngẫu nhiên hóa thay vào đó). FLP là lý do hình thức khiến mọi hệ consensus, trong trường hợp xấu nhất, có thể bị đứng chứ không làm sai.\n\n**Paxos**, do Leslie Lamport giới thiệu năm 1989 (xuất bản 1998), trở thành thuật toán consensus kinh điển được chứng minh đúng dưới một mô hình sự cố thực tế (Viewstamped Replication của Oki và Liskov, 1988, đã giải về cơ bản cùng bài toán một cách độc lập). Nó thanh lịch và chứng minh được là an toàn, nhưng nổi tiếng là gần như không thể hiểu, cài đặt đúng hay mở rộng. Lamport sau này đùa rằng thuật toán không khó, chỉ là giới học thuật không biết trân trọng nó — dù độ khó của việc cài đặt Paxos chất lượng production cho thấy điều ngược lại. **Raft**, do Diego Ongaro và John Ousterhout thiết kế năm 2014, được xây từ đầu với một mục tiêu tường minh: dễ hiểu. Nó chia consensus thành ba bài toán con gần như độc lập — leader election, log replication và safety — và đưa ra các lựa chọn thiết kế mạnh tay để thu nhỏ không gian trạng thái mà developer phải suy luận. Ngày nay Raft là nền móng của etcd (xương sống của Kubernetes), CockroachDB, TiKV (tầng lưu trữ của TiDB), Consul, quorum controller KRaft của Kafka (đã thay thế hoàn toàn ZooKeeper từ Kafka 4.0) và nhiều hệ thống production khác."
+    },
+    {
+      "type": "diagram",
+      "caption": "Raft log replication trong một cluster 4 node. Leader commit một entry sau khi nhận xác nhận từ một majority quorum (3 trên 4 node). Một follower bị crash không chặn được tiến trình."
+    },
+    {
+      "type": "analogy",
+      "title": "Hội đồng thị trấn và chuỗi biên bản có chữ ký",
+      "content": "Hãy tưởng tượng một thị trấn nhỏ do một hội đồng năm thành viên điều hành. Hội đồng phải đưa ra các quyết định có giá trị pháp lý về thị trấn — quy định mới, phê duyệt ngân sách, thay đổi quy hoạch. Đây là cách nó ánh xạ vào consensus:\n\n**Thị trưởng (Leader):** Một thành viên hội đồng được bầu làm thị trưởng. Mọi dự luật mới đều phải qua thị trưởng. Thị trưởng chỉ được bầu nếu hơn một nửa hội đồng bỏ phiếu cho họ — đây là **yêu cầu quorum**. Tại bất kỳ thời điểm nào cũng chỉ có tối đa một thị trưởng hợp pháp.\n\n**Biên bản (Log):** Mọi quyết định được ghi vào một cuốn sổ biên bản đóng gáy. Thị trưởng đề xuất một mục, ghi tạm, rồi gửi bản sao cho mọi thành viên hội đồng. Khi đa số thành viên đã ký ('xác nhận') bản sao của mình, mục đó được **commit** — giờ nó vĩnh viễn là luật của thị trấn, bất kể chuyện gì xảy ra tiếp theo.\n\n**Thị trưởng mới, luật cũ (đồng bộ log):** Nếu thị trưởng đổ bệnh và một cuộc bầu cử mới diễn ra, thị trưởng sắp nhậm chức trước tiên thu thập sổ biên bản từ ít nhất đa số thành viên hội đồng. Điều này đảm bảo thị trưởng mới đã thấy mọi quyết định đã commit trước đó. Không luật nào đã commit có thể bị mất trong quá trình chuyển giao lãnh đạo.\n\n**Bầu cử bãi nhiệm (số term):** Mỗi nhiệm kỳ thị trưởng được đánh số. Thành viên hội đồng từ chối làm theo chỉ thị của bất kỳ ai tự xưng có quyền theo một số nhiệm kỳ cũ. Điều này ngăn một thị trưởng từng bị crash tỉnh dậy và ban hành mệnh lệnh mâu thuẫn.\n\n**Paxos như một thủ tục cũ hơn, hình thức hơn:** Paxos giống một hội đồng không có thị trưởng thường trực — trước mỗi quyết định đều có một cuộc bầu cử mini. Một proposer nói 'tôi bắt đầu đề xuất số 42' và yêu cầu mỗi thành viên hứa không chấp nhận đề xuất nào dưới 42. Khi đa số đã hứa, proposer mới được nộp giá trị thực sự. Cách này linh hoạt hơn nhưng mệt mỏi cho các quyết định thường ngày. Multi-Paxos là Paxos nhưng có một chủ tịch bền vững được bầu cho cả một phiên họp — gần với Raft hơn nhiều."
+    },
+    {
+      "type": "explanation",
+      "title": "Mô hình sự cố: ta giả định điều gì có thể hỏng",
+      "content": "Trước khi đi vào thuật toán, cần nói chính xác về mô hình sự cố mà cả Paxos lẫn Raft giả định. Cả hai đều hoạt động dưới mô hình **crash-stop** (hoặc crash-recovery):\n\n- **Process bị crash** — chúng dừng thực thi và không chạy lại (crash-stop), hoặc crash rồi sau đó khởi động lại với state bền vững (crash-recovery, mà Raft xử lý qua lưu trữ persistent).\n- **Message có thể bị trễ, đảo thứ tự hoặc mất** — nhưng không bị hỏng nội dung. Sự cố Byzantine (node độc hại gửi dữ liệu sai) được loại trừ tường minh khỏi phạm vi của cả Paxos và Raft.\n- **Không có đồng hồ toàn cục** — các node không thể dựa vào timestamp đồng bộ để đảm bảo tính đúng đắn. Thời gian chỉ được dùng cho timeout như một heuristic về liveness, không dùng cho safety.\n\nPhân biệt then chốt: các tính chất **safety** (không điều gì tệ bao giờ xảy ra — cụ thể là hai giá trị khác nhau không bao giờ được commit ở cùng một vị trí) phải luôn đúng, kể cả khi network partition tệ nhất. Các tính chất **liveness** (rốt cuộc điều gì đó tốt sẽ xảy ra — hệ thống tiến triển) chỉ cần đúng khi mạng đủ ổn định. Raft hy sinh liveness khi có partition, không hy sinh safety. Đây là trade-off đúng cho một database.\n\nMột cluster N node chịu được tối đa **f = ⌊(N−1)/2⌋** sự cố mà vẫn hoạt động. Với N=3, f=1. Với N=5, f=2. Với N=7, f=3. Công thức đến từ yêu cầu quorum: bạn cần N−f node khả dụng để tạo thành đa số, và cần N−f > N/2, giải ra f < N/2."
+    },
+    {
+      "type": "diagram",
+      "caption": "Kích thước quorum và khả năng chịu lỗi. Cluster 4 node có khả năng chịu lỗi như cluster 3 node nhưng tốn thêm một node — luôn ưu tiên kích thước cluster lẻ."
+    },
+    {
+      "type": "explanation",
+      "title": "Raft: leader election chi tiết",
+      "content": "Raft chia thời gian thành các **term** — các số nguyên tăng đơn điệu đóng vai trò đồng hồ logic. Mỗi term bắt đầu bằng một cuộc bầu cử. Một term có tối đa một leader (dù một số term có thể không có leader nếu bầu cử thất bại do chia phiếu). Số term là cơ chế ngăn các leader cũ gây rắc rối: mọi message mang term cũ đều bị từ chối.\n\nMỗi node Raft luôn ở đúng một trong ba trạng thái:\n\n- **Follower**: Trạng thái thụ động mặc định. Follower phản hồi RPC từ leader và candidate. Chúng không chủ động khởi tạo giao tiếp.\n- **Candidate**: Một follower đã timeout khi chờ heartbeat và đang cố trở thành leader.\n- **Leader**: Node active duy nhất quản lý log. Nó xử lý mọi request của client và replicate các entry tới follower.\n\n**Election timeout:** Follower duy trì một bộ đếm ngược. Khi bộ đếm hết mà không nhận được heartbeat hợp lệ từ leader, follower chuyển thành candidate. Điểm then chốt là timeout này được **ngẫu nhiên hóa** — thường trong khoảng 150ms tới 300ms. Ngẫu nhiên hóa là lời giải thanh lịch của Raft cho bài toán chia phiếu: nếu mọi node có timeout giống hệt nhau, tất cả sẽ bắt đầu bầu cử cùng lúc, chia phiếu cho nhiều candidate, và không ai thắng. Với ngẫu nhiên hóa, gần như luôn có một node xuất phát trước.\n\n**RPC RequestVote:** Candidate tăng term hiện tại, tự bỏ phiếu cho mình, và gửi RPC `RequestVote` tới mọi node khác. Một node trao phiếu cho candidate đầu tiên nó nghe thấy trong một term, kèm một hạn chế then chốt (election restriction, được trình bày ở phần Safety). Một node không bao giờ bỏ phiếu hai lần trong cùng một term.\n\n**Thắng cử:** Candidate trở thành leader ngay khi nhận được phiếu từ **đa số** node — tính cả phiếu của chính nó. Đa số nghĩa là thực sự hơn một nửa: ⌊N/2⌋ + 1 node. Vì hai đa số bất kỳ phải chung nhau ít nhất một node, hai candidate không bao giờ cùng thắng một cuộc bầu cử. Đây là tính chất quorum intersection — đảm bảo toán học ngăn hai leader cùng tồn tại trong một term.\n\n**Sau bầu cử:** Leader mới lập tức gửi RPC `AppendEntries` (với mảng `entries` rỗng, đóng vai trò heartbeat) tới mọi follower. Chúng ngăn mọi follower timeout và bắt đầu bầu cử mới. Leader tiếp tục gửi heartbeat (cách nhau vài chục mili giây, thấp hơn nhiều so với election timeout) chừng nào nó còn sống. Một node nhận `AppendEntries` từ một leader có term ít nhất bằng term của nó sẽ lập tức trở thành (hoặc tiếp tục là) follower — đây là cách một candidate thua cuộc rút lui."
+    },
+    {
+      "type": "diagram",
+      "caption": "Trình tự bầu cử trong Raft. Timeout ngẫu nhiên của Node 1 hết trước. Nó xin phiếu, thắng đa số, và lập tức gửi heartbeat để ngăn các cuộc bầu cử tiếp theo."
+    },
+    {
+      "type": "explanation",
+      "title": "Raft: log replication chi tiết",
+      "content": "Khi đã có leader, nó bắt đầu nhận request từ client. Mỗi request trở thành một entry trong **replicated log** — một dãy có thứ tự các bộ `(term, index, command)`. Việc của leader là replicate log này lên đa số node rồi áp dụng các entry đã commit vào state machine của nó.\n\n**Replication từng bước:**\n\n1. Client gửi một lệnh (ví dụ `SET x = 42`) tới leader.\n2. Leader append lệnh vào log của chính nó thành một entry mới với term hiện tại và index kế tiếp.\n3. Leader gửi song song RPC `AppendEntries` tới mọi follower, mang theo entry mới cùng với term và index của entry ngay trước đó (để follower phát hiện khoảng trống).\n4. Follower append entry vào log của mình nếu nó nhất quán với phần trước đó. Chúng gửi xác nhận về cho leader.\n5. Khi entry đã được lưu trên **đa số** node (leader tự tính mình), và là entry **thuộc term hiện tại của leader**, nó được **commit**. Leader áp dụng nó vào state machine, ghi lại commit index, và trả kết quả cho client.\n6. Leader gửi kèm giá trị `leaderCommit` đã cập nhật trong các RPC `AppendEntries` sau đó. Follower thấy giá trị này và áp dụng các entry tới index đó vào state machine của mình.\n\n**Tính nhất quán của log:** RPC `AppendEntries` có `prevLogIndex` và `prevLogTerm` — index và term của entry ngay trước các entry mới. Follower chỉ chấp nhận entry nếu log của nó đã có một entry ở index đó với term đó. Phép kiểm tra nhất quán này, áp dụng theo quy nạp, cho ra **Log Matching Property**: nếu hai log có một entry cùng index và term, thì hai log giống hệt nhau ở mọi entry cho tới và bao gồm index đó. (Nó đúng vì trong một term, leader tạo tối đa một entry cho mỗi index, và follower chỉ append sau khi phép kiểm tra thành công.)\n\n**Sửa log:** Khi một leader mới được bầu, một số follower có thể có log cũ hoặc phân kỳ. Leader duy trì một `nextIndex` cho mỗi follower — phỏng đoán tốt nhất của nó về entry kế tiếp mà follower cần. Nếu follower từ chối `AppendEntries` (vì `prevLogIndex`/`prevLogTerm` không khớp), leader giảm `nextIndex` và thử lại. Quá trình này lùi dần cho tới khi leader tìm được điểm hai log khớp nhau, rồi phát lại mọi entry từ điểm đó trở đi, ghi đè các entry phân kỳ trên follower. Log của leader luôn thắng — follower bị đưa về cho khớp."
+    },
+    {
+      "type": "diagram",
+      "caption": "Raft log replication: leader append, replicate song song, commit sau khi đa số xác nhận, và trả lời client. Follower áp dụng entry sau khi biết commit index."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Phiên bản này cho thấy cả hai phía của mỗi RPC, nơi các quy tắc safety nằm. (1) `handleRequestVote` trao tối đa một phiếu mỗi term và chỉ cho candidate có log ít nhất cũng mới bằng — trong demo, A từ chối B, nhưng B vẫn thắng nhờ phiếu của C. (2) `handleAppendEntries` áp đặt phép kiểm tra log-matching, cắt bỏ phần đuôi xung đột, và leader lùi `nextIndex` cho tới khi log khớp nhau — đó là cách `SET x=2` chưa commit của A bị ghi đè. (3) `replicate` chỉ đẩy `commitIndex` tới một entry **thuộc term hiện tại** nằm trên đa số, và một leader mới append một no-op để các entry trước đó commit được. (4) Bất kỳ RPC nào mang term cao hơn đều khiến node rút lui. Raft production còn persist `currentTerm`, `votedFor` và log trước khi trả lời, chạy timer, và pipeline RPC bất đồng bộ.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Raft: đảm bảo safety (election restriction)",
+      "content": "Phần tinh tế nhất của Raft là **election restriction** — quy tắc ngăn một node có log cũ trở thành leader và ghi đè các entry đã commit. Đây là quy tắc chính xác:\n\n> Một voter chỉ trao phiếu nếu log của candidate **ít nhất cũng mới bằng** log của chính voter.\n\n'Mới' được định nghĩa bằng cách so sánh entry cuối của log:\n1. Nếu hai log kết thúc bằng các entry thuộc term khác nhau, log có **term cao hơn** là mới hơn.\n2. Nếu hai log kết thúc cùng term, log **dài hơn** (last index cao hơn) là mới hơn.\n\nVì sao điều này đảm bảo safety? Giả sử entry E ở index 42 được commit trong term 4 — nghĩa là một đa số M các node có E trong log. Bất kỳ candidate C nào trong tương lai phải thu phiếu từ một đa số mới thắng được. Hai đa số bất kỳ chồng lên nhau ít nhất một node. Node chồng lấn đó phải thuộc M nên có E trong log. Election restriction đảm bảo log của C ít nhất cũng mới bằng log của node chồng lấn này, nên log của C cũng phải chứa E ở index 42. Không entry đã commit nào có thể vắng mặt trong log của bất kỳ leader tương lai nào.\n\n**Quy tắc commit theo term hiện tại:** leader không bao giờ commit một entry thuộc term *trước* bằng cách đếm số bản sao. Nó chỉ commit một entry thuộc **term hiện tại** đã được lưu trên đa số; theo Log Matching Property, mọi entry trước đó khi ấy cũng được commit.\n\nVì sao cần hạn chế này (Figure 8 trong paper Raft): S1, leader ở term 2, ghi entry X ở index 2 lên S1 và S2, rồi crash. S5 thắng term 3 (phiếu từ S3, S4 và chính nó) và ghi Y ở index 2 cục bộ, rồi crash. S1 quay lại, thắng term 4, và copy X sang S3 — giờ X nằm trên đa số (S1, S2, S3). Nếu S1 tuyên bố X đã commit ngay lúc này rồi crash, S5 vẫn có thể thắng term 5 (last log term của nó là 3, cao hơn 2 của họ, nên S2, S3, S4 bỏ phiếu cho nó) và ghi đè X bằng Y khắp nơi — một entry \"đã commit\" sẽ bị mất. Nếu S1 thay vào đó chờ tới khi một entry thuộc term 4 nằm trên đa số, S5 không còn thắng được nữa, vì giờ đa số có last log term là 4. Đây cũng là lý do một leader mới lập tức append một entry **no-op**: nó cho phép các entry từ term trước commit mà không phải chờ một lần ghi từ client."
+    },
+    {
+      "type": "explanation",
+      "title": "Paxos: protocol hai pha",
+      "content": "Paxos cổ điển (đôi khi gọi là Single-Decree Paxos) đạt consensus trên **một giá trị duy nhất** — không phải một log lệnh. Dù vậy vẫn đáng để hiểu nó, vì cả Multi-Paxos lẫn Raft đều tiến hóa từ đây.\n\nPaxos có ba vai trò:\n- **Proposer** khởi động protocol và đề xuất giá trị.\n- **Acceptor** bỏ phiếu cho các đề xuất và là nguồn sự thật.\n- **Learner** quan sát giá trị cuối cùng được chấp nhận (thường là cùng các node với proposer/acceptor).\n\n**Pha 1 — Prepare:** Proposer chọn một ballot number `n` (duy nhất toàn cục và tăng đơn điệu — thường là một cặp (timestamp, nodeID)). Nó gửi `Prepare(n)` tới một đa số acceptor. Mỗi acceptor chưa hứa với ballot cao hơn sẽ trả lời bằng `Promise(n, highestAccepted)` — hứa không bao giờ chấp nhận đề xuất có ballot thấp hơn `n`, và báo lại giá trị có ballot cao nhất mà nó đã chấp nhận (nếu có).\n\n**Pha 1 — Proposer nhận phản hồi:** Nếu proposer thu được lời hứa từ đa số, nó xem xét mọi giá trị `highestAccepted` được trả về. Nếu có acceptor đã chấp nhận một giá trị, proposer **bắt buộc** phải dùng giá trị có ballot number cao nhất trong số đó (không được tự do chọn giá trị của mình). Nếu chưa acceptor nào chấp nhận gì, proposer được chọn bất kỳ giá trị nào nó muốn.\n\n**Pha 2 — Accept:** Proposer gửi `Accept(n, v)` tới một đa số acceptor (với `v` được xác định theo quy tắc ở trên). Một acceptor chấp nhận đề xuất nếu từ đó tới giờ nó chưa hứa với ballot nào cao hơn. Khi đa số acceptor đã chấp nhận cùng cặp `(n, v)`, giá trị `v` được **chọn** — nó sẽ không bao giờ thay đổi.\n\n**Vì sao proposer phải chấp nhận giá trị đã được accept?** Đây là cái thiên tài tinh tế của Paxos. Giả sử giá trị `v` đã được đa số chấp nhận ở một vòng trước. Một proposer mới chạy Pha 1 và thu lời hứa từ một đa số. Vì hai đa số bất kỳ chồng lên nhau, proposer mới phải nghe được từ ít nhất một node đã chấp nhận `v`. Bằng cách lấy giá trị được chấp nhận có ballot cao nhất, proposer mới đảm bảo nó sẽ đề xuất lại `v` chứ không phải một giá trị xung đột. Consensus không thể bị vi phạm: hai giá trị khác nhau không bao giờ cùng được chọn vĩnh viễn.\n\n**Cái giá của Paxos cổ điển:** Hai round trip đầy đủ cho mỗi quyết định. Trong một hệ thống đưa ra hàng nghìn quyết định mỗi giây (như database), điều này là quá đắt. **Multi-Paxos** giải quyết bằng cách chạy Pha 1 một lần để bầu ra một proposer đặc biệt (leader) với ballot number rất cao sẽ không bị thách thức. Các quyết định sau chỉ cần Pha 2 — một round trip. Tối ưu này khiến Multi-Paxos tương đương về chức năng với Raft: cả hai đều có một leader ổn định replicate các log entry với một round trip mỗi entry."
+    },
+    {
+      "type": "diagram",
+      "caption": "Protocol hai pha của Paxos cổ điển. Proposer phải lấy giá trị được chấp nhận trước đó có ballot cao nhất từ các phản hồi Pha 1 — đây là cơ chế ngăn các giá trị xung đột được chọn."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Demo này chính là kịch bản mà Paxos sinh ra để giải quyết. Giá trị `A` của p1 được a2 và a1 chấp nhận — một đa số — nên nó được chọn, nhưng p1 crash trước khi ai kịp biết. p2, muốn `B`, chạy Pha 1 với a2 và a3; hai đa số bất kỳ đều chồng nhau, nên a2 báo lại `(1001, A)` nó đã chấp nhận, và quy tắc safety buộc p2 đề xuất `A` thay vì `B`. Xóa block `alreadyAccepted` đi thì p2 sẽ khiến `B` được a2 và a3 chấp nhận — hai giá trị khác nhau được chọn, chính là vi phạm mà Paxos ngăn chặn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Raft vs Paxos: so sánh thực tế",
+      "content": "Cả hai thuật toán đều được chứng minh đúng dưới cùng mô hình sự cố crash. Khác biệt giữa chúng nằm ở triết lý thiết kế và trade-off thực tế:\n\n**Mô hình leader:** Raft có một leader mạnh, bền vững xử lý mọi lần đọc và ghi. Multi-Paxos cũng bầu leader, nhưng abstraction này không được gắn sâu vào thuật toán — các đội cài đặt phải tự đưa ra thêm quyết định thiết kế. Paxos cổ điển hoàn toàn không có khái niệm leader.\n\n**Log vs. một giá trị:** Raft về bản chất là thuật toán **replicated log**. Paxos là thuật toán một giá trị; để xây một log bạn phải chạy nhiều instance Paxos (mỗi slot log một instance) và thêm cơ chế để xử lý khoảng trống, thứ tự và reconfiguration. Đây là lý do các hệ Paxos production (Google Chubby, các Paxos group của Spanner) và các protocol họ Paxos (ZAB của ZooKeeper, Viewstamped Replication) đều hội tụ về một leader ổn định điều khiển một replicated log — cấu trúc mà Raft làm cho tường minh.\n\n**Thay đổi thành viên cluster:** Raft đặc tả cách **thêm hoặc bớt node an toàn** mà không downtime — joint consensus trong paper gốc, và cách thay đổi từng server một đơn giản hơn trong luận án của Ongaro mà phần lớn bản cài đặt (etcd, Consul) dùng, thường kèm các **learner** không bỏ phiếu bắt kịp dữ liệu trước khi được nâng cấp. Paxos không đặc tả reconfiguration; mỗi hệ Paxos production tự giải quyết chuyện này.\n\n**Hiệu năng đọc:** Vì Raft yêu cầu mọi lần đọc đi qua leader (để đảm bảo linearizability), throughput đọc không scale theo kích thước cluster. Có các phần mở rộng (read-index, lease read) cho phép follower phục vụ đọc trong một số điều kiện, nhưng chúng thêm độ phức tạp. Các hệ thống như CockroachDB cài đặt những phần mở rộng này bên trên Raft.\n\n**Triển khai thực tế:**\n- Raft: etcd (Kubernetes), CockroachDB, TiKV (TiDB), Consul, Kafka KRaft, RethinkDB; protocol replica-set của MongoDB giống Raft\n- Paxos/biến thể: Google Chubby (Paxos), Google Spanner (Paxos), Apache ZooKeeper (ZAB — Zookeeper Atomic Broadcast, họ Paxos), Amazon DynamoDB (Multi-Paxos cho mỗi partition)"
+    },
+    {
+      "type": "explanation",
+      "title": "Edge case, sắc thái và hiểu lầm phổ biến",
+      "content": "**Split brain:** Kịch bản ai cũng sợ — hai leader cùng lúc nhận ghi. Raft ngăn điều này bằng số term: leader lập tức rút lui khi thấy bất kỳ message nào có term cao hơn. Khi network partition, leader ở phía thiểu số sẽ không commit được (nó không với tới đa số), trong khi phía đa số bầu leader mới. Leader cũ có thể vẫn xử lý đọc và nghĩ mình còn là leader, nhưng không commit được entry mới nào. **Đọc dữ liệu cũ là có thể xảy ra nếu không có biện pháp phòng ngừa bổ sung** — đọc linearizable đòi leader xác nhận nó vẫn còn hiệu lực (qua một vòng heartbeat hoặc cơ chế lease) trước khi phục vụ đọc.\n\n**Lỗ hổng log trong Paxos:** Paxos cổ điển không ngăn khoảng trống giữa các slot log. Một proposer có thể khiến slot 5 được chọn trong khi slot 4 vẫn đang dở dang. Lấp lỗ hổng đòi hỏi thêm cơ chế protocol. Raft tránh điều này bằng cách để leader điền entry tuần tự nghiêm ngặt — khoảng trống không bao giờ xuất hiện.\n\n**Liveness và dueling proposer:** Paxos cổ điển có một vấn đề liveness gọi là **dueling proposers**. Proposer A chạy Pha 1 với ballot 5. Trước khi A xong Pha 2, Proposer B chạy Pha 1 với ballot 6, vô hiệu hóa lời hứa của A. A lại chạy Pha 1 với ballot 7, vô hiệu hóa B. Vòng này có thể lặp vô hạn. Paxos xử lý bằng exponential backoff hoặc bầu ra một leader đặc biệt. Raft tránh nó từ cấu trúc — chỉ leader đề xuất, và số term ngăn leader cũ can thiệp.\n\n**Thứ tự log đã thống nhất không tự động là đọc linearizable:** Raft đảm bảo mọi node áp dụng cùng các entry theo cùng thứ tự, nên *ghi* là linearizable. Đọc là một câu hỏi riêng: một follower — hoặc một leader đã bị phế mà chưa biết — có thể trả dữ liệu cũ. Các hệ production dùng Raft cho key-value store định tuyến mọi lần đọc qua leader hoặc dùng read-index (leader ghi lại commit index, gửi một vòng heartbeat để xác nhận nó vẫn là leader, rồi mới trả lời lần đọc).\n\n**Leader crash khi đang có ghi dở dang:** một leader khởi động lại quay về làm follower, điều đó là đúng. Chuyện xảy ra với các entry chưa commit của nó mới là phần tinh tế: một entry đã tới được đa số sẽ sống sót (leader kế tiếp phải có nó, và sẽ commit nó khi commit một entry thuộc term của chính mình); một entry chỉ tới được thiểu số có thể bị ghi đè. Client không thể biết điều nào đã xảy ra — request của nó chỉ đơn giản là timeout — nên một lần retry có thể thực thi lệnh **hai lần**. Câu trả lời của Raft (§6.3 trong luận án) là client session: mỗi client gắn số thứ tự vào lệnh và state machine bỏ qua các bản trùng lặp, tức là idempotency key."
+    },
+    {
+      "type": "explanation",
+      "title": "Raft production thêm gì so với bản trong paper",
+      "content": "Thuật toán cốt lõi vừa trên một trang giấy; các triển khai thực tế thêm một số phần mở rộng nổi tiếng:\n- **No-op khi được bầu**: leader mới append một entry rỗng trong term của mình, để các entry từ term trước commit được (quy tắc commit theo term hiện tại) và leader nhanh chóng biết commit index thật.\n- **PreVote**: trước khi tăng term, một ứng viên tiềm năng hỏi xem các peer *có sẽ* bỏ phiếu cho nó không. Nhờ đó một node từng bị partition cô lập không thể quay về và phế truất một leader khỏe mạnh bằng một term bị thổi phồng. etcd và Consul bật tính năng này.\n- **ReadIndex và leader lease**: để đọc linearizable mà không cần ghi log entry, leader ghi lại commit index, xác nhận bằng một vòng heartbeat rằng nó vẫn là leader, chờ tới khi index đó được áp dụng, rồi mới trả lời. Lease read bỏ qua heartbeat bằng cách tin vào độ lệch đồng hồ có giới hạn — nhanh hơn nhưng phụ thuộc đồng hồ.\n- **Log compaction và snapshot**: log không thể phình mãi. Mỗi node định kỳ snapshot state machine và bỏ phần đầu log; một follower tụt lại quá xa sẽ nhận snapshot qua `InstallSnapshot`.\n- **Batching và pipelining**: nhiều lệnh client trong một `AppendEntries`, nhiều RPC đang bay cho mỗi follower, và một lần fsync cho mỗi batch — đây là cách etcd và TiKV đạt throughput cao.\n- **Multi-Raft**: mỗi dải dữ liệu một Raft group (CockroachDB, TiKV), nên các dải khác nhau có leader khác nhau và cluster scale vượt khả năng của một leader."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Leslie Lamport nộp paper Paxos ('The Part-Time Parliament') năm 1989. Nó được viết khác thường tới mức — dựng thành câu chuyện một nhà khảo cổ hư cấu khám phá một nghị viện Hy Lạp cổ đại — các reviewer của TOCS đã từ chối, yêu cầu ông viết lại theo văn phong học thuật chuẩn. Ông gác nó lại, và cuối cùng TOCS xuất bản nó, gần như không đổi, vào năm 1998 — khi đó các hệ thống dựa trên Paxos như hệ lưu trữ Petal và Frangipani của DEC SRC đã được xây xong. Năm 2001 Lamport xuất bản 'Paxos Made Simple', với abstract trọn vẹn là: \"The Paxos algorithm, when presented in plain English, is very simple.\" Nhiều người đọc vẫn thấy nó khó nhằn. Raft được thiết kế chính là để phản ứng lại điều này: Ongaro và Ousterhout làm một nghiên cứu người dùng, trong đó sinh viên ở Stanford và Berkeley học cả hai thuật toán qua video bài giảng rồi làm bài kiểm tra; phần lớn đạt điểm cao hơn với Raft và nói nó dễ hiểu hơn."
+    },
+    {
+      "type": "callout",
+      "content": "**Bẫy interview và bài thi:**\n\n- **'Leader election nhanh nhờ timeout ngẫu nhiên'** — đúng, nhưng phải biết *vì sao*: ngẫu nhiên hóa làm lệch thời điểm bầu cử để một candidate xuất phát trước khi những node khác timeout. Không có ngẫu nhiên hóa, mọi follower bắt đầu bầu cử cùng lúc và chia phiếu.\n- **'Đã commit nghĩa là bền vững'** — một entry Raft đã commit sống sót qua mọi cuộc bầu leader trong tương lai, nhưng chỉ khi bạn persist log xuống đĩa. Một Raft chỉ lưu trong bộ nhớ không an toàn khi crash. etcd và CockroachDB đều fsync log entry trước khi xác nhận ghi.\n- **'Commit ngay khi nằm trên đa số'** — chỉ đúng với entry thuộc term *hiện tại* của leader. Một entry term cũ nằm trên đa số vẫn có thể bị ghi đè (Figure 8) cho tới khi một entry term hiện tại phía trên nó được commit.\n- **'4 node không tốt hơn 3'** — quorum của 4 node là 3, chịu được 1 sự cố. Quorum của 3 node là 2, cũng chịu được 1 sự cố. Hãy dùng kích thước cluster lẻ.\n- **'Paxos và Raft đều không an toàn khi network partition'** — SAI. Chúng *không khả dụng* ở phía thiểu số, nhưng luôn *an toàn*. Phía thiểu số không commit được entry mới. Safety không bao giờ bị vi phạm; liveness bị hy sinh khi có partition.\n- **'Raft cần một round trip cho mỗi lần ghi'** — gần đúng ở trạng thái ổn định (leader → follower → leader), nhưng pipelining rất phổ biến trên production: leader có thể gửi nhiều AppendEntries đang bay mà không chờ từng ack, giới hạn bởi việc theo dõi `nextIndex`."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Bất khả FLP** (1985): trong một mạng hoàn toàn bất đồng bộ, không protocol tất định nào đảm bảo được consensus kết thúc nếu chỉ cần một node có thể crash. Vì vậy Raft và Paxos luôn giữ **safety** và chỉ có **liveness** khi thời gian diễn ra ổn định (partial synchrony).",
+        "**Consensus** là bài toán khiến N node phân tán thống nhất một giá trị bất chấp crash và mất message. Nó là thao tác nền tảng cho replicated state machine, leader election và distributed transaction.",
+        "**Raft** chia consensus thành ba bài toán con — leader election, log replication và safety — với một leader mạnh, bền vững và replicated log làm abstraction cốt lõi. Nó được dùng trong etcd, CockroachDB, Consul và TiKV.",
+        "**Leader election** dùng election timeout ngẫu nhiên (150–300ms) để làm lệch thời điểm bầu cử. Candidate thắng bằng cách thu phiếu từ một đa số thực sự (quorum = ⌊N/2⌋ + 1). Quorum intersection ngăn hai leader đồng thời trong cùng một term.",
+        "**Log replication** commit một entry khi nó được lưu trên đa số **và** thuộc term hiện tại của leader (các entry cũ hơn được commit ngầm bên dưới nó — quy tắc Figure 8); phép kiểm tra log-matching trên `prevLogIndex`/`prevLogTerm` giữ các log giống hệt nhau tới mọi cặp (index, term) chung. Leader duy trì `nextIndex` cho từng follower và sửa log phân kỳ bằng cách lùi về entry chung cuối cùng rồi phát lại về phía trước.",
+        "**Safety (election restriction):** voter từ chối các candidate có log kém mới hơn log của chính nó. Điều này đảm bảo mọi leader tương lai có đủ các entry đã commit — dữ liệu đã commit không bao giờ mất qua các lần chuyển giao leader.",
+        "**Paxos** đạt consensus qua hai pha: Prepare (thu lời hứa và mọi giá trị đã được chấp nhận trước đó) và Accept (đề xuất giá trị trước đó cao nhất nếu có, nếu không thì bất kỳ giá trị nào). Multi-Paxos thêm một leader ổn định để bỏ qua Pha 1, hội tụ về thiết kế của Raft.",
+        "**Toán quorum và kích thước cluster:** Với N node, quorum = ⌊N/2⌋ + 1, chịu được ⌊(N−1)/2⌋ sự cố. Luôn dùng kích thước cluster lẻ — cluster 4 node chỉ chịu được 1 sự cố, y như cluster 3 node nhưng tốn kém hơn. Phần lớn cluster production dùng 3 hoặc 5 node."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Một leader Raft ở term 4 thấy một entry thuộc term 2 giờ đã được lưu trên đa số server. Nó được phép làm gì?",
+      "options": [
+        "Đánh dấu entry term 2 là đã commit ngay, vì đa số đã có nó",
+        "Chỉ commit nó khi mọi server trong cluster đều có bản sao",
+        "Chờ tới khi một entry thuộc term 4 được lưu trên đa số; commit entry đó cũng commit luôn entry term 2 bên dưới",
+        "Bỏ nó đi, vì entry từ các term trước không bao giờ được commit"
+      ],
+      "explanation": "Leader Raft chỉ commit entry thuộc term hiện tại bằng cách đếm số bản sao. Một entry term cũ nằm trên đa số vẫn có thể bị ghi đè bởi một leader tương lai có log kết thúc ở term muộn hơn (kịch bản Figure 8 trong paper Raft). Khi một entry term 4 đã nằm trên đa số, không server nào thiếu nó có thể thắng bầu cử, nên nó và mọi entry trước nó — kể cả entry term 2 — đều được commit. Đây là lý do leader mới append ngay một entry no-op."
+    },
+    {
+      "id": "q2",
+      "question": "Vì sao Raft dùng election timeout ngẫu nhiên thay vì cố định?",
+      "options": [
+        "Timeout ngẫu nhiên giảm tổng số message được gửi trong một cuộc bầu cử",
+        "Nó ngăn cùng một node được bầu làm leader hai lần liên tiếp",
+        "Ngẫu nhiên hóa đảm bảo node có log mới nhất luôn thắng bầu cử",
+        "Timeout cố định sẽ khiến mọi follower bắt đầu bầu cử cùng lúc, chia phiếu để không candidate nào thắng"
+      ],
+      "explanation": "Nếu mọi node có timeout cố định giống hệt nhau, tất cả sẽ phát hiện leader hỏng cùng một lúc và đồng thời bắt đầu bầu cử, gửi RPC RequestVote chia phiếu cho các candidate. Ngẫu nhiên hóa timeout (ví dụ 150-300ms) làm lệch thời điểm bầu cử để gần như luôn có một node xuất phát trước và thắng trước khi những node khác timeout — tránh chia phiếu mà không cần phối hợp gì."
+    },
+    {
+      "id": "q3",
+      "question": "Trong Raft, một entry trong log được coi là đã commit khi:",
+      "options": [
+        "Một đa số node (quorum) đã ghi entry vào log của mình và xác nhận nó",
+        "Mọi follower trong cluster đã xác nhận nhận được entry",
+        "Leader đã ghi entry vào log persistent trên đĩa của chính nó",
+        "Client đã nhận được phản hồi thành công từ bất kỳ node nào trong cluster"
+      ],
+      "explanation": "Raft commit một entry khi một đa số thực sự (quorum = ⌊N/2⌋ + 1) các node đã replicate nó và xác nhận với leader. Commit sau đa số — không phải tất cả node — cho phép cluster tiến triển ngay cả khi một số node không khả dụng. Tính chất quorum intersection đảm bảo entry đã commit hiện diện với mọi leader tương lai."
+    },
+    {
+      "id": "q4",
+      "question": "Một cluster Raft 5 node: kích thước quorum là bao nhiêu và nó chịu được bao nhiêu node hỏng đồng thời mà vẫn khả dụng?",
+      "options": [
+        "Quorum 2, chịu được 3 sự cố",
+        "Quorum 3, chịu được 2 sự cố",
+        "Quorum 4, chịu được 1 sự cố",
+        "Quorum 5, chịu được 0 sự cố"
+      ],
+      "explanation": "Quorum = ⌊5/2⌋ + 1 = 3. Với quorum 3, cluster hoạt động được chừng nào còn với tới ít nhất 3 node — nghĩa là chịu được 2 sự cố đồng thời. Công thức khả năng chịu lỗi là f = ⌊(N−1)/2⌋ = ⌊4/2⌋ = 2."
+    },
+    {
+      "id": "q5",
+      "question": "Election restriction của Raft — yêu cầu log của candidate ít nhất cũng mới bằng log của voter — được thiết kế để đảm bảo tính chất nào?",
+      "options": [
+        "Bầu cử kết thúc trong thời gian giới hạn ngay cả khi network partition",
+        "Follower luôn thống nhất entry nào commit tiếp theo mà không cần qua lại",
+        "Mọi leader tương lai có đủ mọi log entry đã commit trước đó, nên dữ liệu đã commit không bao giờ mất",
+        "Candidate có node ID thấp nhất luôn thắng khi nhiều candidate cạnh tranh"
+      ],
+      "explanation": "Election restriction đảm bảo safety: mọi entry đã commit đều được replicate tới một đa số (M). Bất kỳ candidate thắng cử nào phải thu phiếu từ một đa số, đa số này chồng với M ít nhất một node. Node đó áp đặt phép kiểm tra độ mới, nên log của người thắng phải chứa entry đã commit. Không entry đã commit nào có thể vắng mặt trong log của leader tương lai."
+    },
+    {
+      "id": "q6",
+      "question": "Trong Pha 1 của Paxos cổ điển, sau khi proposer nhận phản hồi Promise từ đa số acceptor, nó phải đề xuất giá trị nào ở Pha 2?",
+      "options": [
+        "Giá trị ưa thích của chính nó, vì nó đã thắng Pha 1 và có quyền tự do chọn",
+        "Một giá trị chọn ngẫu nhiên trong số mọi giá trị thấy được ở các phản hồi Promise",
+        "Giá trị được đề xuất bởi acceptor có node ID cao nhất trong đa số",
+        "Giá trị có ballot number đã chấp nhận cao nhất trong số các giá trị đã chấp nhận trước đó của bất kỳ acceptor nào, nếu có"
+      ],
+      "explanation": "Đây là quy tắc safety cốt lõi của Paxos. Nếu có acceptor trong đa số đã chấp nhận một giá trị, proposer phải dùng giá trị có ballot number cao nhất. Điều này đảm bảo nếu một giá trị đã được một đa số trước đó chọn, proposer mới sẽ truyền nó tiếp chứ không ghi đè bằng giá trị khác. Nếu chưa có lần chấp nhận nào, proposer được tự do chọn giá trị của mình."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao chạy một cluster consensus 4 node thay vì 3 node nhìn chung là lựa chọn tồi?",
+      "options": [
+        "Cluster 4 node cần quorum 3, chỉ chịu được 1 sự cố — như cluster 3 node, nhưng tốn chi phí hạ tầng cao hơn",
+        "Protocol của Raft không được định nghĩa cho cluster số chẵn và sẽ chạy sai",
+        "Bốn node sinh ra gấp bốn lần số message mạng mỗi vòng commit so với ba node",
+        "Cluster số chẵn luôn chia phiếu và không bao giờ bầu được leader"
+      ],
+      "explanation": "Quorum cho 4 node = ⌊4/2⌋ + 1 = 3, chịu được 4 − 3 = 1 sự cố. Quorum cho 3 node = ⌊3/2⌋ + 1 = 2, chịu được 3 − 2 = 1 sự cố. Cả hai kích thước đều chịu được đúng một sự cố. Thêm node thứ tư tốn tiền và thêm overhead mạng mà không cải thiện khả năng chịu lỗi. Luôn ưu tiên kích thước cluster lẻ."
+    },
+    {
+      "id": "q8",
+      "question": "Tính chất safety then chốt ngăn hai leader Raft commit các entry xung đột ở cùng một log index là:",
+      "options": [
+        "Một distributed lock mà leader phải giữ trước khi nhận bất kỳ lần ghi nào",
+        "Quorum intersection: hai đa số bất kỳ chung nhau ít nhất một node, và một node bỏ phiếu cho tối đa một candidate mỗi term",
+        "Mạng áp đặt ngữ nghĩa một leader bằng các TCP port dành riêng cho vai trò leader",
+        "Follower duy trì một số thứ tự toàn cục và từ chối AppendEntries sai thứ tự từ leader thứ hai"
+      ],
+      "explanation": "Quorum intersection là nền tảng toán học cho safety của Raft. Hai tập kích thước ⌊N/2⌋ + 1 bất kỳ rút từ N node phải chung nhau ít nhất một phần tử. Vì một node bỏ phiếu cho tối đa một candidate mỗi term, hai candidate không thể cùng thu được phiếu đa số trong cùng một term — mỗi term có tối đa một leader, khiến các commit xung đột là bất khả."
+    },
+    {
+      "id": "q9",
+      "question": "Phương án nào sau đây là tính chất safety mà Raft luôn giữ, kể cả khi network partition?",
+      "options": [
+        "Phía thiểu số vẫn nhận và commit được ghi trong lúc partition",
+        "Leader mới được bầu trong thời gian giới hạn ngay cả khi không với tới quorum node nào",
+        "Phía đa số không bao giờ commit hai giá trị khác nhau cho cùng một log index",
+        "Mọi node áp dụng log entry vào state machine theo thời gian thực mà không có độ trễ nào"
+      ],
+      "explanation": "Raft luôn duy trì tính chất safety rằng mỗi log index có tối đa một giá trị được commit — kể cả khi partition. Phía thiểu số đơn giản là không commit được (không có quorum). Liveness — khả năng tiến triển — bị hy sinh ở phía thiểu số: không ghi mới nào được commit ở đó. Nhưng safety không bao giờ bị vi phạm. Đây là trade-off đúng cho một database: mất khả dụng trong chốc lát là chấp nhận được; dữ liệu không nhất quán thì không."
+    },
+    {
+      "id": "q10",
+      "question": "Multi-Paxos cải thiện so với Paxos cổ điển bằng cách:",
+      "options": [
+        "Loại bỏ nhu cầu majority quorum cho mỗi quyết định, giảm một nửa số message",
+        "Dùng cryptographic hash thay cho ballot number để ngăn proposer xung đột",
+        "Chạy Pha 1 và Pha 2 song song trên các lõi CPU khác nhau để giảm latency mỗi quyết định",
+        "Bầu một leader đặc biệt ổn định một lần qua Pha 1, rồi bỏ qua Pha 1 cho mọi đề xuất tiếp theo trong cùng term"
+      ],
+      "explanation": "Paxos cổ điển tốn hai round trip đầy đủ (Pha 1 + Pha 2) cho mỗi quyết định — đắt đỏ ở throughput cao. Multi-Paxos bầu một leader đặc biệt bằng cách chạy Pha 1 một lần với ballot number cao. Chừng nào không có thách thức leader mới, mọi quyết định sau chỉ cần Pha 2 (một round trip). Về cơ bản đây là điều Raft làm, đó là lý do Multi-Paxos và Raft thường được mô tả là hội tụ về cùng một thiết kế."
+    }
+  ]
+}

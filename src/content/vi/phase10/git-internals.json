@@ -1,0 +1,219 @@
+{
+  "sourceHash": "456c258dcdf5",
+  "title": "Git Internals",
+  "tagline": "Hiểu object model của Git — blob, tree, commit và DAG — để merge, rebase và ref không còn là phép màu nữa.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hầu hết developer coi Git là một hộp đen: `git add`, `git commit`, `git push`, rồi cầu nguyện. Khi có gì trục trặc — detached HEAD, rebase thất bại, lỗi 'not a fast-forward' — họ lao lên Stack Overflow thay vì hiểu chuyện gì thực sự đã xảy ra. Nhưng vẻ phức tạp của Git chỉ là lớp vỏ bên ngoài một thiết kế thanh lịch đến bất ngờ. Khi đã thấy cấu trúc bên dưới, những thông báo lỗi bí hiểm kia không còn đáng sợ mà trở nên giàu thông tin.\n\nVề cốt lõi, Git là một **content-addressable object store** (kho object đánh địa chỉ theo nội dung) nằm trong thư mục `.git` của mỗi repository. Mọi dữ liệu Git theo dõi đều được lưu dưới đúng một trong bốn loại object: **blob** (nội dung file thô), **tree** (danh sách thư mục), **commit** (snapshot kèm metadata) hoặc **tag** (pointer có chú thích). Mỗi object được định danh bằng hash của chính nội dung nó (mặc định là SHA-1, SHA-256 ở các repository mới hơn) — nội dung giống nhau luôn cho cùng một ID, và trên thực tế nội dung khác nhau không bao giờ cho cùng ID.\n\nXây trên object store đó là một **Directed Acyclic Graph (DAG)** gồm các commit. Mỗi commit trỏ tới commit cha (hoặc hai cha nếu là merge), tạo thành một chuỗi snapshot kéo dài ngược về commit đầu tiên. Edge đi từ mỗi commit ngược về các cha của nó, và không thể có chu trình vì một commit chỉ có thể nêu tên những cha đã tồn tại (hash của chúng phải được biết lúc commit được ghi) — nên gọi là 'có hướng, không chu trình' là chính xác về mặt kỹ thuật. **Ref** — branch, tag và `HEAD` — chẳng qua chỉ là những cái tên dễ đọc trỏ tới các node cụ thể trong graph đó. Branch là một tờ giấy nhớ dán lên một commit; `git commit` tự động dời tờ giấy nhớ về phía trước.\n\nCuối cùng, nằm giữa working directory và object store là **staging area** (còn gọi là index): một snapshot đang được chuẩn bị mà bạn dựng dần bằng `git add` trước khi chốt nó thành commit. Hiểu ba ý tưởng này — content-addressable object store, commit DAG, và ref là pointer nhẹ — sẽ giải mã mọi thao tác Git nâng cao. Merge conflict, rebase, cherry-pick, khôi phục bằng reflog: tất cả đều trở thành hệ quả logic của một mô hình dữ liệu đơn giản mà bạn có thể suy luận từ nguyên lý gốc."
+    },
+    {
+      "type": "diagram",
+      "caption": "Kiến trúc ba tầng của Git: working directory đổ vào staging area, rồi staging area được chốt vào object store. Ref là các pointer nhẹ trỏ vào commit DAG."
+    },
+    {
+      "type": "analogy",
+      "title": "Thư viện với những cuốn sách bất biến, có dấu vân tay",
+      "content": "Hãy tưởng tượng một thư viện rất đặc biệt. Mỗi cuốn sách nhận một mã số danh mục duy nhất, được tính bằng cách lấy dấu vân tay của chính xác nội dung bên trong — đổi dù chỉ một ký tự trong sách, nó sẽ nhận một mã số hoàn toàn khác. Hai cuốn giống hệt nhau dùng chung một ô danh mục. Đó là **object store** của Git: mỗi snapshot file và snapshot thư mục được lưu đúng một lần, định danh bằng dấu vân tay SHA-1 của các byte bên trong. Nội dung giống nhau trên hai mươi branch chỉ tốn dung lượng của một bản.\n\n**Commit** giống một thẻ danh mục có ghi ngày: 'Vào ngày 3/1/2024, các kệ sách được sắp xếp đúng như *tree này* (mã danh mục XYZ), và nó tiếp nối từ cách sắp xếp mô tả trong thẻ *ABC* (commit cha).' **Commit DAG** là toàn bộ kho lưu trữ những thẻ danh mục đó, mỗi thẻ trỏ ngược về thẻ mà nó được tạo ra từ đó. Bạn có thể lần ngược bất kỳ thẻ nào về thẻ đầu tiên, nhưng không bao giờ tạo được chu trình — lịch sử chỉ chảy theo một chiều.\n\n**Branch** là giấy nhớ bạn dán lên một thẻ. Khi bạn checkout một branch và tạo commit mới, Git viết một thẻ mới và tự động dời tờ giấy nhớ của bạn sang đó. **HEAD** là một tờ giấy nhớ đặc biệt cấp cao hơn, ghi rằng 'tôi đang nhìn vào *tờ giấy nhớ này*.' Khi bạn `git checkout feature`, HEAD trỏ vào tờ giấy nhớ của branch feature. Khi tờ giấy nhớ của branch đó di chuyển, HEAD đi theo. Ở trạng thái 'detached HEAD', HEAD trỏ thẳng vào một thẻ thay vì vào một tờ giấy nhớ — bạn đang duyệt lịch sử mà không có branch nào để đẩy về phía trước.\n\n**Staging area** là tờ nháp trước khi bạn viết thẻ mới. Bạn gom những cuốn sách (file) muốn đưa vào, xếp chúng lên kệ staging bằng `git add`, rồi `git commit` chụp ảnh kệ đó và viết thẻ. Bạn có thể stage một phần thay đổi, chỉnh lại cách sắp xếp, và chỉ commit khi đã hài lòng — working directory và commit luôn được ngăn cách bởi bước staging có chủ đích này."
+    },
+    {
+      "type": "explanation",
+      "title": "Bốn loại object: blob, tree, commit, tag",
+      "content": "Mọi thứ Git lưu đều thuộc một trong bốn loại object. Hiểu chính xác từng loại là chìa khóa để hiểu mọi hành vi của Git.\n\n**Blob** là loại đơn giản nhất: blob lưu nội dung file thô và không gì khác. Không tên file. Không đường dẫn. Không quyền truy cập. Chỉ có byte. SHA-1 của blob được tính từ chuỗi `blob <length>\\0<content>`. Vì định danh chỉ được suy ra từ nội dung, hai file ở hai thư mục hoàn toàn khác nhau mà cùng nội dung sẽ chỉ tạo ra đúng một blob object. Đây là cách Git tiết kiệm dung lượng mà không cần logic loại trùng tường minh — việc loại trùng là hệ quả toán học của content-addressing.\n\n**Tree** đại diện cho thư mục. Một tree object chứa danh sách các entry, mỗi entry có ba trường: **mode** (`100644` file thường, `100755` file thực thi, `120000` symlink, `040000` thư mục con, `160000` commit của submodule — Git chỉ theo dõi bit thực thi, không theo dõi đầy đủ quyền Unix), **name** (tên file hoặc tên thư mục), và một **SHA-1** trỏ tới hoặc một blob (cho file) hoặc một tree khác (cho thư mục con). Điểm then chốt: tree không lưu trực tiếp nội dung file — nó chỉ trỏ tới blob. Và vì tree cũng được đánh địa chỉ theo nội dung, SHA của tree ứng với một thư mục con không đổi sẽ giữ nguyên qua các commit. Git chỉ ghi tree object mới cho những thư mục thực sự thay đổi.\n\n**Commit** là loại object quen thuộc nhất với developer, nhưng cấu trúc bên trong của nó đáng để biết chính xác. Một commit object chứa: pointer tới **root tree** (snapshot thư mục cấp cao nhất), một hoặc nhiều SHA-1 của **commit cha** (không có cho commit đầu tiên, thường là một, hai hoặc nhiều hơn cho merge commit), tên/email/timestamp của **author**, tên/email/timestamp của **committer** (có thể khác author sau khi rebase hoặc cherry-pick), và **commit message**. SHA-1 của chính commit được suy ra từ toàn bộ nội dung này. Đổi bất cứ thứ gì — kể cả message, kể cả timestamp — bạn sẽ có SHA-1 khác. Đây là lý do mọi commit bị rebase hay amend đều có hash mới: rebase đổi pointer tới cha (và timestamp của committer), amend đổi tree, message hoặc timestamp của committer — nên hash thay đổi ngay cả khi nội dung file y hệt.\n\n**Tag** có hai loại. **Lightweight tag** chỉ đơn giản là một file ref trỏ tới SHA của commit — không có object nào được tạo. **Annotated tag** tạo ra một object `tag` thực sự trong object store, chứa: SHA-1 của object đích, loại của đích (thường là 'commit'), tên tag, danh tính người tạo tag, timestamp và message. Annotated tag (và commit) có thể được ký bằng khóa GPG, SSH hoặc X.509, biến chúng thành mốc release có thể kiểm chứng bằng mật mã. Dùng annotated tag cho release; lightweight tag cho bookmark tạm thời ở local."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một commit trỏ tới một root tree. Tree trỏ tới các blob (file) và các sub-tree (thư mục con). Mỗi object được định danh bằng hash SHA-1 của nó."
+    },
+    {
+      "type": "explanation",
+      "title": "Commit DAG: lịch sử dưới dạng graph",
+      "content": "**Directed Acyclic Graph (DAG)** là cấu trúc trong đó mỗi node trỏ tới một hoặc nhiều node khác, edge có hướng, và bạn không thể đi theo một đường vòng quay lại điểm xuất phát. Lịch sử commit của Git chính xác là cấu trúc như vậy: mỗi commit trỏ tới (các) commit cha, nên edge đi từ con ngược về cha. Không có chu trình vì hash của một commit bao gồm hash của các cha: muốn một commit làm tổ tiên của chính nó, bạn phải biết hash của nó trước khi tạo ra nó.\n\nHầu hết commit có đúng một cha — commit trước đó trên một nhánh phát triển tuyến tính. **Commit đầu tiên** không có cha (nó là gốc của DAG). **Merge commit** có hai cha trở lên — mỗi cha ứng với một branch được merge. Đây là thứ làm DAG phi tuyến tại các điểm merge: graph rẽ nhánh (khi phát triển phân kỳ) rồi hội tụ lại (khi các branch merge).\n\nCấu trúc DAG có những hệ quả sâu sắc. Thứ nhất, **lịch sử là bất biến**: vì SHA-1 của một commit mã hóa SHA-1 của cha nó, thay đổi bất kỳ commit tổ tiên nào cũng sẽ thay đổi SHA-1 của mọi commit con cháu. Cả chuỗi phải thay đổi. Điều này có nghĩa là `git rebase` và `git commit --amend` không sửa lịch sử — chúng tạo commit mới bên cạnh commit cũ. Commit cũ vẫn nằm trong object store, truy cập được qua `git reflog`, cho đến khi garbage collection xóa chúng.\n\nThứ hai, **tạo branch gần như miễn phí**: tạo branch chỉ là ghi một ref chứa một SHA-1 (một file trong `.git/refs/heads/`, một dòng trong `.git/packed-refs`, hoặc một entry trong format *reftable* mới hơn). Không dữ liệu nào bị sao chép. Không object nào được tạo. Một nghìn branch tốn vài kilobyte dung lượng.\n\nThứ ba, **lịch sử chung được chia sẻ**: nếu hai branch chung một trăm commit đầu, cả hai cùng tham chiếu đúng một trăm commit object, blob object và tree object đó. Không có trùng lặp. Dung lượng tăng theo số object duy nhất, không theo số branch."
+    },
+    {
+      "type": "diagram",
+      "caption": "Merge (nhánh trái) tạo merge commit M có hai cha, giữ nguyên toàn bộ lịch sử phi tuyến. Rebase (nhánh phải) phát lại C thành C-prime trên đỉnh B — lịch sử tuyến tính nhưng SHA-1 mới, kể cả khi diff y hệt."
+    },
+    {
+      "type": "explanation",
+      "title": "Ref và HEAD: hệ thống pointer",
+      "content": "Với hàng nghìn hash SHA-1 của commit trong một repository, con người cần những điểm vào có tên trong graph. Đó là việc của ref.\n\n**Branch** nằm trong `.git/refs/heads/` dưới dạng file văn bản thuần chứa một hash SHA-1 duy nhất. (Git cũng gói nhiều ref vào `.git/packed-refs`, và từ Git 2.45+ có backend nhị phân **reftable** cho các repo có lượng ref khổng lồ — cùng khái niệm, khác cách lưu.) File `.git/refs/heads/main` có thể chứa `a3f8e291...`. Khi bạn chạy `git commit`, Git ghi một commit object mới rồi ghi đè file đó bằng SHA-1 của commit mới. Vì vậy branch là **pointer có thể thay đổi**, tự động tiến lên khi bạn commit. Tạo branch chỉ là ghi một file mới; xóa branch chỉ là xóa file đó. Các commit mà branch từng trỏ tới vẫn không đổi.\n\n**Remote-tracking ref** nằm trong `.git/refs/remotes/` và thể hiện trạng thái được biết gần nhất của các branch trên remote. `origin/main` cho bạn biết `main` ở đâu trên remote vào lần cuối bạn fetch. Các ref này là chỉ đọc — Git cập nhật chúng khi `git fetch`/`git pull`, nhưng bạn không commit trực tiếp lên chúng.\n\n**HEAD** là pointer đặc biệt trong `.git/HEAD` cho Git biết bạn đang ở branch (hoặc commit) nào. Bình thường nó chứa một tham chiếu gián tiếp như `ref: refs/heads/main` — gọi là **symbolic ref**. Git đi theo sự gián tiếp đó: HEAD -> main -> SHA-1. Khi bạn `git checkout main`, Git cập nhật HEAD để trỏ vào main. Khi bạn commit, Git đẩy main lên, và HEAD tự động đi theo.\n\n**Detached HEAD** xảy ra khi HEAD chứa một SHA-1 thô thay vì tham chiếu tới branch — thường là sau `git checkout <sha>`, `git switch --detach <sha>`, hoặc checkout bất kỳ tag nào (`git checkout v1.0`), hoặc giữa chừng rebase/bisect. Ở trạng thái này, các commit bạn tạo không đẩy branch nào lên. Nếu bạn chuyển đi chỗ khác mà không tạo branch, các commit đó trở nên không thể truy cập (unreachable) và cuối cùng sẽ bị garbage-collect. Git cảnh báo rõ ràng về trạng thái này, nên thông báo nghe có vẻ đáng sợ — nhưng giải pháp rất đơn giản: `git switch -c new-branch` (hoặc `git checkout -b new-branch`) để neo công việc của bạn vào một branch pointer mới.\n\n**Tag** nằm trong `.git/refs/tags/`. Khác với branch, tag không di chuyển khi bạn commit — chúng được dùng như **pointer cố định** đánh dấu những thời điểm như release. (Chúng *có thể* bị ép di chuyển bằng `git tag -f`, và đó là lý do việc tag lại một release đã publish bị coi là thói quen xấu.)"
+    },
+    {
+      "type": "diagram",
+      "caption": "HEAD trỏ tới một branch ref, branch ref trỏ tới SHA của một commit. Cả hai branch dùng chung commit tổ tiên — không có dữ liệu trùng lặp."
+    },
+    {
+      "type": "explanation",
+      "title": "Staging area (index): snapshot bản nháp của bạn",
+      "content": "**Staging area** — còn gọi là **index** — là một trong những tính năng bị hiểu sai nhiều nhất của Git, nhưng lại là chìa khóa để Git tạo ra những commit chính xác, được chăm chút.\n\nIndex nằm trong file `.git/index`. Đây là file nhị phân biểu diễn một danh sách phẳng mọi file được theo dõi: mode, blob hash và đường dẫn của mỗi file trong snapshot đang được chuẩn bị, cộng với dữ liệu stat của file system được cache (kích thước, mtime) để `git status` khỏi phải hash lại các file không đổi, và — trong lúc merge có conflict — tới ba entry *stage* cho mỗi đường dẫn (base, ours, theirs). Nó luôn chứa một góc nhìn đầy đủ về working tree đúng như bạn định commit — không chỉ các file đã thay đổi, mà mọi file được theo dõi.\n\nKhi bạn chạy `git add file.txt`, Git làm hai việc: nó **hash nội dung hiện tại** của `file.txt` và ghi một blob object vào `.git/objects/`, rồi **cập nhật index** để trỏ tới SHA-1 của blob mới đó cho `file.txt`. Bản sao `file.txt` trong working directory không bị ảnh hưởng.\n\nKhi sau đó bạn sửa `file.txt` lần nữa (mà không `git add` lại), index vẫn trỏ tới blob từ lần `git add` đầu tiên. Working directory đã đi tiếp, nhưng staging area thì chưa. Đó là lý do `git diff` hiển thị khác biệt giữa working directory và index, còn `git diff --cached` hiển thị khác biệt giữa index và commit gần nhất — hai khoảng cách riêng biệt.\n\nKhi bạn chạy `git commit`, Git đọc toàn bộ index, dựng một tree object (và các sub-tree object cần thiết) từ các entry trong index, ghi một commit object trỏ tới tree đó và lấy commit HEAD hiện tại làm cha, rồi đẩy branch ref hiện tại lên SHA-1 của commit mới. Không lúc nào `git commit` nhìn trực tiếp vào các file trong working directory.\n\nThiết kế này cho phép những workflow mạnh mẽ: bạn có thể thực hiện nhiều thay đổi trong working directory nhưng stage chúng có chọn lọc bằng `git add -p` (chế độ patch tương tác), tách một buổi làm việc lộn xộn thành nhiều commit tập trung riêng biệt. Bạn cũng có thể dùng `git stash` để lưu và khôi phục trạng thái working directory và index dưới dạng các commit object bình thường được tham chiếu bởi `refs/stash`, cho phép chuyển ngữ cảnh mà không mất công việc chưa commit."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`git cat-file -p` là máy X-quang soi vào object store — nó in đẹp bất kỳ blob, tree, commit hay tag nào theo tiền tố SHA-1. Ba lệnh diff làm lộ hai khoảng cách: working-dir so với index và index so với HEAD. Detached HEAD có thể thấy được bằng cách đọc trực tiếp `.git/HEAD` — khi nó chứa một SHA thô thay vì `ref: refs/heads/...`, bạn đang ở trạng thái detached.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Merge vs rebase: hai cách tích hợp thay đổi",
+      "content": "Cả `git merge` và `git rebase` đều tích hợp thay đổi từ một branch vào branch khác. Khi conflict được giải quyết theo cùng một cách, chúng cho ra cùng nội dung file cuối cùng — nhưng tạo ra cấu trúc graph khác nhau về căn bản, với hệ quả khác nhau về độ ổn định SHA-1, khả năng đọc và độ an toàn khi cộng tác.\n\n**Merge hoạt động thế nào:** `git merge feature` tìm **merge base** — commit tổ tiên chung gần nhất của branch hiện tại và branch feature. Sau đó nó thực hiện three-way merge (chiến lược mặc định từ Git 2.34 là `ort`): so sánh trạng thái ở merge base với đỉnh của từng branch. Nếu các thay đổi không xung đột (chúng chạm vào các dòng khác nhau hoặc file khác nhau), Git tự động kết hợp chúng. Kết quả là một **merge commit** mới có hai pointer tới cha. Merge commit này xuất hiện trong lịch sử, và hình dạng phi tuyến đầy đủ của graph được giữ nguyên. `git log --graph` sẽ hiển thị hai branch phân kỳ rồi hội tụ.\n\n**Rebase hoạt động thế nào:** `git rebase main` làm một việc \"phẫu thuật\" hơn. Git xác định các commit trên branch hiện tại mà không có trong main (các commit sau merge base). Rồi nó phát lại từng commit đó, lần lượt, lên trên đỉnh của main. Với mỗi commit, Git tính diff so với cha của nó, áp diff đó lên base mới, và tạo một **commit object mới** với SHA cha mới, tree mới, và (mặc định) author/message gốc. Các commit gốc vẫn tồn tại trong object store nhưng không còn truy cập được từ bất kỳ branch nào (chỉ từ reflog và `ORIG_HEAD`) — sau khi các entry reflog hết hạn, `git gc` sẽ dọn chúng. Nếu quá trình phát lại gặp conflict, Git dừng lại: sửa file, `git add`, rồi `git rebase --continue` (hoặc `--abort` để quay về).\n\n**Trade-off then chốt:** Merge an toàn khi làm trên các remote branch dùng chung vì nó không viết lại SHA-1 hiện có — bản local của developer khác vẫn hợp lệ. Rebase viết lại SHA-1, nên nếu bạn rebase những commit mà đồng nghiệp đã dựa vào để làm việc, lịch sử của họ sẽ phân kỳ khỏi lịch sử của bạn và `git pull` sẽ tạo ra một mớ hỗn độn. Đây là nguồn gốc của **quy tắc vàng khi rebase**: chỉ rebase những commit chỉ tồn tại trong branch local của bạn, không bao giờ rebase những commit đã push lên remote dùng chung.\n\n**Khi nào dùng cái nào:** Nhiều team dùng rebase để giữ feature branch cập nhật với main (giữ lịch sử branch tuyến tính và dễ đọc), rồi merge với `--no-ff` khi feature hoàn thành (để tạo một merge commit hiển thị rõ điểm tích hợp). Các team khác dùng squash merge, làm phẳng lịch sử của branch thành một commit mới trên main (chỉ có một cha — Git không ghi nhận nó là merge). Dùng `git pull --rebase` để giữ các commit local của bạn nằm trên upstream thay vì tạo ra những merge commit không cần thiết, và bật `rerere` nếu bạn hay phải giải quyết đi giải quyết lại cùng một conflict. Cách 'đúng' tùy thuộc quy ước của team, nhưng hiểu cơ chế giúp bạn suy luận được về bất kỳ cách nào.\n\n**Fast-forward merge** là trường hợp đặc biệt: nếu branch hiện tại là tổ tiên trực tiếp của branch đang được merge (chưa có phân kỳ), Git chỉ cần dời pointer của branch hiện tại tới commit đích — không cần merge commit. Đây là điều Git làm mặc định khi có thể. `git merge --no-ff` ép tạo merge commit ngay cả trong trường hợp này, giữ lại dấu vết rằng đã có một lần merge."
+    },
+    {
+      "type": "diagram",
+      "caption": "Three-way merge: Git tìm tổ tiên chung A, so sánh đỉnh của từng branch với A, và kết hợp các thay đổi không xung đột vào merge commit M."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Cờ `--graph` của `git log` hiển thị trực quan DAG rẽ nhánh và hội tụ. Interactive rebase (`-i`) là một trong những công cụ mạnh nhất của Git: bạn có thể squash, sắp xếp lại, sửa hoặc bỏ commit để tạo ra một lịch sử gọn gàng, hợp lý trước khi chia sẻ. Quy tắc vàng: một khi đã push lên remote mà người khác dùng, hãy coi các commit đó là bất biến.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Reflog: cỗ máy thời gian bên trong Git",
+      "content": "**Reflog** (reference log) là một trong những bí mật được giữ kỹ nhất của Git, và là lý do 'tôi làm mất commit rồi' gần như luôn khôi phục được. Mỗi lần HEAD di chuyển — do checkout, commit, merge, rebase, reset — Git thêm một entry vào `.git/logs/HEAD`, ghi lại HEAD đã ở đâu và di chuyển tới đâu.\n\nEntry của reflog trông như `HEAD@{0}`, `HEAD@{1}`, `HEAD@{2}`, trong đó `{0}` là trạng thái gần nhất. Bạn cũng có thể xem reflog riêng của từng branch: `git reflog show main` hiển thị mọi lần main di chuyển.\n\nKịch bản khôi phục kinh điển: bạn chạy `git reset --hard HEAD~5` để hủy năm commit, rồi nhận ra mình cần chúng. Vì các commit vẫn tồn tại trong object store (chúng không bị xóa ngay), reflog cho phép bạn tìm SHA-1 của chúng và khôi phục:\n\n```bash\ngit reflog              # find the SHA before the reset\ngit checkout -b recovery-branch <sha>   # branch off that SHA\n```\n\nReflog **chỉ có ở local** — nó không được chia sẻ khi bạn push. Mỗi developer có reflog riêng cho các lần di chuyển HEAD của mình. Remote repository thường cũng có reflog cho các ref của nó, nhưng bạn không truy cập trực tiếp được bằng `git reflog`.\n\nEntry reflog cho các commit vẫn truy cập được từ một branch sẽ hết hạn sau 90 ngày (`gc.reflogExpire`), nhưng entry cho các commit **không còn truy cập được** — chính là những commit bạn làm mất do hard reset hay xóa branch — hết hạn chỉ sau **30 ngày** (`gc.reflogExpireUnreachable`). Sau đó, `git gc` dọn các object không còn được tham chiếu (khi chúng cũ hơn `gc.pruneExpire`, mặc định 2 tuần). Trước khi cửa sổ đó đóng lại, `git reflog` là lưới an toàn của bạn cho gần như mọi thao tác phá hủy vô tình: hard reset, xóa branch, rebase hỏng."
+    },
+    {
+      "type": "explanation",
+      "title": "Packfile và hiệu quả lưu trữ",
+      "content": "Khi bạn thêm một file vào Git lần đầu, nó lưu một loose object — một file nén bằng zlib tại đường dẫn suy ra từ SHA-1 của nó (ví dụ `.git/objects/ab/cdef1234...`). Với repository nhỏ, ít commit, như vậy là ổn. Nhưng một repository có hàng nghìn commit và nhiều phiên bản của các file lớn sẽ tích lũy một lượng loose object khổng lồ, mỗi object lưu một snapshot đầy đủ của file.\n\nGiải pháp của Git là **packfile**. Khi Git chạy garbage collection (`git gc`), hoặc trong các thao tác `git fetch`/`git push` có nhiều object, Git gom các loose object vào các packfile nhị phân lưu trong `.git/objects/pack/`. Điểm then chốt: packfile dùng **delta compression**: thay vì lưu đầy đủ mọi phiên bản của một file, packfile lưu một số object đầy đủ và số khác dưới dạng delta nhị phân so với một object tương tự. Git chọn delta base theo heuristic (cùng loại, đường dẫn và kích thước tương tự) — không nhất thiết là phiên bản trước của cùng file — và thường giữ phiên bản *mới nhất* ở dạng đầy đủ, các phiên bản cũ hơn ở dạng delta, vì lịch sử gần đây được đọc nhiều nhất. Các phiên bản liên tiếp của một file source sẽ nằm trong những chuỗi delta ngắn (độ sâu bị giới hạn, mặc định 50), giúp lưu trữ cực kỳ hiệu quả.\n\nĐây là lý do repository Git thường gọn đến bất ngờ so với số commit chứa bên trong: một file được sửa một nghìn lần không cần một nghìn bản đầy đủ — phần lớn chỉ là các delta nhỏ so với vài phiên bản đầy đủ.\n\nPackfile đi kèm các file index (`.idx`) cho phép truy cập ngẫu nhiên nhanh: với một SHA-1, index giúp Git định vị object trong packfile mà không cần quét toàn bộ pack. Nhiều packfile có thể tồn tại cùng lúc; `git gc` (hoặc các tác vụ `git maintenance` theo lịch) định kỳ gộp chúng lại, và repo lớn có thêm một **multi-pack-index** và một file **commit-graph** để việc tra cứu và duyệt lịch sử vẫn nhanh.\n\nMột hệ quả quan trọng: file nhị phân (ảnh, artifact đã compile, PDF) delta-compress không tốt, vì format nhị phân thay đổi theo cách không tạo ra delta nhỏ. Đó là lý do không nên lưu file nhị phân lớn trong Git — nó tạo ra packfile lớn mà không được lợi từ nén. Các công cụ như Git LFS (Large File Storage) giải quyết vấn đề này bằng cách lưu file nhị phân lớn ở bên ngoài và chỉ giữ các file pointer nhỏ trong object store của Git."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Reflog thuần túy là công cụ khôi phục — luôn thử nó trước khi hoảng loạn vì mất commit. `git verify-pack -v` cho bạn xem các chuỗi delta bên trong một packfile. Phần bên trong của `git stash` cho thấy stash chỉ là các commit được lưu từ một ref đặc biệt, không phải một cơ chế lưu trữ riêng — nghĩa là công việc đã stash cũng khôi phục được qua reflog nếu bạn lỡ drop một stash.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**SHA-1 và quá trình chuyển sang SHA-256:** Về lịch sử, Git dùng SHA-1 làm hash cho object, và SHA-1 đã bị phá về khả năng chống va chạm (collision resistance): SHAttered của Google (2017) tạo ra va chạm đầu tiên, và một va chạm *chosen-prefix* thực tế theo sau vào năm 2020. Điều này quan trọng vì tag và commit được ký thực chất là ký một hash — một va chạm có thể cho phép kẻ tấn công tráo nội dung phía sau một chữ ký hợp lệ. Git phản ứng theo hai hướng. Từ Git 2.13 (2017), nó dùng **SHA-1DC**, một bản SHA-1 được gia cố, phát hiện các mẫu tấn công va chạm đã biết và từ chối những object như vậy. Và nó bổ sung **object format SHA-256** (`git init --object-format=sha256`, thử nghiệm từ Git 2.29 năm 2020, được tuyên bố ổn định ở 2.42). Về mặt khái niệm không có gì thay đổi — blob, tree, commit, tag, ref — nhưng mỗi ID dài 64 ký tự hex thay vì 40. Phần khó là khả năng tương tác: repository SHA-1 và SHA-256 chưa thể tự do push/fetch qua lại, và hỗ trợ từ các dịch vụ hosting vẫn còn hạn chế, nên phần lớn repository ngày nay vẫn dùng SHA-1. Dự án Git dự định đặt SHA-256 làm mặc định cho repository mới trong Git 3.0, bản chưa được phát hành và chưa có ngày ra mắt tính đến Git 2.56 (tháng 9/2026)."
+    },
+    {
+      "type": "callout",
+      "content": "**Sai lầm thường gặp và góc nhìn interview:**\n\n- **'Branch rẻ vì...'** — câu trả lời đúng là branch chỉ là một file văn bản 41 byte (SHA 40 ký tự + newline). Không object nào bị sao chép.\n- **Rebase đổi SHA-1 ngay cả khi diff y hệt** vì SHA của cha là một phần nội dung của commit object, và hash được suy ra từ toàn bộ object. Đây là câu hỏi interview rất được ưa chuộng.\n- **`git commit --amend` là thay thế, không phải chỉnh sửa** — nó tạo một commit mới với message/tree đã cập nhật và *cùng (các) cha với commit HEAD cũ*, rồi dời branch sang đó. Commit cũ vẫn tồn tại (truy cập được qua reflog) cho đến khi garbage collection.\n- **Detached HEAD không phải là hỏng** — đó là trạng thái hợp lệ để duyệt lịch sử. Nguy hiểm chỉ xảy ra khi bạn tạo những commit muốn giữ mà chưa tạo branch trước.\n- **`git reset --soft` vs `--mixed` vs `--hard`**: soft chỉ dời HEAD (staging và working dir giữ nguyên); mixed dời HEAD và reset index (working dir giữ nguyên); hard dời HEAD, reset index và ghi đè working directory — là lệnh duy nhất có thể làm mất công việc.\n- **`git bisect` là binary search trên DAG** — đánh dấu một commit good và một commit bad, rồi mỗi vòng Git checkout điểm giữa; `git bisect run <test-script>` tự động hóa việc này (exit 0 = good, 1–127 trừ 125 = bad, 125 = skip). Xem topic Debugging Strategies.\n- **`git fetch` không bao giờ thay đổi working directory** — nó chỉ cập nhật remote-tracking ref. `git pull` là `git fetch` rồi đến `git merge` (hoặc `git rebase` nếu được cấu hình)."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Git là content-addressable object store**: blob (nội dung file), tree (thư mục), commit (snapshot + metadata) và annotated tag được lưu theo hash nội dung của chúng (hiện nay là SHA-1, SHA-256 ở repo dùng format mới) — nội dung giống nhau chỉ lưu một lần.",
+        "**Commit tạo thành một DAG bất biến**: mỗi commit mã hóa SHA-1 của cha, nên bất kỳ thao tác viết lại lịch sử nào (amend, rebase, cherry-pick) cũng tạo ra hash SHA-1 hoàn toàn mới — commit gốc vẫn nằm trong object store cho đến khi bị garbage collect.",
+        "**Branch và tag là các file ref nhẹ**: branch là một file văn bản trong `.git/refs/heads/` chứa một SHA-1; tạo hay xóa branch không đụng tới commit object nào. HEAD trỏ tới một branch (bình thường) hoặc trực tiếp tới một commit (detached HEAD).",
+        "**Staging area (index) là snapshot bản nháp**: `git add` hash nội dung vào object store và cập nhật index; `git commit` đọc index để dựng tree — commit không bao giờ đọc trực tiếp working directory.",
+        "**Merge giữ nguyên toàn bộ DAG phi tuyến** bằng một merge commit có hai cha; **rebase phát lại commit theo tuyến tính** với SHA-1 mới — cả hai tích hợp cùng một thay đổi nhưng cho ra hình dạng graph khác nhau. Không bao giờ rebase lịch sử remote dùng chung.",
+        "**Reflog là lưới an toàn**: mọi lần HEAD/branch di chuyển đều được ghi lại ở local — entry truy cập được giữ 90 ngày, entry không truy cập được (mất do reset hay xóa branch) giữ 30 ngày — nên gần như mọi 'commit bị mất' đều khôi phục được bằng `git reflog` và `git switch -c recovery <sha>`.",
+        "**Packfile dùng delta compression** — object được lưu đầy đủ hoặc dưới dạng delta so với object tương tự (thường giữ phiên bản mới nhất ở dạng đầy đủ), nên repository chủ yếu là text vẫn nhỏ gọn dù lịch sử dài; file nhị phân delta không tốt, vì thế mới có Git LFS.",
+        "**Hashing:** SHA-1 đã bị phá về va chạm, nên Git dùng SHA-1DC có phát hiện va chạm và hỗ trợ object format SHA-256 (ID 64 ký tự hex); khả năng tương tác vẫn là rào cản, với SHA-256 được dự định làm mặc định trong Git 3.0."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Một **blob** object của Git lưu gì?",
+      "options": [
+        "Nội dung file thô, định danh chỉ bằng SHA-1 của nội dung đó",
+        "Danh sách thư mục ánh xạ tên file tới hash SHA-1",
+        "Snapshot của toàn bộ repository tại một thời điểm",
+        "Metadata về author và timestamp của một thay đổi"
+      ],
+      "explanation": "Blob chỉ lưu byte thô của file — không tên file, không đường dẫn, không quyền truy cập. SHA-1 được suy ra từ nội dung, nên hai file có nội dung giống hệt nhau dùng chung một blob object bất kể chúng nằm ở đâu trong cây thư mục."
+    },
+    {
+      "id": "q2",
+      "question": "Những trường nào được lưu trong một **commit** object của Git?",
+      "options": [
+        "Một tarball nén của mọi file đã thay đổi và một diff so với commit cha",
+        "Danh sách file đã stage kèm blob hash và quyền truy cập file",
+        "Output của git diff --stat so với commit trước",
+        "Pointer tới root tree, SHA của (các) commit cha, thông tin author/committer và message"
+      ],
+      "explanation": "Một commit chứa: SHA của root tree, không hoặc nhiều SHA của commit cha, danh tính và timestamp của author, danh tính và timestamp của committer, và message. Git tính diff theo yêu cầu bằng cách so sánh các tree — diff không được lưu."
+    },
+    {
+      "id": "q3",
+      "question": "Bạn chạy `git add file.txt`, rồi sửa `file.txt` lần nữa mà không `git add` lần hai. `git commit` sẽ ghi lại gì?",
+      "options": [
+        "Phiên bản mới nhất trên đĩa của file.txt, bao gồm cả lần sửa thứ hai",
+        "Không có thay đổi nào — Git phát hiện file bẩn và hủy commit",
+        "Phiên bản file.txt đã được stage ở lần `git add` đầu tiên",
+        "Một bản merge giữa phiên bản đã stage và phiên bản hiện tại trên đĩa"
+      ],
+      "explanation": "`git commit` đọc index (staging area), không đọc working directory. Lần sửa thứ hai hiện ra trong `git diff` (working-dir so với index) nhưng không có trong `git diff --cached` (index so với HEAD), nên chỉ phiên bản được stage đầu tiên được commit."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao `git rebase` tạo ra hash SHA-1 mới ngay cả khi thay đổi file giống từng byte với commit gốc?",
+      "options": [
+        "Rebase lưu delta diff thay vì snapshot tree, làm thay đổi format object",
+        "SHA-1 của cha là một phần nội dung của commit object, nên cha mới làm thay đổi hash",
+        "Git thêm salt ngẫu nhiên vào input SHA-1 khi rebase để tránh trùng hash",
+        "Rebase nén blob khác với commit thông thường"
+      ],
+      "explanation": "SHA-1 của một commit được suy ra từ toàn bộ nội dung của nó: SHA của tree, SHA của (các) cha, author, committer, timestamp và message. Rebase đặt commit lên một cha mới, làm thay đổi trường SHA của cha, từ đó thay đổi toàn bộ hash của commit — kể cả khi tree (nội dung file) y hệt."
+    },
+    {
+      "id": "q5",
+      "question": "Ở mức file system, một branch Git là gì?",
+      "options": [
+        "Một bản sao riêng của object store của repository trong một thư mục mới",
+        "Một snapshot nén của working tree tại thời điểm tạo branch",
+        "Một file index liệt kê mọi commit thuộc branch đó",
+        "Một file văn bản thuần trong `.git/refs/heads/` chứa một SHA-1 commit duy nhất"
+      ],
+      "explanation": "Branch đơn giản là một file trong `.git/refs/heads/` chứa một hash SHA-1 40 ký tự (cộng newline). Không object nào bị sao chép. Tạo branch ghi khoảng 41 byte; xóa branch thì xóa file đó. Đây là lý do branch trong Git 'rẻ'."
+    },
+    {
+      "id": "q6",
+      "question": "Điều gì phân biệt merge commit với commit thông thường trong object store?",
+      "options": [
+        "Merge commit có hai hoặc nhiều pointer SHA-1 tới cha trong commit object",
+        "Merge commit lưu unified diff của cả hai branch thay vì snapshot tree",
+        "Merge commit được lưu dưới dạng tag object thay vì commit object",
+        "Merge commit chỉ có thể được tạo với cờ `--squash`"
+      ],
+      "explanation": "Merge commit là một commit object bình thường về mọi mặt, chỉ khác ở chỗ nó chứa hai hoặc nhiều pointer SHA-1 tới cha — mỗi cha ứng với một branch được merge. Đây là thứ làm commit DAG phi tuyến tại điểm merge."
+    },
+    {
+      "id": "q7",
+      "question": "Trạng thái **detached HEAD** trong Git là gì?",
+      "options": [
+        "Trạng thái mà ref HEAD ở local không đồng bộ với HEAD ở remote",
+        "Một repository bị hỏng mà `.git/HEAD` bị thiếu hoặc không đọc được",
+        "Trạng thái mà HEAD trỏ trực tiếp tới SHA của một commit thay vì tới một branch ref",
+        "Trạng thái xảy ra khi hai branch cùng trỏ tới một commit"
+      ],
+      "explanation": "Detached HEAD nghĩa là `.git/HEAD` chứa một SHA-1 commit thô thay vì một symbolic ref như `ref: refs/heads/main`. Commit được tạo ở trạng thái này không gắn với branch nào, và nếu bạn chuyển đi chỗ khác mà không tạo branch, những commit đó trở nên không thể truy cập."
+    },
+    {
+      "id": "q8",
+      "question": "`git reflog` chủ yếu được dùng để làm gì?",
+      "options": [
+        "Xem danh sách remote-tracking branch và URL upstream của chúng",
+        "Khôi phục những commit tưởng như đã mất sau hard reset, rebase hỏng hoặc xóa branch",
+        "Hiển thị toàn bộ diff của commit gần nhất",
+        "Liệt kê mọi annotated tag và checksum đã ký của chúng"
+      ],
+      "explanation": "Reflog ghi lại mọi lần HEAD di chuyển ở local, kèm timestamp và mô tả. Nếu bạn `reset --hard` quá xa, xóa một branch, hoặc tạo commit ở detached HEAD rồi chuyển đi, reflog cho thấy SHA-1 bạn đã ở trước đó, giúp bạn khôi phục công việc."
+    },
+    {
+      "id": "q9",
+      "question": "Annotated tag khác lightweight tag ở chỗ nó:",
+      "options": [
+        "Trỏ tới một branch ref thay vì trực tiếp tới SHA của commit",
+        "Tự động tiến lên khi có commit mới trên branch đó",
+        "Không thể fetch hay push lên remote repository",
+        "Được lưu thành một tag object riêng chứa tên người tạo tag, ngày và message"
+      ],
+      "explanation": "Annotated tag (`git tag -a`) tạo ra một object `tag` thực sự trong object store với SHA-1 riêng, chứa SHA của object đích, danh tính người tạo tag, timestamp và message. Lightweight tag chỉ là một file ref trỏ thẳng tới commit — không có tag object nào được tạo."
+    },
+    {
+      "id": "q10",
+      "question": "Phát biểu nào về packfile của Git là chính xác?",
+      "options": [
+        "Packfile delta-compress các object tương tự, nên các phiên bản liên tiếp của một file dùng chung một chuỗi diff thay vì các bản đầy đủ",
+        "Packfile chỉ lưu phiên bản mới nhất của mỗi file, bỏ các phiên bản cũ để tiết kiệm dung lượng",
+        "Packfile được tạo tự động ở mỗi `git commit` và thay thế loose object ngay lập tức",
+        "Packfile vô hiệu hóa `git cat-file` vì object không còn được đánh địa chỉ riêng lẻ theo SHA-1"
+      ],
+      "explanation": "Packfile dùng delta compression: các blob tương tự (như các phiên bản liên tiếp của cùng một file) được lưu thành một object gốc cộng với một chuỗi diff nhị phân. Packfile được tạo bởi `git gc` hoặc trong các thao tác fetch/push qua mạng — không phải ở mỗi commit. Object vẫn được đánh địa chỉ đầy đủ theo SHA-1 qua index `.idx` của packfile."
+    }
+  ]
+}

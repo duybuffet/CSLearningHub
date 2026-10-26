@@ -1,0 +1,248 @@
+{
+  "sourceHash": "8693f94f7a98",
+  "title": "Kubernetes Orchestration",
+  "tagline": "Từ một container đơn lẻ đến cả đội container tự phục hồi — Kubernetes tự động hóa deploy, scaling và khôi phục cho các workload container ở mọi quy mô.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Chạy một Docker container trên một chiếc laptop thì đơn giản. Nhưng chạy ba trăm container rải trên bốn mươi VM trên cloud — tự restart khi container crash, định tuyến traffic thông minh tới các replica còn khỏe, rolling update không downtime, và scaling co giãn để bật thêm instance khi CPU tăng — lại là một bài toán điều phối ở tầm hoàn toàn khác. Nếu làm thủ công, việc theo dõi container nào đang nằm trên máy nào, xử lý node bị chết, định tuyến request và quản lý config lẫn secret sẽ ngốn trọn thời gian của cả một đội vận hành. **Kubernetes ra đời để tự động hóa toàn bộ việc điều phối đó.**\n\nKubernetes (viết tắt là K8s — giữa chữ K và chữ s có 8 ký tự) là **container orchestrator** tiêu chuẩn của ngành. Google open-source nó vào năm 2014, dựa trên hơn một thập kỷ kinh nghiệm vận hành các hệ thống quản lý cluster nội bộ là Borg và Omega, rồi trao nó cho Cloud Native Computing Foundation (CNCF) mới thành lập vào năm 2015, cùng lúc với bản phát hành 1.0. Ngày nay nó chạy phần lớn các workload container quy mô lớn — từ Netflix, Spotify cho đến hạ tầng của chính phủ. Mọi cloud provider lớn đều có dịch vụ Kubernetes managed: Google GKE, Amazon EKS và Azure AKS là ba cái tên thống trị.\n\nỞ cốt lõi, Kubernetes mang đến một ý tưởng rất mạnh: **hạ tầng khai báo (declarative infrastructure)**. Thay vì viết script gồm một chuỗi lệnh mệnh lệnh ('chạy container A trên máy 3, rồi chạy container B trên máy 5'), bạn khai báo trạng thái mong muốn của hệ thống ('tôi muốn lúc nào cũng có ba replica của container A và hai replica của container B') và Kubernetes liên tục làm việc để thực tế khớp với khai báo đó. Container crash thì Kubernetes restart nó. Node hỏng thì Kubernetes schedule lại các container của node đó sang node khỏe. Traffic tăng vọt thì Kubernetes thêm replica. Bạn mô tả bạn muốn *cái gì*; Kubernetes tự tìm ra *cách* để đạt được và duy trì nó.\n\nChương này trình bày trọn vẹn mental model của Kubernetes: kiến trúc control plane, phân cấp abstraction Pod và Deployment, Service và định tuyến mạng, thuật toán scheduling, các control loop tự phục hồi, health probe, autoscaling và những lệnh vận hành bạn sẽ dùng hằng ngày. Đọc xong, bạn sẽ đọc và viết được manifest Kubernetes cho production, và tự tin suy luận về những gì diễn ra bên trong một cluster."
+    },
+    {
+      "type": "diagram",
+      "caption": "Kiến trúc cluster Kubernetes. Control plane là 'bộ não' — nó lưu trạng thái mong muốn trong etcd, ra quyết định scheduling và chạy các vòng reconciliation. Worker node là 'cơ bắp' — agent kubelet chạy các Pod và kube-proxy quản lý luật mạng."
+    },
+    {
+      "type": "analogy",
+      "title": "Kiểm soát không lưu ở quy mô lớn",
+      "content": "Hãy tưởng tượng một sân bay quốc tế bận rộn đang quản lý hàng trăm chuyến bay cùng lúc. Mỗi **máy bay** là một **Pod** — một workload đang chạy. **Tháp điều khiển** là **API server** — mọi thông tin đều đi qua nó. **Cơ sở dữ liệu kế hoạch bay** là **etcd** — bản ghi phân tán, có thẩm quyền cao nhất, về mọi kế hoạch bay đã khai báo và vị trí hiện tại của từng máy bay. **Hệ thống phân cổng** là **Scheduler** — khi có kế hoạch bay mới (một Pod mới cần được đặt chỗ), nó xem xét sức chứa đường băng, điều kiện thời tiết và các yêu cầu đặc biệt để gán cổng phù hợp nhất còn trống (worker node). **Cơ quan an toàn** theo dõi mọi chuyến bay và khẩn cấp điều máy bay thay thế khi có chiếc mất tích chính là **Controller Manager** — bộ quy tắc liên tục so sánh kế hoạch ('phải có sáu máy bay trên trời') với thực tế ('chỉ có năm chiếc đang bay') và hành động dựa trên chênh lệch đó.\n\nPhi công (các lệnh `kubectl` của bạn) không bao giờ nói chuyện trực tiếp với đường băng — mọi thứ đều đi qua tháp điều khiển. Tháp đảm bảo mọi quyết định được ghi vào nhật ký bay trước khi thực thi. Nếu một đường băng bị đóng (node hỏng), cơ quan an toàn lập tức chuyển hướng tất cả máy bay bị ảnh hưởng sang đường băng khác. Bạn chỉ khai báo kế hoạch bay một lần; ban quản lý sân bay sẽ duy trì nó mãi mãi."
+    },
+    {
+      "type": "explanation",
+      "title": "Control plane: bộ não của cluster",
+      "content": "**Control plane** là tập các process quản lý cluster ở cấp tổng thể. Trong cluster production, nó chạy trên các node riêng, tách khỏi workload của ứng dụng. Hiểu từng thành phần sẽ giúp bạn hết thấy bí ẩn về việc vì sao Kubernetes hành xử như vậy.\n\n**API Server** (`kube-apiserver`) là cổng duy nhất cho mọi thao tác trên cluster. `kubectl`, các CI/CD pipeline, scheduler và các controller đều chỉ giao tiếp qua giao diện REST của API server. Mọi resource (Pod, Deployment, Service, ConfigMap) đều là một object JSON/YAML. API server validate request gửi tới, thực thi authentication và authorization (RBAC), rồi lưu các object được chấp nhận vào etcd. Điểm then chốt: API server là thành phần **duy nhất** đọc và ghi etcd — mọi thành phần khác đều đi qua API server chứ không đụng trực tiếp vào etcd. Việc tập trung này cho phép quản lý trạng thái nhất quán, audit và kiểm soát truy cập.\n\n**etcd** là một key-value store phân tán, nhất quán mạnh (strongly consistent). Nó là **nguồn sự thật (source of truth)** cho mọi thứ Kubernetes biết: những Deployment nào đang tồn tại, Pod nào đang chạy (hoặc được mong muốn), node nào khỏe, Secret và ConfigMap chứa gì. etcd dùng **thuật toán consensus Raft** để đảm bảo dữ liệu ghi vào là bền vững kể cả khi một số node etcd hỏng. Trong cluster high-availability, bạn chạy số lẻ member etcd (thường là 3 hoặc 5) để lúc nào cũng có thể tạo được quorum đa số. Mất etcd là mất bộ não của cluster — đó là lý do backup etcd là thực hành vận hành quan trọng nhất trong Kubernetes.\n\n**Scheduler** (`kube-scheduler`) theo dõi API server để tìm các Pod đã được tạo nhưng chưa được gán vào node nào (Pod ở trạng thái `Pending` và chưa có `nodeName`). Với mỗi Pod như vậy, scheduler chạy một **thuật toán hai pha**. Pha đầu là **filtering (lọc)**: loại các node không đáp ứng được yêu cầu của Pod — thiếu CPU, thiếu memory, thiếu label (node selector), hoặc có taint mà Pod không tolerate. Pha thứ hai là **scoring (chấm điểm)**: xếp hạng các node còn lại theo tổ hợp có trọng số của nhiều tiêu chí: least-requested resources (ưu tiên node còn dư capacity), các luật affinity và anti-affinity giữa các pod, pod topology spread, và một số tiêu chí khác. Node có điểm cao nhất sẽ thắng. Sau đó scheduler ghi việc gán node ngược về API server, và API server báo cho kubelet của node đích để khởi động Pod.\n\n**Controller Manager** (`kube-controller-manager`) là một binary duy nhất chạy hàng chục **control loop** (còn gọi là controller hay reconciler). Mỗi loop theo dõi một loại resource cụ thể và liên tục đối chiếu (reconcile) trạng thái thực tế với trạng thái mong muốn. Deployment controller theo dõi các Deployment và đảm bảo có đúng số ReplicaSet và Pod. Node controller theo dõi heartbeat của node và đánh dấu node là `NotReady` khi nó ngừng phản hồi — rồi evict các Pod của node đó. EndpointSlice controller cập nhật danh sách IP của các Pod khỏe mà Service cần định tuyến tới. Mọi thứ 'tự nhiên xảy ra' trong Kubernetes đều là một controller loop đang làm việc của nó."
+    },
+    {
+      "type": "explanation",
+      "title": "Worker node: nơi workload thực sự chạy",
+      "content": "Worker node là các máy (VM hoặc bare metal) chạy container ứng dụng của bạn. Mỗi worker node chạy ba process chính.\n\n**kubelet** là agent chính trên node. Nó theo dõi API server để tìm các Pod được gán cho node của mình, rồi ra lệnh cho **container runtime** (containerd, CRI-O) pull image và khởi động container. Nó liên tục báo cáo trạng thái Pod, mức dùng resource và sức khỏe node về API server. kubelet cũng chạy các **health probe** lên container — nếu liveness probe thất bại, kubelet restart container ngay lập tức mà không cần chờ controller manager.\n\n**kube-proxy** quản lý luật mạng trên mỗi node. Khi một Service được tạo, kube-proxy dịch nó thành các luật viết lại packet — mặc định là iptables, hoặc các mode IPVS / nftables — để chuyển các packet gửi tới `ClusterIP` ảo của Service sang một trong các IP của Pod phía sau. Đây là thứ giúp abstraction Service hoạt động trong suốt — request tới `http://my-api-svc:80` được chuyển tiếp một cách trong suốt tới bất kỳ IP Pod nào khớp với selector của Service, phân tán đều trên các backend (mode iptables chọn ngẫu nhiên một backend cho mỗi connection; IPVS hỗ trợ round-robin và các thuật toán khác). Một số CNI, đáng chú ý là Cilium, thay hẳn kube-proxy bằng eBPF.\n\n**Container runtime** (thường là containerd) là thành phần thực sự pull image từ registry, tạo và quản lý các process container. Kubernetes định nghĩa một interface chuẩn (**Container Runtime Interface, CRI**) để có thể cắm các runtime khác nhau vào — containerd và CRI-O implement nó một cách native. Docker Engine thì không: adapter Docker có sẵn trong kubelet (\"dockershim\") đã bị gỡ bỏ ở v1.24, nên giờ Docker Engine cần shim bên ngoài là `cri-dockerd`. Image build bằng Docker vẫn chạy bình thường ở cả hai cách, vì chúng là OCI image chuẩn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Toàn bộ vòng đời của một lệnh kubectl apply. API server chỉ lưu Deployment và trả lời ngay; các controller, scheduler và kubelet đều theo dõi API server và làm phần việc của mình một cách bất đồng bộ cho đến khi cluster hội tụ về trạng thái mong muốn."
+    },
+    {
+      "type": "explanation",
+      "title": "Pod: đơn vị cơ bản của Kubernetes",
+      "content": "**Pod** là đơn vị nhỏ nhất có thể deploy trong Kubernetes. Nó là một lớp vỏ mỏng bọc quanh một hoặc nhiều container luôn được đặt cùng một node và dùng chung một số resource. Hiểu sâu về Pod rất quan trọng, vì mọi abstraction khác của Kubernetes rốt cuộc đều quản lý Pod.\n\nCác container trong cùng một Pod dùng chung một **network namespace**: chúng có cùng địa chỉ IP và có thể giao tiếp với nhau qua `localhost`. Điều này khác với hai container độc lập — hai Pod riêng biệt có IP riêng. Sidecar pattern tận dụng đúng điểm này: một agent logging hoặc proxy của service mesh chạy như container thứ hai trong cùng Pod, chặn hoặc bổ sung cho traffic của container chính qua `localhost` mà không tốn chút overhead mạng nào.\n\nCác container trong một Pod cũng dùng chung **storage volume**. Bạn định nghĩa volume ở cấp Pod (một `emptyDir`, một `PersistentVolumeClaim`, một mount `configMap`, v.v.) rồi mount nó vào một hoặc nhiều container. Volume `emptyDir` khởi đầu rỗng và bị xóa khi Pod bị gỡ — hữu ích làm vùng nháp dùng chung giữa init container và container chính. Còn `PersistentVolumeClaim` tồn tại qua các lần restart Pod và mount storage bền vững (EBS, NFS, v.v.) vào filesystem của container.\n\n**Pod được thiết kế để mang tính tạm thời (ephemeral).** Mental model của Kubernetes là bất kỳ Pod nào cũng có thể bị kill bất cứ lúc nào — do node hỏng, rolling update, autoscaling scale-down, hoặc đơn giản là bị evict vì thiếu resource. Vì vậy ứng dụng chạy trên Kubernetes phải **stateless ở tầng Pod**, đẩy state ra database, cache hoặc object store. Đừng bao giờ dựa vào filesystem cục bộ của một Pod cụ thể để lưu dữ liệu bền vững.\n\n**Bạn gần như không bao giờ tạo Pod trực tiếp.** Thay vào đó, bạn tạo các object cấp cao hơn (Deployment, StatefulSet, Job) để chúng tạo và quản lý Pod. Nếu bạn tạo một Pod trần và nó crash, sẽ chẳng ai tạo lại nó. ReplicaSet của một Deployment thì sẽ làm."
+    },
+    {
+      "type": "explanation",
+      "title": "Deployment, ReplicaSet và rolling update",
+      "content": "**Deployment** là cách chuẩn để chạy ứng dụng stateless. Khi bạn apply một manifest Deployment, Kubernetes tạo ra một phân cấp: Deployment tạo một **ReplicaSet**, ReplicaSet tạo và duy trì một số lượng **Pod** nhất định. Nếu một Pod crash, ReplicaSet controller lập tức tạo Pod thay thế. Tầng Deployment quản lý việc rollout — khi bạn cập nhật container image, một ReplicaSet mới được tạo ra và các Pod chuyển dần từ cũ sang mới theo update strategy.\n\n**Rolling update** là strategy mặc định. Hai tham số chính là `maxSurge` và `maxUnavailable`. Với `maxUnavailable: 0` và `maxSurge: 1`, Kubernetes tạo thêm một Pod (nâng tổng số lên replicas+1), chờ nó vượt qua readiness probe, rồi mới terminate một Pod cũ. Quá trình này lặp lại cho đến khi tất cả Pod cũ được thay thế. (Nếu bạn không đặt gì, giá trị mặc định là `maxSurge: 25%` và `maxUnavailable: 25%`.) Số replica đang chạy không bao giờ tụt xuống dưới giá trị đã khai báo, cho bạn **update thật sự không downtime**. Với `maxSurge: 0` và `maxUnavailable: 1` (strategy rolling replace), một Pod cũ bị kill trước rồi mới khởi động Pod mới — tốn ít capacity hơn nhưng có lúc chạy dưới số replica mong muốn.\n\n**Rollback** là tính năng hạng nhất. Kubernetes lưu lịch sử revision của Deployment (điều khiển bởi `revisionHistoryLimit`). Khi bạn lỡ deploy một bản update lỗi — chẳng hạn image mới có bug khiến nó crash liên tục — bạn chạy `kubectl rollout undo deployment/my-api` và Kubernetes lập tức rollback về ReplicaSet trước đó. Đây là một trong những tính năng giá trị nhất về mặt vận hành: deploy pipeline của bạn có thể ship một cách tự tin, vì biết rằng quay lại chỉ cần một lệnh.\n\n**Deployment so với StatefulSet**: Deployment coi các Pod là có thể thay thế cho nhau — Pod nào cũng có thể được schedule lên node nào, Pod có hậu tố tên ngẫu nhiên, và nếu mount một PersistentVolumeClaim thì tất cả dùng chung cùng một cái. **StatefulSet** cho Pod danh tính mạng ổn định (ví dụ `mysql-0`, `mysql-1`, `mysql-2`) và PersistentVolumeClaim riêng cho từng Pod. Dùng StatefulSet cho database, Kafka broker và mọi workload mà danh tính của từng Pod và storage bền vững theo từng Pod là quan trọng. Mọi thứ stateless thì dùng Deployment."
+    },
+    {
+      "type": "diagram",
+      "caption": "Trong lúc rolling update, Deployment quản lý đồng thời hai ReplicaSet. Pod mới khởi động trong RS mới; Pod cũ bị terminate dần từng cái khỏi RS cũ. Khi hoàn tất, RS cũ được scale về 0 nhưng vẫn được giữ lại trong lịch sử để rollback."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Manifest này khai báo ba resource trong cùng một file (phân tách bằng `---`). Deployment giữ 3 replica với rolling update không downtime. Secret được inject qua biến môi trường từ một object Secret của Kubernetes — đừng bao giờ hardcode credential trong manifest. HPA tự động scale từ 3 đến 20 replica dựa trên mức dùng CPU. Label selector của Service tự động nhận các Pod mới khi chúng khởi động, không cần cấu hình lại gì.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Service: mạng ổn định cho các Pod tạm thời",
+      "content": "Pod có địa chỉ IP, nhưng IP đó thay đổi mỗi lần Pod được tạo — mà Pod thì được tạo và hủy liên tục. Hardcode IP của Pod trong config ứng dụng là công thức chắc chắn dẫn đến connection bị đứt. **Service** giải quyết chuyện này bằng cách cung cấp một danh tính mạng ổn định, che đi tập IP Pod luôn thay đổi.\n\nMỗi Service được gán một **ClusterIP** — một IP ảo tồn tại suốt vòng đời của Service. Khi một container trong cluster gửi request tới `http://my-api-svc:80`, DNS của Kubernetes phân giải tên service thành ClusterIP của nó. Các luật iptables của `kube-proxy` trên node đích chuyển tiếp packet một cách trong suốt tới một trong các IP Pod đang khỏe. Phía gọi không bao giờ biết mình đã gọi trúng Pod nào, và không bao giờ phải cập nhật gì khi Pod restart.\n\nCơ chế nối Service với các Pod của nó là **label selector**. Spec của Service khai báo `selector: { app: my-api }`. Kubernetes liên tục theo dõi các Pod mang label đó và duy trì một resource **EndpointSlice** — danh sách IP của các Pod khỏe. Khi một Pod khởi động và vượt qua readiness probe, IP của nó được thêm vào EndpointSlice. Khi Pod bị terminate hoặc fail readiness, nó bị gỡ ra. Traffic chỉ bao giờ chảy tới các Pod khỏe và đã sẵn sàng.\n\n**Ba loại Service chính:**\n\n`ClusterIP` (mặc định) — chỉ truy cập được từ bên trong cluster. Dùng cho giao tiếp nội bộ giữa các microservice. Service nhận một IP ảo kiểu `10.96.0.123`, mọi Pod trong cluster đều tới được nhưng bên ngoài thì không.\n\n`NodePort` — expose Service trên một port cố định (dải 30000-32767) trên IP ngoài của mọi node. Bất kỳ request nào tới `<any-node-ip>:<node-port>` đều tới được một Pod phía sau. Cách này đơn giản nhưng không đạt chuẩn production — bạn đang phơi IP của mọi node ra ngoài, và nếu một node chết thì request tới IP của nó sẽ fail. Chủ yếu dùng cho môi trường development hoặc cluster on-premise không có load balancer của cloud.\n\n`LoadBalancer` — chuẩn mực cho deployment production trên cloud. Kubernetes gọi API của cloud provider để cấp một load balancer managed (trên AWS là Network Load Balancer qua AWS Load Balancer Controller — hoặc Classic LB kiểu cũ; GCP và Azure cấp load balancer L4 theo region của họ) với IP ngoài ổn định. Traffic vào đi tới LB, LB phân phối nó qua tất cả các node, và các node định tuyến tới Pod. Đây là pattern để expose web service ra internet.\n\n**Ingress và Gateway API** xử lý định tuyến HTTP(S) tại một điểm vào duy nhất: các luật theo host và theo path sẽ gửi `example.com/api` tới Service api và `example.com/auth` tới Service auth, nhờ vậy bạn chỉ trả tiền cho một load balancer của cloud thay vì mỗi Service một cái. Một controller (Envoy Gateway, Cilium, Traefik, NGINX Gateway Fabric, AWS Load Balancer Controller, controller của GKE…) theo dõi các object định tuyến và lập trình cho proxy.\n\nResource **Ingress** cổ điển đã bị đóng băng: nó vẫn chạy, nhưng chưa bao giờ phát triển vượt quá các luật host/path cơ bản, nên controller nào cũng tự chế annotation riêng. Người kế nhiệm của nó, **Gateway API** (`gateway.networking.k8s.io`, GA từ v1.0 vào tháng 10/2023), chia công việc theo vai trò — đội hạ tầng sở hữu `GatewayClass` và `Gateway` (listener, port, TLS), còn đội ứng dụng gắn các object `HTTPRoute`/`GRPCRoute` vào — và hỗ trợ native việc match theo header, chia trọng số traffic và định tuyến xuyên namespace. Cluster mới nên bắt đầu với Gateway API. Lưu ý rằng controller cộng đồng **ingress-nginx** vốn được dùng rất rộng rãi đã bị khai tử vào tháng 3/2026, như đã thông báo vào tháng 11/2025 (ngừng bảo trì best-effort, repository đã được archive, không còn bản phát hành hay bản vá bảo mật nào nữa), nên các cluster vẫn đang chạy nó cần migrate."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern định tuyến traffic production: một load balancer của cloud đứng trước controller Gateway API (hoặc Ingress kiểu cũ), controller này định tuyến tới các Service ClusterIP, và Service định tuyến tới Pod. Cách này giảm thiểu chi phí LB của cloud mà vẫn cho phép định tuyến theo path phong phú."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Gateway API tách bạch những mối quan tâm mà Ingress gộp chung: `Gateway` (listener, port, chứng chỉ TLS) là hạ tầng, còn mỗi `HTTPRoute` là định tuyến ứng dụng mà một team có thể tự quản lý trong namespace của mình. Cùng một danh sách `backendRefs` chấp nhận nhiều Service với trường `weight:`, và đó chính là cách chia traffic canary mà không cần annotation riêng của vendor.",
+      "label": "Gateway API"
+    },
+    {
+      "type": "explanation",
+      "title": "Tự phục hồi: control loop và reconciliation",
+      "content": "Tự phục hồi không phải phép màu — nó là kết quả có hệ thống của kiến trúc **vòng reconciliation (reconciliation loop)** trong Kubernetes. Mọi controller trong controller manager đều theo cùng một pattern:\n\n1. **Quan sát (Observe)**: Đọc trạng thái mong muốn từ etcd (qua API server) và trạng thái thực tế hiện tại của hệ thống.\n2. **So sánh (Diff)**: Đối chiếu mong muốn với thực tế.\n3. **Hành động (Act)**: Thực hiện hành động tối thiểu cần thiết để kéo thực tế về phía mong muốn.\n4. **Lặp lại (Repeat)**: Làm việc này liên tục, thường là vài giây một lần.\n\nPattern này đôi khi được gọi là **control loop** hay hệ thống **level-triggered** (ngược với edge-triggered). Hệ thống phản ứng với *trạng thái hiện tại*, chứ không phải với *sự kiện*. Kể cả khi lỡ mất một sự kiện (network partition, bầu leader), lượt reconciliation tiếp theo vẫn sẽ phát hiện và sửa chênh lệch.\n\n**Ý nghĩa về mặt vận hành:**\n\n- **Pod crash**: Container runtime báo container đã thoát. kubelet phát hiện container không còn chạy. Nó restart container với exponential back-off — 10s, 20s, 40s, … tối đa 5 phút, và được reset sau khi container chạy ổn định được 10 phút. Trong lúc chờ giữa các lần thử, Pod hiển thị `CrashLoopBackOff` trong `kubectl get pods`.\n\n- **Node hỏng**: Các kubelet gia hạn một heartbeat Lease mỗi 10 giây. Sau `node-monitor-grace-period` (mặc định 40s) không có heartbeat, điều kiện Ready của node chuyển thành `Unknown` và node controller gắn taint `node.kubernetes.io/unreachable` cho nó. Pod có sẵn một toleration mặc định cho taint đó với `tolerationSeconds: 300`, nên sau khoảng 5 phút chúng bị evict và controller của chúng tạo Pod thay thế trên các node khỏe (cơ chế eviction dựa trên taint đã thay thế flag cũ `pod-eviction-timeout`). Bạn có thể rút ngắn toleration cho từng Pod để failover nhanh hơn. Đó là lý do một node hỏng gây gián đoạn service trong vài phút trước khi khôi phục hoàn toàn — chứ không phải vài mili giây. **Đó là lý do bạn luôn chạy ít nhất 2 replica** — nếu một replica nằm trên node đang hỏng, replica kia vẫn tiếp tục phục vụ traffic trong lúc Kubernetes khôi phục.\n\n- **Chưa đủ số replica mong muốn**: Nếu bạn khai báo `replicas: 3` và một đợt bảo trì gỡ bỏ một node đang chứa một Pod, ReplicaSet controller lập tức tạo Pod thay thế, và scheduler đặt nó lên một node khác còn trống.\n\nNguyên tắc này áp dụng tổng quát: nếu bạn muốn K8s quản lý thứ gì đó, hãy khai báo nó thành resource và nó sẽ được reconcile liên tục. Đây là lý do Kubernetes được mô tả là một **hệ thống khai báo (declarative system)** — bạn thôi nghĩ theo lệnh và bắt đầu nghĩ theo trạng thái mong muốn."
+    },
+    {
+      "type": "explanation",
+      "title": "Health probe: liveness, readiness và startup",
+      "content": "Health probe là cơ chế để Kubernetes biết một container có đang hoạt động đúng không và có nên nhận traffic không. Có ba loại, mỗi loại phục vụ một mục đích riêng.\n\n**Liveness probe** trả lời câu hỏi: 'Container này còn sống không, hay đang kẹt ở một trạng thái xấu mà không restart thì không thể hồi phục?' Nếu liveness probe fail `failureThreshold` lần liên tiếp, Kubernetes kill container và restart nó. Ví dụ kinh điển: một web server rơi vào deadlock — mọi goroutine đều bị block, process vẫn đang chạy nhưng không nhận nổi một request nào, và nó sẽ không bao giờ tự hồi phục. Không có liveness probe, process sẽ nằm đó vô thời hạn. Có nó, Kubernetes phát hiện lỗi và restart container trong vòng vài phút.\n\n**Readiness probe** trả lời câu hỏi: 'Container này đã sẵn sàng phục vụ traffic ngay lúc này chưa?' Một container có thể còn sống (liveness OK) nhưng tạm thời chưa sẵn sàng — đang load một ML model lớn vào bộ nhớ, đang chờ kết nối database được thiết lập, hoặc đang dọn dẹp. Nếu readiness probe fail, Pod bị gỡ khỏi danh sách endpoint của Service — nó ngừng nhận request mới — nhưng KHÔNG bị restart. Khi readiness probe pass trở lại, Pod được thêm lại vào. Graceful shutdown thì hoạt động khác: khi một Pod bị xóa, Kubernetes đánh dấu các endpoint của nó là đang terminate (để Service ngừng gửi traffic mới) *và* gửi SIGTERM gần như cùng lúc. Vì kube-proxy và load balancer cần một chút thời gian mới nhận ra, một pattern phổ biến là thêm một lệnh sleep ngắn trong `preStop` (ví dụ 5–10 s) trước khi app ngừng nhận connection, rồi xử lý xong các request đang dở trước khi `terminationGracePeriodSeconds` hết hạn.\n\n**Startup probe** trả lời câu hỏi: 'Container này đã khởi động xong chưa?' Một số ứng dụng khởi động rất lâu (JVM warmup, database migration, load các file dữ liệu lớn). Nếu bạn cấu hình liveness với chu kỳ ngắn, nó có thể kích hoạt và restart container trước khi container kịp khởi động xong. Startup probe được kiểm tra trước; chỉ khi nó pass thì Kubernetes mới bắt đầu kiểm tra liveness. Nhờ vậy bạn có thể cấu hình liveness check gắt (để khôi phục nhanh container bị kẹt) mà không làm khổ các ứng dụng khởi động chậm.\n\n**Cơ chế của probe**: Cả ba loại probe đều hỗ trợ ba cơ chế kiểm tra. `httpGet` — gửi một HTTP GET tới path và port chỉ định; mọi response 2xx/3xx đều tính là thành công. `tcpSocket` — kiểm tra một port có đang nhận TCP connection không. `exec` — chạy một lệnh bên trong container; exit code 0 là thành công.\n\nMột chi tiết tinh tế nhưng quan trọng: readiness và liveness probe được chạy bởi **kubelet trên chính node** chứa container, chứ không phải bởi API server hay một health checker bên ngoài. Nghĩa là chúng vẫn hoạt động kể cả khi control plane của cluster tạm thời không khả dụng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các phase của Pod (Pending, Running, Succeeded, Failed) với điều kiện Ready nằm bên trong Running. Readiness chỉ quyết định việc nhận traffic từ Service; liveness fail thì container được restart tại chỗ (tăng restart count) mà không rời phase Running. Pod của Deployment dùng restartPolicy Always nên không bao giờ tới Succeeded hay Failed — chỉ Job mới tới."
+    },
+    {
+      "type": "explanation",
+      "title": "Resource request, limit và giao kèo với scheduler",
+      "content": "Mọi container nên khai báo **resource request** và **resource limit** cho cả CPU lẫn memory. Đây là hai thứ khác nhau, và nhầm lẫn chúng sẽ gây ra vấn đề thật trên production.\n\n**Request** là thứ scheduler dùng để quyết định đặt Pod ở đâu. Khi một Pod khai báo `cpu: 250m` (250 millicore = 0.25 của một core CPU) và `memory: 256Mi`, scheduler chỉ gán Pod đó vào node còn trống ít nhất 250m CPU và 256Mi memory. Request được **giữ chỗ** — phần capacity đó không được cấp cho bất kỳ Pod nào khác trên node. Request cũng là cơ sở để xác định **class Quality of Service (QoS)** của Pod.\n\n**Limit** được Linux kernel thực thi lúc runtime qua cơ chế cgroup. Nếu container cố dùng nhiều CPU hơn limit, nó bị **throttle** — kernel cấp cho nó ít chu kỳ CPU hơn, làm nó chậm đi nhưng không kill nó. Nếu container cấp phát nhiều memory hơn limit, kernel phát tín hiệu **OOM (Out of Memory) kill**, terminate container. Sau đó kubelet restart nó. Vì vậy memory limit là van an toàn cực kỳ quan trọng, ngăn một container hư hỏng ngốn hết memory của node và làm sập mọi Pod khác trên node.\n\n**Class QoS** quyết định Pod nào bị evict trước khi node thiếu memory:\n- **Guaranteed**: requests == limits cho mọi container. Các Pod này bị evict sau cùng.\n- **Burstable**: requests < limits, hoặc chỉ khai báo một phần resource. Ưu tiên ở mức giữa.\n- **BestEffort**: không khai báo request hay limit nào. Bị evict đầu tiên. Đừng bao giờ làm vậy trên production.\n\n**Hướng dẫn thực tế**: đặt request gần với mức dùng ổn định điển hình (p50–p90) để sổ sách của scheduler khớp với thực tế, đặt memory limit có khoảng dư trên mức đỉnh (nhiều team đặt memory limit = request cho dễ dự đoán), và cẩn trọng với CPU limit — CFS throttling có thể làm tăng latency kể cả khi node còn CPU rảnh, nên nhiều team đặt CPU request nhưng không đặt CPU limit cho các service nhạy cảm với latency. Đo mức dùng thực tế bằng `kubectl top pods` và một metrics stack (Prometheus + Grafana). Điều chỉnh limit để tránh OOM mà không cấp dư thừa.\n\nKý hiệu CPU `250m` được đọc là 250 millicore. 1000m = 1 core CPU. `256Mi` là 256 mebibyte (1 MiB = 2²⁰ byte). Kubernetes dùng tiền tố nhị phân IEC (Mi, Gi) một cách rõ ràng — không nhầm lẫn với MB/GB theo SI."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`kubectl describe` là công cụ debug đầu tiên của bạn — hãy nhìn phần Events ở cuối để thấy lỗi scheduling, lỗi pull image và lỗi probe. Log `--previous` cực kỳ quan trọng khi container rơi vào CrashLoopBackOff — instance hiện tại có thể không có log nào nếu nó crash ngay lập tức. `kubectl exec` vào một container đang chạy cho phép bạn kiểm tra trực tiếp filesystem, các network connection và biến môi trường.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Autoscaling: HPA, VPA và Cluster Autoscaler",
+      "content": "Kubernetes có ba cơ chế autoscaling bổ trợ cho nhau, có thể phối hợp để xử lý tải biến động.\n\n**Horizontal Pod Autoscaler (HPA)** scale số replica Pod trong một Deployment (hoặc StatefulSet, ReplicaSet). Nó query metrics API (do addon Metrics Server cung cấp) để lấy mức dùng CPU trung bình hiện tại trên tất cả Pod của Deployment đích. Nếu CPU trung bình vượt ngưỡng mục tiêu, HPA tính số replica mong muốn mới: `desiredReplicas = ceil(currentReplicas * currentAvgUtilization / targetUtilization)`. Nếu hiện có 3 replica và CPU trung bình = 90% với mục tiêu 70%, số replica mong muốn = ceil(3 * 90/70) = ceil(3.86) = 4. HPA bỏ qua các thay đổi trong biên độ dung sai 10%, và hành vi mặc định của nó dùng cửa sổ ổn định 5 phút cho scale-down, trong khi scale-up ngay lập tức (giới hạn tốc độ ở mức gấp đôi hoặc +4 Pod mỗi 15 giây) để tránh dao động liên tục (thrashing). HPA hiện đại (v2) cũng hỗ trợ custom metric và external metric — scale theo độ sâu queue request, consumer lag của Kafka, hoặc bất kỳ metric Prometheus nào.\n\n**Vertical Pod Autoscaler (VPA)** điều chỉnh request/limit CPU và memory trên từng Pod thay vì thay đổi số lượng Pod. Nó phân tích lịch sử dùng resource và đề xuất hoặc tự động áp dụng giá trị request/limit tốt hơn. VPA và HPA không nên cùng nhắm vào CPU trên cùng một Deployment — chúng có thể đánh nhau. VPA hữu ích nhất cho batch job và các Deployment mà việc thêm replica không giúp được gì (state nằm theo từng Pod).\n\n**Cluster Autoscaler** hoạt động ở cấp node. Khi scheduler không thể đặt một Pod vì không node nào đủ resource (Pod nằm ở Pending), Cluster Autoscaler phát hiện điều này và yêu cầu cloud provider cấp một node mới rồi thêm vào cluster. Khi các node bị dùng dưới mức trong một khoảng thời gian dài, Cluster Autoscaler cordon và drain chúng (di chuyển Pod sang node khác một cách an toàn) rồi terminate VM bên dưới. Kết hợp với HPA, bạn có hạ tầng co giãn hoàn toàn: HPA thêm replica Pod khi tải tăng, Cluster Autoscaler thêm node để chứa các replica đó, và cả hai cùng scale down khi tải giảm."
+    },
+    {
+      "type": "diagram",
+      "caption": "HPA và Cluster Autoscaler phối hợp với nhau: HPA thêm replica Pod, Cluster Autoscaler thêm node khi các node hiện có hết capacity. Cùng nhau, chúng cho phép scaling co giãn hoàn toàn tự động."
+    },
+    {
+      "type": "explanation",
+      "title": "ConfigMap và Secret: đưa cấu hình ra ngoài",
+      "content": "Container nên là bất biến (immutable): cùng một image chạy y hệt nhau ở dev, staging và production. Cấu hình khác nhau theo môi trường (URL database, API key, feature flag) phải được inject lúc runtime, chứ không được nướng sẵn vào image.\n\n**ConfigMap** lưu cấu hình không nhạy cảm dưới dạng các cặp key-value hoặc nguyên cả file config. Bạn có thể mount ConfigMap như một volume (các key trở thành tên file, value trở thành nội dung file — hữu ích cho các file config như `nginx.conf`) hoặc inject giá trị dưới dạng biến môi trường. ConfigMap được lưu không mã hóa trong etcd và phù hợp cho mọi thứ không nhạy cảm.\n\n**Secret** lưu dữ liệu nhạy cảm (mật khẩu, API key, chứng chỉ TLS). Chúng được encode base64 trong etcd (mặc định không được mã hóa, nhưng có thể bật mã hóa at-rest). Trong thực tế, đa số team tích hợp một secrets manager bên ngoài (HashiCorp Vault, AWS Secrets Manager, GCP Secret Manager) với Kubernetes qua các operator như External Secrets Operator, để tự động đồng bộ giá trị secret bên ngoài vào Kubernetes Secret. Giống ConfigMap, Secret có thể được mount như volume hoặc inject dưới dạng biến môi trường.\n\nMột quy tắc vận hành sống còn: **đừng bao giờ hardcode giá trị nhạy cảm trong manifest Deployment** và đừng bao giờ commit chúng vào git repository. Hãy dùng tham chiếu tới Secret, không dùng giá trị inline.\n\n**Namespace** cung cấp cơ chế cô lập resource bên trong một cluster. Namespace là một vùng phân chia ảo của cluster — tên object chỉ có phạm vi trong namespace đó, quyền RBAC và resource quota có thể áp theo từng namespace, và tên DNS ngắn được phân giải trong cùng namespace. Namespace *không* phải ranh giới mạng: một Pod vẫn có thể gọi tới `my-api-svc.production.svc.cluster.local` từ bất kỳ namespace nào, trừ khi có NetworkPolicy chặn. Cách dùng phổ biến: mỗi môi trường một namespace (`production`, `staging`, `development`), hoặc mỗi team một namespace. Có thể đặt resource quota theo namespace để workload của một team không ngốn hết resource của cluster."
+    },
+    {
+      "type": "explanation",
+      "title": "Bảo mật cluster cơ bản: RBAC, Pod Security Admission và NetworkPolicy",
+      "content": "Một cluster chạy code của người khác — hay chỉ đơn giản là code của nhiều team — cần những hàng rào bảo vệ ngoài resource limit. Bốn cơ chế sau gánh phần lớn công việc.\n\n**RBAC (Role-Based Access Control)** quyết định ai được làm gì thông qua API server. Một `Role` (theo namespace) hoặc `ClusterRole` liệt kê các verb trên resource (`get`, `list`, `create` trên `deployments`); một `RoleBinding` cấp role đó cho user, group, hoặc **ServiceAccount** (danh tính mà Pod sử dụng). Hãy cấp cho CI pipeline và workload role hẹp nhất mà vẫn chạy được; `cluster-admin` gắn vào một token của CI là một vụ xâm nhập đang chờ xảy ra.\n\n**Pod Security Admission (PSA)** là bản thay thế có sẵn cho PodSecurityPolicy, vốn đã bị gỡ bỏ ở v1.25. Bạn gắn label cho namespace với một trong ba profile chuẩn — `privileged`, `baseline` hoặc `restricted` — kèm một mode (`enforce`, `audit`, `warn`), ví dụ `pod-security.kubernetes.io/enforce: restricted`. Profile `restricted` yêu cầu chạy dưới user không phải root, bỏ các Linux capability, có seccomp profile và không cho leo thang đặc quyền. Để có các luật tùy biến phong phú hơn, các team bổ sung một policy engine như Kyverno, OPA Gatekeeper, hoặc ValidatingAdmissionPolicy có sẵn (dùng biểu thức CEL).\n\n**NetworkPolicy** là firewall bên trong cluster. Mặc định, mọi Pod đều gọi được tới mọi Pod khác ở mọi namespace; một NetworkPolicy chọn ra các Pod và chỉ cho phép các peer ingress/egress được liệt kê. Baseline phổ biến là một policy default-deny cho mỗi namespace cộng với các luật cho phép tường minh. Policy được thực thi bởi CNI plugin (Calico, Cilium) — trên CNI không hỗ trợ, chúng lặng lẽ không làm gì cả.\n\n**Quản lý Secret an toàn**: bật mã hóa at-rest cho Secret trong etcd, hạn chế `get secrets` trong RBAC, và ưu tiên workload identity (IRSA/EKS Pod Identity, GKE Workload Identity) thay vì các cloud key tồn tại lâu dài lưu trong Secret."
+    },
+    {
+      "type": "callout",
+      "content": "**Kubernetes không được phát minh từ con số không.** Google đã chạy một hệ thống nội bộ tên là **Borg** khoảng một thập kỷ trước khi có Kubernetes, quản lý hàng trăm nghìn job trên các data center toàn cầu của Google. Những bài học từ Borg — đặc tả khai báo, vòng reconciliation, tách control plane khỏi data plane — định hình trực tiếp thiết kế của Kubernetes. Các kỹ sư Google là Joe Beda, Brendan Burns và Craig McLuckie khởi động Kubernetes vào năm 2014, ngay sau đó có thêm các cựu binh Borg như Brian Grant và Tim Hockin. CNCF (Cloud Native Computing Foundation) hiện quản trị Kubernetes như một dự án open-source trung lập với vendor, ngăn không cho bất kỳ công ty nào một mình kiểm soát hướng đi của hệ sinh thái. Mô hình quản trị này là một phần lớn lý do Kubernetes được ngành áp dụng rộng rãi đến vậy — AWS, Google, Microsoft và Red Hat đều cạnh tranh thương mại trên cùng một lõi open-source dùng chung."
+    },
+    {
+      "type": "callout",
+      "content": "**Những thay đổi gần đây của Kubernetes (nên biết cho các buổi interview năm 2026):** dockershim bị gỡ bỏ ở v1.24 — các node chạy containerd hoặc CRI-O, và image build bằng Docker vẫn chạy được vì chúng là OCI image. PodSecurityPolicy bị gỡ bỏ ở v1.25 — hãy dùng label Pod Security Admission (cộng thêm Kyverno/Gatekeeper/ValidatingAdmissionPolicy cho các luật tùy biến). Gateway API đã GA và là người kế nhiệm được khuyến nghị của Ingress; controller cộng đồng ingress-nginx đã bị khai tử vào tháng 3/2026. EndpointSlice đã thay thế các object Endpoints cũ cho backend của Service, và kube-proxy có thêm mode nftables bên cạnh iptables và IPVS (nhiều cluster thay hẳn kube-proxy bằng eBPF qua Cilium)."
+    },
+    {
+      "type": "callout",
+      "content": "**Những sai lầm phổ biến trên production và kinh nghiệm cho interview:**\n\n- **Đừng bao giờ dùng image tag `:latest`** trong manifest production. Các node khác nhau có thể chạy các bản build khác nhau, `kubectl rollout undo` không thể mang lại một image mà `:latest` không còn trỏ tới nữa, và bạn mất luôn mọi dấu vết về thứ đang được deploy. Hãy pin một version tag (`my-image:v2.1.0`) hoặc, bất biến tuyệt đối, một digest (`my-image@sha256:abc123`).\n- **Luôn đặt resource request, và một memory limit**. Không có request, scheduler sẽ nhồi Pod lên những node vốn đã tải nặng. Không có memory limit, một memory leak có thể đẩy node vào tình trạng thiếu memory và khiến các Pod hàng xóm bị evict. CPU limit là một trade-off có chủ đích (throttling), không phải mặc định.\n- **Deploy không downtime cần ba thứ**: `maxUnavailable: 0` (capacity không bao giờ giảm), một readiness probe thực chất, và graceful shutdown (một khoảng trễ `preStop` cộng với xử lý SIGTERM). Lỗi 502 thoáng qua trong lúc deploy thường là do thiếu xử lý shutdown, chứ không phải do cấu hình rollout.\n- **Tối thiểu hai replica** cho mọi thứ trên production — một node hỏng khi chỉ có một replica sẽ gây downtime hoàn toàn cho service đó trong lúc Kubernetes schedule lại nó.\n- **Readiness probe ≠ liveness probe**. Sai lầm hay gặp là dùng cùng một endpoint cho cả hai. Nếu app của bạn còn sống nhưng đang tạm quá tải, fail readiness sẽ gỡ nó khỏi load balancer (tốt). Fail liveness sẽ restart nó (có thể làm quá tải tệ hơn). Hãy dùng các endpoint riêng, đúng ngữ nghĩa.\n- **Câu hỏi interview**: 'Một Pod đang ở `CrashLoopBackOff` — bạn debug thế nào?' Trả lời: `kubectl logs <pod> --previous` để xem output của container đã crash trước đó, rồi `kubectl describe pod <pod>` để xem event và kết quả probe, rồi `kubectl exec` vào một container khỏe dùng cùng image để kiểm tra các giả định về môi trường."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Kubernetes mang tính khai báo**: bạn mô tả trạng thái mong muốn trong manifest YAML; các control loop liên tục reconcile trạng thái thực tế cho khớp — Pod crash thì được restart, node hỏng thì kích hoạt schedule lại, tất cả đều tự động.",
+        "**Control plane** (API server, etcd, scheduler, controller manager) là bộ não của cluster. etcd là source of truth — mất nó là mất cluster. API server là cổng duy nhất; mọi thành phần khác chỉ tương tác thông qua nó.",
+        "**Pod** là lớp vỏ tạm thời bọc một hoặc nhiều container đặt cùng chỗ, dùng chung network namespace và volume. Đừng bao giờ quản lý Pod trần — hãy dùng Deployment hoặc StatefulSet.",
+        "**Deployment** điều khiển rolling update với `maxSurge` và `maxUnavailable` có thể cấu hình; `maxUnavailable: 0` đảm bảo deploy không downtime. Rollback chỉ là một lệnh `kubectl rollout undo`.",
+        "**Service** cung cấp ClusterIP và tên DNS ổn định, che đi IP Pod luôn thay đổi, dùng label selector để định tuyến động tới các Pod khỏe và sẵn sàng. Loại `LoadBalancer` cấp LB của cloud; **Gateway API** (đã GA, người kế nhiệm của Ingress) bổ sung định tuyến theo host/path, TLS và chia traffic theo trọng số ở phía trên.",
+        "**Health probe** là nền tảng: liveness probe restart container bị kẹt; readiness probe quyết định việc nhận traffic từ Service; startup probe bảo vệ ứng dụng khởi động chậm khỏi bị liveness kill quá sớm.",
+        "**Luôn khai báo request và limit cho CPU và memory**. Request quyết định vị trí scheduling và class QoS; limit ngăn một Pod gây OOM-kill cho các Pod hàng xóm. HPA scale số replica; Cluster Autoscaler scale node pool.",
+        "**Hàng rào bảo mật**: RBAC giới hạn quyền truy cập API, Pod Security Admission (label namespace `restricted`/`baseline`/`privileged`) đã thay thế PodSecurityPolicy ở v1.25, và NetworkPolicy là bắt buộc để cô lập Pod với Pod — chỉ namespace thôi thì không phải ranh giới mạng.",
+        "**Runtime**: từ v1.24 các node dùng containerd hoặc CRI-O qua CRI (dockershim đã bị gỡ); image build bằng Docker vẫn chạy được vì chúng là OCI image."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vai trò của etcd trong một cluster Kubernetes là gì?",
+      "options": [
+        "Nó schedule Pod lên các worker node dựa trên lượng resource còn trống",
+        "Nó là key-value store phân tán lưu toàn bộ trạng thái cluster — source of truth duy nhất",
+        "Nó chạy trên mọi worker node và quản lý vòng đời container",
+        "Nó expose REST API mà kubectl và các controller tương tác"
+      ],
+      "explanation": "etcd là store bền vững, nhất quán mạnh cho mọi object của Kubernetes: Deployment, Pod, Service, Secret và nhiều thứ khác. Mất etcd là mất trạng thái cluster. Mọi thành phần control plane khác đều chỉ đọc và ghi trạng thái thông qua API server, thành phần duy nhất truy cập trực tiếp etcd."
+    },
+    {
+      "id": "q2",
+      "question": "Một Deployment có `maxUnavailable: 0` và `maxSurge: 1` trong rolling update strategy. Điều này đảm bảo gì khi cập nhật image?",
+      "options": [
+        "Update hoàn tất trong thời gian ngắn nhất có thể bằng cách thay toàn bộ Pod cùng lúc",
+        "Update bị tạm dừng cho đến khi có người phê duyệt từng bước",
+        "Pod cũ bị xóa trước khi Pod mới khởi động, giảm mức dùng resource của node",
+        "Số Pod đang chạy và sẵn sàng không bao giờ tụt dưới số replica đã khai báo, cho update không downtime"
+      ],
+      "explanation": "Với maxUnavailable: 0, không Pod cũ nào bị terminate cho đến khi một Pod mới đã khởi động và vượt qua readiness probe. maxSurge: 1 cho phép tồn tại thêm một Pod trong quá trình chuyển đổi. Nhờ vậy số replica đã khai báo luôn được đáp ứng bằng các Pod sẵn sàng, và người dùng không gặp downtime."
+    },
+    {
+      "id": "q3",
+      "question": "Một Service của Kubernetes định tuyến traffic tới đúng Pod bằng cách nào?",
+      "options": [
+        "Bằng địa chỉ IP của Pod được hardcode trong spec của Service lúc tạo",
+        "Bằng tiền tố tên pod — mọi Pod do cùng một Deployment tạo ra đều có chung tiền tố tên",
+        "Bằng label selector — Service định tuyến động tới mọi Pod khỏe khớp với các label chỉ định",
+        "Bằng tên Deployment — mỗi Deployment tự động được liên kết với một Service cùng tên"
+      ],
+      "explanation": "Service dùng label selector (ví dụ app: my-api) để tìm các Pod khớp. Một EndpointSlice được duy trì tự động: IP của Pod được thêm vào khi readiness probe pass và bị gỡ khi Pod terminate hoặc fail readiness. Điều này tách hoàn toàn service discovery khỏi các IP Pod tạm thời."
+    },
+    {
+      "id": "q4",
+      "question": "Liveness probe và readiness probe khác nhau thế nào?",
+      "options": [
+        "Liveness fail thì restart container; readiness fail thì gỡ Pod khỏi endpoint của Service mà không restart",
+        "Liveness kiểm tra mức dùng CPU; readiness kiểm tra mã HTTP response",
+        "Readiness chạy một lần lúc khởi động; liveness chạy liên tục theo lịch",
+        "Cả hai probe đều restart container khi fail nhưng readiness có timeout dài hơn"
+      ],
+      "explanation": "Liveness: fail = container ở trạng thái xấu không thể hồi phục, nên Kubernetes kill và restart nó (xử lý deadlock, vòng lặp vô hạn). Readiness: fail = container tạm thời chưa sẵn sàng nhận traffic, nên nó bị gỡ khỏi endpoint của Service nhưng KHÔNG bị restart. Điều này cho phép khởi động êm ái và xử lý quá tải tạm thời."
+    },
+    {
+      "id": "q5",
+      "question": "Điều gì xảy ra khi một worker node ngừng gửi heartbeat tới control plane của Kubernetes?",
+      "options": [
+        "Các Pod trên node đó lập tức restart trên các node khác",
+        "Control plane tắt toàn bộ cluster để đảm bảo an toàn",
+        "Sau một khoảng grace period, node bị đánh dấu NotReady, rồi sau eviction timeout các Pod được schedule lại trên các node khỏe",
+        "etcd tự động khôi phục node về trạng thái tốt gần nhất"
+      ],
+      "explanation": "Việc khôi phục khi node hỏng do Node controller đảm nhiệm. Sau node-monitor-grace-period (mặc định 40s) không có heartbeat, điều kiện Ready của node chuyển thành Unknown và node bị gắn taint unreachable. Mặc định Pod tolerate taint đó trong 300 giây (eviction dựa trên taint), sau đó chúng bị evict và controller của chúng tạo Pod thay thế trên các node khỏe. Đây là lý do chạy ít nhất 2 replica là cực kỳ quan trọng cho availability."
+    },
+    {
+      "id": "q6",
+      "question": "Resource `requests` trong spec của Pod cho scheduler của Kubernetes biết điều gì?",
+      "options": [
+        "Lượng resource tối đa container được phép dùng trước khi bị throttle hoặc bị kill",
+        "Mức cấp phát tối thiểu được đảm bảo — scheduler chỉ đặt Pod lên node còn trống ít nhất chừng đó capacity",
+        "Lượng resource tối thiểu container yêu cầu từ hệ thống tính tiền của cloud provider",
+        "Lượng resource sẽ bị trừ vào quota của namespace nhưng không được thực thi lúc runtime"
+      ],
+      "explanation": "Request là giao kèo với scheduler. Một Pod request 250m CPU và 256Mi memory chỉ được đặt lên node còn ít nhất chừng đó capacity chưa cấp phát. Limit là trần thực thi lúc runtime — vượt memory limit gây OOM kill; vượt CPU limit gây throttling."
+    },
+    {
+      "id": "q7",
+      "question": "Service loại `LoadBalancer` khác `ClusterIP` ở chỗ nó:",
+      "options": [
+        "Dùng định tuyến HTTP theo path để gửi traffic tới các backend khác nhau",
+        "Cho phép Pod ở các namespace khác nhau giao tiếp mà không cần network policy",
+        "Tự động mã hóa traffic giữa các Pod bằng mutual TLS",
+        "Cấp một load balancer của cloud với địa chỉ IP ngoài truy cập được từ internet"
+      ],
+      "explanation": "ClusterIP cho Service một IP ảo chỉ truy cập được bên trong cluster. Loại LoadBalancer còn gọi thêm API của cloud provider để cấp một load balancer managed (trên AWS thường là Network Load Balancer; GCP và Azure cấp load balancer L4 của riêng họ) với IP ngoài ổn định. Đây là cách chuẩn để expose service production ra internet."
+    },
+    {
+      "id": "q8",
+      "question": "Bạn nên dùng object Kubernetes nào cho một database stateful như PostgreSQL, cần danh tính Pod ổn định và persistent volume riêng cho từng Pod?",
+      "options": [
+        "StatefulSet — nó cung cấp danh tính mạng ổn định và PersistentVolumeClaim riêng cho từng Pod",
+        "DaemonSet — nó đảm bảo mỗi node chạy một Pod",
+        "Deployment — nó xử lý replica và rolling update",
+        "Job — nó quản lý các tác vụ database chạy một lần"
+      ],
+      "explanation": "StatefulSet gán tên ổn định, có thứ tự (ví dụ postgres-0, postgres-1) và được giữ nguyên qua các lần restart. Mỗi Pod có PersistentVolumeClaim riêng, không dùng chung với Pod khác. Điều này là thiết yếu cho database, nơi mỗi replica có dữ liệu riêng và danh tính của nó quan trọng cho việc bầu leader."
+    },
+    {
+      "id": "q9",
+      "question": "Horizontal Pod Autoscaler (HPA) có mục tiêu mức dùng CPU là 70%. Hiện tại: 3 replica đang chạy với CPU trung bình 90%. HPA sẽ scale lên bao nhiêu replica?",
+      "options": [
+        "3 replica — đã nằm trong biên độ dung sai",
+        "4 replica — ceil(3 * 90/70) = ceil(3.86) = 4",
+        "5 replica — HPA luôn thêm 2 replica để tránh dao động",
+        "6 replica — gấp đôi số hiện tại khi CPU vượt ngưỡng"
+      ],
+      "explanation": "HPA dùng công thức: desiredReplicas = ceil(currentReplicas * currentAvgUtilization / targetUtilization) = ceil(3 * 90/70) = ceil(3.857) = 4. Sau khi thêm replica thứ tư, CPU trung bình sẽ giảm dần về khoảng 70% vì tải được chia cho nhiều Pod hơn."
+    },
+    {
+      "id": "q10",
+      "question": "Một Pod bị kẹt ở `CrashLoopBackOff`. Lệnh kubectl nào cho bạn xem log của instance container đã crash (trước đó)?",
+      "options": [
+        "kubectl describe pod <pod-name> --crashed",
+        "kubectl exec <pod-name> -- cat /var/log/container.log",
+        "kubectl logs <pod-name> --previous",
+        "kubectl get events --field-selector reason=CrashLoop"
+      ],
+      "explanation": "`kubectl logs <pod-name> --previous` lấy log từ instance container đã terminate gần nhất. Điều này cực kỳ quan trọng khi debug CrashLoopBackOff vì container hiện tại có thể crash quá nhanh để kịp sinh ra log. Sau đó `kubectl describe pod` cho bạn xem phần events với exit code và thông báo lỗi probe."
+    }
+  ]
+}

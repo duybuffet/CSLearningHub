@@ -1,0 +1,235 @@
+{
+  "sourceHash": "de87c085b49c",
+  "title": "HTTP, HTTPS & DNS",
+  "tagline": "Trình duyệt biến một URL thành pixel ra sao — phân giải DNS, request-response HTTP, TLS handshake, quy ước REST và WebSocket.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mỗi lần bạn gõ một URL và nhấn Enter, cả một bản giao hưởng vô hình diễn ra phía sau. Trước khi một byte HTML hay JSON nào kịp đến trình duyệt, hệ điều hành của bạn phải dịch một cái tên dễ đọc như `api.example.com` thành một địa chỉ IP dạng số. Rồi một kết nối TCP được mở, một cuộc handshake mật mã thương lượng ra một bí mật dùng chung, và một HTTP request đi xuyên qua Internet công cộng — tất cả đều diễn ra trước khi bạn thấy ký tự đầu tiên của response. Chuỗi này nhanh và ổn định đến mức ta coi nó là đương nhiên, vậy mà nó là nền móng của mọi website, REST API và backend cho ứng dụng di động mà bạn từng xây dựng.\n\n**HTTP** (HyperText Transfer Protocol) là giao thức tầng ứng dụng định nghĩa cách client và server trao đổi request và response. Theo thiết kế, nó là stateless — mỗi request mang theo mọi thông tin cần thiết để được xử lý một cách độc lập, đó là thứ giúp các service HTTP dễ scale theo chiều ngang. **HTTPS** là HTTP đặt bên trên **TLS** (Transport Layer Security), lớp cung cấp tính bảo mật, toàn vẹn và xác thực. Không có TLS, bất kỳ ai trên cùng mạng cũng có thể đọc hoặc sửa traffic của bạn. **DNS** (Domain Name System) là cuốn danh bạ toàn cầu phân tán, ánh xạ hostname sang địa chỉ IP — một mảnh hạ tầng then chốt mà hầu hết developer tương tác hằng ngày nhưng hiếm khi nghĩ về nó thật sâu.\n\nHiểu ba hệ thống này không chỉ là chuyện học thuật. Bạn sẽ dùng kiến thức này để debug những timeout bí ẩn (thường là do cache DNS), giải thích vì sao CORS preflight request tồn tại (hệ quả của mô hình bảo mật HTTP), chọn đúng status code cho API của bạn (ảnh hưởng đến logic retry của client và việc cache của CDN), và cấu hình TLS đúng cách để trình duyệt không hiện những cảnh báo bảo mật đáng sợ cho người dùng. Chương này xây dựng từng tầng từ nguyên lý cơ bản, rồi cho thấy chúng ghép lại thành toàn bộ stack mà bạn dùng hằng ngày như thế nào."
+    },
+    {
+      "type": "diagram",
+      "caption": "Toàn bộ hành trình từ URL đến response: DNS phân giải tên, TCP mở kết nối, TLS thương lượng mã hóa, rồi HTTP mang request và response thực sự."
+    },
+    {
+      "type": "analogy",
+      "title": "DNS như một cuốn danh bạ phân cấp kèm giấy nhớ",
+      "content": "Giả sử bạn muốn gọi cho một người tên Alice làm ở công ty Acme Corp, nhưng bạn chỉ biết tên công ty. Bạn gọi đến một tổng đài viên **tra cứu danh bạ** — đây là **recursive resolver** của bạn, người trung gian chạy việc thay bạn.\n\nTổng đài viên không tự biết hết mọi số điện thoại trên đời, nên họ bắt đầu từ trên cùng. Họ gọi cho **Trụ sở quốc gia** — **root nameserver** — nơi trả lời 'Tôi không có số của Acme Corp, nhưng các công ty ở nước này đăng ký với Danh bạ Doanh nghiệp.' Tổng đài viên gọi **Danh bạ Doanh nghiệp** — **TLD nameserver** của `.com` — nơi trả lời 'Acme Corp có dịch vụ danh bạ nội bộ riêng, đây là số của nó.' Tổng đài viên gọi **danh bạ nội bộ của Acme Corp** — **authoritative nameserver** — nơi cuối cùng trả lời 'Alice ở số máy lẻ 34, và số này có hiệu lực trong một giờ tới.'\n\nTổng đài viên ghi số của Alice lên một **tờ giấy nhớ** kèm thời điểm hết hạn — đây là **TTL (Time To Live)**. Lần sau có người hỏi số của Alice trong vòng một giờ đó, tổng đài viên đọc luôn từ tờ giấy nhớ mà không phải lặp lại cả chuỗi. Đây là **caching** trong DNS. Khi Alice đổi văn phòng (server đổi IP), những tờ giấy nhớ cũ phải hết hạn thì số mới mới lan ra khắp nơi — đó là lý do thay đổi DNS có thể mất thời gian để 'lan truyền' trên toàn cầu, đôi khi hàng giờ nếu TTL được đặt cao."
+    },
+    {
+      "type": "explanation",
+      "title": "DNS: cuốn danh bạ phân tán của Internet",
+      "content": "DNS là một database **phân cấp, ủy quyền và phân tán**. Không server nào biết hết mọi câu trả lời; thay vào đó, quyền hạn được chia cho hàng triệu nameserver tổ chức thành một cấu trúc cây phản chiếu chính phân cấp của tên miền.\n\n**Phân cấp từ trên xuống dưới:**\n\nỞ đỉnh là các **root nameserver** — có 13 danh tính root server (từ `a.root-servers.net` đến `m.root-servers.net`, mỗi cái có một địa chỉ IPv4 và một địa chỉ IPv6), do 12 tổ chức vận hành và được phục vụ qua **anycast** từ gần 2,000 instance trên toàn thế giới. Chúng chỉ biết đúng một điều: nameserver nào chịu trách nhiệm cho mỗi tên miền cấp cao nhất (TLD) như `.com`, `.org`, `.io`, `.uk`.\n\n**TLD nameserver** do các tổ chức registry vận hành — ví dụ Verisign vận hành `.com` và `.net`. Chúng lưu các **NS record** (nameserver record) trỏ đến authoritative nameserver của từng tên miền đã đăng ký dưới TLD của chúng.\n\n**Authoritative nameserver** là thẩm quyền cuối cùng cho một tên miền cụ thể. Khi bạn mua `example.com` và cấu hình nó với Cloudflare, AWS Route 53 hay nhà đăng ký tên miền, những nơi đó trở thành authoritative server. Chúng giữ các record thực sự: record `A` ánh xạ tên miền sang địa chỉ IPv4, record `AAAA` cho IPv6, alias `CNAME`, record `MX` cho mail, record `TXT` cho việc xác minh và bảo mật email (SPF, DKIM), và nhiều loại khác.\n\n**Recursive resolver** (còn gọi là recursor hay full-service resolver) thường do ISP, mạng công ty của bạn, hoặc một dịch vụ công cộng như `8.8.8.8` (Google) hay `1.1.1.1` (Cloudflare) cung cấp. Nó thay bạn thực hiện các truy vấn lặp đi xuống phân cấp và cache kết quả — kể cả các lời giới thiệu (referral), nên trong thực tế nó gần như không bao giờ phải hỏi root server: địa chỉ của các server `.com` đã được cache sẵn. Stub resolver của hệ điều hành chỉ việc gửi một truy vấn đến resolver này và chờ câu trả lời hoàn chỉnh.\n\n**TTL và lan truyền:** Mỗi DNS record có một TTL tính bằng giây. TTL 3600 nghĩa là các resolver cache câu trả lời trong một giờ. Hạ TTL xuống 60 giây trước khi đổi IP giúp thay đổi lan truyền trên toàn cầu trong vòng một phút; quên hạ trước thì IP cũ của bạn có thể vẫn được phục vụ từ cache hàng giờ sau khi bạn đã cập nhật authoritative record."
+    },
+    {
+      "type": "diagram",
+      "caption": "Phân giải DNS kiểu lặp (iterative): recursive resolver lần lượt truy vấn từng tầng của phân cấp, cache câu trả lời ở mỗi bước."
+    },
+    {
+      "type": "explanation",
+      "title": "Các loại DNS record trong thực tế",
+      "content": "**A record** — Ánh xạ một hostname sang một địa chỉ IPv4. Bạn có thể có nhiều A record cho cùng một tên (load balancing kiểu round-robin ở tầng DNS). Ví dụ: `api.example.com → 93.184.216.34`.\n\n**AAAA record** — Giống A, nhưng cho địa chỉ IPv6 (`2606:2800:220:1:248:1893:25c8:1946`). Các client dual-stack thường hỏi cả A lẫn AAAA, rồi cho các lần thử kết nối IPv6 và IPv4 chạy đua với nhau — thuật toán **Happy Eyeballs** (RFC 8305) — để một đường IPv6 hỏng không bao giờ làm người dùng phải chờ.\n\n**CNAME record** — Alias tên chuẩn (canonical name). `www.example.com CNAME example.com` nghĩa là 'phân giải `www.example.com` bằng cách tra `example.com`.' CNAME không thể cùng tồn tại với record khác ở cùng một tên — đây là cái bẫy thường gặp khi cố dùng CNAME ở zone apex (gốc của tên miền). Nhiều nhà cung cấp DNS giải quyết chuyện này bằng một record 'ALIAS' hay 'ANAME' độc quyền, được \"làm phẳng\" ở phía server.\n\n**MX record** — Mail exchanger. Chỉ định server nào nhận email cho một tên miền, kèm một **độ ưu tiên** (thấp hơn = được ưu tiên). `example.com MX 10 mail.example.com, 20 backup-mail.example.com`.\n\n**TXT record** — Văn bản tùy ý. Con dao đa năng của DNS: dùng cho **SPF** (chỉ định server nào được gửi email dưới danh nghĩa tên miền của bạn), **DKIM** (public key để ký email), **DMARC** (chính sách xác thực email), và xác minh quyền sở hữu tên miền bởi các dịch vụ như Google Search Console.\n\n**NS record** — Ủy quyền một zone (hoặc subdomain) cho các nameserver cụ thể. Các NS record ở tầng TLD là thứ khiến phân cấp DNS hoạt động — chúng bảo resolver 'với mọi thứ dưới `example.com`, hãy hỏi các nameserver này.'\n\n**SOA record** — Start of Authority. Mỗi zone có một cái; chứa metadata của zone gồm nameserver chính, email quản trị, serial number (tăng lên ở mỗi thay đổi để kích hoạt zone transfer) và các giá trị TTL mặc định.\n\n**SRV record** — Vị trí dịch vụ. `_http._tcp.example.com SRV 0 5 80 www.example.com` chỉ định host và port cho một dịch vụ. Được SIP, XMPP và một số giao thức service discovery dùng, dù phần lớn web service đã chuyển sang biến môi trường hoặc service mesh.\n\n**HTTPS / SVCB record** (RFC 9460, 2023) — cho client biết *trước khi kết nối* rằng một dịch vụ hỗ trợ những giao thức nào (`alpn=\"h3,h2\"`), các endpoint và port thay thế, và các key cho Encrypted ClientHello. Trình duyệt dùng chúng để đi thẳng lên HTTP/3, và chúng cung cấp một cách chuẩn để tạo alias cho zone apex.\n\n**CAA record** — liệt kê những certificate authority nào được phép cấp certificate cho tên miền; CA phải kiểm tra nó trước khi cấp.\n\n**PTR record** — reverse DNS: ánh xạ một địa chỉ IP ngược lại thành tên (dưới `in-addr.arpa` / `ip6.arpa`). Mail server kiểm tra nó khi lọc spam."
+    },
+    {
+      "type": "explanation",
+      "title": "DNS trong thực tế: các tầng cache, transport và quyền riêng tư",
+      "content": "**Caching diễn ra ở mọi tầng**: trình duyệt giữ một cache ngắn hạn riêng, stub resolver của hệ điều hành có một cái (`systemd-resolved` trên Linux, `mDNSResponder` trên macOS), router ở nhà cũng có thể có, và recursive resolver cache cho tất cả mọi người phía sau nó. Câu trả lời phủ định cũng được cache: một `NXDOMAIN` được ghi nhớ trong khoảng thời gian quy định ở SOA record của zone, nên một hostname bị tra *trước khi* bạn tạo nó có thể tiếp tục thất bại một lúc.\n\n**Transport**: DNS cổ điển dùng UDP port 53 với giới hạn câu trả lời 512 byte. EDNS(0) cho phép client thông báo một buffer lớn hơn (khoảng 1,232 byte là kích thước an toàn được khuyến nghị, để tránh phân mảnh IP); nếu câu trả lời vẫn không vừa, server bật bit TC (truncated) và client thử lại qua TCP.\n\n**Quyền riêng tư và toàn vẹn**: DNS thuần không được mã hóa và không được xác thực — bất kỳ ai trên đường đi cũng có thể thấy, và giả mạo, các lần tra cứu của bạn. **DNS over HTTPS (DoH)** và **DNS over TLS (DoT)** mã hóa chặng từ client đến resolver (trình duyệt, Android, iOS và Windows đều hỗ trợ), còn **DNSSEC** ký các record để một resolver có kiểm tra có thể chứng minh chúng đến từ chủ sở hữu zone. Chúng giải quyết những vấn đề khác nhau: DoH giấu truy vấn khỏi mạng; DNSSEC chứng minh câu trả lời là xác thực.\n\n**Một cái bẫy của Node.js**: `dns.lookup()` — thứ mà `http`, `net` và `fetch` dùng mặc định — gọi resolver của hệ điều hành (`getaddrinfo`) trên thread pool 4 thread của libuv và tôn trọng `/etc/hosts`, trong khi `dns.resolve*()` gửi truy vấn DNS thật qua mạng. Nhiều lần tra cứu chậm có thể làm bão hòa thread pool đó và làm trễ những việc không liên quan như file system và crypto."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP: giao thức request-response",
+      "content": "HTTP do Tim Berners-Lee thiết kế năm 1989 và lần đầu được chuẩn hóa thành HTTP/1.0 năm 1996. Đó là một giao thức **stateless, tầng ứng dụng** — dạng text và chạy trên TCP ở những phiên bản đầu. 'Stateless' là một lựa chọn thiết kế có chủ đích: mỗi HTTP request đứng độc lập, mang theo mọi ngữ cảnh cần để xử lý nó. Điều này khiến các service HTTP scale được theo chiều ngang — bất kỳ server nào xử lý được `GET /users/42` cũng có thể phục vụ cùng request đó, vì không cần session ở phía server.\n\n**Một HTTP request có ba phần:**\n\n1. **Request line** — method, path và phiên bản HTTP. Ví dụ: `GET /api/users/42 HTTP/1.1`\n2. **Header** — metadata dạng key-value. `Host: api.example.com`, `Authorization: Bearer eyJ...`, `Content-Type: application/json`, `Accept: application/json`, `Cache-Control: no-cache`.\n3. **Body** — payload tùy chọn, có mặt với POST/PUT/PATCH. Header `Content-Type` cho server biết cách parse nó.\n\n**Một HTTP response tương tự cũng có ba phần:**\n\n1. **Status line** — phiên bản HTTP, status code dạng số, reason phrase. Ví dụ: `HTTP/1.1 200 OK`\n2. **Header** — `Content-Type: application/json`, `Cache-Control: max-age=3600`, `ETag: \"abc123\"`, `Set-Cookie: session=...`\n3. **Body** — payload của response (HTML, JSON, binary).\n\nNgữ nghĩa — method, status code, header — giữ nguyên từ HTTP/1.1. Thứ thay đổi qua các phiên bản là định dạng truyền trên dây và tầng transport bên dưới, sẽ bàn ngay sau đây."
+    },
+    {
+      "type": "diagram",
+      "caption": "Cấu trúc của HTTP request và response — mỗi message gồm một status line, các header và một body tùy chọn."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP/1.1 so với HTTP/2 so với HTTP/3",
+      "content": "**HTTP/1.1** (1997; đặc tả hiện hành RFC 9112) dạng text. Kết nối là persistent (keep-alive), nhưng mỗi kết nối chỉ mang một request mỗi lần — pipelining có được đặc tả nhưng chưa bao giờ dùng được trong thực tế — nên trình duyệt mở tối đa **sáu kết nối cho mỗi origin**, và một response chậm sẽ chặn các request xếp hàng phía sau nó (*head-of-line blocking ở tầng HTTP*).\n\n**HTTP/2** (2015, RFC 9113) giữ nguyên ngữ nghĩa nhưng gửi các **frame** nhị phân qua một kết nối TCP duy nhất. Nhiều request đi dưới dạng các **stream** đan xen, header được nén bằng **HPACK**, và mỗi origin chỉ cần một kết nối. Điều này loại bỏ head-of-line blocking ở tầng HTTP — nhưng không loại bỏ được ở tầng *TCP*: một gói tin bị mất làm kẹt mọi stream cho đến khi nó được gửi lại, nên trên mạng hay mất gói, HTTP/2 có thể tệ hơn cả nhiều kết nối HTTP/1.1. (Server push từng được đặc tả, nhưng sau đó các trình duyệt đã bỏ hỗ trợ.)\n\n**HTTP/3** (2022, RFC 9114) ánh xạ cùng ngữ nghĩa đó lên **QUIC** chạy trên UDP. Các stream độc lập với nhau ở tầng transport, nên một gói tin mất chỉ làm kẹt stream của chính nó; TLS 1.3 được tích hợp sẵn, một kết nối mới sẵn sàng sau 1 RTT (0-RTT khi resume), và connection ID cho phép điện thoại chuyển từ Wi-Fi sang mạng di động mà không cần kết nối lại. Nén header dùng **QPACK**. Đến 2025–26, HTTP/3 được bật mặc định trên mọi trình duyệt và CDN lớn. Client biết một server nói được HTTP/3 qua response header `Alt-Svc: h3=\":443\"` hoặc một HTTPS DNS record, và quay về HTTP/2 khi UDP bị chặn.\n\n| | HTTP/1.1 | HTTP/2 | HTTP/3 |\n|---|---|---|---|\n| Transport | TCP | TCP | QUIC trên UDP |\n| Định dạng trên dây | Text | Frame nhị phân | Frame nhị phân |\n| Số request mỗi kết nối | Mỗi lần một | Nhiều, multiplexed | Nhiều, multiplexed |\n| Head-of-line blocking | Tầng HTTP và TCP | Tầng TCP | Chỉ trong từng stream |\n| Nén header | Không | HPACK | QPACK |\n| Mã hóa | Tùy chọn | Trình duyệt bắt buộc | Luôn luôn (TLS 1.3) |\n| Số round trip trước request đầu tiên (kết nối mới) | 2 với TLS 1.3 | 2 với TLS 1.3 | 1 |"
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP method: ngữ nghĩa rất quan trọng",
+      "content": "HTTP định nghĩa một tập nhỏ các **method** (còn gọi là verb) mã hóa hành động dự định. Dùng chúng đúng cách không phải là nghi thức — cache, proxy, trình duyệt và REST client đều đưa ra quyết định dựa trên ngữ nghĩa của method.\n\n**GET** — Lấy một resource. **Safe** (không có side effect trên server) và **idempotent** (lặp lại cho cùng kết quả). Trình duyệt cache response của GET; proxy cũng có thể. Đừng bao giờ đặt dữ liệu nhạy cảm trong URL của GET — nó sẽ nằm trong log của server, lịch sử trình duyệt và header referrer.\n\n**POST** — Gửi dữ liệu để tạo một resource hoặc kích hoạt một hành động. **Không safe**, **không idempotent** — submit một form hai lần có thể tạo ra hai bản ghi. Body của POST mang payload; response của POST thường trả về `201 Created` kèm header `Location` trỏ đến resource mới.\n\n**PUT** — Thay thế toàn bộ một resource. **Idempotent** — PUT cùng một document hai lần cho ra cùng trạng thái như PUT một lần. Nếu bạn muốn `PUT /users/42` chỉ cập nhật tên, bạn phải gửi toàn bộ object user, không chỉ trường tên.\n\n**PATCH** — Cập nhật một phần. Chỉ gửi những trường bạn muốn thay đổi. Đặc tả không bảo đảm PATCH là idempotent (patch document có thể mô tả thay đổi tương đối như 'tăng counter lên 1'), nhưng các hiện thực dùng nó cho việc cập nhật trường đơn giản thì trong thực tế coi nó là idempotent.\n\n**DELETE** — Xóa một resource. Idempotent — trạng thái server sau một lần DELETE hay mười lần là như nhau: resource đã biến mất. *Response* có thể khác (`204` lần đầu, `404` các lần sau), nên client retry một DELETE nên coi `404` là thành công. Thường trả về `204 No Content` khi thành công.\n\n**HEAD** — Giống GET nhưng không có response body. Hữu ích để kiểm tra `Content-Length`, `Last-Modified` hay `ETag` trước khi quyết định có tải một file lớn hay không. Health check hiệu quả và kiểm tra cache thường dùng HEAD.\n\n**OPTIONS** — Mô tả các method được phép cho một resource. Trình duyệt gửi **CORS preflight** request bằng OPTIONS khi một request cross-origin dùng method khác GET, HEAD hoặc POST, đặt header nằm ngoài tập CORS-safelisted (như `Authorization`), hoặc gửi `Content-Type` khác `text/plain`, `multipart/form-data` hoặc `application/x-www-form-urlencoded` — nên một `POST` JSON bình thường cũng bị preflight. Trình duyệt hỏi trước \"có được phép không?\" rồi mới gửi request thật.\n\n**Idempotency là then chốt cho logic retry.** Nếu một GET, PUT hoặc DELETE bị timeout, bạn có thể retry an toàn — bạn biết nó sẽ cho cùng kết quả như một lần gọi thành công. Nếu một POST bị timeout, retry có thể tạo ra resource trùng lặp — bạn cần idempotency key hoặc cơ chế khử trùng lặp ở phía server."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTP status code: metadata gánh trọng trách",
+      "content": "Status code không phải để trang trí — chúng điều khiển hành vi của client, proxy, CDN và load balancer. Dùng sai code là một bug, không phải một lựa chọn phong cách.\n\n**2xx — Thành công:** `200 OK` là thành công tiêu chuẩn cho GET và POST. `201 Created` nên đi kèm các response POST tạo ra resource mới, và nên có header `Location` chứa URL của resource mới. `204 No Content` báo thành công mà không có body — phù hợp cho DELETE và một số thao tác PATCH. `206 Partial Content` dùng cho request theo byte-range (streaming video, tải tiếp tục được).\n\n**3xx — Chuyển hướng:** `301 Moved Permanently` bảo client (và công cụ tìm kiếm) cập nhật bookmark — resource đã có URL cố định mới. `302 Found` (chuyển hướng tạm thời) dùng cho các chuyển hướng nhất thời, như sau pattern POST-redirect-GET. `304 Not Modified` là response kiểm tra cache: 'bạn đã có phiên bản hiện tại rồi, dùng bản cache của bạn đi.' Cách này tiết kiệm bandwidth mà client không phải đoán. `307 Temporary Redirect` và `308 Permanent Redirect` là các phiên bản hiện đại tương đương 302/301, bảo đảm method được giữ nguyên (POST đến đích 307 vẫn là POST; POST đến đích 302 thì trong lịch sử từng bị biến thành GET).\n\n**4xx — Lỗi phía client:** Client đã làm sai điều gì đó. `400 Bad Request` — cú pháp sai hoặc tham số không hợp lệ. `401 Unauthorized` — cần xác thực hoặc thông tin xác thực không hợp lệ (dù tên gọi vậy, nó nghĩa là 'chưa xác thực'). `403 Forbidden` — đã xác thực nhưng không được phép. `404 Not Found` — resource không tồn tại ở path này. `405 Method Not Allowed` — method không được hỗ trợ trên endpoint này. `409 Conflict` — xung đột trạng thái (cố tạo bản trùng, hoặc optimistic locking thất bại). `422 Unprocessable Content` (trước RFC 9110 gọi là \"Unprocessable Entity\") — đúng cú pháp nhưng sai ngữ nghĩa (phổ biến trong Rails và NestJS cho các lỗi validation). `429 Too Many Requests` — vượt rate limit; nên kèm header `Retry-After`.\n\n**5xx — Lỗi phía server:** Server đã thất bại. `500 Internal Server Error` — exception không được xử lý. `502 Bad Gateway` — server upstream (phía sau load balancer hay reverse proxy của bạn) trả về response không hợp lệ. `503 Service Unavailable` — server quá tải hoặc đang bảo trì; hãy kèm `Retry-After` khi có thể. `504 Gateway Timeout` — upstream không phản hồi kịp.\n\nMột phân biệt then chốt: **phần lớn 4xx nghĩa là KHÔNG retry khi chưa sửa request** (retry một lỗi 400 sẽ luôn thất bại) — ngoại lệ là `408 Request Timeout` và `429 Too Many Requests`, những lỗi nên được retry sau khoảng chờ `Retry-After`. **5xx thường nghĩa là retry với exponential backoff** (trừ `501 Not Implemented` và `505 HTTP Version Not Supported`, vốn không phải lỗi tạm thời) — nhưng chỉ tự động retry với các request **idempotent**. Retry một POST đã bị timeout hoặc trả về `502` có thể khiến nó được thực thi hai lần, trừ khi server hỗ trợ idempotency key."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`fetch()` chỉ reject khi có lỗi ở tầng mạng (lỗi DNS, kết nối bị từ chối hoặc reset, bị abort); nó resolve với mọi HTTP response, kể cả 4xx và 5xx, nên bạn phải kiểm tra `res.ok` hoặc `res.status`. Wrapper này bổ sung ba thứ mà client trên production cần: một timeout (`AbortSignal.timeout`) để một server bị treo không làm treo bên gọi, retry với exponential backoff và jitter có tôn trọng `Retry-After`, và — quan trọng nhất — **chỉ** retry với các method idempotent hoặc các request mang `Idempotency-Key`, vì retry một POST một cách mù quáng có thể trừ tiền thẻ hai lần. `408`, `429` và các 5xx tạm thời được retry; các 4xx khác được ném ra ngay lập tức.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "TLS: HTTPS thực sự bảo vệ traffic như thế nào",
+      "content": "TLS (Transport Layer Security, người kế nhiệm SSL) cung cấp ba bảo đảm khi bạn kết nối đến một endpoint HTTPS:\n\n1. **Bảo mật (confidentiality)** — traffic được mã hóa nên kẻ nghe lén chỉ thấy ciphertext.\n2. **Toàn vẹn (integrity)** — các message được xác thực nên việc sửa đổi sẽ bị phát hiện.\n3. **Xác thực (authentication)** — server chứng minh danh tính qua một **certificate** được ký bởi một **Certificate Authority (CA)** đáng tin cậy.\n\n**Certificate hoạt động thế nào:** Một TLS certificate là một tài liệu gắn một public key với một tên miền (và các metadata khác như tổ chức và ngày hết hạn). Nó được ký số bởi một CA — một công ty như Let's Encrypt, DigiCert hay Sectigo mà các trình duyệt và hệ điều hành đã đồng ý tin tưởng. Khi trình duyệt của bạn kết nối đến `https://bank.example.com`, nó kiểm tra rằng certificate được xuất trình có phủ tên miền đó, chưa hết hạn, và được ký bởi một CA đáng tin. Nếu bất kỳ bước kiểm tra nào thất bại, bạn sẽ thấy cảnh báo của trình duyệt.\n\n**TLS 1.3 handshake (1 round trip):**\n\n- **Client → Server: ClientHello** — 'Tôi hỗ trợ các cipher suite này, đây là phần DH key share của tôi.' Client gửi nửa phần trao đổi khóa của mình ngay trong message đầu tiên.\n- **Server → Client: ServerHello + Certificate + CertificateVerify + Finished** — 'Đây là phần DH key share của tôi' (giờ cả hai bên đều có thể suy ra session key, nên mọi thứ sau ServerHello đều đã được mã hóa), 'đây là certificate của tôi, một chữ ký chứng minh tôi giữ private key của nó (CertificateVerify), và một MAC trên toàn bộ handshake (Finished).'\n- **Client → Server: Finished** — 'Tôi đã kiểm tra certificate của bạn. Bắt đầu nói chuyện thôi.' Client gửi HTTP request đầu tiên ngay sau đó, trong cùng lượt gửi.\n\nĐến lúc này, các khóa đối xứng đã được thiết lập chỉ trong **một round trip** (một message từ client đến server, một lời đáp từ server về client). Mã hóa đối xứng (AES-GCM) sau đó được dùng cho mọi dữ liệu HTTP tiếp theo — nó nhanh hơn rất nhiều so với mật mã bất đối xứng (RSA/ECDSA).\n\n**TLS 1.2 so với 1.3:** TLS 1.2 cần hai round trip trước khi dữ liệu có thể đi. TLS 1.3 loại bỏ các cipher suite lỗi thời, đổi handshake thành một RTT, và bổ sung **0-RTT resumption** cho các site đã từng truy cập (client gửi dữ liệu ngay trong message đầu tiên bằng một session ticket từ kết nối trước). Tuy nhiên, dữ liệu 0-RTT có nguy cơ bị replay attack, nên chỉ nên dùng cho các request idempotent.\n\n**Forward secrecy:** TLS 1.3 bắt buộc trao đổi khóa Diffie-Hellman ephemeral (dùng một lần), nghĩa là session key không bao giờ được lưu trữ lâu dài. Kể cả khi ai đó ghi lại toàn bộ traffic đã mã hóa của bạn rồi sau này đánh cắp được private key của server, họ cũng không giải mã được traffic cũ. Tính chất này — gọi là **forward secrecy** hay **perfect forward secrecy (PFS)** — là một cải tiến lớn so với trao đổi khóa RSA tĩnh, thứ mà TLS 1.2 và các bản trước vẫn cho phép (TLS 1.2 với cipher suite ECDHE cũng có forward secrecy).\n\n**SNI và ECH:** ClientHello nêu tên site mà nó muốn (**Server Name Indication**) để một địa chỉ IP có thể phục vụ nhiều certificate — trong lịch sử điều này ở dạng plaintext, ai trên đường đi cũng thấy. **Encrypted ClientHello (ECH)**, được Chrome và Firefox hỗ trợ và được Cloudflare triển khai, mã hóa phần này bằng một key được công bố trong HTTPS DNS record của site.\n\n**Trao đổi khóa hậu lượng tử:** Chrome, Firefox và các CDN lớn giờ mặc định thương lượng nhóm lai **X25519MLKEM768**, kết hợp Diffie-Hellman trên đường cong elliptic cổ điển với lược đồ hậu lượng tử ML-KEM (Kyber), để traffic bị ghi lại hôm nay vẫn giữ được bí mật kể cả trước một máy tính lượng tử trong tương lai."
+    },
+    {
+      "type": "diagram",
+      "caption": "TLS 1.3 handshake: một round trip trước khi HTTP đã mã hóa bắt đầu chạy. Phép trao đổi DH bất đối xứng suy ra các khóa đối xứng ephemeral; sau đó mọi dữ liệu được mã hóa bằng AES-GCM."
+    },
+    {
+      "type": "explanation",
+      "title": "HTTPS trên production: checklist thực tế",
+      "content": "Hiểu TLS về mặt khái niệm là một chuyện; triển khai nó đúng cách là chuyện khác. Đây là những cân nhắc vận hành mà mọi developer nên biết:\n\n**Quản lý certificate:** Let's Encrypt cung cấp certificate 90 ngày miễn phí, tự động gia hạn qua giao thức ACME. Các công cụ như `certbot` hay ACME challenge `tls-alpn-01` tích hợp sẵn trong Caddy khiến việc này gần như tự động. Thời hạn 90 ngày khuyến khích tự động hóa — dựa vào gia hạn thủ công là nguồn gây sự cố phổ biến ('certificate hết hạn vào cuối tuần'). Thời hạn certificate tiếp tục bị rút ngắn trên toàn ngành: quy định của CA/Browser Forum giảm thời hạn tối đa của certificate công khai xuống 200 ngày từ tháng 3/2026, 100 ngày vào 2027 và 47 ngày vào 2029 — gia hạn tự động không còn là tùy chọn nữa.\n\n**TLS termination:** Trên production, TLS thường được kết thúc (terminate) tại một **load balancer** hoặc **reverse proxy** (nginx, Caddy, AWS ALB, Cloudflare), không phải trong application server của bạn. Proxy xử lý TLS, và ứng dụng của bạn nhận HTTP thuần từ một mạng nội bộ đáng tin. Cách này đơn giản hóa việc quản lý certificate và cho phép bạn dùng application framework mà không cần cấu hình TLS.\n\n**HSTS (HTTP Strict Transport Security):** Response header `Strict-Transport-Security` bảo trình duyệt 'trong N giây tới, luôn kết nối đến tên miền này qua HTTPS, kể cả khi người dùng gõ `http://`.' Điều này ngăn **tấn công SSL stripping**, khi một man-in-the-middle hạ cấp một kết nối HTTP trước khi HTTPS bắt đầu. Ví dụ: `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`.\n\n**Mixed content:** Nếu một trang HTTPS nạp bất kỳ resource nào (ảnh, script, API request) qua HTTP thuần, trình duyệt sẽ chặn hoặc cảnh báo. Mọi resource đều phải được phục vụ qua HTTPS.\n\n**Certificate pinning:** Ứng dụng di động đôi khi ghim (pin) các certificate hoặc public key cụ thể để ngăn tấn công dùng certificate giả mạo nhưng vẫn được CA ký. Cách này mạnh nhưng dễ gãy — nếu cert của bạn thay đổi, các app đã pin sẽ hỏng cho đến khi được cập nhật — và hiện nay nói chung không được khuyến khích; các trình duyệt đã bỏ pinning qua HTTP header (HPKP) từ năm 2018.\n\n**Cờ bảo mật cho cookie:** Session cookie phải có `Secure` (chỉ gửi qua HTTPS), `HttpOnly` (JavaScript không truy cập được, ngăn bị đánh cắp qua XSS), và `SameSite=Strict` hoặc `Lax` (ngăn tấn công CSRF). Quên bất kỳ cờ nào trong số này là một lỗ hổng bảo mật kinh điển."
+    },
+    {
+      "type": "diagram",
+      "caption": "Kiến trúc HTTPS điển hình trên production: TLS kết thúc tại load balancer hoặc edge của CDN; các app server nhận HTTP thuần từ mạng nội bộ đáng tin."
+    },
+    {
+      "type": "explanation",
+      "title": "WebSocket: nâng cấp HTTP thành full-duplex",
+      "content": "Mô hình request-response của HTTP nghĩa là server chỉ được gửi dữ liệu khi client hỏi. Với các ứng dụng real-time — chat, dashboard trực tiếp, soạn thảo cộng tác, bảng giá chứng khoán — polling (liên tục hỏi 'có gì mới không?') vừa lãng phí vừa chậm. **WebSocket** giải quyết điều này bằng cách nâng cấp một kết nối HTTP thành một kênh **full-duplex** bền vững, nơi bên nào cũng có thể gửi message vào bất kỳ lúc nào.\n\n**WebSocket handshake** bắt đầu như một HTTP request bình thường:\n\n```\nGET /chat HTTP/1.1\nHost: ws.example.com\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\nSec-WebSocket-Version: 13\n```\n\nNếu server chấp nhận, nó phản hồi bằng `101 Switching Protocols`:\n\n```\nHTTP/1.1 101 Switching Protocols\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\n```\n\nSau `101`, giao thức HTTP bị bỏ đi và kết nối hoạt động với **framing protocol** nhị phân gọn nhẹ của WebSocket. Message có thể là text (UTF-8) hoặc binary, và có thể được chia thành nhiều frame với payload lớn.\n\n**WebSocket so với các lựa chọn khác:**\n\n- **Long polling** — client gửi một request, server giữ nó mở cho đến khi có dữ liệu, rồi đóng lại và client lập tức gửi request khác. Chạy được ở mọi nơi nhưng lãng phí khi scale.\n- **Server-Sent Events (SSE)** — server stream các sự kiện một chiều đến client qua một kết nối HTTP bền vững. Đơn giản hơn WebSocket cho các trường hợp chỉ cần đẩy (news feed, theo dõi log), hỗ trợ sẵn việc tự động kết nối lại.\n- **WebSocket** — hai chiều thực sự. Bắt buộc khi client cũng cần đẩy sự kiện lên (game nhiều người chơi, soạn thảo cộng tác, giao dịch real-time).\n\nTrên production, kết nối WebSocket đi qua cùng lớp TLS (`wss://` thay cho `ws://` — luôn dùng `wss://`). Một WebSocket bị ghim vào backend nào đã chấp nhận nó, nên load balancer phải cho `Upgrade` đi qua và cho phép timeout rảnh (idle) dài. **Sticky session** chỉ cần khi một thư viện quay về HTTP long-polling (ví dụ Socket.IO) hoặc khi các lần kết nối lại phải rơi vào cùng một server. Vì kết nối sống lâu, hãy chuẩn bị cho tải không đều sau mỗi lần deploy và thiết kế để chịu được những cơn bão kết nối lại. Khi scale theo chiều ngang, bạn thường cần một **pub/sub broker** (Redis, Kafka) để định tuyến message giữa các WebSocket server."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Client WebSocket trên production cần ba thứ: kết nối lại với exponential backoff (đừng dội server bằng các lần kết nối lại ngay lập tức), heartbeat ping (load balancer có timeout cho kết nối rảnh sẽ lặng lẽ cắt kết nối), và chốt chặn gửi an toàn (kiểm tra `readyState === OPEN` trước khi gửi). Quyết định có kết nối lại hay không dựa trên *ai* đã đóng socket: hãy kết nối lại trừ khi chính ứng dụng đã gọi `close()` — một `1001 Going Away` từ server thường nghĩa là đang deploy. Jitter ngăn hàng nghìn client kết nối lại trong cùng một khoảnh khắc. Heartbeat là một message ở tầng ứng dụng vì API WebSocket của trình duyệt không gửi được ping frame ở tầng giao thức (server thì gửi được, và trình duyệt tự động trả lời).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Thiết kế REST: quy ước và những sai lầm thường gặp",
+      "content": "REST (Representational State Transfer) là một phong cách kiến trúc, không phải một giao thức. Một API 'RESTful' dùng đúng ngữ nghĩa HTTP để phơi bày các resource. Đây là những quy ước quan trọng nhất:\n\n**URL định danh resource, không định danh hành động.** URL `/users/42/activate` không RESTful — nó mã hóa một động từ hành động. Một cách tương đương kiểu RESTful là `PATCH /users/42` với `{ status: 'active' }` trong body, hoặc `POST /users/42/activations` nếu việc kích hoạt là một resource riêng.\n\n**Collection và singleton theo một pattern.** `GET /users` trả về một collection. `POST /users` tạo một phần tử. `GET /users/42` trả về phần tử đó. `PUT /users/42` thay thế nó. `PATCH /users/42` cập nhật một phần. `DELETE /users/42` xóa nó. Pattern này dễ đoán — developer nào cũng đoán được cách tương tác với một loại resource mới.\n\n**Dùng query parameter cho lọc và phân trang, không dùng path segment.** `GET /users?role=admin&page=2&limit=20` là đúng. `GET /admin-users/page/2` không RESTful.\n\n**Trả về status code phù hợp.** Trả `200 OK` cho mọi response (kể cả lỗi) buộc client phải soi body để phát hiện thất bại — làm hỏng các thư viện HTTP client, việc phát hiện lỗi của CDN và các công cụ observability.\n\n**Những sai lầm REST thường gặp:**\n\n- Dùng `GET` cho các thao tác thay đổi trạng thái ('làm ơn `GET /delete-user?id=42`') — sai một cách thảm họa vì trình duyệt, công cụ tìm kiếm và prefetcher sẽ kích hoạt GET request mà người dùng không hề có ý định.\n- Dùng `POST` cho mọi thứ — bạn mất caching, ngữ nghĩa idempotency và sự hỗ trợ của REST client.\n- Trả `200` với `{ error: true }` trong body — hãy dùng status code `4xx/5xx`.\n- Lồng resource sâu hơn hai cấp (`/users/42/posts/7/comments/3/votes/1`) — hãy làm phẳng không gian URL thay vào đó (`/votes/1`).\n- Không đánh version cho API — một khi client đã phụ thuộc vào hình dạng API của bạn, các thay đổi phá vỡ tương thích đòi hỏi versioning (`/api/v2/users`) hoặc content negotiation."
+    },
+    {
+      "type": "callout",
+      "content": "**CORS: vì sao trình duyệt gửi OPTIONS trước**\n\n**Same-Origin Policy** là một quy tắc bảo mật của trình duyệt: JavaScript trên `app.example.com` không thể gửi request đến `api.otherdomain.com` nếu không được phép. **CORS (Cross-Origin Resource Sharing)** là cơ chế cấp các ngoại lệ đó. Với request 'đơn giản' (GET, HEAD hoặc POST chỉ có các header CORS-safelisted và body dạng form hoặc `text/plain`), trình duyệt gửi request rồi kiểm tra các response header. Với mọi thứ khác — PUT, DELETE, một header `Authorization`, một body JSON — trình duyệt trước tiên gửi một **OPTIONS preflight** request để kiểm tra quyền. Server của bạn phải trả lời OPTIONS với các header `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods` và `Access-Control-Allow-Headers` phù hợp. Nếu preflight thất bại, trình duyệt không bao giờ gửi request thật. Request đơn giản thì không có preflight: chúng *vẫn* được gửi và xử lý, trình duyệt chỉ giấu response khỏi JavaScript — đó là lý do CORS không phải là cơ chế phòng thủ CSRF. Trình duyệt từ chối kết hợp `Access-Control-Allow-Origin: *` với credential (cookie), nên cấu hình sai nguy hiểm là phản chiếu ngược bất kỳ `Origin` nào của request kèm theo `Access-Control-Allow-Credentials: true`: điều đó cho phép bất kỳ website nào gửi request có xác thực và đọc được câu trả lời. Hãy giữ một allow-list tường minh các origin."
+    },
+    {
+      "type": "callout",
+      "content": "**Những cái bẫy interview thường gặp và mẹo debug:**\n\n- `fetch()` KHÔNG ném lỗi với 4xx hay 5xx — nó chỉ reject khi có lỗi mạng. Luôn kiểm tra `res.ok` hoặc `res.status`. Điều này làm vấp gần như mọi developer chuyển từ `axios` hay `curl` sang.\n- `401 Unauthorized` nghĩa là **chưa xác thực** (thông tin xác thực sai/thiếu); `403 Forbidden` nghĩa là **không được phép** (đã xác thực nhưng không có quyền). Cách đặt tên mang tính lịch sử và ngược với trực giác.\n- Việc hạ DNS TTL phải diễn ra TRƯỚC khi bạn đổi IP, không phải sau. Nếu TTL là 86400 và bạn đổi nó thành 60 cùng lúc với đổi IP, TTL cũ (86400) mới là giá trị mà các cache tôn trọng trong khoảng thời gian chuyển đổi.\n- Kết nối WebSocket thất bại một cách âm thầm khi đi qua một số proxy — nếu WS bị chặn, hãy thử `wss://` trên port 443 (TLS), thứ trông giống hệt traffic HTTPS với phần lớn proxy.\n- CNAME record không thể đặt ở zone apex (tên miền gốc, ví dụ chính `example.com`) — hãy dùng record ALIAS/ANAME hoặc một A record thay thế. Chỉ subdomain mới được là CNAME.\n- 0-RTT resumption của TLS 1.3 chỉ nên dùng cho các request idempotent như `GET` — nó có nguy cơ replay attack với các thao tác không idempotent."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Phân giải DNS đi theo một phân cấp** — recursive resolver truy vấn root → TLD → authoritative nameserver — và cache kết quả theo TTL. Thay đổi DNS record không lan truyền cho đến khi các entry cache cũ hết hạn; hãy hạ TTL xuống 60 giây trước các thay đổi đã lên kế hoạch.",
+        "**Các phiên bản HTTP** chung ngữ nghĩa nhưng khác transport: HTTP/1.1 = mỗi kết nối TCP một request mỗi lần; HTTP/2 = các stream multiplexed trên một kết nối TCP (vẫn còn head-of-line blocking của TCP); HTTP/3 = stream trên QUIC/UDP, thiết lập 1-RTT, không chặn chéo giữa các stream, được phát hiện qua `Alt-Svc` hoặc HTTPS DNS record.",
+        "**HTTP method mang ngữ nghĩa** mà client, cache và proxy dựa vào. GET/HEAD/PUT/DELETE là idempotent (retry an toàn); POST thì không. Dùng sai method sẽ phá hỏng caching, logic retry và các thư viện REST client.",
+        "**Status code gánh trọng trách** — `2xx` thành công, `3xx` chuyển hướng, `4xx` lỗi client (không retry — trừ 408/429), `5xx` lỗi server (retry các request *idempotent* với backoff). `fetch()` không bao giờ ném lỗi với 4xx/5xx — luôn kiểm tra `res.ok` hoặc `res.status`.",
+        "**TLS 1.3** hoàn tất handshake trong một round trip nhờ trao đổi khóa Diffie-Hellman ephemeral, suy ra các session key đối xứng, và cung cấp forward secrecy — kể cả ghi lại toàn bộ traffic rồi sau này đánh cắp private key của server cũng không giải mã được các phiên trong quá khứ.",
+        "**WebSocket** nâng cấp một kết nối HTTP thành kênh full-duplex bền vững qua `Upgrade: websocket` và `101 Switching Protocols`. Hãy kết nối lại với exponential backoff, dùng heartbeat ping để đối phó timeout của kết nối rảnh, và luôn dùng `wss://` trên production.",
+        "**CORS preflight (OPTIONS)** là bước trình duyệt kiểm tra quyền trước một request cross-origin không đơn giản. Server của bạn phải xử lý OPTIONS với đúng các header `Access-Control-Allow-*`; đừng bao giờ phản chiếu origin tùy ý cùng với `Allow-Credentials: true`.",
+        "**HTTPS trên production** nghĩa là TLS termination tại load balancer, tự động gia hạn certificate (Let's Encrypt), header HSTS để ngăn SSL stripping, và các cờ `Secure; HttpOnly; SameSite` trên mọi session cookie.",
+        "**Những chi tiết DNS hay gây đau**: câu trả lời phủ định (NXDOMAIN) cũng được cache; câu trả lời lớn quay về TCP; DoH/DoT mã hóa các lần tra cứu còn DNSSEC xác thực chúng; `dns.lookup()` của Node chạy trên thread pool của libuv."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Trường TTL trong một DNS record kiểm soát điều gì?",
+      "options": [
+        "Thời gian một DNS server chờ trước khi cho một truy vấn timeout",
+        "Resolver và cache của hệ điều hành giữ câu trả lời trong bao lâu trước khi truy vấn lại",
+        "Số nameserver tối đa mà một truy vấn được phép đi qua",
+        "Thời hạn hiệu lực của TLS certificate cho tên miền"
+      ],
+      "explanation": "TTL (Time To Live) quy định bao nhiêu giây các resolver phía dưới và cache của hệ điều hành nên giữ câu trả lời DNS trước khi bỏ nó và truy vấn lại. TTL 3600 nghĩa là cache giữ câu trả lời trong một giờ. Để giảm thiểu độ trễ lan truyền trước khi đổi địa chỉ IP, hãy hạ TTL xuống 60 giây sớm ít nhất một chu kỳ TTL đầy đủ trước khi thực hiện thay đổi."
+    },
+    {
+      "id": "q2",
+      "question": "HTTP method nào vừa SAFE vừa IDEMPOTENT?",
+      "options": [
+        "POST",
+        "PUT",
+        "DELETE",
+        "GET"
+      ],
+      "explanation": "GET là safe (không có side effect phía server) và idempotent (lặp lại cho cùng kết quả). PUT idempotent nhưng không safe — nó thay đổi trạng thái. DELETE idempotent nhưng không safe. POST không safe cũng không idempotent — các POST lặp lại có thể tạo ra resource trùng lặp."
+    },
+    {
+      "id": "q3",
+      "question": "Một client nhận được HTTP 401. Điều này cho thấy gì?",
+      "options": [
+        "Resource không tồn tại ở URL này",
+        "Client đã xác thực nhưng thiếu quyền cần thiết",
+        "Cần xác thực hoặc thông tin xác thực được cung cấp không hợp lệ",
+        "Server gặp một lỗi nội bộ không được xử lý"
+      ],
+      "explanation": "401 Unauthorized (cái tên gây nhầm lẫn) nghĩa là request cần xác thực — hoặc không có thông tin xác thực nào được gửi, hoặc thông tin đó không hợp lệ. 403 Forbidden nghĩa là client ĐÃ xác thực nhưng không có quyền. 404 là không tìm thấy; 500 là lỗi server."
+    },
+    {
+      "id": "q4",
+      "question": "TLS 1.3 cần bao nhiêu round trip trước khi dữ liệu HTTP đã mã hóa có thể chạy?",
+      "options": [
+        "0 (dữ liệu đi ngay trong message đầu tiên của client với mọi kết nối)",
+        "1 (ClientHello → ServerHello+Cert+Finished → client Finished)",
+        "2 (giống TLS 1.2)",
+        "3 (trao đổi khóa, kiểm tra certificate và bắt đầu phiên)"
+      ],
+      "explanation": "TLS 1.3 hoàn tất handshake trong 1 round trip: client gửi ClientHello kèm DH key share, server đáp lại bằng ServerHello, certificate của nó và Finished — giờ cả hai bên có thể suy ra cùng các session key đối xứng. 0-RTT resumption tồn tại cho các client đã từng kết nối nhưng có nguy cơ replay attack và không được dùng cho mọi kết nối."
+    },
+    {
+      "id": "q5",
+      "question": "Client đưa vào HTTP header nào để khởi tạo việc nâng cấp lên WebSocket?",
+      "options": [
+        "Upgrade: websocket",
+        "Content-Type: websocket",
+        "Protocol-Switch: websocket",
+        "Transfer-Encoding: websocket"
+      ],
+      "explanation": "Một request nâng cấp WebSocket gồm 'Upgrade: websocket', 'Connection: Upgrade' và 'Sec-WebSocket-Key' (một nonce ngẫu nhiên). Server đáp lại bằng 101 Switching Protocols và 'Sec-WebSocket-Accept' (một giá trị hash được suy ra). Sau 101, hai bên giao tiếp bằng framing protocol của WebSocket thay vì HTTP."
+    },
+    {
+      "id": "q6",
+      "question": "Loại DNS record nào ánh xạ một hostname sang địa chỉ IPv4?",
+      "options": [
+        "CNAME",
+        "MX",
+        "TXT",
+        "A"
+      ],
+      "explanation": "A record ánh xạ trực tiếp một hostname sang một địa chỉ IPv4 (ví dụ example.com → 93.184.216.34). AAAA ánh xạ sang IPv6. CNAME là một alias trỏ đến hostname khác — resolver sẽ đi theo chuỗi. MX chỉ định mail server. TXT chứa văn bản tùy ý cho SPF, DKIM, bằng chứng sở hữu tên miền, v.v."
+    },
+    {
+      "id": "q7",
+      "question": "Một HTTP DELETE request trả về 204. Client nên làm gì?",
+      "options": [
+        "Retry — 204 cho biết mới hoàn thành một phần",
+        "Parse body rỗng để lấy object kết quả",
+        "Coi request là thành công và không trông đợi body nào",
+        "Chuyển hướng đến URL của collection cha"
+      ],
+      "explanation": "HTTP 204 No Content nghĩa là request đã thành công và cố ý không có response body. Đây là code thành công theo quy ước cho DELETE và một số thao tác PATCH khi không cần trả về resource. Client không được cố parse body — chẳng có body nào cả."
+    },
+    {
+      "id": "q8",
+      "question": "Vì sao fetch() KHÔNG tự động ném lỗi khi server trả về 404?",
+      "options": [
+        "404 được xếp là response thành công trong đặc tả HTTP",
+        "fetch() chỉ reject Promise của nó khi có lỗi ở tầng mạng, không phải với các HTTP status code lỗi",
+        "Cần một plugin hoặc interceptor để bật việc phát hiện lỗi HTTP trong fetch()",
+        "Phải đọc hết response body thì mới có status code"
+      ],
+      "explanation": "fetch() resolve Promise của nó với mọi HTTP response hoàn chỉnh, kể cả status code 4xx và 5xx. Nó chỉ reject khi có lỗi ở tầng mạng như phân giải DNS thất bại hay kết nối bị từ chối. Để phát hiện lỗi HTTP, bạn phải kiểm tra res.ok (true với 200–299) hoặc res.status và tự ném lỗi."
+    },
+    {
+      "id": "q9",
+      "question": "Việc TLS 1.3 dùng trao đổi khóa Diffie-Hellman ephemeral mang lại tính chất gì?",
+      "options": [
+        "Resumption không cần round trip nào cho mọi kết nối",
+        "Dùng lại khóa đối xứng giữa nhiều phiên để tăng hiệu năng",
+        "Certificate pinning — certificate được nhúng sẵn vào ứng dụng client",
+        "Forward secrecy — các phiên trong quá khứ không thể bị giải mã kể cả khi private key của server sau này bị lộ"
+      ],
+      "explanation": "Trao đổi khóa DH ephemeral nghĩa là mỗi phiên sinh ra một cặp khóa mới, bị hủy sau khi dùng. Session key không bao giờ được lưu lại. Kể cả khi kẻ tấn công ghi lại toàn bộ traffic đã mã hóa rồi sau này lấy được private key của server, họ cũng không suy ra được session key và vì vậy không giải mã được các phiên trong quá khứ. Đây gọi là forward secrecy (hay perfect forward secrecy, PFS)."
+    },
+    {
+      "id": "q10",
+      "question": "Trong phân giải DNS kiểu lặp, recursive resolver truy vấn server nào ĐẦU TIÊN?",
+      "options": [
+        "Authoritative nameserver của tên miền cụ thể",
+        "TLD nameserver (ví dụ các server .com của Verisign)",
+        "Một trong 13 cụm root nameserver",
+        "Cache nameserver của ISP cục bộ của client"
+      ],
+      "explanation": "Khi cache còn trống, phân giải kiểu lặp bắt đầu từ các root nameserver — 13 danh tính root server (từ a đến m) được phục vụ từ gần 2,000 instance anycast. Trong thực tế, resolver cache sẵn các referral đến TLD, nên phần lớn các lần tra cứu bỏ qua bước này. Root trả lời bằng địa chỉ của TLD nameserver cho TLD liên quan (.com, .org, v.v.), rồi resolver truy vấn TLD, và sau đó là authoritative nameserver của tên miền cụ thể."
+    }
+  ]
+}

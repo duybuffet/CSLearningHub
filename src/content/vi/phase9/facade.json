@@ -1,0 +1,213 @@
+{
+  "sourceHash": "c770cc15716b",
+  "title": "Facade Pattern",
+  "tagline": "Giấu một subsystem phức tạp sau một interface đơn giản duy nhất, để caller gần như không cần hiểu gì về những thứ diễn ra bên dưới.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "**Vấn đề:** Các hệ thống phần mềm hiện đại được lắp ráp từ rất nhiều subsystem — library xác thực, dịch vụ email, payment processor, tầng database, cache store, notification queue, analytics tracker. Đặt một đơn hàng trong app thương mại điện tử có thể cần: kiểm tra giỏ hàng, kiểm tra tồn kho, charge qua payment gateway, gửi email xác nhận, publish một event lên message queue, và ghi một metric cho analytics. Đó là sáu subsystem, mỗi cái có API riêng, mô hình lỗi riêng và yêu cầu về trình tự riêng.\n\nNếu route handler cho checkout của bạn thò tay trực tiếp vào cả sáu subsystem, bạn đã tạo ra coupling sâu: mọi thay đổi API của một subsystem đều lan ra mọi handler. Mọi kỹ sư mới đọc handler đều phải hiểu cả sáu API cùng lúc. Mọi integration test đều phải stub cả sáu service. Gánh nặng nhận thức rất khủng khiếp và sự dễ vỡ là có thật.\n\n**Facade pattern** giải quyết bằng cách đưa vào một class — `OrderFacade` — cung cấp một method gọn gàng duy nhất `placeOrder(cartId, userId)` và bên trong điều phối cả sáu subsystem. Client gọi một method; facade lo trình tự, phục hồi lỗi và việc nối dây. Khi một subsystem thay đổi, chỉ facade cần cập nhật — không phải mọi caller. Khi một kỹ sư mới đọc handler checkout, họ thấy `orderFacade.placeOrder(...)` và hiểu chính xác nó làm gì mà không phải đọc sáu API.\n\nFacade có lẽ là design pattern **thực dụng** nhất trong công việc kỹ thuật hằng ngày. Bạn gặp nó liên tục, thường mà không nhận ra tên của nó: một REST controller giao việc cho một service class, một service class điều phối các repository và client bên ngoài, file `index.js` của một Node module chỉ export một public API gọn gàng trong khi giấu các thành phần nội bộ, một Backend-for-Frontend (BFF) gom nhiều lời gọi microservice thành một response. Facade chẳng có gì xa lạ — nó là pattern nằm dưới mọi ranh giới tầng được tổ chức tốt trong phần mềm.\n\nTrong chương này chúng ta sẽ đi qua: cấu trúc GoF kinh điển, những khác biệt then chốt với Adapter và Mediator, một ví dụ JavaScript hoàn chỉnh có xử lý bù trừ lỗi, cách inject subsystem để test được, pattern facade dạng module tĩnh, khi nào Facade đi sai hướng, và cách các framework thực tế dùng pattern này hằng ngày."
+    },
+    {
+      "type": "diagram",
+      "caption": "Client chỉ phụ thuộc vào OrderFacade. Cả bốn subsystem đều được giấu sau interface của nó. Client không import CartService, InventoryService, PaymentGateway hay EmailService — những chi tiết đó là việc riêng của facade."
+    },
+    {
+      "type": "analogy",
+      "title": "Nhân viên concierge của khách sạn",
+      "content": "Bạn đến một khách sạn và tới quầy **concierge**. 'Tôi cần một chiếc taxi ra sân bay lúc 7 giờ sáng, một cuộc gọi báo thức lúc 6 giờ, bữa sáng phục vụ tại phòng lúc 6 giờ 30, và cần người lo việc giặt khô cho tôi.' Concierge mỉm cười: 'Dạ vâng, thưa ông.' Bạn đưa chìa khóa phòng rồi đi.\n\nỞ phía sau, concierge gọi bộ phận điều xe, báo cho hệ thống báo thức ở lễ tân, liên hệ nhà bếp, và chuyển đồ giặt khô sang dịch vụ giặt ủi — bốn bộ phận riêng biệt với quy trình nội bộ, lịch ca và những “tật” riêng. Bạn, vị khách, không hề gọi trực tiếp cho bộ phận nào. Bạn không bao giờ biết số máy lẻ của họ. Nếu tháng sau khách sạn đổi hãng taxi, bạn sẽ không nhận ra — bạn vẫn chỉ nói 'Tôi cần một chiếc taxi.'\n\nConcierge chính là **Facade**: một interface duy nhất bằng người thật, che giấu sự phức tạp của việc điều phối nhiều subsystem nội bộ. Bạn thấy một quầy, một người, một cuộc trò chuyện. Các subsystem chỉ thấy domain của riêng chúng — chúng không hề biết concierge tồn tại.\n\nĐây chính xác là quan hệ cấu trúc trong pattern: một facade, nhiều subsystem, một interface cho client, và client không bị gắn chặt vào subsystem nào."
+    },
+    {
+      "type": "explanation",
+      "title": "Ba thành phần: Facade, Subsystem, Client",
+      "content": "Định nghĩa của Gang of Four (GoF) xác định ba thành phần:\n\n**1. Facade**\n\nFacade là interface đơn giản hóa duy nhất. Nó biết cần dùng những class subsystem nào, theo thứ tự nào và với tham số gì. Nó lo việc điều phối, sắp xếp trình tự, và thường cả phục hồi lỗi hoặc logic bù trừ. Điều then chốt là facade **không** tự cài đặt business logic của subsystem — nó giao việc. Một facade bắt đầu tự cài đặt lại logic xử lý thanh toán thì không còn là facade nữa; nó đã trở thành một Application Service, hoặc tệ hơn, một God object.\n\nFacade thường là một class (trong OOP) hoặc một module (trong code kiểu functional/dựa trên module). Dù là cái nào, public API của nó được cố ý giữ hẹp — chỉ những thao tác mà một client điển hình cần, được diễn đạt ở đúng mức abstraction.\n\n**2. Subsystem**\n\nSubsystem là các class và service phức tạp đứng sau facade. Mỗi subsystem độc lập: `CartService`, `PaymentGateway`, `InventoryService` và `EmailService` đều tự chứa với domain logic riêng. Chúng **không** biết facade tồn tại. Chúng không import `OrderFacade`. Đây là điều làm nên sức mạnh của pattern — các subsystem vẫn dùng lại được, test được và hiểu được một cách độc lập.\n\nNhững client nâng cao thực sự cần kiểm soát chi tiết vẫn có thể bỏ qua facade và dùng subsystem trực tiếp. Facade là một sự tiện lợi, không phải một cánh cổng.\n\n**3. Client**\n\nClient chỉ gọi API đơn giản hóa của facade. Nó không phụ thuộc trực tiếp vào subsystem nào. Sự cô lập này nghĩa là: test của client không cần stub năm service; code của client không hỏng khi API nội bộ của một subsystem thay đổi; và kỹ sư mới đọc code client hiểu được ý định của nó mà không cần biết phần ruột của subsystem.\n\nQuy tắc cấu trúc then chốt: **dependency hướng vào trong**. Client → Facade → Subsystem. Không bao giờ Subsystem → Facade."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hướng dependency luôn là Client -> Facade -> Subsystem. Subsystem không bao giờ tham chiếu tới facade. Coupling một chiều này là nguồn gốc của mọi lợi ích mà pattern đem lại."
+    },
+    {
+      "type": "explanation",
+      "title": "Facade, Adapter và Mediator: những khác biệt then chốt",
+      "content": "Facade thường bị nhầm với hai pattern liên quan. Code cấu trúc có thể trông giống nhau, nhưng **mục đích** thì khác, và mục đích quyết định khi nào bạn áp dụng cái nào.\n\n**Facade và Adapter**\n\nAdapter khiến một interface không tương thích khớp với một interface khác. Nó là một tầng dịch: bạn có class `LegacyPrinter` với method `printDocument(text)` nhưng interface `Printer` mới lại mong đợi `print(content)`. Adapter bọc `LegacyPrinter` và dịch các lời gọi. Thường có một nguồn và một đích.\n\nFacade đơn giản hóa **nhiều** interface thành một. Không có sự không tương thích nào cần giải quyết — các subsystem tự chúng vẫn chạy tốt. Facade tồn tại thuần túy để giảm số điểm chạm mà client cần. Bạn có thể có một Facade bên trong dùng Adapter cho một subsystem cũ — kết hợp như vậy không mâu thuẫn gì.\n\n**Facade và Mediator**\n\nMediator điều phối giao tiếp **giữa** một tập component biết về mediator. Hãy nghĩ đến đài kiểm soát không lưu: mọi máy bay giao tiếp qua đài, và chúng biết đài tồn tại. Mediator xử lý các quan hệ hai chiều giữa những thành phần ngang hàng.\n\nFacade thì hoàn toàn **một chiều**: client gọi facade; subsystem không biết nó tồn tại và không giao tiếp qua nó. Facade không phải trung tâm cho giao tiếp giữa các subsystem — nó là một điểm vào đơn giản hóa từ bên ngoài.\n\nPhép thử: bản thân các component có **gọi tới bộ điều phối** không (chúng giữ reference tới nó và gửi event cho nó)? Nếu có thì đó là Mediator. Nếu bộ điều phối gọi chúng còn chúng không hề biết nó tồn tại, thì đó là Facade — kể cả khi nó chuyển đầu ra của một subsystem (một biên lai) sang một subsystem khác (dịch vụ email).\n\n**Facade và God Object**\n\nGod object là một class biết quá nhiều và làm quá nhiều — nó tích lũy trách nhiệm cho đến khi trở thành cây cột chịu lực duy nhất của hệ thống. Facade thì được cố ý giữ mỏng: nó chỉ chứa logic sắp xếp trình tự và giao việc, không có business logic của riêng nó. Khi một facade bắt đầu tích lũy các quy tắc domain, các luồng có điều kiện và biến đổi dữ liệu trực tiếp, nó đang trở thành God object và nên được refactor thành một kiến trúc phân tầng đúng nghĩa (service → repository → entity)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Client gửi một lời gọi và nhận về một response. Năm tương tác trung gian hoàn toàn do facade quản lý — client không bao giờ thấy chúng."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Ba quyết định thiết kế đáng chú ý: (1) Các subsystem được **inject** qua constructor, cho phép test truyền vào bản giả mà không phải mock phần ruột. (2) Logic bù trừ — giải phóng tồn kho khi thanh toán thất bại — được tập trung trong facade. Không có nó, mọi caller đều phải tự xử lý việc rollback này. (3) Email được coi là không quan trọng: lỗi ở đó không rollback đơn hàng. Các chính sách này nằm ở một chỗ — facade — thay vì rải rác ở các caller.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Facade dạng module tĩnh: JavaScript hằng ngày",
+      "content": "Dạng biểu hiện phổ biến nhất của Facade pattern trong các codebase JavaScript/TypeScript hoàn toàn không phải là class — mà là barrel export `index.ts` của module. Điều này đáng học kỹ vì đó là thứ bạn viết và đọc hằng ngày.\n\nXét một module `auth` với các class nội bộ `TokenService`, `SessionStore`, `CryptoUtil` và `UserRepository`. Đây là chi tiết cài đặt. Hợp đồng public của module `auth` — phần bề mặt mà caller bên ngoài được phép phụ thuộc vào — có thể chỉ là ba hàm: `login`, `logout` và `refreshToken`.\n\n`auth/index.ts` đóng vai facade:\n\n```ts\n// auth/index.ts  ← facade\nexport { login, logout, refreshToken } from './auth-facade';\n// TokenService, SessionStore, CryptoUtil are NOT exported\n```\n\nCaller viết `import { login } from './auth'`. Họ phụ thuộc vào hợp đồng public của facade. Nếu sau này bạn refactor `TokenService` để dùng thuật toán khác, không caller nào phải đổi — chỉ phần cài đặt của facade thay đổi.\n\nVới một package được publish, field `exports` trong `package.json` biến ranh giới thành thứ được ràng buộc thật sự: các deep import như `my-lib/src/token-service.js` sẽ thất bại trừ khi đường dẫn đó được liệt kê.\n\n**Lưu ý về barrel:** trong một app lớn, các file re-export `index.ts` hiện bị khuyến cáo rộng rãi là không nên lạm dụng — import một symbol có thể buộc bundler hoặc test runner load cả đồ thị module (Jest/Vitest và dev server chạy chậm hơn, tree-shaking kém hơn), và barrel khiến circular import dễ xảy ra. Hãy giữ barrel ở những ranh giới module thực sự; đừng thêm một cái vào mọi thư mục.\n\nKhác biệt then chốt so với facade dạng class: facade dạng module không điều phối một chuỗi thao tác lúc runtime — nó thuần túy là một **quyết định về đóng gói và bề mặt API**. Facade dạng class điều phối các subsystem lúc runtime. Cả hai đều là ứng dụng hợp lệ của cùng một nguyên tắc: giấu sự phức tạp, phơi ra sự đơn giản."
+    },
+    {
+      "type": "diagram",
+      "caption": "index.ts là facade của module: nó cung cấp ba hàm public trong khi giữ bốn class nội bộ ở chế độ private. Caller bên ngoài chỉ có thể phụ thuộc vào những gì được export."
+    },
+    {
+      "type": "explanation",
+      "title": "Khả năng test: vì sao dependency injection thay đổi mọi thứ",
+      "content": "Một facade điều phối các subsystem thật sẽ không test được nếu nó tự `new` các dependency bên trong. Hãy xét anti-pattern này:\n\n```js\nclass OrderFacade {\n  constructor() {\n    this._payment = new StripeGateway(); // hardwired — cannot substitute\n    this._email   = new SendGridClient(); // hardwired — network call in tests\n  }\n}\n```\n\nĐể test `placeOrder`, bạn hoặc phải gọi tới API thật của Stripe (chậm, tốn tiền, có state), hoặc phải monkey-patch module (dễ vỡ). Cả hai đều không chấp nhận được cho một unit test.\n\nGiải pháp là **constructor injection**: nhận các instance subsystem qua tham số, kèm giá trị mặc định hợp lý.\n\n```js\nclass OrderFacade {\n  constructor({ payment = new StripeGateway(), email = new SendGridClient() } = {}) {\n    this._payment = payment;\n    this._email   = email;\n  }\n}\n```\n\nGiờ một test có thể inject bản giả: `new OrderFacade({ payment: fakePayment, email: fakeEmail })`. Logic điều phối của facade — trình tự, bù trừ lỗi, email có điều kiện — được test mà không cần lời gọi mạng thật nào.\n\nCách này chia việc test rất gọn: test của facade kiểm tra *trình tự và bù trừ* bằng bản giả; mỗi subsystem thật (hoặc adapter của nó) được test riêng; một vài integration test kiểm tra việc nối dây thật. (Đừng nhầm điều này với pattern *Humble Object*, vốn là bước đi ngược lại: làm cho code ở ranh giới khó test mỏng đến mức gần như không cần test, và chuyển logic sang nơi test được.)\n\nTrong TypeScript, bạn sẽ định nghĩa interface cho mỗi subsystem và inject chúng:\n\n```ts\ninterface IPaymentGateway {\n  charge(userId: string, amount: number): Promise<Receipt>;\n  refund(receiptId: string): Promise<void>;\n}\n\nclass OrderFacade {\n  constructor(\n    private readonly payment: IPaymentGateway,\n    private readonly email: IEmailService,\n    private readonly inventory: IInventoryService,\n  ) {}\n}\n```\n\nDependency injection container của NestJS làm đúng như vậy: nó resolve các implementation cụ thể lúc runtime trong khi constructor của facade chỉ khai báo các hợp đồng interface."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Các test này chạy hoàn toàn trong bộ nhớ — không mạng, không database, không timer. Chúng chỉ kiểm tra những gì facade chịu trách nhiệm: điều phối các subsystem theo đúng trình tự và bù trừ khi thất bại. Logic riêng của mỗi subsystem được test riêng — ví dụ payment adapter thật được test với test mode của Stripe — và một số ít integration test phủ phần nối dây thật.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Khi Facade đi sai hướng: anti-pattern God Facade",
+      "content": "Facade pattern có một kiểu thất bại nổi tiếng: **God Facade**. Nó bắt đầu một cách vô hại. Có một yêu cầu mới: khi user đặt hàng với mã coupon, áp dụng giảm giá. Logic giảm giá chỉ vài dòng, nên nó nằm luôn trong `placeOrder`. Rồi: đơn trên $500 cần kiểm tra gian lận. Thêm hai dòng nữa trong facade. Rồi: đơn hàng doanh nghiệp cần cách tính thuế khác. Thêm một nhánh trong facade. Sáu tháng sau, `OrderFacade.placeOrder` dài 400 dòng với cả chục câu điều kiện, import từ mười hai service, và không test nào dám chắc là đã phủ hết mọi nhánh.\n\nĐây là lúc facade trở thành God object. Những dấu hiệu cần để ý:\n\n- **Tích lũy business logic**: Quy tắc thuế, thuật toán giảm giá, chấm điểm gian lận — không cái nào là điều phối cả; chúng là business logic và thuộc về các service chuyên biệt (`DiscountService`, `TaxEngine`, `FraudChecker`).\n- **Những chuỗi điều kiện dài dựa trên loại entity**: `if (order.type === 'corporate') { ... } else if (order.type === 'subscription') { ... }` — chỗ này nên là polymorphism hoặc strategy, không phải một nhánh trong facade.\n- **Hơn 5-7 dependency subsystem**: Một facade có 12 service được inject gần như chắc chắn đang làm quá nhiều việc.\n- **Test đòi hỏi setup phức tạp**: Nếu chỉ setup facade cho một test thôi đã phải stub 8 service, facade đã ôm quá nhiều trách nhiệm.\n\nCách chữa là phân rã theo chiều dọc: tách ra `CorporateOrderFacade` và `SubscriptionOrderFacade`. Tách `OrderCalculationService` cho phần tính giá. Để facade tiếp tục là một bộ điều phối mỏng, và chuyển domain logic vào domain service phù hợp.\n\nMột facade tốt nên đọc hiểu được trong 5 phút. Nếu mất cả tiếng để hiểu `placeOrder`, nó không còn là facade nữa."
+    },
+    {
+      "type": "explanation",
+      "title": "Framework thực tế và Facade ngoài đời",
+      "content": "Facade pattern xuất hiện khắp phần mềm production ở mọi quy mô. Nhận ra nó ngoài thực tế giúp bạn hiểu sâu hơn cả pattern lẫn framework.\n\n**Express Router như một Facade**\n\n`express()` là một facade. Khi bạn gọi `app.get('/orders', handler)`, bạn đang gọi một interface đơn giản hóa che giấu việc quản lý HTTP socket, parse request, xây dựng bảng routing, thực thi chuỗi middleware và serialize response. Module `http` của Node.js là subsystem; Express là facade khiến việc xây web server trở nên dễ thở.\n\n**Model của Sequelize / TypeORM như một Facade**\n\n`User.findAll({ where: { active: true } })` là một lời gọi facade. Phía sau nó: sinh SQL, lấy connection từ pool, bind tham số query, map result set, và join cho eager-load. Driver thô `pg` hoặc `mysql2` là subsystem; model của ORM là facade.\n\n**Client cấp cao của AWS SDK**\n\nAWS SDK v3 kết hợp các command client cấp thấp (`S3Client` + `CreateMultipartUploadCommand`, `UploadPartCommand`, `CompleteMultipartUploadCommand`, ...) với các helper cấp cao như `Upload` từ `@aws-sdk/lib-storage`, thứ chia một stream thành nhiều phần, upload chúng đồng thời, retry, báo cáo tiến độ và abort khi thất bại. Helper này là một facade bao trùm cả chục lời gọi cấp thấp. (Trong SDK v2, nay đã hết hạn hỗ trợ, đây là `s3.upload()`.)\n\n**Module + tầng Service của NestJS**\n\nTrong NestJS, service class theo quy ước là một facade. Một `OrdersService` cung cấp `create`, `findOne`, `update`, `remove` — và bên trong điều phối `OrdersRepository`, `InventoryClient`, `NotificationsService`. Controller gọi service; service là facade; các repository và client là subsystem. DI container của NestJS nối mọi thứ lại với nhau.\n\n**BFF (Backend-for-Frontend)**\n\nỞ cấp kiến trúc, một service BFF là Facade tại ranh giới mạng. Mobile client gọi một endpoint BFF; BFF tỏa ra gọi user-service, order-service và product-service, lắp ráp response rồi trả về. Điều này giảm số round trip mà mobile client phải thực hiện và giấu topology của các service nội bộ khỏi ứng dụng client.\n\n**React Query / SWR**\n\n`useQuery({ queryKey: ['orders'], queryFn: fetchOrders })` (TanStack Query v5) là một facade bao trùm caching, khử trùng lặp, refetch ngầm, quản lý trạng thái loading và trạng thái lỗi. Không có nó, mỗi component sẽ phải tự cài đặt vòng đời lấy dữ liệu của riêng mình."
+    },
+    {
+      "type": "diagram",
+      "caption": "Backend-for-Frontend là một Facade ở cấp kiến trúc. Mobile app gửi một request; BFF tỏa ra gọi ba microservice và lắp ráp thành một response JSON duy nhất. Nếu topology của các service thay đổi, chỉ BFF phải cập nhật."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`index.js` là facade của module. Nó khởi tạo `AuthFacade` một lần (scope singleton) và chỉ re-export ba hàm. `TokenService` và `SessionStore` hoàn toàn vô hình với caller. Nếu sau này bạn thay `SessionStore` bằng một implementation dựa trên Redis, không caller nào phải đổi — chỉ `auth-facade.js` thay đổi.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Facade pattern được Gang of Four (Gamma, Helm, Johnson, Vlissides) hệ thống hóa trong *Design Patterns: Elements of Reusable Object-Oriented Software* (1994), được xếp vào nhóm pattern **Structural**. Thuật ngữ 'facade' (từ tiếng Pháp, nghĩa là mặt tiền của một tòa nhà) được chọn có chủ ý: giống như mặt tiền tòa nhà, nó phô ra một bộ mặt public gọn gàng trong khi giấu toàn bộ đường ống, dây điện và sự phức tạp về kết cấu ở phía sau. Pattern này có trước cả cuốn sách — service layer, shell script và API wrapper đều là những ý tưởng “cổ xưa” nếu tính theo thời gian của ngành máy tính. GoF chỉ đặt cho nó một cái tên và một bộ từ vựng chính xác."
+    },
+    {
+      "type": "callout",
+      "content": "**Khi nào dùng Facade pattern:**\n- Một client phải tương tác với nhiều subsystem theo một trình tự cố định — facade sở hữu trình tự đó.\n- Bạn muốn định nghĩa một public API ổn định cho một module hoặc một tầng có thể thay đổi bên trong.\n- API của một library bên thứ ba phức tạp nhưng bạn chỉ cần một phần nhỏ của nó.\n- Bạn đang xây một BFF, API gateway hoặc service layer gom nhiều lời gọi downstream.\n\n**Khi nào KHÔNG dùng:**\n- Client thực sự cần kiểm soát chi tiết, từng trường hợp một, với mỗi subsystem — facade khi đó trở thành rào cản chứ không phải sự đơn giản hóa.\n- 'Facade' sẽ phải hỗ trợ quá nhiều tổ hợp khác nhau đến mức biến thành God object với vô số tùy chọn cấu hình.\n- Các subsystem thực sự cần giao tiếp hai chiều với nhau — khi đó bạn cần Mediator.\n\n**Dấu hiệu cảnh báo facade của bạn cần refactor:**\n- Nó có hơn 7-8 dependency được inject.\n- Các method của nó chứa business logic có rẽ nhánh (quy tắc thuế, thuật toán giảm giá).\n- Bạn phải đọc toàn bộ cài đặt của nó mới hiểu được hành vi của bất kỳ caller nào.\n- Test cho facade đòi hỏi stub cả chục service."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Facade** pattern cung cấp một interface đơn giản hóa duy nhất cho một tập subsystem phức tạp, giảm coupling giữa client và các chi tiết cài đặt nội bộ.",
+        "Facade **điều phối và sắp xếp trình tự** các lời gọi subsystem — nó không cài đặt lại logic của chúng. Business logic nằm trong subsystem; trình tự và bù trừ lỗi nằm trong facade.",
+        "Các subsystem vẫn **độc lập và không biết gì** về facade. Chúng hoàn toàn dùng được mà không cần nó; facade là một sự tiện lợi, không phải một cánh cổng.",
+        "**Constructor injection** cho các dependency subsystem khiến facade test được bằng các fake trong bộ nhớ — không cần lời gọi mạng thật nào để kiểm tra trình tự điều phối.",
+        "Barrel export `index.ts` của một module là dạng biểu hiện phổ biến nhất hằng ngày của Facade pattern — nó định nghĩa public API của module trong khi giữ các thành phần nội bộ ở chế độ private.",
+        "Kiểu thất bại của facade là trở thành **God object**: tránh tích lũy business logic, điều kiện lồng sâu, hoặc hơn ~7 dependency. Giữ facade mỏng và tập trung vào điều phối.",
+        "Facade ngoài thực tế có mặt khắp nơi: Express Router, model của ORM (Sequelize/TypeORM), client cấp cao của AWS SDK, tầng service của NestJS, BFF/API gateway, và React Query đều áp dụng pattern này ở các quy mô khác nhau."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Mục đích chính của Facade pattern là gì?",
+      "options": [
+        "Dịch một interface không tương thích sang một interface khác",
+        "Đảm bảo một class chỉ có một instance",
+        "Cung cấp một interface đơn giản hóa cho một tập subsystem phức tạp",
+        "Thêm hành vi cho object lúc runtime mà không sửa class của chúng"
+      ],
+      "explanation": "Facade pattern giấu sự phức tạp của subsystem sau một interface duy nhất, dễ dùng, để client không cần biết hay tự điều phối từng class subsystem. Adapter dịch interface; Singleton đảm bảo một instance; Decorator thêm hành vi lúc runtime."
+    },
+    {
+      "id": "q2",
+      "question": "Các class subsystem có cần biết rằng có một facade bọc chúng không?",
+      "options": [
+        "Không — subsystem độc lập và không có reference nào tới facade",
+        "Có — chúng phải gọi facade cho mọi giao tiếp giữa các subsystem",
+        "Chỉ subsystem ngoài cùng trong chuỗi gọi mới biết về facade",
+        "Có — facade tự đăng ký với từng subsystem khi khởi tạo"
+      ],
+      "explanation": "Các subsystem độc lập. Facade biết về chúng; chúng không biết về facade. Dependency một chiều này là thứ giữ cho hệ thống tách rời và giúp subsystem dùng lại được một cách độc lập."
+    },
+    {
+      "id": "q3",
+      "question": "Facade khác Adapter như thế nào?",
+      "options": [
+        "Facade đơn giản hóa nhiều interface thành một; Adapter dịch một interface không tương thích sang một interface khác",
+        "Facade dịch một interface không tương thích; Adapter đơn giản hóa nhiều interface",
+        "Chúng giống hệt nhau về cấu trúc lẫn mục đích — chỉ khác quy ước đặt tên",
+        "Adapter giấu sự phức tạp; Facade thực hiện việc dịch interface"
+      ],
+      "explanation": "Mục đích là khác biệt quyết định: Adapter = dịch interface (một interface không tương thích → một interface tương thích). Facade = giảm độ phức tạp (nhiều interface → một điểm vào đơn giản hóa). Code cấu trúc có thể trông giống nhau nhưng vấn đề chúng giải quyết thì khác."
+    },
+    {
+      "id": "q4",
+      "question": "Trong ví dụ OrderFacade, điều gì nên xảy ra khi PaymentGateway throw lỗi sau khi tồn kho đã được giữ chỗ?",
+      "options": [
+        "Lỗi nên bị nuốt im lặng để giữ nguyên trạng thái đơn hàng",
+        "Dịch vụ email nên tự động báo cho khách hàng về lỗi",
+        "Facade nên giải phóng tồn kho đã giữ chỗ như một bước bù trừ trước khi throw lại",
+        "Giỏ hàng nên bị xóa để ngăn việc đặt hàng trùng lặp"
+      ],
+      "explanation": "Facade sở hữu logic bù trừ. Khi thanh toán thất bại sau khi đã giữ chỗ tồn kho, facade phải giải phóng tồn kho trước khi throw lại — đây là pattern 'compensating transaction trong Saga'. Không có facade, mọi caller sẽ phải tự cài đặt chuỗi rollback này."
+    },
+    {
+      "id": "q5",
+      "question": "File index.ts của một module chỉ export `login`, `logout` và `refreshToken` trong khi giữ `TokenService`, `SessionStore` và `CryptoUtil` ở nội bộ. Đây là áp dụng của pattern nào?",
+      "options": [
+        "Không phải pattern nào — export của module là một tính năng ngôn ngữ, không liên quan tới design pattern",
+        "Facade — các export public là một API đơn giản hóa che giấu các thành phần nội bộ",
+        "Singleton — module đảm bảo mỗi service chỉ có một instance",
+        "Proxy — các hàm được export chặn lời gọi tới các implementation thật"
+      ],
+      "explanation": "Khi một index.ts chỉ re-export hợp đồng public trong khi giấu các class nội bộ, nó đang đóng vai một Facade cấp module — cung cấp một public API gọn gàng bao trùm phần ruột phức tạp. Singleton liên quan tới số lượng instance; Proxy chặn việc truy cập vào từng object."
+    },
+    {
+      "id": "q6",
+      "question": "Facade pattern khác Mediator pattern như thế nào?",
+      "options": [
+        "Facade điều phối giao tiếp hai chiều giữa các subsystem biết về nó; Mediator là một chiều",
+        "Mediator giấu sự phức tạp khỏi client bên ngoài; Facade điều phối các event nội bộ",
+        "Chúng giống hệt nhau — cả hai đều điều phối tương tác giữa các subsystem và đều được subsystem biết đến",
+        "Facade là một chiều (client gọi nó; subsystem không biết nó); Mediator điều phối giao tiếp hai chiều giữa các component biết về nó"
+      ],
+      "explanation": "Trong Facade, subsystem không biết facade tồn tại — giao tiếp là một chiều (client → facade → subsystem). Trong Mediator, các component biết về mediator và định tuyến giao tiếp qua nó theo cả hai chiều, giống như đài kiểm soát không lưu mà các máy bay chủ động liên lạc."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao constructor injection cho các dependency subsystem là best practice khi cài đặt Facade?",
+      "options": [
+        "Nó giảm số method mà facade cần cung cấp",
+        "Nó ngăn caller bỏ qua facade để truy cập trực tiếp subsystem",
+        "Nó cho phép test thay bằng các fake trong bộ nhớ mà không cần lời gọi mạng thật",
+        "Nó khiến subsystem biết về facade để có thể phối hợp với nó"
+      ],
+      "explanation": "Khi subsystem được inject, test có thể truyền vào bản giả (object trong bộ nhớ có cùng interface) thay vì service thật. Điều này khiến test nhanh, tất định và không cần setup mạng/database. Hardwire `new StripeGateway()` bên trong constructor khiến facade không thể test nếu không có hạ tầng thật."
+    },
+    {
+      "id": "q8",
+      "question": "Một OrderFacade đã phình lên 600 dòng và import từ 14 service, với logic phức tạp về thuế, giảm giá và kiểm tra gian lận nằm bên trong. Điều này minh họa vấn đề gì?",
+      "options": [
+        "Facade đã trở thành God object và nên được phân rã thành các domain service đúng nghĩa",
+        "Các subsystem quá vụn và nên được gộp thành ít class hơn",
+        "Facade đang hoạt động đúng — càng nhiều logic điều phối nghĩa là đóng gói càng tốt",
+        "Client đang vi phạm Single Responsibility Principle vì gọi quá nhiều method"
+      ],
+      "explanation": "Một facade nên mỏng — chỉ điều phối và sắp xếp trình tự. Khi business logic (quy tắc thuế, thuật toán giảm giá, chấm điểm gian lận) tích lũy bên trong facade, nó đã vượt từ Facade sang lãnh địa của God object. Cách chữa là tách ra các domain service chuyên biệt và giữ facade như một bộ điều phối mỏng."
+    },
+    {
+      "id": "q9",
+      "question": "Điều nào sau đây là ví dụ thực tế của Facade pattern?",
+      "options": [
+        "Một JavaScript Proxy chặn việc đọc property trên một object duy nhất",
+        "Một event emitter broadcast thay đổi tới mọi listener đã đăng ký",
+        "Một thuật toán depth-first search đệ quy duyệt một graph",
+        "Một nhân viên concierge khách sạn điều phối việc đưa đón, báo thức và phục vụ phòng cho khách qua một cuộc trò chuyện"
+      ],
+      "explanation": "Concierge khách sạn là phép so sánh kinh điển cho Facade: một đầu mối liên hệ duy nhất cho khách (client), che giấu sự phức tạp của việc điều phối nhiều bộ phận nội bộ (subsystem). Proxy chặn việc truy cập vào một object; DFS là một thuật toán; event emitter là Observer pattern."
+    },
+    {
+      "id": "q10",
+      "question": "Client có thể bỏ qua facade và tương tác trực tiếp với subsystem không?",
+      "options": [
+        "Không — Facade pattern áp đặt kiểm soát truy cập ở cấp class",
+        "Có — facade là một sự tiện lợi và không hạn chế việc truy cập trực tiếp subsystem",
+        "Chỉ khi subsystem cài đặt một interface đặc biệt cho phép bỏ qua do facade cung cấp",
+        "Chỉ test nội bộ mới được phép truy cập trực tiếp subsystem"
+      ],
+      "explanation": "Facade không phải là cơ chế kiểm soát truy cập — đó là lãnh địa của Proxy pattern. Những client nâng cao cần kiểm soát chi tiết vẫn có thể dùng subsystem trực tiếp. Facade chỉ đơn giản cung cấp con đường dễ hơn cho trường hợp thông thường."
+    }
+  ]
+}

@@ -1,0 +1,233 @@
+{
+  "sourceHash": "95723d4628ce",
+  "title": "TCP vs UDP",
+  "tagline": "Three-way handshake tin cậy của TCP đối đầu kiểu \"bắn rồi quên\" của UDP — vì sao cả hai giao thức cùng tồn tại và chọn giữa chúng thế nào.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mọi chương trình giao tiếp qua mạng rốt cuộc đều quy về một trong hai lựa chọn nền tảng: **TCP** (Transmission Control Protocol) hoặc **UDP** (User Datagram Protocol). Cả hai đều nằm ở **tầng Transport** (Layer 4) của mô hình OSI, phía trên IP (lớp lo địa chỉ và routing) và phía dưới HTTP, DNS, SSH cùng mọi giao thức ứng dụng khác bạn từng dùng. Nhiệm vụ của chúng là lấy các gói IP thô — những datagram không thứ tự, không tin cậy, kiểu cố gắng hết sức — và biến chúng thành thứ mà code ứng dụng thực sự làm việc được.\n\nTCP đưa ra một lời hứa táo bạo: mọi byte bạn gửi sẽ đến được đầu bên kia, đúng thứ tự bạn đã gửi, hoặc bạn sẽ được báo về thất bại. Nó đạt được điều này nhờ một tập cơ chế phong phú — handshake thiết lập kết nối, sequence number, acknowledgement, gửi lại, flow control và congestion control — tất cả đều trong suốt với ứng dụng. Bạn ghi vào socket và đọc từ socket; kernel lo mọi thứ còn lại. Sự tin cậy này có cái giá của nó: latency, overhead và độ phức tạp bên trong kernel.\n\nUDP chẳng hứa hẹn gì cả. Nó đóng dấu dữ liệu của bạn với một port nguồn và một port đích, tính checksum, rồi gửi đi. Không handshake. Không trạng thái. Không gửi lại. Nếu một gói tin bị mất, UDP không biết và cũng chẳng quan tâm. Nếu các gói đến sai thứ tự, UDP chuyển chúng lên đúng theo thứ tự sai đó. Nghe như một bước lùi, nhưng đó chính xác là thứ các ứng dụng latency thấp cần: một cuộc gọi video không thể chờ 200 mili giây cho một frame được gửi lại vốn đã cũ; một truy vấn DNS đơn giản có thể tự gửi lại nếu không có trả lời.\n\nKhông giao thức nào tốt hơn trong mọi trường hợp. Hiểu *vì sao* mỗi cơ chế trong TCP tồn tại, và *khi nào* overhead đáng để trả, là năng lực cốt lõi của backend engineer, lập trình viên hệ thống và bất kỳ ai xây dựng hay chẩn đoán phần mềm mạng. Chương này đi sâu vào cả hai giao thức: header, cơ chế, các kiểu thất bại của chúng, và các giao thức hiện đại — đặc biệt là QUIC — đã học hỏi từ cả hai."
+    },
+    {
+      "type": "diagram",
+      "caption": "Cây quyết định: TCP thêm bước thiết lập kết nối và các bảo đảm; UDP gửi ngay lập tức mà không có trạng thái."
+    },
+    {
+      "type": "analogy",
+      "title": "Thư bảo đảm so với rải truyền đơn từ máy bay",
+      "content": "**TCP** giống như gửi một lá thư bảo đảm qua một dịch vụ bưu chính cam kết giao tận nơi. Trước khi thư được nhận, bạn và bưu cục trao đổi giấy tờ để thiết lập giao dịch (handshake). Mỗi lá thư có một số sê-ri; nếu bưu cục làm mất một lá, họ gửi lại. Các lá thư luôn đến theo đúng thứ tự số sê-ri, kể cả khi chúng đi theo những tuyến khác nhau. Bạn nhận được xác nhận có chữ ký rằng thư đã được giao. Overhead này — giấy tờ, theo dõi, xác nhận — đáng để trả khi nội dung là thứ không thể thay thế: một hợp đồng pháp lý, một lệnh chuyển tiền, một bản cập nhật phần mềm.\n\n**UDP** giống như bay qua một thành phố và rải truyền đơn. Bạn chất hàng lên máy bay, mở cửa khoang, và thả. Có tờ rơi trên mái nhà và chẳng bao giờ được đọc. Có tờ bay sang con phố bên cạnh. Thứ tự là không thể đoán. Bạn không nhận được bất kỳ xác nhận nào. Nhưng việc này *nhanh* và *rẻ* — bạn đang phát cho hàng nghìn người cùng lúc, và nếu vài người không nhận được tờ rơi, thông điệp vẫn đến được với phần lớn. Với một chương trình phát thanh trực tiếp, một cuộc họp video hay một cập nhật game real-time, cùng logic đó áp dụng: một frame bị thiếu là không thể nhận ra, nhưng làm đứng luồng để chờ gửi lại sẽ phá hỏng trải nghiệm."
+    },
+    {
+      "type": "explanation",
+      "title": "TCP segment: thứ thực sự chạy trên đường truyền",
+      "content": "Trước khi đi vào các cơ chế, nên hiểu một TCP segment thực sự trông thế nào. **TCP header** dài tối thiểu **20 byte** và mang mọi metadata giúp tính tin cậy trở nên khả thi.\n\nCác trường quan trọng nhất là:\n\n- **Source port** (2 byte) và **destination port** (2 byte) — xác định process ứng dụng nào trên mỗi host đang giao tiếp. Port 80 cho HTTP, 443 cho HTTPS, 22 cho SSH, v.v.\n- **Sequence number** (4 byte) — offset trong byte stream của byte đầu tiên trong payload của segment này. Việc đánh số bắt đầu từ một Initial Sequence Number (ISN) ngẫu nhiên: nếu ISN là `x` và đã gửi 1,000 byte dữ liệu, segment kế tiếp mang `seq = x + 1 + 1000` (bản thân SYN tiêu tốn một số). Wireshark hiển thị sequence number *tương đối* bắt đầu từ 0 để giấu chi tiết này. Đây là cách bên nhận phát hiện khoảng trống và sắp xếp lại các gói đến sai thứ tự.\n- **Acknowledgement number** (4 byte) — byte tiếp theo mà bên nhận đang chờ. Một ACK 1,001 nghĩa là 'Tôi đã nhận mọi thứ đến byte 1,000; tiếp theo hãy gửi byte 1,001.' Đây là acknowledgement kiểu *tích lũy* (cumulative).\n- **Data offset** (4 bit) — header có bao nhiêu word 32-bit (tối thiểu 5 = 20 byte; tối đa 15 = 60 byte khi có option).\n- **Flag** (6 hoặc 9 bit) — SYN, ACK, FIN, RST, PSH, URG (và các cờ mới hơn ECE, CWR). Chúng điều khiển vòng đời kết nối và độ khẩn cấp của dữ liệu.\n- **Window size** (2 byte) — bên nhận hiện có thể buffer thêm bao nhiêu byte nữa, tính từ điểm đã được acknowledge. Đây là cốt lõi của flow control. Trường này chỉ có 16 bit, nên option **window scale** nhân nó lên để cho phép window tới ~1 GB.\n- **Checksum** (2 byte) — tổng bù một (one's-complement) trên header, payload và một pseudo-header gồm các địa chỉ IP. Phát hiện hỏng dữ liệu trong khi truyền.\n- **Option** — trường có độ dài thay đổi, được các phần mở rộng dùng như **MSS** (mỗi bên thông báo segment lớn nhất nó chấp nhận), **SACK** (Selective Acknowledgement), **timestamp** và **window scaling**.\n\nNgược lại, **UDP header** đúng **8 byte**: source port, destination port, length, checksum. Không sequence number, không flag, không window. Sự đơn giản chính là tính năng của nó."
+    },
+    {
+      "type": "diagram",
+      "caption": "TCP header lớn gấp 2.5 lần UDP header ngay cả ở kích thước tối thiểu — mỗi trường thêm vào đều phục vụ một mục đích cụ thể về tính tin cậy."
+    },
+    {
+      "type": "explanation",
+      "title": "Three-way handshake: thiết lập một kết nối",
+      "content": "Trước khi TCP truyền bất kỳ dữ liệu ứng dụng nào, hai bên phải thống nhất về **initial sequence number** (ISN). Điều này ngăn một gói tin cũ từ một kết nối trước đó trên cùng cặp port bị giao nhầm vào kết nối mới. Handshake gồm đúng ba message:\n\n1. **SYN** — client chọn một ISN ngẫu nhiên (gọi là `x`) và gửi một segment có cờ SYN và `seq=x`. ISN 'ngẫu nhiên' này rất quan trọng về bảo mật: ISN dễ đoán đã tạo điều kiện cho các cuộc tấn công chiếm phiên TCP (session hijacking) vào những năm 1990. Kernel hiện đại dùng một hàm mật mã để sinh ISN không đoán trước được.\n\n2. **SYN-ACK** — server chọn ISN của riêng nó (`y`), xác nhận SYN của client bằng cách đặt `ack=x+1` (nghĩa là 'tôi chờ byte x+1 tiếp theo'), và bật cả cờ SYN lẫn ACK. Lúc này server đã cấp phát một **half-open connection** trong SYN queue của nó.\n\n3. **ACK** — client xác nhận SYN của server với `ack=y+1`. Đến đây hai bên đã đồng bộ sequence number theo cả hai chiều và server chuyển từ SYN_RECEIVED sang **ESTABLISHED**. (Client đã chuyển từ SYN_SENT sang ESTABLISHED ngay khi SYN-ACK đến, và có thể gửi dữ liệu đầu tiên kèm theo ACK này.)\n\nBa message là số tối thiểu để mỗi bên xác nhận rằng bên kia đã nhận được ISN của mình. Với hai message, server không thể biết client có nhận được SYN-ACK của nó hay không (hoặc SYN có phải là một bản sao cũ hay không). Về logic có bốn bước — SYN, ACK, SYN, ACK — nhưng server gộp ACK của nó và SYN của chính nó vào một segment.\n\n**Half-open connection và SYN backlog**: Giữa bước 2 và 3, server giữ trạng thái cho có thể tới hàng nghìn half-open connection trong một kernel queue. Một **SYN flood attack** khai thác điều này: kẻ tấn công gửi hàng triệu gói SYN với IP nguồn giả mạo để ACK hoàn tất không bao giờ đến, làm cạn SYN backlog của server. Giải pháp là **SYN cookie**: thay vì lưu trạng thái, server mã hóa các tham số kết nối vào ISN (`y`) bằng một hàm hash mật mã. Khi ACK đến, server suy ra lại các tham số từ ACK number mà không cần đã lưu gì. Linux tự động bật SYN cookie khi SYN queue tràn (`net.ipv4.tcp_syncookies=1`).\n\n**Accept queue**: các kết nối đã hoàn tất chờ trong một kernel queue thứ hai cho đến khi ứng dụng gọi `accept()`. Kích thước của nó đến từ backlog của `listen()`, bị giới hạn bởi `net.core.somaxconn`. Nếu ứng dụng accept quá chậm, queue này tràn và các handshake mới bị bỏ — một nguyên nhân phổ biến của những connection timeout bí ẩn khi tải cao."
+    },
+    {
+      "type": "diagram",
+      "caption": "Toàn bộ vòng đời kết nối TCP với sequence number cụ thể. Để ý ACK = seq trước đó + 1, xác nhận đã nhận mọi byte trước đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "State machine của TCP (đã đơn giản hóa — bỏ qua trường hợp mở/đóng đồng thời và trạng thái CLOSING). Bên chủ động đóng đi FIN_WAIT_1 → FIN_WAIT_2 → TIME_WAIT; bên bị động đóng đi CLOSE_WAIT → LAST_ACK. Đây là những cái tên mà `ss -tan` và `netstat` in ra."
+    },
+    {
+      "type": "explanation",
+      "title": "Tính tin cậy: sequence number, ACK và gửi lại",
+      "content": "Khi đã thiết lập, TCP coi dữ liệu là một **byte stream liên tục** thay vì các gói tin riêng lẻ. Sequence number trong mỗi segment cho bên nhận biết chính xác các byte đó thuộc vị trí nào trong stream. ACK của bên nhận cho bên gửi biết chính xác stream đã được tiêu thụ đến đâu.\n\n**Cumulative acknowledgement** nghĩa là một ACK có thể xác nhận hàng nghìn byte: nếu bên gửi gửi các segment phủ byte 0-499, 500-999 và 1000-1499, một ACK duy nhất với `ack=1500` xác nhận cả ba. Điều này hiệu quả trong điều kiện bình thường.\n\n**Gửi lại (retransmission)** được kích hoạt theo hai cách. Nếu **retransmission timer** của bên gửi hết hạn trước khi ACK đến, nó giả định segment đã mất và gửi lại. Retransmission timeout (RTO) được tính từ RTT đã làm mượt cộng bốn lần độ dao động của nó (RFC 6298; Linux dùng mức sàn 200 ms) và tăng gấp đôi sau mỗi lần thất bại lặp lại, tối đa 120 giây trên Linux.\n\nMột cách kích hoạt nhanh hơn là **duplicate ACK**. Nếu một segment bị mất nhưng các segment sau vẫn đến, bên nhận tiếp tục ACK byte liên tiếp cuối cùng mà nó nhận được. Bên gửi thấy cùng một ACK number ba lần liên tiếp (**triple duplicate ACK**) và suy ra segment còn thiếu đã mất mà không cần chờ timeout. Đây là **fast retransmit**, và nó giảm mạnh latency trong trường hợp phổ biến là một gói bị rớt trong một luồng nhìn chung khỏe mạnh. Linux hiện đại còn đi xa hơn với **RACK-TLP** (RFC 8985), phát hiện mất gói theo *thời gian* — một segment được gửi từ khá lâu trước một segment đã được xác nhận thì bị coi là đã mất — và nhanh chóng thăm dò các lần mất gói ở đuôi một đợt gửi.\n\n**Selective Acknowledgement (SACK)** là một TCP option mở rộng điều này hơn nữa: thay vì chỉ ACK byte liên tiếp cuối cùng, bên nhận có thể báo *chính xác những dải nào* nó đã nhận. Bên gửi khi đó chỉ gửi lại các lỗ hổng còn thiếu thay vì mọi thứ sau khoảng trống. SACK hiện được gần như mọi hệ điều hành hiện đại hỗ trợ và được thương lượng trong handshake."
+    },
+    {
+      "type": "explanation",
+      "title": "Flow control: đừng làm ngợp bên nhận",
+      "content": "Tính tin cậy là chưa đủ nếu bên gửi nhanh hơn khả năng xử lý của bên nhận. Một bên gửi nhanh có thể làm đầy socket buffer trong kernel của bên nhận và khiến nó rớt gói — rồi TCP lại gửi lại không ngừng trong một vòng lặp. **Flow control** ngăn điều này bằng cách để bên nhận quyết định nhịp độ.\n\nMỗi TCP ACK mang một **receive window** (`rwnd`) — số byte mà bên nhận có thể nhận vào kernel buffer ngay lúc này. Tại mọi thời điểm, bên gửi không được có quá `rwnd` byte **dữ liệu chưa được xác nhận đang trên đường truyền**. Khi ứng dụng bên nhận đọc dữ liệu khỏi buffer (qua `recv()` hoặc tương tự), kernel tăng `rwnd` trong các ACK tiếp theo, cho phép bên gửi bơm thêm dữ liệu.\n\nMột vấn đề kinh điển là **silly window syndrome**: nếu ứng dụng bên nhận đọc dữ liệu theo từng mẩu nhỏ xíu (mỗi lần một byte), nó có thể quảng bá window 1 byte, khiến bên gửi gửi các segment 1 byte, mỗi segment kèm 40 byte header TCP+IP — kém hiệu quả một cách thảm họa. **Thuật toán Nagle** ở phía gửi và **giải pháp của Clark** ở phía nhận giải quyết điều này bằng cách gộp các lần ghi nhỏ và trì hoãn việc quảng bá window cho đến khi có đủ một lượng buffer đáng kể được giải phóng.\n\nThuật toán Nagle có một tương tác khét tiếng với **delayed ACK** (bên nhận chờ tới ~40 ms trên Linux, 200 ms trên Windows, hy vọng gửi kèm ACK vào một reply): một client làm write-write-read có thể bị kẹt trọn một khoảng timeout delayed-ACK ở mỗi request. Các giao thức nhạy cảm với latency — SSH, database driver, RPC framework — đặt `TCP_NODELAY` để tắt Nagle (`socket.setNoDelay(true)` trong Node.js).\n\n**Zero-window probing**: nếu `rwnd` giảm về 0, bên gửi phải ngừng truyền. Nhưng nó vẫn cần biết khi nào bên nhận hồi phục. TCP xử lý điều này bằng các **window probe** định kỳ — bên gửi gửi một segment 1 byte sau mỗi vài giây cho đến khi bên nhận quảng bá lại một window khác 0. Không có probe, hai bên sẽ deadlock mãi mãi vì chờ lẫn nhau."
+    },
+    {
+      "type": "explanation",
+      "title": "Congestion control: đừng làm ngợp mạng",
+      "content": "Flow control ngăn làm ngợp *bên nhận*. Một cơ chế riêng ngăn làm ngợp *chính mạng*. Không có congestion control, nhiều kết nối TCP trên một link dùng chung sẽ đều cố gửi ở tốc độ tối đa, khiến router rớt gói, kích hoạt gửi lại, gây ra thêm rớt gói — một **congestion collapse** (sụp đổ do tắc nghẽn). Điều này đã xảy ra nổi tiếng trên Internet thời kỳ đầu năm 1986, làm throughput giảm đi 1,000 lần. Bài báo năm 1988 của Van Jacobson đã giới thiệu các thuật toán cứu vãn nó.\n\nTCP duy trì một **congestion window** (`cwnd`) song song với window của flow control. Window hiệu dụng của bên gửi là `min(rwnd, cwnd)`. `cwnd` khởi đầu nhỏ và tăng dần dựa trên phản hồi từ mạng.\n\n**Slow Start**: `cwnd` bắt đầu ở 1-10 segment (Initial Window, IW). Với mỗi ACK nhận được, `cwnd` tăng thêm một segment — đây là tăng trưởng theo hàm mũ (gấp đôi mỗi RTT) vì mỗi segment sinh ra một ACK. Slow start tiếp tục cho đến khi `cwnd` chạm **slow-start threshold** (`ssthresh`) hoặc cho đến khi phát hiện mất gói.\n\n**Congestion Avoidance**: trên `ssthresh`, `cwnd` tăng 1 segment mỗi RTT thay vì mỗi ACK — tăng trưởng tuyến tính. Đây là giai đoạn thăm dò ở trạng thái ổn định.\n\n**Khi mất gói**: nếu xảy ra timeout, `cwnd` giảm về 1 và `ssthresh` được đặt bằng một nửa `cwnd` hiện tại. Slow start bắt đầu lại. Nếu xảy ra triple duplicate ACK (fast retransmit), Reno giảm `cwnd` một nửa còn CUBIC cắt nó xuống 70% (β = 0.7) thay vì giảm về 1 — một phản ứng nhẹ nhàng hơn với một tín hiệu ít nghiêm trọng hơn.\n\n**Các thuật toán hiện đại** vượt ra ngoài khuôn khổ này:\n- **CUBIC** (mặc định trên Linux từ kernel 2.6.19 năm 2006, và vẫn là mặc định trên Linux, Windows và macOS): tăng `cwnd` theo một hàm bậc ba của thời gian kể từ lần mất gói gần nhất — nhanh chóng quay lại gần mức tối đa trước đó, thận trọng quanh mức đó, rồi thăm dò vượt qua — hoạt động tốt hơn Reno rất nhiều trên các link nhanh, đường dài.\n- **BBR** (Google; v1 năm 2016, v3 năm 2023): thay vì coi mất gói là tín hiệu tắc nghẽn, BBR liên tục ước lượng bandwidth của nút thắt và RTT tối thiểu rồi điều nhịp (pace) gói tin cho khớp, giữ queue ngắn (ít bufferbloat hơn) và đối phó tốt với mất gói ngẫu nhiên. Nó mang phần lớn traffic của Google và YouTube và có sẵn trên Linux (`net.ipv4.tcp_congestion_control=bbr`), nhưng không phải là mặc định của Linux, và các phiên bản đầu từng bị chỉ trích vì chiếm nhiều hơn phần công bằng của mình khi cạnh tranh với các luồng CUBIC.\n- **ECN** (Explicit Congestion Notification): router có thể đánh dấu gói tin thay vì bỏ chúng, cho phép TCP phản ứng với tắc nghẽn trước khi gói bị mất — cả hai đầu phải thương lượng nó và router ở nút thắt phải đánh dấu gói (router không hỗ trợ ECN chỉ chuyển tiếp các bit nguyên vẹn). **L4S** (RFC 9330–9332, 2023) xây dựng trên ECN để có độ trễ hàng đợi luôn thấp và đang bắt đầu được triển khai."
+    },
+    {
+      "type": "diagram",
+      "caption": "TCP chồng năm cơ chế riêng biệt lên trên IP; UDP chỉ thêm port multiplexing và một checksum tùy chọn."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Module `net` phơi bày TCP thô. Callback kết nối chỉ được gọi sau khi kernel hoàn tất three-way handshake — code của bạn không bao giờ thấy SYN hay SYN-ACK. `socket.write()` đẩy byte vào send buffer của kernel; TCP lo việc chia segment, đánh thứ tự, ACK và gửi lại một cách vô hình. `client.end()` gửi một FIN, kích hoạt quá trình đóng bốn bước. Port cục bộ sẽ nằm ở TIME_WAIT khoảng ~60 giây, hấp thụ mọi gói trùng lặp bị trễ.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Đóng kết nối bốn bước và TIME_WAIT",
+      "content": "Đóng một kết nối TCP cần bốn message vì mỗi chiều của stream được đóng độc lập. Đây là thiết kế **half-close**: mỗi bên có thể ngừng *gửi* trong khi vẫn *nhận* (hữu ích cho các giao thức như HTTP/1.0, nơi server báo hiệu kết thúc response bằng cách đóng phía ghi của nó trong khi vẫn đọc nốt request).\n\n1. **FIN** — bên khởi xướng không còn dữ liệu để gửi. Sequence number là byte kế tiếp sau toàn bộ dữ liệu.\n2. **ACK** — phía bên kia xác nhận FIN. Nó có thể vẫn còn dữ liệu để gửi, nên lúc này kết nối ở trạng thái half-closed.\n3. **FIN** — khi phía bên kia gửi xong, nó cũng đóng phía ghi của mình.\n4. **ACK** — bên khởi xướng ban đầu xác nhận FIN thứ hai.\n\nBên khởi xướng việc đóng sau đó đi vào **TIME_WAIT** trong **2×MSL** (Maximum Segment Lifetime). RFC 793 đề xuất MSL là hai phút; Linux hard-code TIME_WAIT ở **60 giây**, còn Windows mặc định 120 giây. TIME_WAIT có hai mục đích:\n\n- **Bảo đảm ACK cuối cùng đến được server**: nếu FIN của server không được ACK, nó sẽ gửi lại FIN, và TIME_WAIT bảo đảm client có thể trả lời.\n- **Hấp thụ các bản sao bị trễ**: mọi segment cũ của kết nối này bị trễ trong mạng sẽ đến trong lúc TIME_WAIT và bị bỏ đi, ngăn chúng làm hỏng một kết nối mới trên cùng bộ bốn (src IP, src port, dst IP, dst port).\n\n**TIME_WAIT ở quy mô lớn**: một server bận rộn đóng hàng nghìn kết nối mỗi giây có thể tích tụ hàng nghìn socket TIME_WAIT. Chúng không còn giữ file descriptor (ứng dụng đã đóng socket rồi), nhưng mỗi cái chiếm một cấu trúc kernel nhỏ và, quan trọng hơn, chiếm bộ bốn của nó. Các cách giảm thiểu thực tế gồm `SO_REUSEADDR` (cho phép bind một port kể cả khi có socket TIME_WAIT trên đó), `tcp_tw_reuse` (sysctl của Linux dùng lại socket TIME_WAIT cho các kết nối *đi ra* mới khi option timestamp chứng minh việc đó an toàn), và thiết kế giao thức sao cho *client* khởi xướng việc đóng, phân tán TIME_WAIT ra nhiều client thay vì dồn vào một server.\n\n**CLOSE_WAIT ứ đọng** là vấn đề đối xứng, và gần như luôn là bug của ứng dụng: phía bên kia đã đóng, kernel đã ACK FIN của nó, và kết nối đang chờ *code của bạn* gọi `close()`. Hàng nghìn socket CLOSE_WAIT (`ss -tan state close-wait`) chỉ ra một nhánh code quên đóng kết nối — một pool bị rò hoặc thiếu một khối `finally`."
+    },
+    {
+      "type": "explanation",
+      "title": "UDP chi tiết: khi sự đơn giản là một tính năng",
+      "content": "Triết lý thiết kế của UDP là mạng đã đủ nhanh và ứng dụng hiểu yêu cầu về tính tin cậy của mình rõ hơn kernel. **Header 8 byte** chỉ có bốn trường: source port, destination port, length và checksum. Checksum là tùy chọn trong IPv4 (dù mọi hệ điều hành lớn đều bật) và bắt buộc trong IPv6.\n\nKhông có handshake, bên gửi UDP có thể bắt đầu truyền ngay — không tốn round trip handshake nào trước byte đầu tiên. Không có sequence number, kernel không sắp xếp lại gói hay buffer các gói đến sai thứ tự. Không có ACK, bên gửi không bao giờ chờ xác nhận. Không có congestion control, UDP sẽ gửi ở bất kỳ tốc độ nào ứng dụng đưa vào, bất kể tình trạng mạng. Điểm cuối này là con dao hai lưỡi: các ứng dụng dựa trên UDP không tự hiện thực congestion control có thể \"phản xã hội\" trên mạng dùng chung, độc chiếm bandwidth và gây mất gói cho các luồng TCP.\n\n**UDP cho bạn những gì:**\n\n- **Datagram hướng message**, không hướng stream. Mỗi lời gọi `sendto()` tạo ra đúng một datagram; mỗi lời gọi `recvfrom()` trả về đúng một datagram. Không cần tự phân khung message — ranh giới message được chính giao thức bảo toàn (khác với TCP, nơi bạn phải tự hiện thực việc phân khung bằng tiền tố độ dài hoặc ký tự phân cách).\n- **Broadcast và multicast**: TCP là point-to-point nghiêm ngặt (một bên gửi, một bên nhận). UDP hỗ trợ gửi đến một broadcast address (mọi host trong một subnet) hoặc một multicast group (các host đã đăng ký). Điều này thiết yếu cho các giao thức discovery (mDNS, SSDP, DHCP), phân phối media (IPTV) và một số hệ thống phòng chờ game.\n- **Không có head-of-line blocking**: nếu một datagram bị mất, các datagram sau không bị chặn để chờ nó. Mỗi cái độc lập. Điều này cực kỳ quan trọng với ứng dụng real-time.\n\n**Những gì bạn phải tự hiện thực khi dùng UDP:**\n\nCác ứng dụng cần một mức tin cậy nào đó trên UDP phải tự xây, nhưng chỉ nhiều đúng mức thực sự cần. DNS chỉ đơn giản gửi lại truy vấn sau một timeout. DHCP cũng vậy. Một video codec có thể yêu cầu gửi lại keyframe nhưng bỏ qua việc gửi lại inter-frame. Một game có thể hiện thực forward error correction (FEC) — gửi dữ liệu dư thừa để có thể dựng lại khi mất một gói mà không cần chờ gửi lại. QUIC hiện thực đầy đủ tính tin cậy, thứ tự và TLS, nhưng làm vậy mà không có head-of-line blocking của TCP."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Khác với `net.createConnection` của TCP, ở đây không có handshake, không cần `connect()`, và không có streaming — mỗi `send()` tạo ra đúng một datagram và mỗi sự kiện `message` giao đúng một datagram. Callback của `send()` chỉ xác nhận hệ điều hành đã đưa vào hàng đợi, không xác nhận đã giao. Để ý không có bước đóng kết nối: UDP socket đơn giản là được đóng khi dùng xong. Comment về ICMP Port Unreachable minh họa bản chất best-effort của UDP.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Port number và cặp socket",
+      "content": "Cả TCP lẫn UDP đều dùng **port number** để ghép nhiều kênh giao tiếp trên cùng một địa chỉ IP. Port là một số nguyên 16-bit (0-65535). Tổ hợp (protocol, local IP, local port, remote IP, remote port) tạo thành một **bộ năm (5-tuple)** định danh duy nhất một kết nối hoặc một luồng trong socket table của kernel.\n\n**Các dải port theo quy ước:**\n- **Well-known port (0-1023)**: do IANA gán, cần đặc quyền root/admin để bind. HTTP=80, HTTPS=443, SSH=22, DNS=53, SMTP=25, FTP=21.\n- **Registered port (1024-49151)**: được IANA đăng ký cho các ứng dụng cụ thể, trên hầu hết hệ thống không cần đặc quyền gì. PostgreSQL=5432, MySQL=3306, Redis=6379, MongoDB=27017, Kubernetes API=6443.\n- **Ephemeral port (49152-65535)**: được hệ điều hành gán động cho các socket của client. Dải chính xác khác nhau: Linux mặc định 32768-60999 (cấu hình được qua `/proc/sys/net/ipv4/ip_local_port_range`); macOS dùng 49152-65535.\n\n**Một server xử lý nhiều client trên một port thế nào**: server socket lắng nghe trên, chẳng hạn, port 443. Mỗi kết nối TCP đến tạo ra một *socket mới*, được phân biệt bằng IP và ephemeral port của client. Listening socket không bao giờ thay đổi; kernel phân phối mỗi kết nối đến một connected socket riêng. Với UDP, server đọc từ một socket và dùng `recvfrom` để lấy địa chỉ bên gửi của mỗi datagram.\n\n**NAT và việc viết lại port**: trong mạng gia đình và nhiều môi trường cloud, socket trên máy bạn dùng một IP private (như 192.168.1.5:54321). NAT gateway viết lại gói tin để dùng public IP với một port khác (ví dụ 203.0.113.1:38472) và duy trì một bảng ánh xạ. Server ở xa chỉ thấy địa chỉ public. Khi reply đến, NAT đảo ngược phép dịch. UDP đi qua NAT được nhưng có những hạn chế quan trọng: UDP không có trạng thái kết nối, nên ánh xạ NAT hết hạn nhanh (thường 30-60 giây), gây vấn đề cho các ứng dụng UDP sống lâu như VoIP, trừ khi có gửi keep-alive datagram đều đặn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một listening socket trên port 443 sinh ra một connected socket mới cho mỗi client qua accept(). Kernel phân phối theo bộ năm."
+    },
+    {
+      "type": "explanation",
+      "title": "QUIC và HTTP/3: học hỏi từ cả hai giao thức",
+      "content": "HTTP/2 đã giải quyết nhiều điểm kém hiệu quả của HTTP/1.1 — nó multiplex nhiều request trên một kết nối TCP duy nhất bằng framing nhị phân. Nhưng nó lại đưa ra một vấn đề mới: **head-of-line blocking của TCP**. Mọi stream HTTP/2 dùng chung một byte stream TCP. Nếu một TCP segment bị mất, *mọi stream đều đứng lại* trong khi TCP chờ gửi lại, kể cả những stream có dữ liệu đã đến hoàn hảo. Segment bị mất có thể thuộc về một request nền có độ ưu tiên thấp, nhưng nó lại chặn một lời gọi API quan trọng về thời gian.\n\n**QUIC** (ban đầu là QUIC của Google, nay được IETF chuẩn hóa thành RFC 9000) được thiết kế từ đầu để tránh điều này. Nó chạy trên UDP và hiện thực tính tin cậy ở cấp stream của riêng nó:\n\n- **Thứ tự ở cấp stream, không phải cấp kết nối**: một gói bị mất chỉ làm đứng stream mà nó thuộc về. Các stream khác tiếp tục không bị ảnh hưởng.\n- **Connection ID thay cho bộ năm**: một kết nối QUIC được định danh bằng các connection ID mờ (mỗi đầu chọn những ID mà đầu kia nên đặt vào gói tin, và có thể xoay vòng chúng), không phải bằng các cặp (IP, port). Điều này nghĩa là một kết nối sống sót qua các thay đổi mạng — chuyển từ Wi-Fi sang LTE không làm đứt kết nối, một lợi ích lớn cho thiết bị di động.\n- **Handshake 0-RTT và 1-RTT**: QUIC tích hợp TLS 1.3 vào handshake của nó. Một kết nối mới cần 1 RTT trước request đầu tiên, so với 2 RTT cho TCP + TLS 1.3 và 3 RTT cho TCP + TLS 1.2. Một kết nối được resume có thể gửi dữ liệu ứng dụng ngay trong gói đầu tiên (0-RTT) bằng một session ticket — nhưng dữ liệu 0-RTT có thể bị kẻ tấn công replay, nên server chỉ nên chấp nhận nó cho các request idempotent.\n- **Congestion control theo từng kết nối**: QUIC tự hiện thực congestion control (có thể thay thế — cả CUBIC lẫn BBR đều phổ biến), và vì chạy ở user space, nó dễ cập nhật hơn TCP nằm trong kernel space.\n- **Header transport được mã hóa**: packet number và phần lớn các trường header đều được mã hóa, nên middlebox không thể soi vào hay \"tối ưu\" giao thức. Các phần mở rộng của TCP thường bị kẹt sau những middlebox cũ bỏ đi các option lạ (\"ossification\" — hóa xơ cứng); QUIC giữ được sự tự do để tiến hóa.\n\nHTTP/3 đơn giản là ngữ nghĩa HTTP chạy trên QUIC. Đến 2025–26, HTTP/3 được bật mặc định trên Chrome, Edge, Firefox và Safari cùng các CDN lớn, và mang khoảng một phần năm đến một phần ba số web request tùy cách đo. Trình duyệt phát hiện nó qua response header `Alt-Svc` hoặc một HTTPS DNS record, và lặng lẽ quay về HTTP/2 trên TCP khi UDP port 443 bị chặn — nên bật QUIC không bao giờ khiến một site khó truy cập hơn. QUIC đại diện cho hướng đi của Internet: tính tin cậy có chọn lọc được xây trên sự linh hoạt của UDP."
+    },
+    {
+      "type": "explanation",
+      "title": "Chọn TCP hay UDP: một khung quyết định",
+      "content": "Việc chọn giữa TCP và UDP hiếm khi là tùy tiện. Đây là một cách có cấu trúc để suy nghĩ về nó:\n\n**Dùng TCP khi:**\n- Tính toàn vẹn dữ liệu là không thể thương lượng, và chỉ một byte bị thiếu hay bị hỏng cũng làm hỏng ứng dụng (database, truyền file, SSH, email, giao dịch tài chính, lời gọi API).\n- Giao thức là request-response và latency của một lần handshake là chấp nhận được (gần như mọi web API).\n- Bạn cần connection multiplexing và backpressure mà không phải tự hiện thực chúng.\n- Bạn giao tiếp với hạ tầng không rõ, nơi UDP có thể bị firewall chặn (một số mạng doanh nghiệp bị khóa chặt chặn mọi UDP ngoài DNS).\n\n**Dùng UDP khi:**\n- **Latency quan trọng hơn tính đúng đắn**: một game real-time, cuộc gọi thoại hay luồng video trực tiếp, nơi độ trễ 200 ms do gửi lại còn tệ hơn một frame bị bỏ qua hay một chút trục trặc âm thanh.\n- **Bạn sẽ tự hiện thực tính tin cậy**: QUIC làm điều này. Một số game engine tự hiện thực tầng reliable-UDP riêng với bitmask ACK tùy chỉnh và FEC.\n- **Bạn cần broadcast hoặc multicast**: service discovery (mDNS, SSDP), DHCP, IPTV, giao thức routing (RIP, gói Hello của OSPF).\n- **Truy vấn vừa trong một datagram và việc thử lại là đơn giản**: DNS, NTP, SNMP, TFTP.\n- **Bạn đang xây trên QUIC**: nếu stack của bạn dùng HTTP/3, bạn đã dùng UDP bên dưới mà không cần nghĩ đến nó.\n\n**Các lựa chọn giao thức phổ biến trong thực tế:**\n| Giao thức | Transport | Lý do |\n|---|---|---|\n| HTTP/1.1, HTTP/2 | TCP | Toàn vẹn dữ liệu; hệ sinh thái trình duyệt |\n| HTTP/3 | UDP (qua QUIC) | Loại bỏ head-of-line blocking |\n| DNS | UDP (chính); TCP cho zone transfer và câu trả lời bị cắt (bit TC) | Một cặp query/reply vừa trong một datagram |\n| SSH | TCP | Luồng lệnh phải tin cậy và đúng thứ tự |\n| VoIP / WebRTC | UDP | Real-time; latency là then chốt; chịu được mất gói |\n| Game online | UDP (thường kèm tầng tin cậy tùy chỉnh) | Cập nhật vị trí; dữ liệu cũ là vô giá trị |\n| NTP | UDP | Một lần trao đổi timestamp duy nhất |\n| DHCP | UDP + broadcast | Chưa có IP để thiết lập TCP |\n| gRPC | TCP (HTTP/2) | Hỗ trợ HTTP/3 chỉ có ở một số ít hiện thực |"
+    },
+    {
+      "type": "callout",
+      "content": "**Lịch sử tóm tắt**: TCP và IP ban đầu là một giao thức duy nhất do Vint Cerf và Bob Kahn thiết kế năm 1974. Việc tách thành hai tầng TCP và IP riêng biệt diễn ra năm 1978, cụ thể là vì các nhà nghiên cứu nhận ra rằng truyền giọng nói dạng gói real-time (VoIP thời kỳ đầu) cần một tầng *không* gửi lại — từ đó có sự tách biệt khái niệm giữa routing (IP) và transport (TCP/UDP). UDP được Jon Postel hình thức hóa năm 1980 trong RFC 768 — một tài liệu ngắn đến đáng kinh ngạc (chỉ 3 trang) định nghĩa toàn bộ giao thức. Cuộc khủng hoảng độ tin cậy của Internet hiện đại năm 1986, được giải quyết nhờ các thuật toán congestion control của Van Jacobson, đã cho thấy những bên gửi không được kiểm soát có thể làm sụp đổ một mạng dùng chung tệ đến mức nào, và là lý do congestion control của TCP được coi là một trong những đóng góp quan trọng nhất cho kỹ thuật mạng."
+    },
+    {
+      "type": "callout",
+      "content": "**Những hiểu lầm phổ biến và cái bẫy interview:**\n\n- **'UDP không có checksum'** — sai. UDP có một checksum 16-bit (tùy chọn trong IPv4, bắt buộc trong IPv6). Nó dùng cùng thuật toán tổng bù một như của TCP, tính trên một pseudo-header, header và dữ liệu.\n- **'UDP luôn nhanh hơn'** — không phải lúc nào cũng vậy. Trên phần cứng hiện đại với một kết nối TCP đã \"ấm\", overhead của TCP là rất nhỏ. Với truyền dữ liệu khối lớn, congestion control của TCP thường lấp đầy link hiệu quả không kém bất kỳ lựa chọn nào khác.\n- **'TCP bảo đảm giao nhận'** — chính xác hơn, TCP bảo đảm rằng *nếu kết nối còn sống*, mọi dữ liệu được giao đúng thứ tự. Nếu mạng bị chia cắt đủ lâu để dùng hết số lần gửi lại, TCP bỏ cuộc và trả lỗi cho ứng dụng. Nó không bảo đảm giao nhận trong mọi kiểu thất bại có thể có.\n- **TIME_WAIT không phải là bug** — nó là một cơ chế bảo vệ có chủ đích chống lại việc các gói trùng lặp bị trễ làm hỏng kết nối mới. Tắt nó một cách hung hăng (ví dụ `tcp_tw_recycle`, đã bị gỡ bỏ ở Linux 4.12) từng gây ra những bug production tinh vi trong môi trường có NAT.\n- **'Microservice nên dùng UDP để có hiệu năng'** — trên thực tế, gần như không có microservice gRPC hay REST nào bị nghẽn bởi overhead handshake của TCP. Latency chủ đạo là serialization, query database và logic ứng dụng — không phải cái handshake dưới một mili giây bên trong data center (và connection pooling loại bỏ luôn cả cái đó)."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Three-way handshake của TCP** (SYN → SYN-ACK → ACK) đồng bộ sequence number trước khi dữ liệu chạy. Sequence number cho phép bên nhận phát hiện khoảng trống, sắp xếp lại các segment đến sai thứ tự, và xác nhận chính xác những byte nào đã nhận qua cumulative ACK.",
+        "**Các trạng thái TCP cần biết**: SYN_SENT / SYN_RECEIVED → ESTABLISHED; bên chủ động đóng đi FIN_WAIT_1 → FIN_WAIT_2 → **TIME_WAIT** (60 s trên Linux), bên bị động đóng đi **CLOSE_WAIT** → LAST_ACK. CLOSE_WAIT ứ đọng nghĩa là code của bạn không gọi `close()`.",
+        "**Tính tin cậy trong TCP** đạt được nhờ kết hợp sequence number, cumulative ACK, retransmission timer, fast retransmit khi có triple duplicate ACK, và SACK để lấp lỗ hổng chính xác — mỗi cơ chế xử lý một kiểu thất bại khác nhau.",
+        "**Flow control** (receive window `rwnd`) ngăn làm ngợp buffer của bên nhận. **Congestion control** (slow start, congestion avoidance, CUBIC, BBR) ngăn làm ngợp mạng (CUBIC là mặc định trên Linux, Windows và macOS; BBR mô hình hóa bandwidth và RTT thay vì phản ứng với mất gói) — cả hai dùng window hiệu dụng `min(rwnd, cwnd)` của bên gửi để giới hạn tốc độ truyền.",
+        "**Header 8 byte của UDP** (so với 20+ byte của TCP) chỉ thêm port multiplexing và một checksum tùy chọn — không trạng thái, không handshake, không thứ tự, không gửi lại. Ứng dụng nhận datagram thô và chỉ hiện thực đúng mức tin cậy mà nó cần.",
+        "**QUIC (HTTP/3)** hiện thực tính tin cậy theo từng stream, 0-RTT connection resumption và connection migration trên UDP — loại bỏ head-of-line blocking của TCP trong khi vẫn giữ tính tin cậy end-to-end, và đại diện cho quỹ đạo phát triển của các giao thức transport hiện đại.",
+        "**Các dải port** chia thành well-known (0-1023, cần root), registered (1024-49151) và ephemeral (do hệ điều hành gán: IANA 49152-65535, Linux 32768-60999). Một TCP server trên một port xử lý hàng nghìn client bằng cách phân biệt các kết nối qua trọn bộ năm (protocol, src IP, src port, dst IP, dst port).",
+        "**Chọn TCP** cho các workload mà tính đúng đắn là then chốt (database, API, truyền file, SSH). **Chọn UDP** khi latency quan trọng hơn độ tin cậy (media real-time, game, DNS), khi cần broadcast/multicast, hoặc khi xây một transport tùy chỉnh như QUIC tự hiện thực tính tin cậy hiệu quả hơn."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Có bao nhiêu message được trao đổi trong một three-way handshake của TCP, và chúng là gì?",
+      "options": [
+        "3 message: SYN, SYN-ACK, ACK",
+        "2 message: SYN rồi SYN-ACK",
+        "4 message: SYN, ACK, SYN, ACK",
+        "2 message: CONNECT rồi ACCEPT"
+      ],
+      "explanation": "Three-way handshake gồm: (1) Client gửi SYN kèm Initial Sequence Number của nó, (2) Server đáp SYN-ACK kèm ISN của chính nó và xác nhận ISN của client, (3) Client gửi ACK xác nhận ISN của server. Ba message là cần và đủ để đồng bộ sequence number theo cả hai chiều."
+    },
+    {
+      "id": "q2",
+      "question": "Kích thước header tối thiểu của một UDP datagram là bao nhiêu, và nó chứa bốn trường nào?",
+      "options": [
+        "4 byte: source port, dest port, checksum, flags",
+        "12 byte: source port, dest port, sequence, checksum",
+        "20 byte: các trường giống TCP",
+        "8 byte: source port, dest port, length, checksum"
+      ],
+      "explanation": "UDP header đúng 8 byte: 2 byte source port, 2 byte destination port, 2 byte length (header + dữ liệu), 2 byte checksum. Không có sequence number, acknowledgement number, flag hay trường window. Header tối thiểu của TCP là 20 byte."
+    },
+    {
+      "id": "q3",
+      "question": "Cơ chế TCP nào ngăn một bên gửi nhanh làm ngợp kernel buffer của bên nhận?",
+      "options": [
+        "Congestion control (slow start + CUBIC)",
+        "Three-way handshake",
+        "Flow control qua receive window (rwnd)",
+        "Selective Acknowledgement (SACK)"
+      ],
+      "explanation": "Flow control dùng receive window (rwnd) được quảng bá trong mỗi ACK. Bên gửi không được có quá rwnd byte dữ liệu chưa được xác nhận trên đường truyền. Congestion control (slow start, CUBIC) xử lý năng lực của mạng, không phải năng lực buffer của bên nhận. Cả hai dùng window hiệu dụng min(rwnd, cwnd) của bên gửi."
+    },
+    {
+      "id": "q4",
+      "question": "QUIC (HTTP/3) giải quyết vấn đề cụ thể nào mà HTTP/2 chạy trên TCP không giải quyết được?",
+      "options": [
+        "QUIC mã hóa dữ liệu; HTTP/2 trên TCP thì không",
+        "TCP không thể multiplex nhiều request trên một kết nối",
+        "Head-of-line blocking của TCP, khi một segment bị mất làm đứng mọi stream được multiplex",
+        "QUIC có header nhỏ hơn TCP nên giảm overhead mỗi gói tin"
+      ],
+      "explanation": "HTTP/2 multiplex các stream trên một kết nối TCP duy nhất. Chỉ một TCP segment bị mất cũng làm đứng TẤT CẢ các stream vì TCP phải giao byte đúng thứ tự. QUIC hiện thực tính tin cậy theo từng stream trên UDP — một gói bị mất chỉ làm đứng stream mà nó thuộc về, các stream khác không bị ảnh hưởng. QUIC còn tích hợp TLS và hỗ trợ connection migration."
+    },
+    {
+      "id": "q5",
+      "question": "Thuật toán 'slow start' của TCP là gì, và điều gì kích hoạt việc kết thúc giai đoạn slow start?",
+      "options": [
+        "cwnd bắt đầu ở 1-10 segment và gấp đôi mỗi RTT; slow start kết thúc khi cwnd chạm ssthresh hoặc phát hiện mất gói",
+        "Bên gửi chờ sự cho phép tường minh từ bên nhận trước khi gửi mỗi segment",
+        "ISP bóp băng thông các kết nối mới cho đến khi chúng chứng minh mình không độc hại",
+        "Bên nhận tăng dần window của nó từ 0, giới hạn tốc độ ban đầu của bên gửi"
+      ],
+      "explanation": "Slow start bắt đầu với congestion window (cwnd) 1-10 segment. Mỗi ACK tăng cwnd thêm một segment, gây ra tăng trưởng theo hàm mũ (gấp đôi mỗi RTT). Slow start kết thúc khi cwnd chạm slow-start threshold (ssthresh), hoặc ngay lập tức khi mất gói, điều làm reset cwnd và ssthresh. Sau ssthresh, tăng trưởng tuyến tính (congestion avoidance) tiếp quản."
+    },
+    {
+      "id": "q6",
+      "question": "Vì sao kết nối TCP đi vào TIME_WAIT sau khi đóng, và nó kéo dài bao lâu?",
+      "options": [
+        "Kernel chờ mọi dữ liệu ứng dụng còn treo được flush xuống đĩa",
+        "Socket nằm ở TIME_WAIT trong 2×MSL (60 s trên Linux) để bảo đảm ACK cuối cùng đã đến và hấp thụ các bản sao bị trễ",
+        "TIME_WAIT báo cho hệ điều hành rằng port có thể được dùng lại ngay cho kết nối mới",
+        "Server giữ trạng thái cho đến khi client xác nhận đã nhận hết dữ liệu"
+      ],
+      "explanation": "TIME_WAIT kéo dài 2×MSL — cố định 60 giây trên Linux, mặc định 120 giây trên Windows. Nó phục vụ hai mục đích: (1) nếu server không nhận được ACK cuối cùng, nó sẽ gửi lại FIN, và TIME_WAIT cho phép client trả lời; (2) mọi gói trùng lặp bị trễ của kết nối này đến trong lúc TIME_WAIT sẽ bị bỏ đi, ngăn chúng làm hỏng một kết nối mới trên cùng bộ năm."
+    },
+    {
+      "id": "q7",
+      "question": "Một SYN flood attack khai thác cơ chế TCP cụ thể nào, và cách giảm thiểu tiêu chuẩn là gì?",
+      "options": [
+        "Nó làm tràn receive window bằng cách gửi payload khổng lồ; giảm thiểu bằng flow control",
+        "Nó chiếm sequence number để chèn dữ liệu; giảm thiểu bằng việc sinh ISN ngẫu nhiên",
+        "Nó gây cạn TIME_WAIT bằng cách mở và đóng kết nối liên tục",
+        "Nó làm cạn SYN backlog bằng cách gửi nhiều SYN với IP giả mạo; giảm thiểu bằng SYN cookie"
+      ],
+      "explanation": "Một SYN flood gửi nhiều gói SYN với IP nguồn giả mạo. Server cấp phát một half-open connection cho mỗi gói và gửi SYN-ACK, nhưng ACK hoàn tất không bao giờ đến. SYN backlog đầy và các kết nối hợp lệ bị từ chối. SYN cookie giải quyết điều này bằng cách mã hóa các tham số kết nối vào ISN của server bằng mật mã — không lưu trạng thái nào cho đến khi ACK đến và được kiểm tra."
+    },
+    {
+      "id": "q8",
+      "question": "Cả TCP lẫn UDP hoạt động ở tầng nào của mô hình OSI, và nhiệm vụ của tầng đó bao gồm những gì?",
+      "options": [
+        "Layer 3 (Network) — chịu trách nhiệm định tuyến gói tin giữa các mạng khác nhau",
+        "Layer 2 (Data Link) — chịu trách nhiệm MAC addressing và giao frame trên một link",
+        "Layer 4 (Transport) — chịu trách nhiệm giao tiếp giữa các process và port multiplexing",
+        "Layer 7 (Application) — chịu trách nhiệm các giao thức ứng dụng như HTTP và DNS"
+      ],
+      "explanation": "TCP và UDP đều hoạt động ở Layer 4 (Transport). Tầng Transport nằm trên IP (Layer 3, lo routing giữa các host) và thêm port number để cho phép giao tiếp giữa các process — nhiều ứng dụng trên cùng một địa chỉ IP có thể nhận dữ liệu độc lập. TCP thêm tính tin cậy; UDP chỉ thêm port và một checksum tùy chọn."
+    },
+    {
+      "id": "q9",
+      "question": "Vì sao UDP được ưu tiên hơn TCP cho truy vấn DNS, nhưng TCP lại được dùng cho DNS zone transfer?",
+      "options": [
+        "UDP được mã hóa; TCP thì không, nên truy vấn DNS cần tính bảo mật của UDP",
+        "Một truy vấn và trả lời DNS vừa trong một datagram và client tự thử lại khi timeout; zone transfer là việc truyền lớn nhiều record, cần tính tin cậy và flow control của TCP",
+        "TCP không chịu nổi lượng traffic DNS; UDP scale tốt hơn",
+        "DNS dùng UDP vì TCP sẽ làm lộ địa chỉ IP của bên truy vấn"
+      ],
+      "explanation": "Một truy vấn và trả lời DNS điển hình đều vừa trong một UDP datagram (512 byte trong DNS cổ điển; với EDNS(0), phần lớn resolver hiện quảng bá khoảng 1,232 byte để tránh phân mảnh IP, và quay về TCP khi câu trả lời bị cắt). Nếu không có trả lời, DNS client đơn giản gửi lại truy vấn — thực chất là tự hiện thực một cơ chế tin cậy gọn nhẹ. Zone transfer sao chép toàn bộ một DNS zone (có thể hàng nghìn record) giữa các name server, đó là một lần truyền lớn và cần tin cậy, đòi hỏi việc đánh thứ tự, flow control và gửi lại của TCP."
+    },
+    {
+      "id": "q10",
+      "question": "'Triple duplicate ACK' trong TCP là gì, và nó kích hoạt hành động nào?",
+      "options": [
+        "Bên nhận gửi cùng một ACK number ba lần liên tiếp, cho thấy có khoảng trống; kích hoạt fast retransmit mà không cần chờ timeout",
+        "Ba yêu cầu kết nối giống hệt nhau từ cùng một client; server bỏ các bản trùng",
+        "Ba ACK được gửi đồng thời cho một segment để tăng độ tin cậy",
+        "Một ACK có cả ba cờ SYN, ACK và FIN cùng bật"
+      ],
+      "explanation": "Nếu một segment bị mất nhưng các segment sau vẫn đến, bên nhận tiếp tục ACK byte liên tiếp cuối cùng (ranh giới của khoảng trống). Bên gửi thấy cùng một ACK number đến ba lần liên tiếp — một triple duplicate ACK. Đây là tín hiệu mạnh cho thấy segment còn thiếu đã bị mất chứ không chỉ bị trễ. Fast retransmit lập tức gửi lại segment còn thiếu mà không chờ retransmission timer hết hạn, giảm mạnh latency trong trường hợp phổ biến là chỉ một gói bị rớt."
+    }
+  ]
+}

@@ -1,0 +1,214 @@
+{
+  "sourceHash": "3152298848b5",
+  "title": "Rate Limiting",
+  "tagline": "Bảo vệ hệ thống khỏi quá tải và lạm dụng bằng cách kiểm soát tốc độ client gửi request — \"cảnh sát giao thông\" của hệ thống phân tán.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mọi API endpoint đều có năng lực xử lý hữu hạn. Nếu không có **rate limiting**, chỉ một client hoạt động bất thường — có thể là script bị bug, một cuộc tấn công từ chối dịch vụ, hay đơn giản là một bản tích hợp quá nổi tiếng dội vào server lúc 3 giờ sáng — cũng đủ vắt kiệt tài nguyên server và làm chất lượng dịch vụ đi xuống với tất cả người dùng khác. Rate limiting không phải thứ phòng thủ nghĩ ra sau cùng; nó là một mối quan tâm kiến trúc hạng nhất, phải có mặt ngay trong thiết kế của bất kỳ API public hay internal nào.\n\nRate limiting áp đặt một **request budget** (hạn mức request) cho mỗi client: một chính sách kiểu \"bạn được gửi tối đa N request trong mỗi khung thời gian; vượt quá thì bạn nhận response 429 Too Many Requests thay vì được phục vụ\". Budget này có thể chia theo nhiều chiều — theo địa chỉ IP, theo user đã xác thực, theo API key, theo endpoint, hoặc tổ hợp bất kỳ của chúng.\n\nNgoài việc chống lạm dụng, rate limiting còn là một **cơ chế kinh doanh**: nó tạo nên các gói giá API (user free được 60 req/min; user pro được 6000), chặn brute-force mật khẩu trên endpoint đăng nhập, tạo back-pressure bảo vệ các service phía sau khỏi lỗi dây chuyền (cascading failure), và giúp lập kế hoạch capacity dễ đoán hơn. Stripe, GitHub, AWS và Twilio đều công bố chính sách rate limit như một phần cốt lõi trong hợp đồng API của họ.\n\nThách thức kỹ thuật ở đây không nhỏ. Chọn sai **thuật toán** thì bạn dính lỗ hổng boundary burst, hoặc phạt oan những client hay burst nhưng trung bình thấp. Chọn sai **nơi lưu counter** thì cả fleet phân tán của bạn thành cái rây. Làm sai **ngữ nghĩa response** thì client còn hành xử tệ hơn chứ không tốt lên. Chương này đi qua cả ba: thuật toán, cách áp đặt trong môi trường phân tán, và hợp đồng với client."
+    },
+    {
+      "type": "diagram",
+      "caption": "Rate limiting nằm ở tầng gateway hoặc middleware, trước khi request chạm tới logic ứng dụng. Nó xác định định danh của client, kiểm tra một counter dùng chung trong Redis, rồi hoặc cho request đi tiếp, hoặc trả về 429 kèm header backoff. Redis được dùng chung bởi mọi instance API server nên giới hạn là toàn cục, không phải theo từng server."
+    },
+    {
+      "type": "analogy",
+      "title": "Đèn điều tiết ở lối nhập cao tốc",
+      "content": "Đèn điều tiết ở lối nhập vào đường cao tốc kiểm soát số xe được vào đường mỗi phút. Không có nó, xe ùa vào cùng lúc và cao tốc tắc cứng. Có đèn, xe vào với tốc độ có kiểm soát, vừa sức đường chịu.\n\n**Token bucket** giống như đặt một xô xu ở lối nhập — mỗi xe lấy một đồng xu để vào. Xu được bù lại mỗi giây một đồng. Nếu bạn tới lúc xô đầy, bạn có thể vọt qua liền một lèo (burst); nếu xô rỗng, bạn phải chờ. Phần lớn thời gian xô chỉ đầy một phần, cho phép lưu lượng tự nhiên nhưng vẫn chặn trần tốc độ trong worst case.\n\n**Leaky bucket** giống một hàng chờ có nhân viên thu phí cho đúng một xe qua mỗi giây, bất kể bao nhiêu xe đang chờ. Hàng chờ hấp thụ burst, còn tốc độ đầu ra thì đều tuyệt đối. Rất hợp để bảo vệ một service phía sau cần tải ổn định, chẳng hạn một bên xử lý thanh toán tính phí theo từng API call.\n\n**Fixed window** là ông quản lý trạm thu phí đếm 1000 xe mỗi giờ và reset bộ đếm vào đầu mỗi giờ. Đơn giản — nhưng một tài xế láu cá có thể canh cho 1000 xe qua lúc 11:59 tối và 1000 xe nữa lúc 12:00 khuya, đẩy 2000 xe qua chỉ trong hai phút.\n\n**Sliding window** liên tục theo dõi 60 phút gần nhất, như một cuốn sổ ghi lại giờ từng xe vào. Trong bất kỳ khoảng 60 phút trượt nào cũng chỉ được tối đa 1000 xe. Công bằng hơn, nhưng tốn chỗ lưu — mỗi lượt vào cần một bản ghi timestamp."
+    },
+    {
+      "type": "explanation",
+      "title": "Thuật toán 1: Token Bucket — chuẩn mực của ngành",
+      "content": "**Token bucket** là thuật toán đứng sau nhiều rate limiter API lớn — AWS API Gateway và Stripe ghi rõ trong tài liệu, còn các gateway như Envoy dùng nó cho local rate limiting. (Không phải ai cũng vậy: REST API của GitHub dùng quota theo giờ có reset, còn rate limiting của Cloudflare đếm request theo sliding window.) Hiểu thật sâu thuật toán này là điều quan trọng nhất trong chương.\n\n**Mô hình:** Một bucket chứa tối đa `capacity` token. Token được thêm vào với `refill rate` không đổi (token mỗi giây hoặc mỗi phút). Mỗi request đến tiêu một token. Nếu bucket còn token, request được cho qua và một token bị lấy đi. Nếu bucket rỗng, request bị từ chối ngay (hoặc, ở một số cài đặt, được đưa vào queue).\n\n**Vì sao nó cho phép burst:** Nếu một client ngồi yên 10 giây và refill rate là 5 token/giây, bucket tích được 50 token (bị chặn trần ở `capacity`). Khi client bất ngờ bắn 40 request, cả 40 đều được duyệt ngay — số token tích lũy đã đủ phủ burst. Sau burst, bucket cạn và từ đó client bị giới hạn ở 5 req/giây. Khả năng hấp thụ burst này chính là thứ client hợp lệ cần: một mobile app vừa mở lên đã tải song song vài màn hình thì không nên bị throttle.\n\n**Áp đặt trung bình dài hạn:** Tốc độ duy trì được luôn ≤ refill rate. Bạn không thể duy trì nhiều hơn `refillRate` request mỗi giây trong một khoảng dài, vì đó là nguồn token mới duy nhất.\n\n**Tham số chính:** `capacity` (kích thước burst tối đa) và `refillRate` (req/giây duy trì). Với một REST API public, bạn có thể chọn `capacity=60, refillRate=10/sec` — client có thể burst 60 request ngay sau một khoảng yên lặng, nhưng về lâu dài chỉ duy trì được 10 req/giây.\n\n**Bẫy khi cài đặt:** Bạn không cần timer chạy nền để bù token. Thay vào đó, lưu `(tokenCount, lastRefillTime)` trong Redis. Ở mỗi request, tính `elapsed = now - lastRefillTime`, tính `tokensToAdd = elapsed × refillRate`, kẹp lại `tokenCount = min(tokenCount + tokensToAdd, capacity)`, rồi tiêu một token. Cách lazy refill (bù token lười, chỉ tính khi có request) này chính xác và không cần process chạy nền."
+    },
+    {
+      "type": "explanation",
+      "title": "Thuật toán 2: Leaky Bucket — làm phẳng traffic gai góc",
+      "content": "**Leaky bucket** xử lý request với tốc độ đầu ra cố định tuyệt đối, bất kể đầu vào burst thế nào. Request đến được xếp vào một FIFO queue. Queue được rút với tốc độ cố định — cứ mỗi `1/rate` giây xử lý một request. Nếu queue đầy, request mới đến bị bỏ.\n\n**So với token bucket:** Token bucket giới hạn tốc độ *đầu vào* và có cho phép burst. Leaky bucket kiểm soát tốc độ *đầu ra* với nhịp đều hoàn toàn. Từ góc nhìn của service phía sau, leaky bucket đảm bảo nó sẽ không bao giờ thấy quá `rate` request mỗi giây, bất kể client làm gì. Token bucket đảm bảo yếu hơn — burst tới `capacity` có thể ập đến cùng lúc.\n\n**Khi nào dùng leaky bucket:** Bất kỳ service phía sau nào cực kỳ nhạy cảm với tải burst đều là ứng viên tốt. Bên xử lý thanh toán, dịch vụ gửi email và các API bên thứ ba tính phí theo call đều hưởng lợi từ traffic đã được làm phẳng. Một pipeline encode video xếp job vào queue sẽ hợp với leaky bucket (job đến đều đặn) hơn là token bucket (đột ngột 50 job khi user upload cả loạt).\n\n**Hai biến thể — cần phân biệt:** *Leaky bucket dạng queue* (như trên) thực sự làm trễ request, ví dụ một Redis list cho mỗi client được một worker rút ra với tốc độ cố định. *Leaky bucket dạng meter* thì không queue gì cả: nó theo dõi một \"thời điểm đến lý thuyết\" (TAT — theoretical arrival time) cho mỗi client và từ chối request đến quá sớm. Đó chính là **Generic Cell Rate Algorithm (GCRA)** từ mạng ATM: ở mỗi request, `tat = max(tat, now)`; nếu `tat - now > burstTolerance` thì từ chối, ngược lại cho qua và đặt `tat += 1/rate`. GCRA chỉ lưu một timestamp cho mỗi client và tương đương về mặt toán học với token bucket — đây là thứ module `redis-cell` và một số gateway cài đặt. `limit_req` của NGINX cũng là leaky bucket: request vượt mức bị làm trễ tối đa tới `burst`, hoặc bị từ chối ngay nếu có `nodelay`.\n\n**Hạn chế:** Leaky bucket thêm **latency** — request phải chờ trong queue thay vì bị từ chối ngay. Với các API tương tác mà client mong latency thấp, độ trễ xử lý cố định này cho trải nghiệm tệ hơn so với thỉnh thoảng nhận một cái 429 nhanh gọn."
+    },
+    {
+      "type": "explanation",
+      "title": "Thuật toán 3: Fixed Window Counter — đơn giản nhưng có lỗ hổng",
+      "content": "**Fixed window** là thuật toán đơn giản nhất: chia thời gian thành các cửa sổ rời rạc có độ dài cố định (ví dụ mỗi phút một cửa sổ). Với mỗi cửa sổ, đếm số request theo từng định danh. Khi số đếm vượt giới hạn, từ chối các request tiếp theo cho tới khi cửa sổ reset.\n\n**Cài đặt bằng Redis:** Dùng key dạng `ratelimit:{identifier}:{windowIndex}` với `windowIndex = floor(unixSeconds / windowSizeSeconds)`. Gọi `INCR` trên key này. Nếu kết quả là 1, gọi `EXPIRE` để đặt TTL bằng độ dài cửa sổ (để key tự dọn). Nếu số đếm vượt giới hạn, trả về 429.\n\n**Tấn công boundary burst:** Đây là lỗ hổng nghiêm trọng. Client biết cửa sổ N reset ở thời điểm T. Họ gửi `limit` request tại T−0.001 (tất cả thuộc cửa sổ N, đều được cho qua). Tại T+0.001 họ gửi thêm `limit` request nữa (cửa sổ N+1, cũng đều được cho qua). Kết quả: `2×limit` request trong khoảng 0.002 giây. Với giới hạn 60/min, kẻ tấn công lấy được 120 request trong chưa tới một mili giây ở mỗi ranh giới. Chuyện này có đáng lo hay không tùy use case: với việc bảo vệ API nói chung thì thường chấp nhận được; với chống brute-force đăng nhập thì là thảm họa.\n\n**Khi nào fixed window chấp nhận được:** Các API public thiên về đọc, giới hạn lớn và hiệu ứng boundary burst chỉ là chuyện nhỏ. Nó cũng hữu ích làm rate limit **thứ cấp** cho quota theo ngày hoặc tháng, nơi độ chính xác ở ranh giới không quan trọng (`limit = 10000/day` — kể cả 20000 ở ranh giới cũng không nghiêm trọng).\n\n**Hiệu quả bộ nhớ:** O(1) cho mỗi định danh — chỉ một số nguyên và một TTL. Sự đơn giản khiến nó phổ biến trong các hệ thống throughput cao, nơi lỗ hổng boundary burst có thể chấp nhận được."
+    },
+    {
+      "type": "diagram",
+      "caption": "Tấn công boundary burst vào fixed window: 50 request ngay trước khi cửa sổ reset, rồi thêm 60 request ngay sau đó. Kẻ tấn công lấy được 110 request trong 2 giây dù giới hạn là 60/min. Các thuật toán sliding window ngăn chuyện này bằng cách theo dõi request trên một khoảng thời gian trượt thực sự."
+    },
+    {
+      "type": "explanation",
+      "title": "Thuật toán 4: Sliding Window — chính xác mà không tốn kém",
+      "content": "**Sliding window log** lưu bản ghi chính xác timestamp của mọi request trong một sorted set cho mỗi định danh. Ở mỗi request, xóa mọi timestamp cũ hơn `now - windowSize`, đếm số timestamp còn lại, và từ chối nếu `count >= limit`. Chính xác nhưng tốn O(N) bộ nhớ, với N là số request trong cửa sổ — ở mức 1000 req/min mỗi user với hàng triệu user, bộ nhớ trở nên không kham nổi.\n\n**Sliding window counter** là bản lai đạt chuẩn production. Nó dùng hai counter fixed window — cửa sổ hiện tại và cửa sổ ngay trước đó — rồi đánh trọng số theo việc bạn đã đi được bao xa trong cửa sổ hiện tại:\n\n```\nweight = (windowSize - (now % windowSize)) / windowSize\neffectiveCount = previousCount × weight + currentCount\n```\n\nNếu bạn đã đi được 75% cửa sổ hiện tại, cửa sổ trước chỉ đóng góp 25% số đếm của nó. Cách này xấp xỉ sliding window thực sự với bộ nhớ O(1) — chỉ hai số nguyên mỗi định danh — đổi lại phải giả định các request của cửa sổ trước rải đều. Trên thực tế sai số rất nhỏ: Cloudflare, nơi dùng thuật toán này, báo cáo chỉ 0.003% request bị cho qua hoặc bị chặn sai trên tổng 400 triệu request.\n\n**Ví dụ:** Độ dài cửa sổ = 60s. Tại t=45s, một client đã gửi 80 request trong cửa sổ trước (t=−60 s tới 0 s) và tới giờ là 30 request trong cửa sổ hiện tại (0 s tới 45 s). Khoảng trượt 60 giây (−15 s tới 45 s) phủ một phần tư cuối của cửa sổ trước, nên trọng số là 0.25. Số đếm hiệu dụng là `80 × (60-45)/60 + 30 = 80 × 0.25 + 30 = 20 + 30 = 50`. Với giới hạn 60, client này vẫn còn được gửi thêm 10 request.\n\n**Chọn thuật toán nào:** Token bucket (hoặc người anh em song sinh GCRA) cho API public cần chịu được burst. Sliding window counter khi cần công bằng nghiêm ngặt. Fixed window cho quota đơn giản (giới hạn theo ngày/tháng). Leaky bucket để bảo vệ các service phía sau nhạy cảm với latency."
+    },
+    {
+      "type": "diagram",
+      "caption": "Sliding window counter tại t=45s trong cửa sổ 60 giây. Cửa sổ trước chỉ đóng góp 25% số đếm của nó (tỉ lệ phần chồng lấn). Số request hiệu dụng là 50, vẫn dưới giới hạn 60, nên request được cho qua. Hai số nguyên thay thế cho cả một sorted set."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Lua script chạy atomic trên Redis server — HMGET, phép tính refill, HSET và EXPIRE là một thao tác không thể chia cắt, nên hai request đồng thời không bao giờ cùng tiêu được token cuối cùng. Pattern lazy refill không cần timer chạy nền: lượng token bù được tính từ thời gian đã trôi qua ở mỗi request. Script còn trả về số token còn lại và chính xác thời gian chờ tới token kế tiếp, nhờ vậy `Retry-After` và `X-RateLimit-Remaining` đều chính xác (lưu ý số trong Lua bị cắt về số nguyên khi trả về Redis, nên mới cần `math.floor`). TTL làm key hết hạn khi bucket đằng nào cũng đã được bù đầy, tránh memory leak với các client không hoạt động. Trong production, hãy đăng ký script một lần (ioredis `defineCommand` / `EVALSHA`) thay vì gửi nguyên source ở mỗi lần gọi, và cân nhắc dùng `TIME` của Redis thay vì đồng hồ của app server.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Rate limiting phân tán: vì sao Redis là bắt buộc",
+      "content": "Sai lầm rate limiting phổ biến nhất trong hệ thống production là dùng **counter cục bộ trên từng server** thay vì một store dùng chung. Đây là lý do nó thất bại thảm hại:\n\nGiả sử bạn có 10 instance API server, mỗi instance áp giới hạn 100 req/min bằng bộ nhớ cục bộ. Một client gửi 100 request mỗi phút tới từng server. Từ góc nhìn của mỗi server, client vẫn trong giới hạn. Nhưng thực chất client đang gửi **1000 request/min** — gấp 10 lần giới hạn bạn định đặt. Load balancer phân phối request qua các server, nên một client tinh ranh (hoặc đơn giản là client có nhiều connection) có thể khai thác chuyện này dễ như trở bàn tay.\n\n**Cách sửa là một store counter dùng chung.** Redis là lựa chọn phổ quát vì:\n1. **Latency dưới mili giây** — một round-trip `EVAL` tới Redis thường mất 0.1–0.5ms trong cùng mạng, overhead chấp nhận được cho việc kiểm tra rate\n2. **Thao tác atomic** — Lua script, INCR và việc Redis xử lý command đơn luồng giúp cập nhật không có race condition một cách đơn giản\n3. **Hỗ trợ TTL** — cơ chế hết hạn key của Redis tự động dọn dẹp cửa sổ\n4. **Cluster mode** — Redis Cluster hoặc Sentinel cung cấp high availability\n\n**Nếu Redis không truy cập được thì sao?** Đây là một failure mode có thật mà bạn phải thiết kế cho nó. Các lựa chọn:\n1. **Fail open**: cho mọi request qua khi không kết nối được Redis. Rủi ro: một đợt traffic không bị throttle trong lúc Redis sập\n2. **Fail closed**: từ chối mọi request khi không kết nối được Redis. Rủi ro: false positive; traffic hợp lệ bị chặn trong lúc Redis gặp sự cố\n3. **Fallback về counter cục bộ**: mỗi server tự áp một giới hạn thấp hơn (ví dụ `globalLimit / serverCount`). Rủi ro: giới hạn chỉ xấp xỉ; server phải biết có bao nhiêu server anh em\n4. **Circuit breaker**: fail open nhưng log, cảnh báo và giám sát gắt gao; tự phục hồi khi Redis kết nối lại\n\nPhần lớn hệ thống production chọn phương án 1 (fail open kèm cảnh báo) vì lý do thực dụng: một khoảng ngắn traffic không bị throttle đỡ thảm họa hơn là chặn toàn bộ user chỉ vì hạ tầng trục trặc chốc lát. Lựa chọn cụ thể phụ thuộc vào threat model của bạn."
+    },
+    {
+      "type": "explanation",
+      "title": "Rate limiting đa chiều: xếp chồng chính sách",
+      "content": "Hệ thống thực tế không áp một rate limit duy nhất — chúng xếp chồng nhiều chính sách cùng lúc, mỗi chính sách nhắm vào một chiều lạm dụng hoặc công bằng khác nhau:\n\n**Giới hạn theo IP** bắt được lạm dụng chưa xác thực (brute force đăng nhập, scraping, khuếch đại DDoS). Ví dụ: `5 login attempts per IP per 5 minutes`. Điểm yếu: IP NAT dùng chung (mạng công ty, nhà mạng di động) gây false positive cho user hợp lệ. Chỉ dùng giới hạn IP cho endpoint thực sự chưa xác thực, hoặc ghép nó với giới hạn theo user ID cho endpoint đã xác thực.\n\n**Giới hạn theo User ID / API Key** áp đặt quota theo từng khách hàng và đảm bảo dùng công bằng. Ví dụ: `1000 req/min per API key`. Đây là chiều đúng cho API đã xác thực — không thể lách bằng cách đổi IP, và không phạt oan những user vô tội dùng chung IP.\n\n**Giới hạn theo endpoint** áp ràng buộc chặt hơn cho các thao tác tốn kém hoặc nhạy cảm. Endpoint `GET /health` có thể chịu 10,000 req/giây; còn `POST /invoice/generate` kích hoạt ghi database và gửi email thì không nên. Ví dụ các override: `POST /auth/login: 5/5min per IP`, `POST /export/csv: 3/hour per user`, `GET /search: 60/min per key`.\n\n**Giới hạn toàn cục** chặn trần tổng traffic bất kể nguồn — một van an toàn cho hạ tầng. Ví dụ: `20,000 req/sec total; return 503 above this`. Nó bảo vệ trước tình huống hàng triệu client hợp lệ cùng retry một lúc (thundering herd sau một sự cố).\n\n**Áp nhiều chính sách:** Kiểm tra mọi chính sách áp dụng được và áp chính sách khắt khe nhất. Trong code, điều này nghĩa là chạy lần lượt các kiểm tra và dừng ngay (short-circuit) khi có một cái từ chối:\n\n```js\nconst policies = [\n  { key: `ip:${req.ip}`, limit: 60, window: 60 },\n  { key: `user:${req.user.id}`, limit: 1000, window: 60 },\n  { key: `endpoint:${req.method}:${req.path}:${req.user.id}`, limit: 10, window: 60 }\n];\nfor (const policy of policies) {\n  if (await isLimited(policy)) return res.status(429).json(...);\n}\n```\n\nPattern này còn giúp việc quản lý chính sách minh bạch và dễ audit — mỗi rule là một mục rõ ràng, dễ đọc."
+    },
+    {
+      "type": "diagram",
+      "caption": "Rate limiting đa chiều kiểm tra chính sách theo thứ tự: IP trước (rẻ nhất, bắt lạm dụng chưa xác thực), rồi user/key (công bằng theo khách hàng), rồi theo endpoint (bảo vệ thao tác tốn kém). Chính sách đầu tiên bị vượt sẽ dừng ngay và trả về 429. Cả ba counter đều được tăng ở mỗi request được cho qua."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Hai key cho mỗi định danh theo dõi counter của cửa sổ hiện tại và cửa sổ trước. Lua script đọc cả hai một cách atomic, tính tổng có trọng số, và chỉ tăng counter nếu số đếm hiệu dụng còn dưới giới hạn. TTL bằng `windowSec * 2` đảm bảo key của cửa sổ trước sống đủ lâu để còn đọc được trong giai đoạn đầu của cửa sổ kế tiếp, rồi tự hết hạn. Các response header `X-RateLimit-*` là một quy ước de-facto được dùng rộng rãi (GitHub, Twitter/X và nhiều nơi khác); nhóm làm việc IETF HTTPAPI đang chuẩn hóa các field không tiền tố `RateLimit-Policy` / `RateLimit` để thay thế. `Retry-After: windowSec` được cố ý đặt bi quan — giá trị chính xác hơn là thời gian cho tới khi số đếm có trọng số tụt xuống dưới giới hạn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Thiết kế response: hợp đồng với client",
+      "content": "Một rate limiter trả về 429 mà không kèm ngữ cảnh gì là một \"công dân API\" tồi. Thiết kế response quyết định client sẽ hành xử thông minh hay tạo ra một **retry storm** — khi mọi client bị throttle đều retry ngay lập tức, khuếch đại chính lượng tải đã gây ra throttle.\n\n**Các header theo quy ước nên trả về ở mọi request (không chỉ 429)** — tên có tiền tố `X-` là chuẩn de-facto; một bản draft của IETF định nghĩa các field không tiền tố `RateLimit-Policy` và `RateLimit` để thay thế:\n- `X-RateLimit-Limit: 100` — số request tối đa được phép trong cửa sổ\n- `X-RateLimit-Remaining: 47` — còn bao nhiêu request trước khi bị throttle\n- `X-RateLimit-Reset: 1701388800` — Unix timestamp lúc cửa sổ reset (hoặc lúc token được bù lại, với token bucket)\n\n**Với response 429, trả thêm:**\n- `Retry-After: 30` — số giây client nên chờ trước khi retry (RFC 6585 nói 429 *có thể* kèm header này; API tử tế thì luôn kèm). Cả định dạng số giây (số nguyên) lẫn HTTP-date đều hợp lệ.\n\n**Định dạng body:** Trả về một JSON body có cấu trúc với các field `error`, `message` và `retryAfter`. Đừng chỉ trả mỗi status code — người dùng API của bạn sẽ cảm ơn bạn.\n\n**Jitter trong Retry-After:** Nếu bạn trả `Retry-After` cố định (ví dụ 60 giây ở ranh giới cửa sổ), mọi client bị throttle sẽ retry cùng lúc tại T+60, tạo thêm một đợt tăng vọt. Hãy thêm jitter ngẫu nhiên: `retryAfter = base + Math.random() * jitterRange`. SDK của AWS và client library của Stripe mặc định cài đặt exponential backoff kèm jitter.\n\n**Phân biệt rate limit với server quá tải:** 429 nghĩa là \"chính bạn đã gửi quá nhiều request\". 503 nghĩa là \"server hiện không xử lý được request, bất kể tốc độ\". Hai trường hợp này đòi hỏi client hành xử khác nhau — 429 thì nên lùi lại (back off); 503 thì nên retry với backoff và kiểm tra trang trạng thái. Đừng trả 429 khi server của bạn chỉ đơn giản là quá tải vì tổng traffic; đó là 503.\n\n**Công khai thông tin quota cả ở response không bị throttle.** Client nhìn thấy `X-RateLimit-Remaining: 5` trước khi đụng tường có thể tự điều chỉnh — gom request, thêm độ trễ, hoặc giảm chức năng một cách êm ái, thay vì dội liên tục cho tới khi nhận 429."
+    },
+    {
+      "type": "explanation",
+      "title": "Cài đặt thực tế và hỗ trợ từ framework",
+      "content": "Bạn hiếm khi phải tự cài đặt rate limiting từ đầu. Các library và thành phần hạ tầng đã có sẵn lo phần nặng nhọc:\n\n**Node.js / Express:**\n- `express-rate-limit` — middleware đơn giản, hỗ trợ Redis store qua `rate-limit-redis`\n- `@upstash/ratelimit` — tối ưu cho Vercel, chạy được trên Edge runtime, hỗ trợ token bucket và sliding window\n- `@nestjs/throttler` — module NestJS với decorator (`@Throttle()`, `@SkipThrottle()`)\n\n**Hạ tầng / nền tảng:**\n- **NGINX `limit_req`** — leaky bucket ngay trong reverse proxy (với tùy chọn `burst` / `nodelay`); không cần dòng code ứng dụng nào\n- **AWS API Gateway** — throttling tích hợp sẵn theo stage và theo method; thuật toán token bucket\n- **Cloudflare Rate Limiting** — áp đặt ở tầng edge trước khi traffic tới origin của bạn; rất hiệu quả chống DDoS\n- **Kong / AWS WAF** — plugin rate limit cấu hình được cho API gateway\n\n**Thuần Redis:**\n- `redis-cell` — module Redis cài đặt GCRA (một leaky bucket tương đương token bucket); chỉ một command `CL.THROTTLE key maxBurst countPerPeriod period [quantity]`\n- `@upstash/ratelimit` trên Upstash Redis — Redis serverless kèm SDK cài đặt fixed window, sliding window và token bucket\n\n**Những cái bẫy thường gặp trong production:**\n1. **Quên xử lý header `X-Forwarded-For`.** Nếu bạn rate limit theo `req.ip` sau load balancer, và LB có đặt `X-Forwarded-For`, bạn phải suy ra đúng IP *gốc* của client. Mục ngoài cùng bên trái là thứ client tự gửi và giả mạo dễ dàng; hãy duyệt danh sách từ **bên phải**, bỏ qua các proxy tin cậy của chính bạn, và dùng địa chỉ đầu tiên mà không phải do bạn thêm vào. Trong Express, đặt `app.set('trust proxy', <number of proxy hops>)` để `req.ip` làm việc này giúp bạn. Làm sai thì hoặc kẻ tấn công tự chọn được rate-limit key của mình, hoặc mọi user bị dồn chung dưới IP của load balancer.\n2. **Bùng nổ key trong Redis.** Không có TTL, các key rate limit của client không hoạt động sẽ tích tụ mãi mãi. Luôn đặt EXPIRE.\n3. **Lệch đồng hồ (clock skew) trong hệ thống phân tán.** Nếu hai instance Redis (hoặc các server tính window key) có đồng hồ hệ thống khác nhau, ranh giới cửa sổ có thể bị xê dịch. Dùng đồng bộ NTP và cân nhắc dùng command `TIME` của Redis (trả về giờ của server) bên trong Lua script thay vì `Date.now()` của ứng dụng.\n4. **Log và giám sát.** Theo dõi tỉ lệ bị throttle (counter `rate_limit_exceeded` theo endpoint và loại định danh). Số 429 của một API key cụ thể tăng vọt đột ngột cho thấy hoặc client hoạt động bất thường, hoặc đang bị tấn công — cả hai đều đáng được cảnh báo."
+    },
+    {
+      "type": "callout",
+      "content": "**Khi nào KHÔNG nên rate limiting ở tầng ứng dụng:** Nếu bạn đã đứng sau Cloudflare hoặc một API gateway có sẵn rate limiting, thêm rate limiting ở tầng ứng dụng lên trên sẽ nhân đôi latency của mỗi request (hai lần gọi Redis thay vì một). Trong kiến trúc này, hãy đẩy rate limiting ra càng gần edge càng tốt — ở tầng gateway hoặc CDN — và chỉ dùng giới hạn ở tầng ứng dụng cho các rule nghiệp vụ (áp quota theo từng user) mà gateway không diễn đạt được. Rate limiter tốt nhất là cái nằm gần kẻ tấn công nhất."
+    },
+    {
+      "type": "callout",
+      "content": "**Checklist thực tế trước khi ship một API có rate limit:**\n- Trả header `Retry-After` và `X-RateLimit-Remaining` ở mọi response, không chỉ 429\n- Thêm jitter ngẫu nhiên vào `Retry-After` để tránh thundering herd lúc cửa sổ reset\n- Với endpoint đã xác thực, rate limit theo API key hoặc user ID, không chỉ theo IP (vì NAT của công ty)\n- Chỉ dùng giới hạn IP cho endpoint chưa xác thực như `/login`, `/register`, `/forgot-password`\n- Dùng Lua script (hoặc Redis transaction) để việc đọc và ghi counter là atomic\n- Đặt TTL cho key Redis để tránh bộ nhớ tích tụ từ các client không hoạt động\n- Test hành vi boundary burst của thuật toán trước khi lên production\n- Giám sát tỉ lệ 429 theo endpoint trong observability stack — tăng vọt bất thường chính là sự cố"
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Token bucket** là thuật toán API phổ biến nhất (AWS API Gateway và Stripe có ghi trong tài liệu): burst tối đa `capacity`, trung bình dài hạn `refillRate`. Cài đặt bằng lazy refill (lưu số token + lastRefillTime) trong một Lua script atomic. **GCRA** là một cách phát biểu tương đương, chỉ lưu một timestamp cho mỗi client (được `redis-cell` dùng).",
+        "**Fixed window** đơn giản nhưng cho phép tới ~2× giới hạn quanh ranh giới cửa sổ. **Sliding window counter** sửa chuyện này với hai số nguyên mỗi client (cửa sổ hiện tại + cửa sổ trước, cửa sổ trước được đánh trọng số theo phần chồng lấn) — bộ nhớ O(1) và, theo đo đạc của Cloudflare, tỉ lệ sai số không đáng kể. **Leaky bucket** làm phẳng đầu ra về một tốc độ cố định (NGINX `limit_req`).",
+        "**Rate limiting phân tán đòi hỏi một counter Redis dùng chung.** Counter cục bộ trên từng server trên thực tế cho phép `limit × serverCount` request — một lỗi chí mạng ở bất kỳ deployment nhiều instance nào. Dùng Lua script để INCR+EXPIRE là atomic và ngăn race condition.",
+        "**Xếp chồng nhiều chiều rate limiting:** địa chỉ IP cho endpoint chưa xác thực (chống brute-force), API key/user ID cho traffic đã xác thực (công bằng theo khách hàng), giới hạn theo endpoint cho các thao tác tốn kém. Áp mọi chính sách và trả 429 nếu bất kỳ cái nào bị vượt.",
+        "**Thiết kế response quan trọng ngang thuật toán.** Trả `X-RateLimit-Limit`, `X-RateLimit-Remaining` và `X-RateLimit-Reset` ở mọi response. Trả `Retry-After` khi 429. Thêm jitter để tránh thundering herd lúc cửa sổ reset.",
+        "**Fail open thường là chiến lược đúng khi Redis lỗi.** Khi Redis không truy cập được, hãy cho traffic đi qua thay vì chặn toàn bộ user — một khoảng ngắn traffic không bị throttle ít hại hơn một sự cố sập toàn ứng dụng. Cảnh báo gắt gao và tự phục hồi.",
+        "**Đẩy rate limiting ra edge.** Cloudflare, NGINX và API Gateway áp giới hạn trước khi traffic tới ứng dụng, tiết kiệm tài nguyên backend. Chỉ dành rate limiting ở tầng ứng dụng cho các quota nghiệp vụ mà hạ tầng không diễn đạt được."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Một client ngồi yên 20 giây, rồi bắn 80 request cùng lúc. Với token bucket (capacity=100, refillRate=5/sec), có bao nhiêu request được cho qua?",
+      "options": [
+        "5 — chỉ bằng lượng bù của một chu kỳ",
+        "80 — burst được hấp thụ hoàn toàn bởi số token tích lũy",
+        "100 — mọi request đều qua vì bucket đầy",
+        "0 — bucket rỗng sau thời gian ngồi yên"
+      ],
+      "explanation": "Sau 20 giây ngồi yên với refillRate=5/sec, bucket tích được 20×5=100 token, chặn trần ở capacity=100. 80 request tiêu 80 token, tất cả đều được cho qua. 20 token còn lại vẫn nằm trong bucket. Token bucket chủ động cho phép burst tới mức capacity đã tích lũy được trong thời gian ngồi yên."
+    },
+    {
+      "id": "q2",
+      "question": "\"Tấn công boundary burst\" nhắm vào fixed window rate limiting là gì?",
+      "options": [
+        "Client gửi đủ giới hạn ngay trước khi một cửa sổ kết thúc, rồi gửi đủ giới hạn nữa ngay khi cửa sổ kế tiếp bắt đầu — lấy được gấp 2 giới hạn trong một khoảng thời gian rất ngắn",
+        "Kẻ tấn công giả mạo timestamp để reset counter của cửa sổ sớm",
+        "Số nguyên của counter bị tràn và quay về 0, cho phép truy cập không giới hạn",
+        "Redis EXPIRE kích hoạt quá muộn, cho phép thêm request trong khoảng trống lúc hết hạn"
+      ],
+      "explanation": "Với fixed window 60 req/min, client gửi 60 request lúc 11:59:59 (cửa sổ 1, đều được cho qua) và 60 request nữa lúc 12:00:01 (cửa sổ 2, đều được cho qua). Tức là 120 request trong 2 giây — gấp 2 giới hạn dự định. Các thuật toán sliding window ngăn chuyện này bằng cách đo request trên một khoảng trượt thực sự, không có ranh giới cứng."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao rate limiting phân tán phải dùng một counter Redis dùng chung thay vì counter cục bộ trên từng server?",
+      "options": [
+        "Redis hỗ trợ số nguyên lớn hơn so với hầu hết runtime của server",
+        "Redis tự động retry các request lỗi, điều mà bộ nhớ cục bộ không làm được",
+        "Counter trong bộ nhớ cục bộ quá chậm để tra cứu rate limit ở throughput cao",
+        "Counter cục bộ nhân giới hạn hiệu dụng lên theo số server — 10 server, mỗi server cho 100 req/min, nghĩa là một client có thể gửi 1000 req/min"
+      ],
+      "explanation": "Nếu mỗi server trong số 10 server tự đếm tới 100 req/min, một client có nhiều connection dội vào cả 10 server có thể gửi 1000 request mỗi phút. Một counter Redis dùng chung áp giới hạn toàn cục trên cả fleet — counter được tăng trong Redis ở mọi request từ mọi server."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao pattern rate limiter INCR + EXPIRE trên Redis lại dùng Lua script thay vì hai command riêng rẽ?",
+      "options": [
+        "Lua script chạy nhanh hơn các command gốc của Redis",
+        "INCR và EXPIRE phải đi cùng nhau — nếu process crash giữa hai command riêng rẽ, counter sẽ không có TTL, không bao giờ reset, và client bị chặn mãi mãi",
+        "Redis EXPIRE không hoạt động trên key tạo bởi INCR nếu không có Lua",
+        "Lua script cho phép logic rẽ nhánh mà chế độ pipeline của Redis không hỗ trợ"
+      ],
+      "explanation": "Bản thân INCR đã atomic, nên hai request không bao giờ cùng thấy count=1. Nguy hiểm nằm ở khoảng hở giữa INCR và một EXPIRE riêng: nếu app crash hoặc connection rớt đúng lúc đó, key tồn tại mà không có TTL và client đó bị rate limit vĩnh viễn. Một Lua script (hoặc MULTI/EXEC) chạy cả hai như một đơn vị trên Redis server, nên TTL luôn được đặt."
+    },
+    {
+      "id": "q5",
+      "question": "Thuật toán sliding window counter dùng hai counter fixed window. Tại t=45s trong cửa sổ 60 giây, cửa sổ trước có 80 request và cửa sổ hiện tại có 30. Với giới hạn 100, request kế tiếp có được cho qua không?",
+      "options": [
+        "Có — chỉ số đếm của cửa sổ hiện tại (30) là quan trọng",
+        "Không — tổng 110 request vượt quá 100",
+        "Có — số đếm hiệu dụng là 50: (80 × 0.25) + 30 = 50, dưới 100",
+        "Không — request của cửa sổ trước luôn được tính đủ trọng số"
+      ],
+      "explanation": "Tại t=45s trong cửa sổ 60 giây, trọng số của cửa sổ trước là (60-45)/60 = 0.25 (chỉ 25% cửa sổ trước chồng lấn với khoảng trượt 60 giây hiện tại). Số đếm hiệu dụng = 80 × 0.25 + 30 = 20 + 30 = 50. Vì 50 < 100, request được cho qua. Sliding window counter xấp xỉ một cửa sổ trượt thực sự với bộ nhớ O(1)."
+    },
+    {
+      "id": "q6",
+      "question": "Khác biệt then chốt giữa token bucket và leaky bucket là gì?",
+      "options": [
+        "Token bucket cho phép burst tới capacity; leaky bucket xuất ra với tốc độ cố định, không có burst",
+        "Token bucket lưu token trong Redis; leaky bucket lưu cục bộ",
+        "Token bucket dành cho HTTP; leaky bucket dành cho traffic TCP",
+        "Token bucket từ chối request vượt mức; leaky bucket xếp chúng vào queue vô thời hạn"
+      ],
+      "explanation": "Token bucket cho phép burst: nếu bạn đã tích được 100 token, 100 request có thể được phục vụ ngay lập tức. Leaky bucket rút queue với tốc độ cố định bất kể request đến theo kiểu gì — đầu ra luôn đều. Leaky bucket được ưu tiên khi service phía sau cần tốc độ request ổn định, dễ đoán (ví dụ bên xử lý thanh toán, API gửi email)."
+    },
+    {
+      "id": "q7",
+      "question": "Một startup chỉ rate limit API theo địa chỉ IP. Vấn đề chính của cách này với khách hàng doanh nghiệp đã xác thực là gì?",
+      "options": [
+        "Địa chỉ IPv6 không thể lưu làm key trong Redis",
+        "Địa chỉ IP thay đổi quá thường xuyên nên không theo dõi tin cậy được",
+        "Hàng nghìn nhân viên sau NAT của công ty dùng chung một IP public — cả công ty bị throttle khi một user dùng nhiều chạm giới hạn",
+        "Load balancer thay IP của client bằng IP của chính nó, khiến mọi client trông như một"
+      ],
+      "explanation": "Văn phòng công ty, trường đại học và nhà mạng di động dùng NAT, khiến hàng nghìn user trông như một IP duy nhất. Giới hạn theo IP phạt tất cả user khi chỉ một người trong số họ dùng nhiều. Với API đã xác thực, hãy rate limit theo user ID hoặc API key — chúng định danh duy nhất thực thể thực sự bị tính phí. Chỉ dành giới hạn IP cho endpoint chưa xác thực như /login."
+    },
+    {
+      "id": "q8",
+      "question": "Mục đích của việc thêm jitter ngẫu nhiên vào giá trị header `Retry-After` là gì?",
+      "options": [
+        "Jitter khiến kẻ tấn công khó dịch ngược rate limiter hơn",
+        "Jitter bù cho clock skew của Redis trong các deployment phân tán",
+        "Jitter là yêu cầu bắt buộc của RFC 6585 về mặt tuân thủ",
+        "Jitter ngăn mọi client bị throttle retry cùng một thời điểm, điều sẽ gây thêm một đợt traffic tăng vọt ở ranh giới cửa sổ"
+      ],
+      "explanation": "Nếu 10,000 client bị throttle và tất cả đều nhận Retry-After: 60, chúng sẽ cùng retry tại T+60, tạo ra một thundering herd có thể lại vượt capacity. Thêm jitter ngẫu nhiên (ví dụ Retry-After = 60 + random(0, 30)) rải các lần retry ra trong khoảng 30 giây, làm phẳng làn sóng retry. SDK của AWS, Stripe và Google cài đặt exponential backoff kèm jitter chính vì lý do này."
+    },
+    {
+      "id": "q9",
+      "question": "Khi nào bạn nên trả 503 Service Unavailable thay vì 429 Too Many Requests?",
+      "options": [
+        "Khi client đã vượt quota hằng ngày",
+        "Khi không kết nối được Redis lưu rate",
+        "Khi cửa sổ rate limit chưa reset",
+        "Khi server quá tải vì tổng traffic, bất kể tốc độ request của từng client"
+      ],
+      "explanation": "429 nghĩa là \"client cụ thể này đã gửi quá nhiều request\". 503 nghĩa là \"server hiện không xử lý được request, bất kể ai đang hỏi\". Nếu server bị quá tải bởi tổng lưu lượng toàn cục, 503 mới đúng — từng client riêng lẻ không có lỗi. Client xử lý hai trường hợp khác nhau: 429 kích hoạt backoff riêng cho client đó; 503 kích hoạt retry kèm backoff và kiểm tra trang trạng thái."
+    },
+    {
+      "id": "q10",
+      "question": "Cách nào phù hợp nhất khi Redis không truy cập được và rate limiter không kiểm tra được counter?",
+      "options": [
+        "Trả 500 Internal Server Error cho mọi request",
+        "Chặn mọi request bằng 503 cho tới khi Redis phục hồi",
+        "Fallback về counter cục bộ trên từng server hoặc fail open (cho mọi request qua), kèm cảnh báo gắt gao",
+        "Tắt API endpoint cho tới khi Redis được khôi phục"
+      ],
+      "explanation": "Hai lựa chọn thực tế là: fail open (cho mọi request qua, cảnh báo, tự phục hồi) hoặc fallback về counter cục bộ với giới hạn thấp hơn theo tỉ lệ. Chặn toàn bộ user (fail closed) trong lúc Redis sập thường tệ hơn một khoảng ngắn traffic không bị throttle. Lựa chọn đúng phụ thuộc vào threat model — một endpoint đăng nhập cần chống brute force có thể chọn fail closed, còn API thông thường nên fail open. Dù chọn cách nào, giám sát gắt gao và tự phục hồi là thiết yếu."
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "sourceHash": "ae0782f98438",
+  "title": "SQL vs NoSQL & định lý CAP",
+  "tagline": "Vì sao không có distributed database hoàn hảo — và cách chọn đúng loại store cho workload của bạn.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mọi ứng dụng bạn xây đều đứng trên một tầng lưu trữ, và lựa chọn tầng đó định hình gần như mọi quyết định kiến trúc theo sau. Trong nửa thế kỷ đầu của điện toán thương mại, lựa chọn này rất đơn giản: bạn dùng một database quan hệ, bạn học SQL, và bạn tin tưởng giao dữ liệu cho các bảng và foreign key. Mô hình quan hệ, do Edgar Codd phát minh tại IBM năm 1970, giàu sức biểu đạt và có nền tảng toán học chặt chẽ đến mức nó thống trị gần như mọi thứ.\n\nRồi internet bùng nổ quy mô. Các công ty như Google, Amazon và Facebook phát hiện ra rằng những đảm bảo mà database quan hệ cung cấp — schema chặt chẽ, join nhiều bảng, transaction serializable — đi kèm một cái giá: **chúng rất khó phân tán**. Chia một database quan hệ ra nhiều máy mà vẫn giữ mọi đảm bảo về tính đúng đắn đòi hỏi mức phối hợp phi thường. Ở quy mô hàng tỷ người dùng và hàng petabyte dữ liệu, chi phí phối hợp đó trở nên không thể chấp nhận.\n\nTừ áp lực đó nảy sinh cả một hệ sinh thái các data store thay thế, được gom lỏng lẻo dưới nhãn **NoSQL** (cái tên nổi lên từ một hashtag của buổi meetup năm 2009 và sau này mới được diễn giải ngược thành 'Not Only SQL'). Các hệ thống này đánh đổi một phần đảm bảo của SQL để lấy khả năng mở rộng theo chiều ngang, schema linh hoạt và các access pattern được tinh chỉnh cho từng workload cụ thể. Document store, key-value cache, wide-column engine, graph database — mỗi họ có một bộ trade-off khác nhau.\n\nNăm 2000, Eric Brewer đề xuất **định lý CAP** như một khung hình thức để hiểu distributed database có thể và không thể hứa hẹn những gì. Được Gilbert và Lynch chứng minh chặt chẽ năm 2002, nó phát biểu rằng trong một network partition — khi các node trong cluster không thể liên lạc với nhau — một hệ thống phân tán phải chọn giữa hai tính chất: **Consistency** (mọi lần đọc phản ánh lần ghi mới nhất) hoặc **Availability** (mọi request đều nhận được response, dù dữ liệu có thể đã cũ). Đây không phải thất bại về kỹ thuật; đó là một điều bất khả đã được chứng minh: không thể có cả hai chừng nào partition còn kéo dài.\n\nTrong chương này, ta sẽ xây dựng một mô hình tư duy hoàn chỉnh: SQL cho bạn những gì và vì sao, các họ NoSQL là gì và khi nào mỗi họ tỏa sáng, định lý CAP hoạt động cụ thể ra sao, sharding và replication mở rộng dữ liệu theo chiều ngang thế nào, và cách đưa ra lựa chọn đúng cho một workload nhất định. Đây là một số chủ đề phổ biến nhất trong interview cho senior engineer, và nắm vững chúng là điều kiện tiên quyết cho mọi cuộc thảo luận system design nghiêm túc."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hãy bắt đầu từ access pattern, đừng chạy theo trào lưu. Mỗi họ database tối ưu cho một dạng query khác nhau."
+    },
+    {
+      "type": "analogy",
+      "title": "Phòng hồ sơ bị chia đôi (split-brain)",
+      "content": "Hãy tưởng tượng một công ty lớn có hai phòng hồ sơ ở hai đầu tòa nhà, cả hai đều giữ bản sao giống hệt nhau của hồ sơ nhân viên. Một người đưa thư chạy qua lại giữa hai phòng cả ngày để giữ các bản sao đồng bộ. Giờ giả sử hành lang của người đưa thư bị chặn — một network partition.\n\nNgười quản lý hai phòng hồ sơ giờ phải chọn. Họ có thể **ngừng nhận cập nhật** cho đến khi hành lang thông trở lại (đó là Consistency: người đọc được đảm bảo thấy dữ liệu mới nhất, nhưng không lần ghi nào được thực hiện). Hoặc họ có thể **tiếp tục nhận cập nhật một cách độc lập**, biết rằng các bản sao sẽ lệch nhau và cần được đối soát sau khi hành lang thông trở lại (đó là Availability: dịch vụ vẫn chạy, nhưng người đọc có thể thấy hồ sơ đã cũ).\n\nMột phòng hồ sơ duy nhất, không có người đưa thư nào phải lo, có thể đưa ra cả hai đảm bảo cùng lúc — đó là lý do một instance PostgreSQL độc lập đôi khi được mô tả là 'CA', dù partition tolerance chẳng có ý nghĩa gì khi không có gì để bị chia cắt. Trong một hệ thống phân tán thật, hành lang chính là mạng, và sớm muộn gì nó cũng bị chặn. Partition không phải là giả thuyết — ở quy mô lớn, nó là điều chắc chắn. Câu hỏi chỉ là bạn hy sinh điều gì khi nó xảy ra."
+    },
+    {
+      "type": "explanation",
+      "title": "Database quan hệ: pháo đài SQL",
+      "content": "**Database quan hệ** tổ chức dữ liệu thành các **bảng** (theo nghĩa toán học còn gọi là relation). Mỗi bảng có một **schema** cố định — danh sách các cột có tên và có kiểu. Các dòng là những bản ghi riêng lẻ. Quan hệ giữa các entity được biểu diễn qua **foreign key**: một cột trong bảng này chứa giá trị primary key của một dòng trong bảng khác.\n\nSQL (Structured Query Language) là giao diện. Nó mang tính **khai báo (declarative)**: bạn mô tả bạn muốn *cái gì*, không phải *làm thế nào* để lấy nó. Query optimizer của database — một phần mềm tinh vi — đọc SQL của bạn, tham khảo thống kê về kích thước bảng và phạm vi index, rồi sinh ra một **execution plan** hiệu quả. Việc tách ý định khỏi cách thực thi này cực kỳ mạnh mẽ. Một query mười dòng SQL có thể được optimizer viết lại thành một plan dùng hash join cộng bitmap index scan, chạy trong vài mili giây trên một bảng trăm triệu dòng.\n\nCác đảm bảo về tính đúng đắn mà SQL database cung cấp được gọi là **ACID**:\n- **Atomicity**: một transaction hoặc commit toàn bộ, hoặc rollback toàn bộ — không có ghi dở dang.\n- **Consistency**: mọi transaction đưa database từ một trạng thái hợp lệ sang một trạng thái hợp lệ khác — các constraint (foreign key, mệnh đề CHECK, UNIQUE index) luôn được thực thi.\n- **Isolation**: các transaction đồng thời không thấy thay đổi chưa commit của nhau; ở mức chặt nhất (Serializable), kết quả bằng với một thứ tự chạy lần lượt nào đó. Phần lớn database mặc định dùng một mức yếu hơn như Read Committed.\n- **Durability**: một khi đã commit, transaction sống sót qua crash — write-ahead log (WAL) đảm bảo khôi phục được.\n\nBốn tính chất này là thứ khiến database quan hệ trở thành lựa chọn mặc định cho hệ thống tài chính, ERP/CRM, hồ sơ y tế, và mọi lĩnh vực mà dữ liệu sai gây hậu quả về pháp lý, an toàn hay tiền bạc. Khi “hợp đồng” về tính đúng đắn phải vững như thép, SQL là câu trả lời.\n\nTrade-off nằm ở **việc mở rộng ghi**. Các đảm bảo ACID của SQL đòi hỏi phối hợp: lock, two-phase commit cho transaction phân tán, flush WAL xuống đĩa. Trên một server mạnh duy nhất, việc phối hợp này rẻ. Trải nó ra hàng chục node thì chi phí phối hợp sẽ lấn át. Đây là lý do về lịch sử SQL database mở rộng theo **chiều dọc** (máy to hơn) trong khi các hệ thống NoSQL được thiết kế để mở rộng theo **chiều ngang** (nhiều máy hơn).\n\nPostgreSQL, MySQL/MariaDB và SQLite là các database quan hệ mã nguồn mở thống trị. Tuy vậy, câu \"SQL không scale out được\" không còn đúng như một khẳng định chung chung nữa: các **tầng sharding** (Citus cho PostgreSQL, Vitess cho MySQL) chia một database logic ra nhiều node, và các database **distributed SQL** (\"NewSQL\") — Google Spanner, CockroachDB, YugabyteDB, TiDB, Amazon Aurora DSQL — replicate mỗi dải dữ liệu bằng một giao thức consensus (Paxos hoặc Raft) và cung cấp transaction serializable trên nhiều máy. Cái giá là latency: một lần commit xuyên region phải chờ một quorum replica, thường mất hàng chục mili giây. Các dịch vụ managed như Amazon Aurora mở rộng storage và read replica, nhưng một cluster Aurora tiêu chuẩn vẫn chỉ có một writer."
+    },
+    {
+      "type": "diagram",
+      "caption": "Tính atomic của ACID: mọi câu lệnh trong một transaction cùng thành công hoặc cùng thất bại. WAL (Write-Ahead Log) đảm bảo durability — kể cả crash sau COMMIT cũng không làm mất dữ liệu."
+    },
+    {
+      "type": "explanation",
+      "title": "Bốn họ NoSQL — và khi nào dùng họ nào",
+      "content": "**NoSQL** không phải một công nghệ duy nhất mà là cái ô che cho nhiều mô hình lưu trữ khác biệt, mỗi mô hình tối ưu cho một dạng dữ liệu và access pattern khác nhau. Nhầm lẫn giữa chúng là sai lầm phổ biến nhất của engineer khi đánh giá database.\n\n**Document store** (MongoDB, Firestore, CouchDB) lưu các document bán cấu trúc, giống JSON. Mỗi document là một khối độc lập gồm các field lồng nhau và array — không cần join để nạp một entity hoàn chỉnh vì mọi attribute của nó nằm ở một chỗ. Đây gọi là **denormalisation mặc định**. Document store xuất sắc khi hình dạng dữ liệu khác nhau giữa các bản ghi (profile người dùng với các field tùy chọn khác nhau), khi bạn thường nạp cả entity một lúc, và khi team thay đổi schema liên tục. Nhược điểm: các query trải nhiều collection thì vụng về và thường chậm hơn một phép SQL join tương đương (`$lookup` của MongoDB có ít chiến lược thực thi hơn nhiều so với một optimizer quan hệ), và dữ liệu nhân bản phải được ứng dụng giữ đồng bộ — nếu email của một người dùng được nhúng trong nhiều document, bạn phải cập nhật tất cả. MongoDB hỗ trợ ACID transaction trên nhiều document từ phiên bản 4.0 (sharded cluster từ 4.2), nhưng chúng tốn hơn các lần ghi trên một document, vốn luôn atomic.\n\n**Key-value store** (Redis, DynamoDB, Memcached) là trừu tượng đơn giản nhất có thể: một hash map khổng lồ. Cho một key, lấy về value — O(1) và rất nhanh. Redis giữ mọi thứ trong bộ nhớ với tùy chọn persist xuống đĩa; tra cứu được đo bằng micro giây. Key-value store là lựa chọn tự nhiên cho session, cache, feature flag, counter rate-limiting và leaderboard. Giới hạn của chúng là không có cấu trúc: bạn query theo key (DynamoDB thêm sort key cho range query trong một partition, cùng secondary index), và database không nhìn thấy các quan hệ.\n\n**Wide-column store** (Apache Cassandra, HBase, ScyllaDB) tinh tế hơn. Dù tên như vậy, chúng gần với một sorted map phân tán hơn là một column store truyền thống. Dữ liệu được tổ chức theo **partition key** (shard nào giữ dòng này), **clustering key** (thứ tự sắp xếp trong một partition), và một tập cột tùy ý có thể khác nhau giữa các dòng. Cassandra được thiết kế cho workload **ghi nhiều, chủ yếu ghi nối thêm**: dữ liệu time-series, số đo cảm biến IoT, event log và analytics ở quy mô lớn. Nó đạt throughput ghi phi thường bằng cách ghi vào một cấu trúc trong bộ nhớ trước (memtable), flush tuần tự xuống đĩa (SSTable), và không bao giờ update tại chỗ — thay vào đó, các lần ghi mới hơn đơn giản là che khuất các lần ghi cũ. Trade-off là data model phải được thiết kế **theo query trước**: bạn định nghĩa bảng quanh các query bạn sẽ chạy, không phải quanh quan hệ giữa các entity.\n\n**Graph database** (Neo4j, Amazon Neptune, ArangoDB) biểu diễn dữ liệu dưới dạng **node** và **edge** — đỉnh và cạnh theo thuật ngữ lý thuyết đồ thị. Cả node lẫn edge đều có thể mang thuộc tính. Lợi thế then chốt là **duyệt quan hệ một cách tự nhiên**: tìm 'mọi bạn của bạn trong phạm vi 3 bước mà sống ở Berlin' là một thao tác O(số edge được duyệt) trong graph database, so với một chuỗi join O(kích thước bảng) trong SQL. Mạng xã hội, recommendation engine, phát hiện gian lận (nhận ra các chuỗi giao dịch đáng ngờ) và knowledge graph là các use case kinh điển. Graph database tỏa sáng khi quan hệ chính là câu hỏi, chứ không phải thứ tính sau."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mỗi họ NoSQL tối ưu cho một access pattern khác nhau về bản chất. Chọn theo hình dạng workload, không theo độ phổ biến, là kỷ luật then chốt."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Cả hai phiên bản trả về cùng một kết quả. Phiên bản SQL để optimizer chọn thuật toán join, thứ tự join và index dựa trên thống kê của bảng. Pipeline MongoDB chạy các stage gần như theo thứ tự đã viết (nó có thể đẩy `$match` lên sớm hơn và dùng index cho các stage đầu): ở đây `$lookup` là một lần tra `_id` có index cho mỗi nhóm, vẫn ổn, nhưng một `$lookup` trên field không có index sẽ quét collection bên kia cho từng document đầu vào. Với các query phân tích ad-hoc trên nhiều entity, SQL thường phù hợp hơn; MongoDB thắng khi bạn nạp nguyên document theo key mà không cần join.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Định lý CAP — thực sự nói gì",
+      "content": "**Định lý CAP** thường được tóm tắt là \"một distributed data store chỉ có thể đảm bảo tối đa hai trong ba tính chất sau\":\n\n- **Consistency (C)**: mọi lần đọc nhận được lần ghi mới nhất hoặc một lỗi. Mọi node thấy cùng dữ liệu tại cùng thời điểm. Về mặt hình thức, đây là **linearizability** — mọi thao tác dường như xảy ra tức thời tại một thời điểm nào đó giữa lúc bắt đầu và kết thúc của nó.\n- **Availability (A)**: mọi request mà một node không hỏng nhận được đều có response **không phải lỗi** — nhưng không đảm bảo nó chứa lần ghi mới nhất. Trả về \"cannot reach quorum\" được tính là *không available*.\n- **Partition Tolerance (P)**: hệ thống tiếp tục hoạt động ngay cả khi một số lượng tùy ý message giữa các node bị mất hoặc bị trễ — tức là một network partition.\n\nĐây là sắc thái then chốt mà phần lớn các lời giải thích bỏ qua: **trong bất kỳ hệ thống phân tán thật nào, partition tolerance là không thể thương lượng**. Network partition có xảy ra. Cáp bị cắt, switch hỏng, availability zone trên cloud mất kết nối. Một hệ thống từ bỏ partition tolerance khi partition xảy ra thì đơn giản là offline — và như vậy dù sao cũng vi phạm availability. Vì thế lựa chọn thật không phải là 'chọn hai trong ba'; mà là:\n\n> **Khi partition xảy ra, bạn ưu tiên Consistency (trả lỗi thay vì dữ liệu cũ) hay Availability (trả dữ liệu có thể đã cũ thay vì lỗi)?**\n\nĐây là lựa chọn **CP hay AP**. Các hệ thống 'CA' thực chất chỉ là hệ thống một node, nơi partition không có ý nghĩa.\n\nHai điểm chính xác mà interviewer thích hỏi: **chữ C trong CAP là linearizability** của một register duy nhất — nó chẳng liên quan gì tới chữ C trong ACID (constraint và invariant). Và CAP không nói gì về latency hay về 99.9% thời gian không có partition — đó là thứ PACELC (bên dưới) bổ sung.\n\n**Hệ thống CP** (Consistency + Partition Tolerance): HBase, Zookeeper, etcd, MongoDB với majority write concern. Trong một partition, hệ thống CP từ chối phục vụ các request không thể đảm bảo phản ánh trạng thái mới nhất. Bạn có thể nhận lỗi: 'Cannot reach quorum'. Ngân hàng, hệ thống tồn kho và dịch vụ bầu leader muốn CP — hiển thị cho khách hàng một số dư cao hơn thực tế $1000 còn tệ hơn là hiển thị một lỗi tạm thời.\n\n**Hệ thống AP** (Availability + Partition Tolerance): Cassandra, CouchDB, Riak, và DynamoDB ở chế độ đọc eventually consistent mặc định. Trong một partition, hệ thống AP tiếp tục phục vụ request từ bất kỳ node nào còn truy cập được, có thể trả về dữ liệu cũ. Khi partition được khắc phục, hệ thống đối soát các lần ghi đã lệch nhau — **eventual consistency**. Feed mạng xã hội, giỏ hàng, DNS và counter analytics chấp nhận eventual consistency — cho người dùng xem một bài viết cũ hai giây không phải là vấn đề nghiệp vụ."
+    },
+    {
+      "type": "diagram",
+      "caption": "CAP trong thực tế: P là bắt buộc trong hệ thống phân tán. Quyết định thực sự là CP (báo lỗi khi partition, không bao giờ trả dữ liệu cũ) hay AP (trả dữ liệu có thể đã cũ, đối soát sau)."
+    },
+    {
+      "type": "explanation",
+      "title": "Eventual consistency — cơ chế và hệ quả",
+      "content": "**Eventual consistency** là mô hình consistency mà các hệ thống AP áp dụng. Nó là đảm bảo yếu hơn linearizability: nếu không có lần ghi mới nào vào một key, cuối cùng mọi replica sẽ hội tụ về cùng một giá trị. Trong khoảng thời gian trước khi hội tụ, các client khác nhau đọc từ các replica khác nhau có thể thấy giá trị khác nhau cho cùng một key.\n\nTrong Cassandra, việc ghi dùng một khái niệm gọi là **quorum**. Nếu bạn có replication factor là 3 (mỗi dòng được lưu trên ba node) và cấu hình ghi thành công khi 2 trên 3 node xác nhận (`QUORUM`), và việc đọc cũng cần xác nhận từ 2 trên 3 node, thì `R + W > N` (2 + 2 > 3) — bạn được đảm bảo luôn đọc được ít nhất một node có lần ghi mới nhất. Đây gọi là **quorum read/write** và cho đảm bảo mạnh hơn nhiều so với những gì một nền tảng AP gợi ý. Nó vẫn không tự động linearizable: sloppy quorum (hinted handoff), lệch đồng hồ khi dùng last-write-wins, và các lần ghi thất bại một phần đều có thể tạo ra anomaly, đó là lý do các hệ thống cần linearizability thật sự dùng consensus (Cassandra cung cấp lightweight transaction dựa trên Paxos cho việc này). Và hãy nhớ trade-off — một request `QUORUM` thất bại khi đa số replica không truy cập được, nên nó từ bỏ availability đúng theo nghĩa CAP. Hạ xuống `ONE` (chỉ một node cần xác nhận) tối đa hóa throughput và availability nhưng cho phép đọc dữ liệu cũ.\n\nKhả năng tinh chỉnh này là một nhận thức then chốt: phần lớn distributed database hiện đại không nằm cố định tại một điểm trên phổ CAP — chúng cho phép người vận hành **tinh chỉnh trade-off cho từng thao tác**.\n\n**Giải quyết xung đột** trở nên cần thiết khi các lần ghi đã lệch nhau phải được trộn lại. Các chiến lược phổ biến:\n- **Last-Write-Wins (LWW)**: lần ghi có timestamp cao nhất thắng. Đơn giản nhưng mất dữ liệu trong các tình huống đồng thời.\n- **Version vector / vector clock**: mỗi replica duy trì một vector số lần ghi theo từng node. Các cập nhật có quan hệ nhân quả có thể được sắp thứ tự; các cập nhật đồng thời được đánh dấu để ứng dụng tự giải quyết.\n- **CRDT (Conflict-free Replicated Data Type)**: các cấu trúc dữ liệu được thiết kế sao cho mọi phép trộn các cập nhật đồng thời đều có tính giao hoán, kết hợp và idempotent — counter, set và register đều có thể được làm cho an toàn theo kiểu CRDT.\n\nRiak và các database Active-Active của Redis Enterprise dùng CRDT. Bài báo **Dynamo** gốc của Amazon (2007) trả các phiên bản xung đột về cho ứng dụng tự trộn (ví dụ giỏ hàng); dịch vụ **DynamoDB** thì khác — global table giải quyết các lần ghi đồng thời bằng last-writer-wins. Cassandra giải quyết mọi xung đột bằng LWW ở mức cell."
+    },
+    {
+      "type": "diagram",
+      "caption": "Trong một partition, hai node chấp nhận các lần ghi đồng thời. Khi partition được khắc phục, Last-Write-Wins (LWW) chọn timestamp cao hơn, lặng lẽ bỏ đi lần ghi của Client 1. Việc mất dữ liệu này là cái giá của availability."
+    },
+    {
+      "type": "explanation",
+      "title": "Sharding: mở rộng ghi theo chiều ngang",
+      "content": "**Sharding** (còn gọi là horizontal partitioning) là kỹ thuật chia một dataset ra nhiều node database, mỗi node chịu trách nhiệm một tập con dữ liệu không giao nhau. Mỗi node — gọi là một **shard** — là một database server hoàn toàn độc lập. Không có máy nào giữ toàn bộ dữ liệu.\n\nSharding giải quyết nút thắt cổ chai khi ghi: thay vì một node gánh mọi lần ghi, mỗi shard chỉ gánh các lần ghi cho partition của nó. Với 10 shard kích thước bằng nhau, throughput ghi tăng gần như tuyến tính (trừ đi chi phí phối hợp).\n\n**Dữ liệu được định tuyến tới shard nào** do **shard key** và **chiến lược partitioning** quyết định:\n\n- **Hash partitioning**: hash shard key và ánh xạ giá trị hash tới một shard. Dữ liệu được phân bố đều và tra cứu là O(1). Nhược điểm: range query phải chạm mọi shard (fan-out kiểu scatter-gather). Cách ánh xạ ngây thơ `hash(key) mod N` có một tính chất tệ hại: thay đổi N sẽ ánh xạ lại gần như mọi key (đi từ 4 lên 5 shard làm dịch chuyển ~80% số key). Các hệ thống thực tế tránh điều đó bằng **consistent hashing** (token ring của Cassandra, DynamoDB) hoặc một số lượng **hash slot** cố định được gán cho các node (Redis Cluster dùng `CRC16(key) mod 16384` slot, rồi di chuyển nguyên slot giữa các node).\n- **Range partitioning**: gán các dải của shard key cho các shard cụ thể (ví dụ người dùng A–M ở shard 1, N–Z ở shard 2). Range query hiệu quả — chỉ các shard liên quan bị query. Rủi ro là **hot spot**: nếu range partition dựa trên một giá trị tăng đơn điệu (như timestamp hay ID auto-increment), mọi lần ghi mới luôn rơi vào shard cuối cùng.\n- **Directory-based partitioning**: một bảng tra cứu ánh xạ mỗi key tới shard của nó. Linh hoạt tối đa; rủi ro là bảng tra cứu trở thành single point of failure và nút thắt cổ chai.\n\n**Chọn shard key** là một trong những quyết định hệ trọng nhất khi thiết kế database. Một shard key tốt có:\n1. **Cardinality cao**: đủ nhiều giá trị phân biệt để rải dữ liệu đều trên các shard.\n2. **Phân bố đều**: không bị lệch tới mức 80% lần ghi dồn vào một giá trị.\n3. **Khớp với query**: các query phổ biến nhất lọc theo shard key — nếu không, mọi query đều fan-out tới mọi shard.\n4. **Bất biến**: nếu giá trị shard key thay đổi, dòng phải được chuyển sang shard khác — một thao tác tốn kém.\n\n**Thao tác xuyên shard** là chi phí chính của sharding. Một query join dữ liệu từ nhiều shard phải được định tuyến tới từng shard liên quan, kết quả được thu về (**scatter**) và trộn tại một coordinator node (**gather**). Transaction phân tán xuyên shard cần two-phase commit (2PC) — tốn kém và dễ lỗi. Phần lớn hệ thống đã shard tránh join xuyên shard bằng cách denormalise dữ liệu sao cho mọi thứ một query cần đều nằm trên cùng một shard."
+    },
+    {
+      "type": "diagram",
+      "caption": "Sharding phân bổ lần ghi trên ba shard qua hash partitioning. Mỗi shard được replicate để mở rộng đọc và chịu lỗi. Router giữ logic ánh xạ."
+    },
+    {
+      "type": "explanation",
+      "title": "Replication: mở rộng đọc và sống sót qua sự cố",
+      "content": "**Replication** là việc duy trì nhiều bản sao giống hệt (hoặc gần giống hệt) của cùng một dữ liệu trên các node khác nhau. Khác với sharding — vốn chia nhỏ dữ liệu — replication nhân bản nó. Hai kỹ thuật kết hợp được với nhau: phần lớn hệ thống quy mô lớn shard để tăng năng lực ghi và replicate mỗi shard để tăng năng lực đọc và chịu lỗi.\n\n**Primary-replica replication** (còn gọi là master-slave) là mô hình kinh điển. Một node — **primary** — nhận mọi lần ghi. Nó ghi lại mỗi lần ghi vào một replication log (WAL trong PostgreSQL, binlog trong MySQL). Các replica node đọc theo log này và áp dụng cùng các lần ghi theo đúng thứ tự, giữ đồng bộ với primary. Việc đọc có thể được phục vụ từ bất kỳ replica nào, nhân throughput đọc lên theo số replica. Nếu primary hỏng, một replica được đôn lên — quá trình này gọi là **failover**.\n\nMối nguy trong primary-replica replication là **replication lag**: replica áp dụng các lần ghi bất đồng bộ, nên trong một khoảng ngắn sau một lần ghi, đọc từ replica có thể trả về dữ liệu cũ. Đây là bài toán consistency kinh điển 'read-your-own-writes': người dùng đăng một bài rồi lập tức đọc feed của mình — nếu lần đọc rơi vào một replica chưa theo kịp, bài viết sẽ như bị mất.\n\nCác chiến lược giảm thiểu:\n- **Read-your-own-writes**: định tuyến các lần đọc của một người dùng tới primary trong một khoảng ngắn sau lần ghi của người đó.\n- **Monotonic reads**: đảm bảo một người dùng luôn đọc từ cùng một replica trong một session — tránh việc họ thấy dữ liệu 'đi lùi'.\n- **Synchronous replication**: primary chờ ít nhất một replica xác nhận lần ghi trước khi trả thành công. Điều này đảm bảo không lần ghi đã commit nào bị mất khi failover, đổi lại tăng write latency. Lưu ý \"xác nhận\" thường nghĩa là *đã flush vào log của replica*, chưa phải đã *hiển thị* ở đó; PostgreSQL cần `synchronous_commit = remote_apply` để một lần ghi vừa commit đọc được trên standby.\n\n**Multi-primary replication** (active-active) cho phép ghi trên nhiều node cùng lúc. Việc giải quyết xung đột (như đã bàn trong phần eventual consistency) trở nên cần thiết. Đây là cách CouchDB và DynamoDB Global Tables (đa Region, đa active) hoạt động.\n\n**Leaderless replication** (dùng bởi Cassandra và Riak) không có primary được chỉ định. Node nào cũng có thể nhận lần ghi. Client ghi tới N node, dùng quy tắc quorum để xác định thành công. Cách này loại bỏ nút thắt cổ chai của đường ghi duy nhất và độ trễ failover, đổi lại cần giải quyết xung đột dựa trên quorum."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Định tuyến shard dựa trên hash mang tính tất định — cùng key và cùng số shard thì bạn luôn nhận cùng một shard. Nhưng với `mod N`, thay đổi số shard sẽ xáo trộn khoảng (N_new − 1)/N_new tổng số key, đó là lý do hệ thống production dùng consistent hashing hoặc hash slot cố định. Công thức quorum R + W > N đảm bảo mọi read quorum đều giao với mọi write quorum, nên ít nhất một replica được lần đọc liên hệ giữ lần ghi mới nhất đã được xác nhận.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Cây quyết định này mã hóa logic cốt lõi của việc chọn database: ACID trước, rồi access pattern, rồi quy mô ghi. Trong các buổi interview system design thực tế, đi qua cây này một cách có hệ thống cho thấy sự trưởng thành về kiến trúc. Nhận thức then chốt là access pattern dẫn dắt thiết kế schema, chứ không phải ngược lại.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**PACELC — phần mở rộng của CAP**: Daniel Abadi (phác thảo năm 2010, đăng trên IEEE Computer năm 2012) chỉ ra một lỗ hổng của CAP: ngay cả khi *không có* partition, một hệ thống có replication vẫn phải đánh đổi giữa **Latency** và **Consistency** — chờ các replica ở xa xác nhận khiến đọc và ghi chậm hơn. PACELC nói: nếu bị **P**artition, chọn **A** hoặc **C**; **E**lse (ngược lại), chọn **L** hoặc **C**. Cassandra và DynamoDB (thiết lập mặc định) là **PA/EL**; Spanner, etcd, ZooKeeper và các store dựa trên consensus khác là **PC/EC**; MongoDB với thiết lập mặc định thường được xếp vào **PA/EC**. Vì phần lớn hệ thống dành gần như toàn bộ thời gian ở trạng thái không bị partition, nửa ELC mới là trade-off bạn cảm nhận hàng ngày."
+    },
+    {
+      "type": "callout",
+      "content": "**Các bẫy interview và hiểu lầm cần nắm vững:**\n\n'Chọn hai trong ba của CAP' là cách nói gây hiểu lầm — P là bắt buộc. Lựa chọn thật là CP hay AP trong lúc partition.\n\nMongoDB không tự động là AP — với majority write concern và read concern, nó hành xử như CP. Thiết lập yếu hơn đẩy nó về phía AP. Luôn làm rõ mức concern.\n\n**Hot shard** là sự cố mở rộng phổ biến nhất trong hệ thống đã shard. Nếu bạn chọn một shard key tăng đơn điệu (ID auto-increment, timestamp), 100% lần ghi mới đổ vào một shard. Luôn hash hoặc dùng composite key để rải tải.\n\n'Eventual consistency' không có nghĩa là 'thường xuyên không nhất quán'. Khi tải thấp và mạng nhanh, các replica thường chỉ lệch nhau vài mili giây. Nhưng dữ liệu cũ quan sát được bất cứ khi nào bạn đọc một replica bị trễ ngay sau một lần ghi (bug kinh điển 'bài của tôi biến mất') — không chỉ trong các lần ghi đồng thời xung đột.\n\n**Chữ C trong CAP** (linearizability) không phải **chữ C trong ACID** (constraint và invariant). Nhầm lẫn hai thứ này là lỗi interview thường gặp.\n\nSQL và NoSQL không loại trừ nhau. Phần lớn kiến trúc production dùng cả hai: PostgreSQL cho dữ liệu transaction, Redis cho caching, và Cassandra hoặc DynamoDB cho các event stream khối lượng lớn. Polyglot persistence là chuyện bình thường ở quy mô lớn."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**SQL database** cung cấp ACID transaction, JOIN giàu biểu đạt và một query optimizer — lựa chọn mặc định đúng cho workload tài chính, ERP và quan hệ, nơi tính đúng đắn là không thể thương lượng.",
+        "**Mỗi họ NoSQL tối ưu cho một access pattern cụ thể**: document store cho dữ liệu phân cấp linh hoạt, key-value cho tra cứu điểm O(1), wide-column cho time-series ghi nối thêm nhiều ở quy mô lớn, graph cho duyệt quan hệ nhiều bước.",
+        "**Định lý CAP**: trong một network partition, một hệ thống có replication phải chọn Consistency (linearizable — trả lỗi thay vì dữ liệu cũ) hoặc Availability (mọi node không hỏng đều trả lời, có thể là dữ liệu cũ). Partition tolerance là bắt buộc trong mọi hệ thống phân tán thật — 'CA' chỉ mô tả một node duy nhất. Chữ C của CAP không phải chữ C của ACID.",
+        "**Eventual consistency** nghĩa là các replica hội tụ khi các lần ghi dừng lại. Quy tắc quorum (R + W > N) khiến mọi lần đọc giao với lần ghi mới nhất và cho phép người vận hành tinh chỉnh trade-off consistency/availability theo từng thao tác — nhưng chỉ riêng quorum thì chưa phải linearizability đầy đủ.",
+        "**Sharding** chia dữ liệu ra các node để mở rộng ghi. Shard key phải có cardinality cao, phân bố đều và khớp với các query pattern phổ biến nhất. Tránh shard key tăng đơn điệu (hot shard) và định tuyến ngây thơ kiểu `hash mod N` (thêm một shard làm dịch chuyển phần lớn key).",
+        "**PACELC**: nếu bị Partition thì chọn A hoặc C, ngược lại (Else) thì chọn Latency hoặc Consistency. Cassandra/DynamoDB là PA/EL; Spanner/etcd là PC/EC. Trade-off latency–consistency áp dụng hàng ngày, không chỉ khi có partition.",
+        "**Distributed SQL** (Spanner, CockroachDB, YugabyteDB, TiDB) mang lại SQL serializable trên nhiều node nhờ consensus replication — trả giá bằng commit latency, không phải bằng tính đúng đắn.",
+        "**Replication** nhân bản dữ liệu ra các node để mở rộng đọc và chịu lỗi. Primary-replica replication sinh ra replication lag — bài toán read-your-own-writes phải được xử lý trong thiết kế ứng dụng.",
+        "**Polyglot persistence** là chuyện bình thường ở quy mô lớn: dùng PostgreSQL cho transaction, Redis cho caching, Cassandra cho event stream và Neo4j cho graph query — chọn mỗi công cụ cho đúng access pattern mà nó được thiết kế."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Theo định lý CAP, vì sao 'Partition Tolerance' là không thể thương lượng trong mọi hệ thống phân tán thật?",
+      "options": [
+        "Network partition không thể ngăn chặn trong thực tế (đường truyền, switch và zone đều có thể hỏng), nên một hệ thống từ bỏ P đơn giản là không available khi xảy ra chia cắt",
+        "Partition tolerance là tùy chọn — các cluster nhỏ có thể được cấu hình để tránh nó",
+        "Từ bỏ partition tolerance cải thiện cả consistency lẫn availability cùng lúc",
+        "Partition tolerance chỉ áp dụng cho hệ thống có hơn 100 node"
+      ],
+      "explanation": "Network partition — các node mất khả năng liên lạc với nhau — xảy ra trong mọi hệ thống phân tán thật do lỗi phần cứng, bug phần mềm và sự cố mạng. Một hệ thống từ bỏ P khi partition xảy ra thì đơn giản là sập. Vì vậy lựa chọn thật trong lúc partition là Consistency hay Availability, chứ không phải chọn hai trong ba tính chất."
+    },
+    {
+      "id": "q2",
+      "question": "Một hệ thống ngân hàng không bao giờ được hiển thị số dư sai. Nó nên trả lỗi thay vì dữ liệu cũ trong lúc network partition. Nó nên chọn profile CAP nào?",
+      "options": [
+        "AP — ưu tiên availability để khách hàng luôn kiểm tra được số dư",
+        "CP — ưu tiên consistency, trả lỗi trong lúc partition thay vì dữ liệu cũ",
+        "CA — dùng một hệ thống không có partition tolerance",
+        "ACID — database quan hệ miễn nhiễm với CAP"
+      ],
+      "explanation": "Hệ thống CP từ chối các request không thể đảm bảo phản ánh trạng thái mới nhất trong lúc partition. Với ngân hàng, hiển thị số dư sai (dữ liệu cũ) có thể dẫn tới thấu chi hoặc chi tiêu hai lần — một thông báo lỗi an toàn hơn. HBase và ZooKeeper là CP; MongoDB với majority write concern và read concern cũng vậy."
+    },
+    {
+      "id": "q3",
+      "question": "Trong Cassandra với replication factor N=3, tổ hợp read quorum (R) và write quorum (W) tối thiểu nào đảm bảo strong consistency?",
+      "options": [
+        "R=1, W=1 (tổng 2) — nhanh và nhất quán",
+        "R=2, W=2 (tổng 4) — vì R + W > N đảm bảo có giao nhau",
+        "R=3, W=3 (tổng 6) — mọi replica phải đồng ý",
+        "R=1, W=2 (tổng 3) — chỉ cần đa số khi ghi là đủ"
+      ],
+      "explanation": "Điều kiện quorum là R + W > N. Với N=3, R=2 và W=2 cho 4 > 3, nên mọi tập đọc đều giao với mọi tập ghi ở ít nhất một node. R=1,W=1 (2) và R=1,W=2 (3) không vượt quá N, nên một lần đọc có thể bỏ lỡ lần ghi mới nhất. R=3,W=3 cũng giao nhau nhưng không tối thiểu và sẽ thất bại ngay khi một replica bất kỳ bị down."
+    },
+    {
+      "id": "q4",
+      "question": "Một team chọn một cột timestamp làm shard key cho bảng event có traffic cao. Họ sẽ gặp kiểu sự cố nào?",
+      "options": [
+        "Hash collision sẽ làm hỏng dữ liệu trên các shard",
+        "Range query sẽ trở nên bất khả vì timestamp quá chi tiết",
+        "Mọi lần ghi mới sẽ dồn vào shard có timestamp mới nhất, tạo ra hot spot trong khi các shard khác ngồi không",
+        "Replication lag sẽ tăng vì timestamp thay đổi thường xuyên"
+      ],
+      "explanation": "Một shard key tăng đơn điệu (timestamp, ID auto-increment) nghĩa là shard 'hiện tại' luôn nhận 100% lần ghi mới. Điều này phá hỏng việc mở rộng theo chiều ngang — một shard bị quá tải trong khi các shard khác bị dùng quá ít. Cách sửa là hash key hoặc dùng composite key để phân bổ đều lần ghi."
+    },
+    {
+      "id": "q5",
+      "question": "Họ NoSQL nào về kiến trúc phù hợp nhất cho query 'tìm mọi tài khoản đã giao dịch với tài khoản X trong phạm vi hai bậc quan hệ'?",
+      "options": [
+        "Wide-column store — tối ưu cho tra cứu theo thứ tự thời gian",
+        "Document store — document lồng nhau có thể chứa danh sách giao dịch",
+        "Key-value store — tra cứu O(1) cho mỗi account ID",
+        "Graph database — duyệt edge nhiều bước một cách tự nhiên là O(số edge), không phải O(kích thước bảng)"
+      ],
+      "explanation": "Graph database lưu quan hệ như công dân hạng nhất (edge có thuộc tính). Một lượt duyệt hai bước ('các tài khoản đã giao dịch với các tài khoản đã giao dịch với X') là O(số edge được đi qua), hiệu quả hơn nhiều so với thực hiện nhiều SQL JOIN tốn kém. Đây chính là use case phát hiện gian lận thúc đẩy việc áp dụng graph database trong ngành tài chính."
+    },
+    {
+      "id": "q6",
+      "question": "Lợi thế chính của SQL query optimizer so với aggregation pipeline của MongoDB cho các query phân tích ad-hoc là gì?",
+      "options": [
+        "SQL luôn chạy nhanh hơn vì được biên dịch ra native code",
+        "SQL hỗ trợ nhiều kiểu dữ liệu hơn định dạng BSON của MongoDB",
+        "Query SQL có thể được trình duyệt cache; query MongoDB thì không",
+        "SQL optimizer chọn giữa các thuật toán join (hash join, merge join, index nested-loop) và thứ tự join dựa trên thống kê; aggregation pipeline phần lớn chạy các stage theo thứ tự đã viết"
+      ],
+      "explanation": "SQL mang tính khai báo — bạn mô tả cần lấy gì và optimizer sinh ra plan. Nó có thể chọn hash join, merge join hay nested-loop join dựa trên cardinality của bảng và phạm vi index. Aggregation pipeline của MongoDB mang tính thủ tục: các stage chạy theo thứ tự đã viết, với ít lựa chọn tối ưu hơn nhiều. Với các query phức tạp trên nhiều collection, lợi thế optimizer của SQL là quyết định."
+    },
+    {
+      "id": "q7",
+      "question": "Một ứng dụng mạng xã hội phải luôn trả về feed của người dùng, dù hơi cũ, để tối đa uptime khi có sự cố mạng. Database và mô hình consistency nào phù hợp nhất?",
+      "options": [
+        "PostgreSQL với isolation serializable — đảm bảo ACID cho dữ liệu luôn mới",
+        "HBase với strong consistency — hệ thống CP đáng tin cậy",
+        "Cassandra với consistency level ONE — AP, eventual consistency, luôn available",
+        "Redis ở chế độ standalone — đọc in-memory nhanh nhất"
+      ],
+      "explanation": "Feed mạng xã hội chấp nhận được dữ liệu cũ — hiển thị một bài viết trễ hai giây không phải là vấn đề nghiệp vụ. Cassandra với consistency level ONE (ghi/đọc chỉ cần một node xác nhận) tối đa hóa availability, đổi lại có thể trả dữ liệu cũ. Đây là use case AP điển hình. HBase/CP sẽ báo lỗi khi có partition, làm giảm availability — trade-off sai cho một feed mạng xã hội."
+    },
+    {
+      "id": "q8",
+      "question": "'Replication lag' trong mô hình primary-replica nghĩa là gì, và nó phá vỡ trực tiếp nhất pattern ứng dụng nào?",
+      "options": [
+        "Khoảng thời gian một replica chưa áp dụng các lần ghi mới nhất của primary — phá vỡ consistency kiểu read-your-own-writes",
+        "Độ trễ khi áp dụng schema migration trên mọi replica — phá vỡ tự động hóa deploy",
+        "Chênh lệch giữa giờ UTC và giờ địa phương trong timestamp của replica — phá vỡ các query theo khoảng ngày",
+        "Network latency khi định tuyến query xuyên shard — phá vỡ JOIN phân tán"
+      ],
+      "explanation": "Replication lag là độ trễ bất đồng bộ giữa lúc một lần ghi đến primary và lúc nó được replicate tới và áp dụng trên các replica. Nếu người dùng ghi dữ liệu rồi lập tức đọc từ một replica chưa theo kịp, họ sẽ thấy lần ghi của chính mình bị mất — vi phạm consistency read-your-own-writes. Các cách giảm thiểu gồm định tuyến lần đọc tới primary trong chốc lát sau lần ghi của người dùng, hoặc dùng synchronous replication."
+    },
+    {
+      "id": "q9",
+      "question": "Đâu là shard key tốt nhất cho một bảng người dùng toàn cầu có 500 triệu người dùng, với query phổ biến nhất là 'tra cứu người dùng theo ID'?",
+      "options": [
+        "Timestamp created_at — cho phép range query theo thứ tự thời gian",
+        "country_code — nhóm người dùng theo địa lý để có locality",
+        "hash(user_id) — cardinality cao, phân bố đều, khớp với query pattern tra cứu điểm",
+        "last_login_at — phân bổ đều người dùng đang hoạt động trên các shard"
+      ],
+      "explanation": "hash(user_id) thỏa mãn mọi tiêu chí của một shard key tốt: cardinality cao (500M giá trị phân biệt), phân bố đều (một hàm hash tốt là đồng đều), và khớp với access pattern chính (tra cứu theo user_id). Key dạng timestamp gây ra hot shard. Country code có cardinality thấp — một shard cho 'US' sẽ chứa hơn 30% tổng số người dùng. last_login_at thay đổi thường xuyên, khiến key trên thực tế là khả biến."
+    },
+    {
+      "id": "q10",
+      "question": "Mô hình PACELC bổ sung điều gì cho CAP mà CAP không đề cập?",
+      "options": [
+        "Nó thêm tính chất thứ tư — Elasticity — đo hệ thống scale nhanh đến đâu khi chịu tải",
+        "Nó nhận ra rằng ngay cả khi không có partition, hệ thống vẫn phải đánh đổi giữa Latency và Consistency trong vận hành bình thường",
+        "Nó thay Partition Tolerance bằng một chỉ số xác suất về độ tin cậy của mạng",
+        "Nó mở rộng CAP để bao gồm cả durability của storage và quyết định về replication factor"
+      ],
+      "explanation": "CAP chỉ mô tả hành vi trong lúc partition. PACELC (do Abadi đề xuất, 2012) thêm vế Else: khi hệ thống chạy bình thường (không partition), nó vẫn phải chọn giữa Latency thấp hơn (trả lời trước khi mọi replica xác nhận) và Consistency mạnh hơn (chờ quorum rồi mới trả lời). Cassandra và DynamoDB là PA/EL (availability khi partition, latency thấp lúc bình thường); các store dựa trên consensus như Spanner và etcd là PC/EC."
+    }
+  ]
+}

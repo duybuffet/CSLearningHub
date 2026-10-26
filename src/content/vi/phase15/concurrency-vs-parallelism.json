@@ -1,0 +1,214 @@
+{
+  "sourceHash": "495fcc16ba5f",
+  "title": "Concurrency vs Parallelism",
+  "tagline": "Xoay xở với nhiều việc cùng lúc và thực sự làm nhiều việc cùng lúc",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "**Concurrency** và **parallelism** là hai thuật ngữ bị nhầm lẫn nhiều nhất trong khoa học máy tính — và sự nhầm lẫn này không chỉ mang tính học thuật. Thiết kế hệ thống với một mô hình tư duy sai sẽ dẫn tới deadlock làm sập production, các core bị lãng phí không bao giờ chạy hết tải, code async âm thầm chạy tuần tự, hoặc thread pool được cấp dư tới mức overhead của context switch xóa sạch chính phần throughput bạn đang muốn đạt được.\n\nRob Pike, đồng tác giả của Go và là một trong những \"hậu duệ tư tưởng\" của Unix, đã đúc kết sự khác biệt này trong một bài nói năm 2012: *'Concurrency is about dealing with lots of things at once. Parallelism is about doing lots of things at once.'* (Concurrency là xoay xở với nhiều việc cùng lúc. Parallelism là làm nhiều việc cùng lúc.) Hãy đọc lại hai lần. Concurrency là một thuộc tính **cấu trúc** của chương trình — cách phân rã công việc để nhiều task cùng có thể tiến triển. Parallelism là một thuộc tính **thực thi** — các task thực sự chạy tại cùng một thời điểm vật lý trên các đơn vị tính toán riêng biệt.\n\nMột CPU single-core chạy event loop là concurrent nhưng không parallel: tại mỗi thời điểm chỉ có một luồng lệnh được thực thi, vậy mà chương trình vẫn xoay xở với hàng trăm HTTP connection đang dở dang bằng cách xen kẽ chúng. Ngược lại, một chương trình đa luồng ngây thơ, khởi chạy mỗi core một thread để làm cùng một công việc tuần tự, có thể parallel nhưng concurrency kém — nó chưa bao giờ thực sự điều phối hay kết hợp các task logic độc lập. Nghệ thuật của lập trình hệ thống là biết bạn cần thuộc tính nào, cơ chế nào cung cấp nó, và với cái giá bao nhiêu.\n\nTrong chương này, ta sẽ xây dựng hiểu biết đó từ những nguyên lý đầu tiên: mô hình phần cứng của CPU và core, vai trò của scheduler trong hệ điều hành, các primitive concurrency then chốt (thread, event loop, coroutine, actor), định luật Amdahl và Gustafson quy định giới hạn cứng của parallelism, cách phân loại workload để biết nên dùng công cụ nào, và các hiểm họa đồng bộ hóa khiến code concurrent nổi tiếng là khó suy luận."
+    },
+    {
+      "type": "diagram",
+      "caption": "Concurrency là thuộc tính thiết kế của chương trình; parallelism là thuộc tính thực thi lúc runtime. Cả hai có thể — và thường nên — cùng tồn tại trong một hệ thống được thiết kế tốt."
+    },
+    {
+      "type": "analogy",
+      "title": "Quán cà phê: một barista, hai barista, và bài toán quầy thu ngân",
+      "content": "Hãy hình dung một quán cà phê đông khách lúc 8 giờ sáng. Có **một barista duy nhất** (một core CPU) đối mặt với hàng mười khách. Cô ấy không phục vụ khách A từ đầu tới cuối rồi mới chuyển sang khách B. Thay vào đó, trong lúc máy espresso chiết một shot mất 25 giây cho khách A (một lần chờ I/O — máy làm việc, không phải cô ấy), cô nhận order của khách B, gọi tên khách C, và quẹt thẻ cho khách D. Nhiều task cùng *đang diễn ra* một lúc, được xen kẽ thông minh quanh các khoảng chờ. Đó là **concurrency** — một người làm, nhiều task dở dang, tiến triển bằng cách tận dụng thời gian rảnh.\n\nGiờ giả sử quán thuê thêm **barista thứ hai**. Lúc 8:05, cả hai barista cùng lúc chiết shot, đánh sữa và pha đồ uống cho những khách khác nhau tại cùng một thời điểm. Hai người, hai task, công việc vật lý thực sự đồng thời. Đó là **parallelism** — thực thi đồng thời thật sự.\n\nMột quán cà phê có hai barista *đồng thời* biết xen kẽ task một cách thông minh thì vừa concurrent vừa parallel — đúng mục tiêu thiết kế của một server async chạy trên nhiều core.\n\nNhưng đây mới là phần khó: quán chỉ có **một quầy thu ngân**. Mọi order, bất kể bao nhiêu barista đang pha chế song song, cuối cùng đều phải qua đúng quầy thu ngân đó. Nếu tính tiền một order mất 10 giây và không thể làm song song, thì dù bạn thuê bao nhiêu barista, throughput tối đa cũng chỉ là 6 khách mỗi phút — quầy thu ngân là nút thắt cổ chai. Đó chính là **định luật Amdahl (Amdahl's Law)** hiện hình: phần tuần tự của bất kỳ quy trình nào cũng đặt ra một trần cứng cho mức tăng tốc có thể đạt được."
+    },
+    {
+      "type": "explanation",
+      "title": "Thực tế phần cứng: CPU, core và thread",
+      "content": "Để hiểu chính xác concurrency và parallelism, bạn cần một bức tranh rõ ràng về phần cứng. Một chip CPU hiện đại chứa nhiều **core** độc lập — mỗi core là một đơn vị xử lý hoàn chỉnh, có thể fetch, decode và thực thi lệnh. CPU bốn core có thể thực sự chạy bốn luồng lệnh cùng lúc; mười sáu core chạy được mười sáu luồng.\n\nNhưng câu chuyện chưa dừng ở đó. **Hyper-Threading** của Intel (và SMT — Simultaneous Multi-Threading — tương đương của AMD) cho mỗi core vật lý hai **hardware thread**, còn gọi là logical processor. Mỗi hardware thread có register file và program counter riêng, nên hệ điều hành thấy số CPU logic gấp đôi. Các đơn vị thực thi của core được chia sẻ giữa hai hardware thread ở mỗi chu kỳ, nên khi một thread bị đứng vì cache miss thì thread kia vẫn giữ chúng bận rộn — một cơ chế concurrency ở mức vi mô được khắc thẳng vào silicon. Vì hai thread tranh nhau cùng các đơn vị thực thi và cache, SMT thường chỉ tăng thêm vài chục phần trăm throughput, không phải 2×.\n\n**Scheduler của hệ điều hành** nằm phía trên phần cứng này và quản lý **software thread** (còn gọi là kernel thread hay OS thread). Software thread là một đơn vị thực thi có thể lập lịch: hệ điều hành gán nó cho một hardware thread trong một time quantum (thường 1–10 ms), rồi preempt nó và chạy thread khác. Việc chia lát thời gian kiểu preemptive này là lý do một laptop dual-core chạy 200 process vẫn có cảm giác phản hồi nhanh — hệ điều hành xoay vòng qua chúng đủ nhanh để mỗi process có vẻ như tiến triển liên tục.\n\n**Context switch** là cái giá của ảo giác đó. Chuyển từ thread A sang thread B đòi hỏi lưu toàn bộ trạng thái register của A (hàng trăm register trên một CPU x86-64 hiện đại), nạp trạng thái của B, đổi page table nếu chúng thuộc các process khác nhau (tag PCID/ASID giúp tránh phần lớn các lần flush TLB), và làm \"nóng\" lại pipeline của CPU. Một context switch tốn khoảng 1–10 micro giây. Với công việc I/O-bound, nơi thread phần lớn thời gian là ngủ, chi phí này không đáng kể. Với công việc CPU-bound, nơi từng micro giây tính toán đều quan trọng, chuyển qua lại 1000 thread trên 4 core nghĩa là hàng nghìn lần switch không cần thiết mỗi giây — thuần overhead.\n\nĐó là lý do **số thread cho công việc CPU-bound nên xấp xỉ bằng số core hiện có** (`os.availableParallelism()` trong Node.js, `runtime.NumCPU()` trong Go), chứ không phải bằng số task. Có tính các SMT sibling hay không thì tùy workload — hãy đo. Nhiều thread hơn số core nghĩa là hệ điều hành phải context switch chúng trên cùng một core, tăng overhead mà không tăng năng lực tính toán."
+    },
+    {
+      "type": "diagram",
+      "caption": "Core vật lý chứa các hardware thread (SMT/Hyper-Threading). Scheduler của hệ điều hành ánh xạ nhiều software thread lên các hardware thread hiện có bằng cách chia lát thời gian."
+    },
+    {
+      "type": "explanation",
+      "title": "Các cơ chế concurrency: thread, event loop, coroutine và actor",
+      "content": "Không có một \"primitive concurrency\" duy nhất nào — mỗi ngôn ngữ và runtime cung cấp những abstraction khác nhau, mỗi loại có trade-off riêng về độ phức tạp, overhead và khả năng kết hợp.\n\n**OS thread** là abstraction trực tiếp nhất: mỗi task độc lập một thread, mỗi thread có stack riêng (thường 1–8 MB). Hệ điều hành lập lịch chúng theo kiểu preemptive. Thread rất mạnh nhưng tạo ra thì tốn kém (cỡ micro giây) và ngốn bộ nhớ khi ở quy mô lớn. Server kiểu thread-per-connection chật vật ở mức 10.000+ connection đồng thời — bài toán **C10K** kinh điển. RAM cho stack không phải lý do chính (10.000 × stack mặc định 8 MB là 80 GB không gian địa chỉ *ảo*, nhưng chỉ những page được chạm tới mới thực sự nằm trong RAM); chi phí thật nằm ở các cấu trúc kernel cho từng thread, tải lên scheduler, context switch, và việc cache bị \"ô nhiễm\" khi hàng nghìn thread thay phiên nhau chạy trên vài core.\n\n**Event loop** (khởi đầu với libevent, phổ biến nhờ Node.js) giải quyết bài toán C10K bằng một mô hình hoàn toàn khác: một OS thread chạy một vòng lặp chặt, gọi `epoll`/`kqueue` (syscall I/O multiplexing của hệ điều hành) để hỏi 'trong hàng nghìn file descriptor của tôi, cái nào đã sẵn sàng?', rồi dispatch callback cho từng descriptor sẵn sàng. Event loop không bao giờ block — thay vì *chờ* I/O, nó *đăng ký quan tâm* rồi trả quyền điều khiển ngay. Hệ điều hành báo cho nó khi dữ liệu tới. Nhờ vậy một thread duy nhất có thể quản lý hàng chục nghìn connection đồng thời với lượng bộ nhớ rất nhỏ. Trade-off: bất kỳ callback nào làm việc nặng CPU sẽ block toàn bộ vòng lặp trong suốt thời gian đó, làm chết đói mọi connection khác.\n\n**Coroutine / async-await** cho event loop một gương mặt dễ đọc. Thay vì kim tự tháp callback lồng nhau, bạn viết code *trông* tuần tự nhưng thực chất là cooperative: mỗi `await` là một điểm tạm dừng, nơi coroutine nhường quyền điều khiển lại cho event loop để các coroutine khác chạy. Runtime giữ một danh sách các coroutine đang tạm dừng và tiếp tục chúng khi I/O đang chờ hoàn tất. `asyncio` của Python, async/await của Rust (được điều khiển bởi các runtime như Tokio), và Promise của JavaScript đều cài đặt mô hình này. Các coroutine này là *stackless*: compiler hoặc runtime biến mỗi hàm async thành một state machine, các biến còn sống nằm trong một đối tượng nhỏ trên heap (một closure của Promise, một `Future` của Rust), và việc chuyển qua lại giữa chúng diễn ra hoàn toàn ở user space — không có kernel tham gia, không có OS context switch.\n\n**Mô hình Actor** (Erlang, Elixir, Akka) đi theo hướng khác: actor là những process nhẹ (giống coroutine, không phải OS process), không chia sẻ bộ nhớ và chỉ giao tiếp bằng cách gửi message bất biến. Vì không có trạng thái chia sẻ, không có lock và không có data race. Một Erlang VM có thể chạy hàng triệu actor trên một nhúm OS thread, với scheduler chuyển actor theo kiểu preemptive. Mô hình này đánh đổi sức biểu đạt của bộ nhớ chia sẻ lấy sự an toàn của tính cô lập.\n\n**Green thread** (goroutine của Go, virtual thread của Java trong JDK 21) nằm ở giữa: chúng trông và hoạt động như OS thread — blocking I/O không sao cả, bạn có thể viết code tuần tự — nhưng được quản lý bởi runtime của ngôn ngữ, không phải hệ điều hành. Runtime multiplex hàng nghìn goroutine lên một pool OS thread (thiết lập `GOMAXPROCS` trong Go), tự động tạm dừng goroutine khi nó block vì I/O và tiếp tục khi I/O hoàn tất. Bạn có được mô hình lập trình của thread cùng khả năng mở rộng của event loop."
+    },
+    {
+      "type": "diagram",
+      "caption": "Năm mô hình concurrency, mỗi mô hình tối ưu cho một trade-off khác nhau giữa tính dễ lập trình, khả năng mở rộng và độ an toàn."
+    },
+    {
+      "type": "explanation",
+      "title": "Định luật Amdahl: trần cứng của parallelism",
+      "content": "**Định luật Amdahl (Amdahl's Law)** là công cụ định lượng quan trọng nhất trong tính toán song song. Nó trả lời câu hỏi: nếu tôi thêm N core cho chương trình, mức tăng tốc tối đa tôi đạt được là bao nhiêu?\n\nNếu một phần `p` của tổng công việc có thể song song hóa (tức là chia được ra nhiều core), và phần còn lại `(1 - p)` buộc phải chạy tuần tự, thì với `N` core, mức tăng tốc lý thuyết là:\n\n`Speedup(N) = 1 / ((1 - p) + p / N)`\n\nKhi N tiến tới vô cùng, speedup tiến tới `1 / (1 - p)`. Phần tuần tự là nút thắt vĩnh viễn — nó áp đảo khi bạn càng ném thêm phần cứng vào bài toán.\n\nHãy xây dựng trực giác bằng những con số cụ thể. Giả sử 90% chương trình có thể song song hóa (`p = 0.9`) và 10% là tuần tự (`1 - p = 0.1`):\n- 2 core: `1 / (0.1 + 0.9/2) = 1 / 0.55 ≈ 1.82×`\n- 4 core: `1 / (0.1 + 0.9/4) = 1 / 0.325 ≈ 3.08×`\n- 10 core: `1 / (0.1 + 0.09) = 1 / 0.19 ≈ 5.26×`\n- ∞ core: `1 / 0.1 = 10×` — trần cứng\n\nNghĩa là kể cả với vô số core, một chương trình có 10% công việc tuần tự cũng không bao giờ chạy nhanh hơn 10× so với một core. Đó là lý do **profile để tìm nút thắt tuần tự** là bước đầu tiên bắt buộc của mọi nỗ lực song song hóa.\n\nHệ quả thực tế rất rõ ràng:\n- Nếu phần tuần tự là 1%, bạn có thể đạt gần 100× — tuyệt vời cho công việc embarrassingly parallel (song song \"dễ tới mức xấu hổ\") như render các frame ảnh.\n- Nếu phần tuần tự là 25%, trần là 4× — đi từ 64 core (3.82×) lên 256 core (3.95×) gần như chẳng được gì.\n- Lập kế hoạch query của database, việc lấy lock, ghi log, và bầu leader đều là những nút thắt tuần tự ẩn trong hệ thống phân tán.\n\n**Định luật Gustafson (Gustafson's Law)** đưa ra góc nhìn lạc quan hơn. Amdahl giả định kích thước bài toán cố định — bạn song song hóa cùng một lượng công việc. Gustafson nhận thấy trên thực tế, khi năng lực tính toán tăng, kỹ sư có xu hướng *mở rộng bài toán* thay vì giữ nguyên. Một studio CGI có số core gấp 100 lần không render cùng các frame đó nhanh hơn; họ render các frame chi tiết gấp 100 lần trong cùng thời gian. Khi bài toán lớn lên cùng phần cứng, phần có thể song song hóa tăng lên trong khi chi phí khởi tạo tuần tự giữ nguyên — và việc mở rộng gần tuyến tính trở nên khả thi với những công việc được cấu trúc phù hợp."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Định luật Amdahl giới hạn speedup ở `1/(1-p)` cho một bài toán kích thước cố định — phần đuôi tuần tự áp đảo. Định luật Gustafson cho thấy khi bạn mở rộng bài toán cùng phần cứng (trường hợp thực tế của mô phỏng, training ML, render), speedup gần tuyến tính là khả thi. Khác biệt mấu chốt: Amdahl hỏi 'tôi làm cùng một việc nhanh tới mức nào?'; Gustafson hỏi 'trong cùng thời gian tôi làm được nhiều hơn bao nhiêu?'",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "I/O-bound và CPU-bound: phân loại workload",
+      "content": "Mọi vấn đề hiệu năng đều bắt đầu bằng việc phân loại đúng workload, vì chiến lược concurrency tối ưu cho hai nhóm chính hoàn toàn khác nhau.\n\n**Workload I/O-bound** dành phần lớn thời gian chờ tài nguyên bên ngoài: response từ mạng, đọc đĩa, query database, hoặc input của người dùng. CPU hầu như rảnh — một thread đang chờ query database trả về thì chẳng làm gì cả. Thêm core CPU cho một chương trình I/O-bound gần như vô ích. Nút thắt là latency và bandwidth, không phải tính toán. Công cụ đúng là **concurrency**: cho các task khác chạy trong lúc task này chờ. Một server Node.js xử lý 10.000 HTTP connection hiệu quả trên một thread duy nhất vì cả 10.000 connection đều dành phần lớn thời gian để chờ — event loop có thể phục vụ tất cả chúng trong những khoảng rảnh đó.\n\nVí dụ I/O-bound phổ biến: web server, API gateway, ứng dụng chat, database client, công cụ đồng bộ file, và bất kỳ service nào proxy request tới các service phía sau.\n\n**Workload CPU-bound** dành phần lớn thời gian để tính toán: hash mật mã, chuyển mã video, xử lý ảnh, mô phỏng số, inference machine learning, nén dữ liệu. CPU chạy hết công suất — không có thời gian rảnh nào để tận dụng. Chỉ concurrency thì không giúp được gì: kể cả khi bạn xen kẽ 100 task trên một core, bạn vẫn chỉ có năng lực tính toán của một core. Công cụ đúng là **parallelism**: phân phối việc tính toán ra nhiều core. Một video encoder xử lý nhiều frame cùng lúc trên nhiều core, đạt throughput tỷ lệ với số core.\n\nVí dụ CPU-bound phổ biến: encode video/audio, ray tracing và render 3D, mô phỏng khoa học (thời tiết, vật lý, genomics), đào coin bằng mật mã, training machine learning, tạo thumbnail ảnh ở quy mô lớn.\n\n**Workload hỗn hợp** — trường hợp phổ biến nhất trong hệ thống thực — có cả thành phần I/O lẫn CPU. Một web application có thể nhận request (I/O), decode JWT và validate schema (CPU, rất nhỏ), query database (I/O, chiếm phần lớn), format response JSON (CPU, rất nhỏ). Chi phí chủ đạo là I/O, nên concurrency là công cụ chính, bổ sung thêm một thread pool nhỏ cho những đợt tăng vọt CPU.\n\nMột trường hợp con quan trọng: **workload memory-bound**. Một số phép tính không I/O-bound theo nghĩa mạng, cũng không CPU-bound theo nghĩa throughput lệnh, mà bị giới hạn bởi bandwidth bộ nhớ — tốc độ di chuyển dữ liệu giữa RAM và cache của CPU. Nhân ma trận cực lớn, một số thuật toán đồ thị, và nhiều phép toán ML chạm tới giới hạn này. Thêm core không giúp gì nếu mọi core đều đang đứng chờ memory bus. Các kỹ thuật như cache blocking, cấp phát nhận biết NUMA (NUMA-aware), và vector hóa SIMD xử lý vấn đề này."
+    },
+    {
+      "type": "diagram",
+      "caption": "Phân loại workload trước, rồi mới chọn công cụ. Dùng parallelism cho công việc I/O-bound là lãng phí tài nguyên; chỉ dùng concurrency cho công việc CPU-bound thì để core ngồi không."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`Promise.all` đạt được concurrency: 20 request giả lập đều khởi động ngay và resolve đồng thời trên một thread duy nhất trong ~100ms thay vì 2000ms. `worker_threads` đạt được parallelism: mỗi worker chạy trên OS thread riêng với V8 isolate riêng, thực sự tính toán song song. Để ý rằng số worker được spawn bằng `CORES` — nhiều worker hơn số core sẽ gây overhead context switch mà không thêm năng lực tính toán.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Trạng thái chia sẻ và đồng bộ hóa: nơi concurrency trở nên nguy hiểm",
+      "content": "Hiểm họa cơ bản của lập trình concurrent là **shared mutable state** (trạng thái chia sẻ có thể thay đổi): khi hai hay nhiều thread có thể đọc và ghi cùng một vị trí bộ nhớ đồng thời, kết quả trở nên không thể đoán trước. Đây là nguyên nhân gốc của **race condition**, **data race**, và độ khó khét tiếng của việc debug code concurrent.\n\nHai thuật ngữ này đáng để tách bạch. **Data race** là khi hai thread truy cập cùng một vị trí bộ nhớ cùng lúc, ít nhất một trong hai đang ghi, mà không có đồng bộ hóa — undefined behaviour trong C và C++, và là thứ type system của Rust từ chối ngay lúc compile. **Race condition** là loại bug rộng hơn, khi tính đúng đắn phụ thuộc vào thời điểm. Bạn có thể gặp race condition mà không có data race nào: mọi truy cập đều được lock đúng cách, nhưng bước *kiểm tra* và bước *hành động* nằm trong hai lần lấy lock khác nhau (check-then-act), hoặc — trong JavaScript single-threaded — trạng thái đọc trước một `await` đã cũ sau khi `await` xong.\n\nXét một giao dịch chuyển tiền đơn giản: Thread A đọc số dư (£100), Thread B đọc số dư (£100), Thread A ghi số dư − £30 = £70, Thread B ghi số dư − £40 = £60. Số dư cuối cùng là £60, trong khi lẽ ra phải là £30. Cả hai thread đều đọc một giá trị cũ và ghi đè lên nhau — £40 đã bị tiêu hai lần từ £100.\n\n**Mutual exclusion (mutex)** là giải pháp kinh điển: một lock đảm bảo mỗi lúc chỉ một thread được thực thi critical section. Thread B phải chờ tới khi Thread A nhả lock rồi mới đọc được số dư. Mutex cho kết quả đúng nhưng đi kèm chi phí: **contention** (các thread xếp hàng ở lock), **priority inversion** (một thread độ ưu tiên thấp giữ lock mà một thread độ ưu tiên cao đang cần), và **deadlock** (Thread A giữ Lock 1 và chờ Lock 2, trong khi Thread B giữ Lock 2 và chờ Lock 1 — cả hai chờ mãi mãi).\n\n**Deadlock** cần bốn điều kiện xảy ra cùng lúc (điều kiện Coffman): mutual exclusion, hold-and-wait, no preemption, và circular wait. Loại bỏ bất kỳ điều kiện nào cũng ngăn được deadlock — kỹ thuật thực tế phổ biến nhất là **thứ tự lấy lock nhất quán**: luôn lấy các lock theo cùng một thứ tự toàn cục, phá vỡ điều kiện circular wait.\n\n**Atomic operation** là một lựa chọn thay thế cho các trường hợp đơn giản. Lệnh compare-and-swap (CAS) đọc một giá trị, so sánh với giá trị kỳ vọng, rồi ghi giá trị mới — tất cả một cách nguyên tử trong một lệnh CPU không thể chia cắt. Đây là nền tảng của **cấu trúc dữ liệu lock-free** (lock-free queue, lock-free hash map), tránh hoàn toàn mutex bằng cách retry mỗi khi phát hiện có sửa đổi đồng thời. Cấu trúc lock-free khó cài đặt đúng hơn nhưng có thể giảm contention đáng kể khi mức song song cao.\n\n**Tính bất biến (immutability)** là kỹ thuật mạnh nhất: nếu dữ liệu không bao giờ thay đổi sau khi tạo, không cần đồng bộ hóa gì cả. Các ngôn ngữ hàm (Haskell, Clojure), mô hình Actor (Erlang), và hệ thống ownership của Rust đều đẩy lập trình viên về phía immutability ngay từ thiết kế. `Object.freeze` của JavaScript, quy ước của Go về việc gửi giá trị qua channel thay vì chia sẻ pointer, và kiểu `record` của Java đều khuyến khích hướng này.\n\n**Software Transactional Memory (STM)**, dùng trong monad `STM` của Haskell và `ref` của Clojure, đi theo hướng giống database: gói nhiều lần đọc và ghi bộ nhớ vào một transaction. Nếu thread khác đã sửa bất kỳ giá trị nào trong lúc transaction diễn ra, rollback và retry. STM có tính kết hợp — bạn có thể ghép hai transaction đúng riêng lẻ thành một transaction lớn hơn vẫn đúng — điều nổi tiếng là khó làm với lock."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một race condition kinh điển: hai thread đọc một giá trị cũ và ghi đè lên nhau. Mutual exclusion (mutex/lock) bao quanh chuỗi read-modify-write sẽ khắc phục điều này."
+    },
+    {
+      "type": "explanation",
+      "title": "Event loop chuyên sâu: Node.js xử lý concurrency thế nào",
+      "content": "Node.js là ví dụ điển hình của một runtime **single-threaded mà vẫn concurrent**, và hiểu chính xác event loop của nó sẽ xóa tan nhiều quan niệm sai phổ biến.\n\nEvent loop của Node được xây trên **libuv**, một library async I/O đa nền tảng. Khi bạn gọi `fetch()` hoặc đọc từ một socket, Node không block thread để chờ dữ liệu. Thay vào đó, nó đăng ký socket với I/O multiplexer của hệ điều hành (`epoll` trên Linux, `kqueue` trên macOS, `IOCP` trên Windows) rồi return ngay; kernel thực hiện network I/O ở chế độ nền. File thông thường không thể chờ theo cách đó, nên `fs.readFile()`, `dns.lookup()`, công việc crypto và zlib chạy trên **thread pool của libuv** (mặc định 4 thread) — dù theo cách nào, thread JavaScript cũng không bao giờ block. Khi dữ liệu sẵn sàng, hệ điều hành đưa file descriptor vào tập 'ready', libuv nhặt nó ở tick kế tiếp của event loop, và callback tương ứng được đặt vào **callback queue**.\n\nỞ mỗi tick, event loop chạy qua các phase:\n1. **timers** — chạy callback của `setTimeout` và `setInterval` đã hết thời gian chờ\n2. **pending callbacks** — các callback I/O bị hoãn sang vòng lặp kế tiếp\n3. **idle, prepare** — dùng nội bộ trong libuv\n4. **poll** — lấy các sự kiện I/O mới; block tại đây nếu queue rỗng và chưa tới hạn timer nào\n5. **check** — callback của `setImmediate`\n6. **close callbacks** — `socket.on('close', ...)` v.v.\n\nCallback của `process.nextTick` rồi tới microtask của Promise/`queueMicrotask` được làm trống **sau mỗi callback riêng lẻ** (từ Node 11; trước đó chỉ giữa các phase) — giống hành vi của trình duyệt và được ưu tiên hơn mọi callback khác đang chờ.\n\nHệ quả then chốt: **bất kỳ code JavaScript đồng bộ nào chạy lâu cũng block toàn bộ event loop**. Nếu bạn có một callback chạy vòng lặp nặng CPU mất 500ms, mọi connection khác đang chờ trong queue đều bị treo 500ms. Đó là lý do công việc CPU-bound trong Node.js phải được chuyển sang `worker_threads` — chúng chạy trên các OS thread riêng với V8 isolate và event loop riêng, giao tiếp với main thread qua `postMessage`.\n\nKiến trúc này cho phép Node.js xử lý hàng chục nghìn HTTP connection đồng thời trên một thread duy nhất — mỗi connection dành phần lớn thời gian chờ response từ database, và event loop xử lý concurrent tất cả chúng trong những khoảng chờ đó. Netflix, LinkedIn và PayPal nổi tiếng vì đã chọn Node.js cho API gateway chính vì mô hình I/O concurrent này giảm đáng kể số lượng server so với mô hình truyền thống mỗi connection một thread."
+    },
+    {
+      "type": "explanation",
+      "title": "Những quan niệm sai phổ biến và edge case",
+      "content": "**'Async/await làm code chạy song song.'** Có lẽ đây là nhầm lẫn phổ biến nhất. Trong một runtime single-threaded như Node.js, `await` không tạo thread mới. Nó tạm dừng coroutine hiện tại và nhường cho event loop, nơi có thể chạy các coroutine khác. Code sau `await` chạy trên cùng thread đó khi thao tác được await hoàn tất. `await fetch(url)` là concurrent (code khác chạy trong lúc network I/O đang diễn ra), nhưng chắc chắn không parallel — không dùng thêm core CPU nào.\n\n**'Nhiều thread hơn thì luôn nhanh hơn.'** Như đã thấy: với công việc CPU-bound, tạo nhiều thread hơn số core chỉ thêm overhead context switch. Với công việc CPU-bound trong các ngôn ngữ có GIL (Global Interpreter Lock của Python), nhiều thread hoàn toàn không thể thực thi bytecode Python cùng lúc — GIL đảm bảo mỗi lúc chỉ một thread chạy interpreter. Thread Python cung cấp concurrency (GIL được nhả ra trong lúc I/O) nhưng không cung cấp parallelism cho code Python. Để có CPU parallelism thật sự trong Python, bạn phải dùng `multiprocessing`, vốn spawn các process riêng, mỗi process có interpreter và GIL riêng. (CPython 3.13 đã thêm một bản build *free-threaded* tùy chọn không có GIL, được hỗ trợ chính thức từ 3.14, nhưng bản build mặc định — và phần lớn các deployment — vẫn có GIL.)\n\n**'GIL khiến thread Python vô dụng.'** Không hẳn — thread Python hữu ích cho concurrency I/O-bound. Trong khi một thread chờ trên network socket (CPython nhả GIL quanh các lời gọi I/O blocking), thread khác thực thi code Python. Các web framework như Django và Flask mở rộng tốt với nhiều thread cho workload nặng I/O.\n\n**'Bug concurrency là tất định.'** Race condition nổi tiếng là không tất định. Một race có thể xảy ra một lần trong mười nghìn lần chạy, không bao giờ tái hiện được trong debugger (vì debugger thay đổi timing), và chỉ xuất hiện dưới tải production. Đó là điều khiến bug concurrent tốn kém tới vậy — khó tái hiện, khó test, và khó chẩn đoán. **Thread sanitiser** (cờ `-race` của Go, ThreadSanitizer của Clang) gắn instrument động vào binary để phát hiện race lúc runtime — hãy chạy chúng trong pipeline CI/CD.\n\n**'Parallelism luôn cải thiện throughput.'** Định luật Amdahl nói khác. Mà ngay cả ngoài phần tuần tự, parallelism còn đưa vào những overhead mà mô hình đơn giản của Amdahl không tính tới: thời gian phân phối công việc, thời gian gộp kết quả, lưu lượng cache coherence giữa các core (các core phải đồng bộ cách nhìn của cache L1/L2 về bộ nhớ chia sẻ qua giao thức MESI), và hiệu ứng NUMA khi thread trên các socket CPU khác nhau truy cập bộ nhớ của nhau. Speedup đo được trên thực tế gần như luôn thấp hơn dự đoán của Amdahl."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Sự phân biệt giữa concurrency và parallelism trở nên sắc nét trong kỷ nguyên multicore (giữa những năm 2000), khi tốc độ xung nhịp của single-core chững lại vì giới hạn về điện năng và nhiệt. CPU dual-core đầu tiên cho người dùng phổ thông của Intel ra mắt năm 2005. Trước đó, 'chạy nhanh hơn' nghĩa là chờ thế hệ vi xử lý tiếp theo. Sau 2005, nó nghĩa là học cách viết code concurrent và parallel — một kỹ năng mà ngành công nghiệp phần lớn chưa sẵn sàng. Erlang (1986) và STM của Haskell (2005) đã tiên phong các mô hình concurrency an toàn, nhưng chúng chỉ đi vào nhận thức chung khi \"bức tường multicore\" biến lập trình song song thành kỹ năng sống còn thay vì một sự tò mò nghiên cứu. Goroutine của Go (2009) và mô hình ownership của Rust (2015) là những phản hồi trực tiếp cho sự chuyển dịch này."
+    },
+    {
+      "type": "callout",
+      "content": "**Góc nhìn interview và kiến trúc:**\n- Khi được hỏi 'bạn sẽ scale service này thế nào?', luôn phân loại workload trước: I/O-bound → async/event loop; CPU-bound → worker pool có kích thước bằng số core.\n- Định luật Amdahl là chủ đề interview tiêu chuẩn. Hãy thuộc công thức `1 / ((1-p) + p/N)` và tính tay được trần cho p=0.9 (10×) và p=0.95 (20×).\n- 'Concurrency is not parallelism' (Rob Pike) là câu interviewer rất thích — hãy sẵn sàng giải thích nó bằng một ví dụ cụ thể.\n- Bug concurrency số một trong coding interview: quên rằng `i++` trong C/Java/JS không atomic — nó là chuỗi read-modify-write cần đồng bộ hóa khi có truy cập đồng thời.\n- Với vị trí Node.js: hãy nói rõ `async/await` là concurrency kiểu cooperative trên một thread, còn `worker_threads` là parallelism trên nhiều thread.\n- Race condition nổi tiếng khó tái hiện; hãy nhắc tới ThreadSanitizer, cờ `-race` của Go, và type system của Rust như những công cụ bắt chúng ngay lúc phát triển."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Concurrency** là thuộc tính cấu trúc của chương trình — các task được phân rã để có thể *tiến triển* bằng cách xen kẽ, kể cả trên một core. **Parallelism** là thuộc tính thực thi — các task thực sự chạy đồng thời trên nhiều core tại cùng một thời điểm.",
+        "Workload **I/O-bound** hưởng lợi từ concurrency (async event loop, coroutine): một thread có thể quản lý hàng nghìn network request đang dở dang bằng cách xen kẽ trong các khoảng chờ. Workload **CPU-bound** cần parallelism (worker thread/process): thêm core là thêm năng lực tính toán.",
+        "**Định luật Amdahl** giới hạn speedup của parallelism ở `1 / (1 - p)`, với `p` là phần có thể song song hóa — một nút thắt tuần tự 10% giới hạn bạn ở 10× bất kể số core. Hãy profile để tìm nút thắt tuần tự trước khi thêm core.",
+        "**Các cơ chế concurrency** trải dài từ OS thread nặng nề (stack 1–8 MB, kernel lập lịch) tới goroutine và coroutine nhẹ (cỡ KB, lập lịch ở user space) tới mô hình Actor (không có trạng thái chia sẻ, chỉ gửi message) — mỗi loại đánh đổi bộ nhớ, tính dễ lập trình và độ an toàn theo cách khác nhau.",
+        "**Shared mutable state** là nguyên nhân gốc của race condition, deadlock và priority inversion. Phòng thủ an toàn nhất là immutability (không có trạng thái chia sẻ có thể thay đổi), mô hình Actor (trạng thái cô lập, gửi message), hoặc hệ thống ownership của Rust (đảm bảo tính độc quyền ngay lúc compile).",
+        "**GIL của Python** nghĩa là OS thread không thể thực thi bytecode Python song song trong bản build CPython mặc định (từ 3.13 có thêm bản build free-threaded tùy chọn) — dùng `multiprocessing` cho parallelism CPU-bound và `asyncio`/thread cho concurrency I/O-bound. **Node.js** mặc định là single-threaded concurrent; hãy chuyển công việc nặng CPU sang `worker_threads`.",
+        "**Định luật Gustafson** bổ sung cho Amdahl: khi kích thước bài toán tăng theo phần cứng (trường hợp phổ biến trong tính toán khoa học và training ML), speedup gần tuyến tính là khả thi vì phần tuần tự giữ nguyên trong khi công việc song song hóa được lớn dần.",
+        "**Data race** là truy cập đồng thời không được đồng bộ vào cùng một vùng nhớ với ít nhất một lần ghi; **race condition** là bất kỳ bug nào phụ thuộc vào thời điểm — có thể xảy ra ngay cả khi mọi truy cập đều được lock, hoặc trong code async single-threaded."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Phát biểu nào nắm bắt chính xác nhất sự khác biệt giữa concurrency và parallelism?",
+      "options": [
+        "Concurrency là thuộc tính thiết kế về cấu trúc, cho phép các task tiến triển bằng cách xen kẽ; parallelism là thuộc tính thực thi lúc runtime, khi các task chạy đồng thời trên nhiều core",
+        "Concurrency đòi hỏi nhiều core CPU; parallelism có thể chạy trên một core",
+        "Parallelism là thuộc tính thiết kế; concurrency là thuộc tính phần cứng",
+        "Chúng là từ đồng nghĩa — cách dùng hiện đại coi chúng có thể thay thế cho nhau"
+      ],
+      "explanation": "Concurrency nói về cách chương trình được cấu trúc (nhiều task có cùng tiến triển được không?). Parallelism nói về cách nó thực thi (nhiều task có đang chạy tại đúng cùng một thời điểm không?). Một event loop single-core là concurrent nhưng không parallel; một chương trình multi-core cấu trúc kém có thể parallel nhưng thiếu concurrency có ý nghĩa."
+    },
+    {
+      "id": "q2",
+      "question": "Theo định luật Amdahl, nếu 20% chương trình buộc phải chạy tuần tự, mức speedup tối đa đạt được với số core không giới hạn là:",
+      "options": [
+        "20×",
+        "Không giới hạn — thêm core luôn cải thiện throughput",
+        "80×",
+        "5×"
+      ],
+      "explanation": "Với p = 0.8 có thể song song hóa và (1-p) = 0.2 tuần tự, giới hạn khi N→∞ là 1 / 0.2 = 5×. Phần tuần tự 20% là nút thắt vĩnh viễn mà không lượng phần cứng nào vượt qua được."
+    },
+    {
+      "id": "q3",
+      "question": "Một server Node.js xử lý 5.000 HTTP connection đồng thời trên một OS thread duy nhất. Đây là ví dụ của:",
+      "options": [
+        "Parallelism — hệ điều hành thực thi nhiều thread đồng thời",
+        "Concurrency — một thread xen kẽ các task trong khoảng chờ I/O của chúng",
+        "Cả parallelism lẫn concurrency ngang nhau",
+        "Không cái nào — một thread không thể xử lý nhiều connection về mặt logic"
+      ],
+      "explanation": "Node.js dùng một event loop trên một thread duy nhất. Mỗi connection dành phần lớn thời gian chờ I/O (query database, mạng). Event loop xen kẽ các connection đang chờ này — phục vụ connection khác trong lúc một connection chờ — đó chính xác là concurrency. Không có thực thi song song trên nhiều core nào ở đây."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao tạo nhiều OS thread hơn số core CPU hiện có lại làm giảm hiệu năng với workload CPU-bound?",
+      "options": [
+        "Hệ điều hành không thể lập lịch nhiều hơn một thread cho mỗi process",
+        "Thread dư tiêu tốn quá nhiều bộ nhớ heap",
+        "Overhead context switch tăng lên mà không có thêm chút năng lực tính toán nào",
+        "Theo định nghĩa, task CPU-bound không tương thích với đa luồng"
+      ],
+      "explanation": "Với nhiều thread hơn số core, hệ điều hành phải chia lát thời gian nhiều thread trên cùng một core. Mỗi lần context switch lưu và khôi phục trạng thái register mà không có phép tính hữu ích nào diễn ra. Với công việc CPU-bound, nơi từng micro giây tính toán đều quan trọng, đây thuần túy là lãng phí. Số thread lý tưởng cho công việc CPU-bound xấp xỉ bằng số core hiện có."
+    },
+    {
+      "id": "q5",
+      "question": "Global Interpreter Lock (GIL) của Python có nghĩa là trong bản build CPython mặc định:",
+      "options": [
+        "Nhiều OS thread không thể thực thi bytecode Python cùng lúc, nhưng GIL được nhả ra trong các thao tác I/O",
+        "Chương trình Python hoàn toàn không thể dùng thread",
+        "Thread Python đạt parallelism đầy đủ cho công việc CPU-bound giống hệt thread C",
+        "Trên hệ thống có cài Python, mỗi lúc chỉ một process được chạy"
+      ],
+      "explanation": "GIL đảm bảo mỗi lúc chỉ một thread chạy interpreter Python, ngăn CPU parallelism thật sự cho bytecode Python. Tuy nhiên, GIL được nhả ra khi thread bị block vì I/O (mạng, đọc file), nên thread vẫn mang lại concurrency I/O-bound. Để có parallelism CPU-bound, hãy dùng `multiprocessing` để spawn các process interpreter riêng, mỗi process có GIL riêng. (CPython 3.13+ còn có bản build free-threaded tùy chọn không có GIL.)"
+    },
+    {
+      "id": "q6",
+      "question": "Định luật Gustafson gợi ý rằng định luật Amdahl đánh giá thấp điều gì?",
+      "options": [
+        "Chi phí context switch trong các hệ thống song song",
+        "Thêm core luôn làm giảm hiệu năng do overhead đồng bộ hóa",
+        "Phần tuần tự lớn dần khi phần cứng mở rộng",
+        "Tiềm năng mở rộng gần tuyến tính khi kích thước bài toán tăng tương ứng với số core"
+      ],
+      "explanation": "Định luật Amdahl cố định kích thước bài toán — nó hỏi 'với N core, tôi làm cùng một việc nhanh tới mức nào?' Gustafson nhận thấy người làm thực tế có xu hướng mở rộng bài toán theo phần cứng. Khi workload tăng tương ứng với số core, chi phí khởi tạo tuần tự giữ nguyên trong khi công việc song song hóa được lớn dần, cho phép mở rộng gần tuyến tính — điều mà mô hình của Amdahl sẽ gạt đi."
+    },
+    {
+      "id": "q7",
+      "question": "Bốn điều kiện Coffman cho deadlock là: mutual exclusion, hold-and-wait, no preemption, và circular wait. Kỹ thuật thực tế phổ biến nhất để ngăn deadlock trong hệ thống thật là:",
+      "options": [
+        "Chỉ dùng một mutex cho mỗi chương trình",
+        "Áp đặt một thứ tự lấy lock toàn cục nhất quán để phá vỡ điều kiện circular wait",
+        "Nhả mọi lock trước khi lấy lock mới",
+        "Dùng atomic operation thay cho mutex với mọi biến chia sẻ"
+      ],
+      "explanation": "Thứ tự lấy lock nhất quán phá vỡ điều kiện circular wait — nếu Thread A luôn lấy Lock 1 trước Lock 2, và Thread B cũng vậy, chúng không bao giờ tạo thành vòng. Đây là kỹ thuật phòng ngừa deadlock được áp dụng rộng rãi nhất trong các codebase thực tế (ví dụ tài liệu về phân cấp lock của Linux kernel)."
+    },
+    {
+      "id": "q8",
+      "question": "Trong Node.js, gọi `await Promise.all([fetch(urlA), fetch(urlB), fetch(urlC)])` sẽ phát cả ba request:",
+      "options": [
+        "Tuần tự — mỗi fetch chờ cái trước hoàn tất rồi mới bắt đầu",
+        "Song song trên ba OS thread riêng biệt, mỗi fetch một thread",
+        "Concurrent trên thread event loop duy nhất — cả ba cùng đang dở dang một lúc",
+        "Chỉ khi server hỗ trợ HTTP/2 multiplexing"
+      ],
+      "explanation": "`Promise.all` phát cả ba lời gọi fetch ngay lập tức — chúng đều được đăng ký với network stack của hệ điều hành và cùng đang dở dang một lúc. Event loop xử lý callback khi từng response tới. Đây là concurrency (một thread, nhiều task đang tiến hành), không phải parallelism (nhiều thread). Không có OS thread nào được tạo thêm."
+    },
+    {
+      "id": "q9",
+      "question": "Một chương trình có 95% công việc có thể song song hóa. Theo định luật Amdahl, speedup với đúng 20 core là bao nhiêu?",
+      "options": [
+        "20×",
+        "19×",
+        "Xấp xỉ 10.3×",
+        "Xấp xỉ 5×"
+      ],
+      "explanation": "Speedup = 1 / ((1 - 0.95) + 0.95/20) = 1 / (0.05 + 0.0475) = 1 / 0.0975 ≈ 10.26×. Phần đuôi tuần tự 5% giới hạn máy 20 core ở mức speedup hiệu quả chỉ khoảng một nửa số core."
+    },
+    {
+      "id": "q10",
+      "question": "Bạn đang thiết kế một backend service proxy request tới ba microservice phía sau và gộp response của chúng. Mỗi lời gọi xuống phía sau mất ~200ms. Thiết kế đúng để giảm thiểu latency là:",
+      "options": [
+        "Gọi tuần tự từng service phía sau để tránh race condition (tổng ~600ms)",
+        "Spawn một OS thread mới cho mỗi lời gọi xuống phía sau (tổng ~200ms nhưng nặng nề)",
+        "Phát cả ba lời gọi concurrent bằng Promise.all hoặc tương đương (tổng ~200ms, nhẹ)",
+        "Cache response trong Redis để khỏi phải gọi chút nào"
+      ],
+      "explanation": "Đây là pattern fan-out I/O-bound kinh điển. Gọi các service concurrent (Promise.all, asyncio.gather, goroutine của Go) nghĩa là cả ba khoảng chờ 200ms diễn ra cùng lúc, nên tổng latency là ~200ms thay vì ~600ms. Cách mỗi lời gọi một thread cũng chạy được nhưng nặng nề. Cache có thể giúp tổng thể nhưng không giải quyết được vấn đề latency khi cache miss."
+    }
+  ]
+}

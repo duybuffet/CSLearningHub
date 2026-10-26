@@ -1,0 +1,222 @@
+{
+  "sourceHash": "388c1636276f",
+  "title": "Logical clock và thứ tự sự kiện (Logical Clocks and Ordering)",
+  "tagline": "Hệ phân tán suy luận về thứ tự sự kiện mà không cần đồng hồ đồng bộ như thế nào — Lamport timestamp, vector clock và quan hệ happens-before.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy tưởng tượng bạn đang debug một sự cố production. Bạn lấy log từ ba server, sắp xếp theo timestamp và cố dựng lại chuyện đã xảy ra. Nhưng log có vẻ mâu thuẫn — Server B hình như đã phản hồi một message trước cả khi Server A gửi nó. Có gì sai chăng? Chưa chắc. Đồng hồ trên hai server đó lệch nhau vài trăm mili giây, và độ lệch nhỏ xíu đó đủ để đảo ngược thứ tự sự kiện trong log của bạn. Đây không phải edge case. Đây là bài toán cơ bản về thời gian trong hệ phân tán, và nó đã tồn tại từ những chương trình nhiều máy đầu tiên.\n\nTrong bất kỳ hệ thống nào có hai process trở lên chạy trên các máy riêng, các máy đó có đồng hồ riêng. Đồng hồ vật lý chạy với tốc độ hơi khác nhau — bộ dao động thạch anh chính xác cỡ một phần triệu, nghĩa là hai đồng hồ chạy tự do sẽ lệch nhau khoảng 32 giây mỗi năm. Network Time Protocol (NTP) định kỳ đồng bộ lại đồng hồ, nhưng chỉ chính xác tới khoảng một mili giây trên một LAN tốt và 1–100 mili giây qua internet — và một bước NTP hoạt động sai thậm chí có thể kéo đồng hồ lùi lại. Với những sự kiện cách nhau vài micro giây — một lần ghi database và việc replicate nó — thời gian thực đơn giản là không đủ mịn hay đủ tin cậy để xác định thứ tự.\n\n**Logical clock** né hoàn toàn vấn đề này bằng cách theo dõi *quan hệ nhân quả* thay vì thời gian vật lý. Nhận thức then chốt, được Leslie Lamport trình bày trong paper bước ngoặt năm 1978 **\"Time, Clocks, and the Ordering of Events in a Distributed System\"**, là điều ta thường quan tâm không phải *khi nào* một việc xảy ra trên đồng hồ, mà là *liệu một sự kiện có thể đã ảnh hưởng tới sự kiện kia hay không*. Nếu sự kiện A gửi một message mà sự kiện B nhận, thì A đi trước B theo nhân quả — và quan hệ đó là tất cả những gì ta cần cho các thuật toán phân tán đúng. Paper của Lamport đã được trích dẫn hơn 10,000 lần và có thể nói là một trong mười paper quan trọng nhất của khoa học máy tính.\n\nChương này xây logical clock từ những nguyên lý đầu tiên. Ta sẽ bắt đầu với định nghĩa trừu tượng của quan hệ nhân quả (quan hệ **happens-before**), dựng clock số nguyên đơn giản của Lamport, chỉ ra giới hạn của nó, rồi phát triển **vector clock**, thứ cho ta bức tranh đầy đủ và chính xác về quan hệ nhân quả trong hệ phân tán. Dọc đường, ta sẽ thấy các ý tưởng này vận hành hệ thống thật ra sao: version vector trong Riak (và trong thiết kế Amazon Dynamo gốc), hybrid logical clock trong CockroachDB, và causal consistency trong database phân tán. Đọc xong, bạn sẽ có thể nhìn vào một tập sự kiện phân tán và xác định — một cách chặt chẽ — sự kiện nào gây ra sự kiện nào, và sự kiện nào thực sự concurrent."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mạch logic: sự không tin cậy của đồng hồ vật lý dẫn tới quan hệ happens-before, được cài đặt qua Lamport clock hoặc vector clock, mỗi loại vận hành các hệ thống thực tế khác nhau."
+    },
+    {
+      "type": "analogy",
+      "title": "Quầy phát số nối tiếp",
+      "content": "Hình dung một tòa nhà hành chính lớn có ba quầy hỗ trợ — A, B và C — mỗi quầy phát phiếu đánh số cho người đến làm thủ tục. Mỗi quầy có bộ đếm phiếu riêng bắt đầu từ số không. Các quầy chung một quy tắc: **khi nhân viên nhận một hồ sơ tham chiếu phiếu số N từ quầy khác, nhân viên đóng dấu phiếu kế tiếp của mình ít nhất là N+1**. Đây là sự đồng bộ duy nhất giữa các quầy.\n\nGiờ giả sử Quầy A phát phiếu 5 và chuyển hồ sơ đó sang Quầy B. Quầy B, bộ đếm đang ở 3, giờ thấy mình phải đóng dấu ít nhất 6 — nên phiếu kế tiếp của Quầy B là 6. Quầy B sau đó chuyển sang Quầy C, nơi đóng dấu 7. Ai nhìn vào ba hồ sơ này cũng nói chắc chắn được: phiếu 5 ở Quầy A *xảy ra trước* phiếu 6 ở Quầy B, phiếu này lại *xảy ra trước* phiếu 7 ở Quầy C. Các con số mã hóa chuỗi nhân quả.\n\nNhưng nếu Quầy A cũng phát phiếu 8 một cách độc lập — không liên quan gì tới chuỗi B/C thì sao? Phiếu 8 ở Quầy A và phiếu 6 ở Quầy B không có liên hệ nhân quả. Chúng **concurrent** — Quầy A không biết về hồ sơ B-6 khi phát A-8, và Quầy B không biết về A-8 khi phát B-6. Chỉ riêng số phiếu không cho bạn biết điều này. A-8 > B-6 về số, nhưng điều đó không có nghĩa A-8 *gây ra* hay *đi sau* B-6. Đây là giới hạn cơ bản mà Lamport clock chia sẻ với phép so sánh phiếu số — và là lý do vector clock được phát minh."
+    },
+    {
+      "type": "explanation",
+      "title": "Quan hệ happens-before: hình thức hóa quan hệ nhân quả",
+      "content": "Lamport định nghĩa quan hệ **happens-before**, ký hiệu →, bằng ba quy tắc cùng nhau bao quát mọi cách một sự kiện có thể ảnh hưởng tới sự kiện khác:\n\n**Quy tắc 1 — Thứ tự trong process**: Nếu A và B là sự kiện trong cùng một process, và A xảy ra trước B theo thứ tự thực thi cục bộ của process đó, thì A → B. Trong một process, các sự kiện có thứ tự tuần tự tự nhiên (kể cả trong chương trình đa thread, trong phạm vi một thread thì điều này là rõ ràng).\n\n**Quy tắc 2 — Truyền message**: Nếu A là việc *gửi* một message và B là việc *nhận* chính message đó (có thể ở process khác), thì A → B. Bên gửi tất yếu hành động trước khi bên nhận phản ứng được, tạo ra một cạnh nhân quả xuyên process.\n\n**Quy tắc 3 — Tính bắc cầu**: Nếu A → B và B → C, thì A → C. Quan hệ nhân quả nối thành chuỗi. Nếu A gửi message mà B nhận, rồi B gửi message mà C nhận, thì A đã gây ra C một cách bắc cầu.\n\nVới ba quy tắc này, ta phân được mọi cặp sự kiện trong hệ phân tán vào đúng hai loại:\n- **Có thứ tự nhân quả**: A → B hoặc B → A. Một sự kiện có thể đã ảnh hưởng tới sự kiện kia.\n- **Concurrent** (ký hiệu A ∥ B): không có A → B cũng không có B → A. Không có đường nhân quả nào nối chúng. Chúng có thể xảy ra đúng cùng một khoảnh khắc thực, hoặc cách nhau nhiều năm — điểm mấu chốt là, với các message đã được gửi, không cái nào có thể đã ảnh hưởng tới cái kia.\n\nĐây là một bước chuyển tư duy sâu sắc. Thay vì hỏi \"sự kiện A xảy ra khi nào?\", ta hỏi \"sự kiện A có thể đã ảnh hưởng tới sự kiện B không?\" Câu hỏi thứ nhất cần đồng hồ đồng bộ; câu thứ hai chỉ cần theo dõi message nào đã được gửi và nhận. Đó là tính chất của chính quá trình tính toán, không phải của nguồn thời gian bên ngoài nào.\n\n**Vì sao điều này quan trọng?** Xét một database phân tán nơi hai client cùng lúc ghi vào cùng một key trên các replica khác nhau. Nếu hai lần ghi là concurrent — không cái nào có thể biết về cái kia — thì theo định nghĩa, hệ thống không thể nói cái nào \"muộn hơn\" nếu không có thêm chính sách (như last-write-wins hay một consensus protocol). Quan hệ happens-before làm điều này tường minh: các lần ghi concurrent là một trạng thái phát hiện được, có ý nghĩa, chứ không chỉ là sai số đo lường."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các chuỗi happens-before: a1→b1 (message), b1→b2 (thứ tự trong process), b2→c1 (message), c1→c2 (thứ tự trong process). Do đó a1→c2 theo tính bắc cầu. Nhưng a2 concurrent với b1, b2, c1 — không có message nào nối chúng."
+    },
+    {
+      "type": "explanation",
+      "title": "Lamport clock: đơn giản, thanh lịch và chưa đầy đủ",
+      "content": "Đóng góp đầu tiên của Lamport là một thuật toán đơn giản tuyệt đẹp, gán timestamp số nguyên cho các sự kiện sao cho quan hệ nhân quả được tôn trọng. Mỗi process duy trì một bộ đếm số nguyên duy nhất, gọi là **Lamport clock** L. Thuật toán chỉ có ba quy tắc:\n\n**Với mọi sự kiện cục bộ**: L = L + 1. Tăng trước khi sự kiện được coi là đã xảy ra.\n\n**Khi gửi message**: L = L + 1, rồi đính kèm giá trị hiện tại của L vào message.\n\n**Khi nhận message** có timestamp T: L = max(L, T) + 1. Phần +1 là then chốt — nó đảm bảo sự kiện nhận có timestamp *thực sự lớn hơn* sự kiện gửi, giữ đúng Quy tắc 2 của happens-before.\n\nĐiều này đảm bảo **clock condition**: nếu A → B, thì L(A) < L(B). Chứng minh khá thẳng bằng quy nạp theo định nghĩa của →: Quy tắc 1 được đảm bảo vì sự kiện cục bộ luôn tăng bộ đếm. Quy tắc 2 được đảm bảo vì max(L, T) + 1 > T = L(send). Quy tắc 3 suy ra từ tính bắc cầu của <.\n\n**Điểm vướng — chiều ngược lại không đúng.** L(A) < L(B) *không* suy ra A → B. Hai sự kiện concurrent A và B có thể có Lamport timestamp lần lượt là 5 và 7, chỉ vì Process A tình cờ có bộ đếm cục bộ cao hơn ở một thời điểm không liên quan nào đó. Chỉ từ Lamport timestamp, bạn không thể biết L(A) < L(B) là vì A gây ra B, hay chỉ vì process của A gần đây tình cờ có nhiều sự kiện cục bộ hơn.\n\nTrên thực tế, Lamport clock vẫn hữu ích cho **total ordering**. Bằng cách kết hợp Lamport timestamp với một yếu tố phân định (ví dụ process ID), bạn có một thứ tự toàn phần tất định trên mọi sự kiện, nhất quán với happens-before. Lamport đã dùng chính thứ tự toàn phần này trong cùng paper để xây distributed mutual exclusion. Ballot number của Paxos theo đúng công thức đó — một cặp (counter, nodeId) — nên đề xuất từ các proposer concurrent luôn có thứ tự toàn phần, và term của Raft đóng vai trò tương tự."
+    },
+    {
+      "type": "diagram",
+      "caption": "Lan truyền Lamport clock. Khi Node A nhận message của B với L=5, nó đặt L=max(3,5)+1=6, đảm bảo sự kiện nhận (L=6) thực sự đi sau sự kiện gửi (L=5). Các sự kiện cục bộ độc lập của Node A chạy bộ đếm riêng song song."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Dòng then chốt là `Math.max(this.time, msgTime) + 1` trong `receive()`. Phần `max` hấp thụ mọi timestamp đi trước theo nhân quả từ lịch sử của bên gửi; phần `+1` đảm bảo sự kiện nhận thực sự muộn hơn sự kiện gửi. Phần minh họa cuối cho thấy vì sao Lamport timestamp thấp hơn không đảm bảo 'xảy ra trước' — L=3 của A hoàn toàn chỉ là trùng hợp so với L=5 của C.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Vector clock: nắm bắt concurrency một cách chính xác",
+      "content": "Để phân biệt sự kiện có thứ tự nhân quả với sự kiện concurrent, ta cần nhiều thông tin hơn một số nguyên mỗi node. Lời giải, được Colin Fidge và Friedemann Mattern phát triển độc lập năm 1988, là **vector clock**.\n\nThay vì một bộ đếm mỗi process, mỗi process duy trì một **vector** (mảng) các bộ đếm — mỗi process trong hệ thống một bộ đếm. Vector clock V của process i được đánh chỉ số sao cho V[i] là thời gian logic của chính i, còn V[j] (j ≠ i) là thời gian logic mới nhất của process j mà process i *biết tới*. Hãy nghĩ như sau: \"V[j] cho bạn biết bạn đã thấy bao nhiêu phần lịch sử của j.\"\n\nCác quy tắc cập nhật là:\n\n**Với mọi sự kiện cục bộ ở process i**: V[i] = V[i] + 1. Chỉ thành phần của chính process đó tăng.\n\n**Khi gửi message ở process i**: V[i] = V[i] + 1, rồi gửi toàn bộ vector V kèm message.\n\n**Khi nhận message** ở process i với vector W: Với mỗi thành phần j, V[j] = max(V[j], W[j]). Sau đó V[i] = V[i] + 1. Bước merge này làm cho bên nhận biết mọi điều bên gửi đã biết — toàn bộ lịch sử dẫn tới message này.\n\nGiờ ta có thể định nghĩa **phép so sánh vector clock**:\n\n- **V_A ≤ V_B** (theo từng thành phần): A[j] ≤ B[j] với *mọi* j.\n- **V_A < V_B**: V_A ≤ V_B *và* V_A ≠ V_B (nhỏ hơn thực sự ở ít nhất một thành phần).\n- **A → B** (A happened-before B) khi và chỉ khi V_A < V_B.\n- **A ∥ B** (concurrent) khi và chỉ khi V_A và V_B *không so sánh được* — không có V_A ≤ V_B cũng không có V_B ≤ V_A.\n\nĐây là khác biệt then chốt so với Lamport clock. Với vector clock, phép so sánh mã hóa trực tiếp việc các sự kiện có quan hệ nhân quả hay concurrent. Không có chỗ cho mơ hồ. Các vector không so sánh được là một tín hiệu khẳng định, chính xác rằng cả hai sự kiện đã xảy ra mà không biết về nhau."
+    },
+    {
+      "type": "diagram",
+      "caption": "Sự tiến hóa của vector clock qua ba node. Vector cuối của C là [2,2,1] mã hóa: 'Tôi đã thấy 2 sự kiện từ A, 2 từ B, và 1 của chính tôi.' Sự kiện concurrent a2 của A có VC=[3,0,0] — không so sánh được với vector của B và C, báo hiệu concurrency."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Hàm `happensBefore` cài đặt đúng định nghĩa hình thức: để A < B (theo từng thành phần), mọi thành phần của A phải nhỏ hơn hoặc bằng thành phần tương ứng của B, với ít nhất một thành phần nhỏ hơn thực sự. Khi không chiều nào đúng — mỗi clock đều có thành phần lớn hơn clock kia — các vector không so sánh được và các sự kiện là concurrent. Đây là tính chất mà Riak dùng để phát hiện các lần ghi xung đột.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Vector clock trong thực tế: phát hiện xung đột",
+      "content": "Sức mạnh của vector clock trở nên cụ thể khi áp dụng vào database phân tán. Xét một key-value store có ba replica, nơi client có thể ghi vào bất kỳ replica nào mà không cần phối hợp (thiết kế ưu tiên availability của Amazon Dynamo, Riak và Voldemort).\n\nKhi Client 1 ghi `x = 'red'` vào Replica A và Client 2 đồng thời ghi `x = 'blue'` vào Replica B — không có phối hợp nào giữa họ — hai replica rốt cuộc sẽ cố hòa giải. Làm sao Replica C, nơi rốt cuộc nhận được cả hai lần ghi, biết chúng là concurrent?\n\nVới version vector (một biến thể theo từng object của vector clock), mỗi lần ghi mang theo vector clock của replica tại thời điểm ghi. Khi C so sánh hai version vector:\n- Vector của lần ghi 1: `{A:3, B:0, C:0}`\n- Vector của lần ghi 2: `{A:0, B:2, C:0}`\n\nKhông vector nào ≤ vector kia theo từng thành phần. Chúng **không so sánh được** — một tín hiệu dứt khoát rằng các lần ghi này là concurrent. C không thể tự động merge chúng; nó phải lưu cả hai giá trị (gọi là **sibling** trong Riak) và phơi xung đột ra cho ứng dụng.\n\nỨng dụng sau đó có thể giải quyết xung đột bằng bất kỳ chính sách nào:\n- **Last-Write-Wins (LWW)**: Gắn một timestamp vật lý và chọn cái cao hơn. Đơn giản nhưng mất dữ liệu nếu đồng hồ bị lệch.\n- **Merge ở ứng dụng**: Nếu kiểu giá trị hỗ trợ (ví dụ counter, set), merge theo ngữ nghĩa. Các kiểu CRDT của Riak dùng cách này.\n- **Xung đột hiển thị cho người dùng**: Cho người dùng thấy cả hai giá trị và để họ chọn (như \"conflicted copy\" của Dropbox).\n\n**Version vector vs. vector clock**: Một vector clock thuần theo dõi mọi sự kiện ở mọi process. Một version vector chỉ theo dõi *thao tác ghi* theo từng replica — độ mịn thô hơn nhưng thực tế hơn cho database. Riak và Voldemort dùng version vector (tài liệu của Riak gọi chúng là **vclock**), thiết kế Dynamo năm 2007 cũng vậy. Amazon DynamoDB, dịch vụ được quản lý, thì *không* — nó sắp thứ tự ghi qua một leader cho mỗi partition, và global table giải quyết xung đột giữa các region bằng last-writer-wins. Bộ máy khái niệm là y hệt; chỉ độ mịn của thứ được tính là một \"sự kiện\" là khác."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các lần ghi concurrent được phát hiện qua version vector không so sánh được. Replica C nhận cả hai lần ghi và nhận ra không cái nào trội hơn cái kia — lần đọc phía client sẽ phơi ra cả hai giá trị (sibling) để ứng dụng giải quyết."
+    },
+    {
+      "type": "explanation",
+      "title": "Bài toán scale: kích thước của vector clock",
+      "content": "Vector clock có một giới hạn thực tế đáng kể: **vector phải có một entry cho mỗi bên tham gia**. Trong một hệ thống 100 node, mỗi message mang một vector 100 số nguyên, và mỗi object trong một database dùng version vector lưu 100 bộ đếm. Với 10,000 node — quy mô của một cluster microservice lớn hay một database phân tán toàn cầu — điều này trở nên không kham nổi.\n\nCó vài kỹ thuật giải quyết chuyện này:\n\n**Dotted version vector (DVV)**: Được dùng trong Riak 2.x. Thay vì theo dõi bộ đếm của mọi node trong một vector phẳng duy nhất, DVV tách *lịch sử nhân quả* (những gì đã thấy) khỏi *dot* (sự kiện duy nhất mà lần ghi cụ thể này đại diện). Điều này cho phép biểu diễn gọn hơn và tránh vấn đề bùng nổ clock khi client (không phải replica) được coi là bên tham gia.\n\n**Plausible clock**: Một xấp xỉ nén của vector clock trong đó các entry cũ bị cắt bỏ. Phép xấp xỉ luôn sắp đúng thứ tự các sự kiện có quan hệ nhân quả, nhưng có thể báo một số sự kiện *concurrent* là có thứ tự — nên nó có thể bỏ sót xung đột, nhưng không bao giờ bịa ra xung đột. Chỉ chấp nhận được ở nơi thỉnh thoảng bỏ sót một xung đột là chịu được.\n\n**Interval tree clock (ITC)**: Một phương án thay thế vector clock hỗ trợ tạo và xóa node động mà không cần phối hợp, dùng một không gian định danh hình tree thay vì một vector kích thước cố định.\n\nVới phần lớn database phân tán thực tế ngày nay, cấu hình điển hình có một số lượng replica nhỏ, cố định (ví dụ 3 hoặc 5), khiến version vector với vector cố định 3–5 entry hoàn toàn kham được. Bài toán scale chỉ thực sự gây đau khi số *bên tham gia có thể độc lập khởi tạo lần ghi* là lớn."
+    },
+    {
+      "type": "explanation",
+      "title": "Hybrid logical clock: bắc cầu giữa thời gian thực và quan hệ nhân quả",
+      "content": "Logical clock thuần rất tốt cho việc sắp thứ tự và phát hiện xung đột, nhưng chúng mất liên hệ với thực tế vật lý. Nếu bạn muốn trả lời \"cho tôi xem database như lúc 2:00 PM hôm qua\" — một query time-travel — thì một Lamport timestamp 4,293 chẳng cho bạn biết nó rơi vào đâu trong thời gian thực.\n\n**Hybrid Logical Clock (HLC)**, được Sandeep Kulkarni, Murat Demirbas, Deepak Madeppa, Bharadwaj Avva và Marcelo Leone giới thiệu năm 2014, giải quyết chuyện này bằng cách kết hợp một thành phần vật lý với một bộ đếm logic:\n\n```\nHLC = (wallClock, logicalCounter)\n```\n\nCác quy tắc cập nhật duy trì bất biến `HLC ≥ physicalTime` ở mọi thời điểm:\n\n**Với sự kiện cục bộ**: Nếu `wallClock > HLC.wall`, cập nhật `HLC = (wallClock, 0)`. Ngược lại, `HLC.counter++` (tick logic trong cùng một mili giây vật lý).\n\n**Khi gửi**: Giống sự kiện cục bộ, nhưng nhúng HLC vào message.\n\n**Khi nhận** một message có HLC `m`:\n- `newWall = max(HLC.wall, m.wall, wallClock)`\n- Nếu `newWall == HLC.wall == m.wall`, `HLC.counter = max(HLC.counter, m.counter) + 1`\n- ngược lại nếu `newWall == HLC.wall`, `HLC.counter++`\n- ngược lại nếu `newWall == m.wall`, `HLC.counter = m.counter + 1`\n- còn lại (đồng hồ cục bộ đi trước cả hai), `HLC.counter = 0`\n- Cuối cùng đặt `HLC.wall = newWall`\n\nĐiều này đảm bảo đồng thời hai tính chất: (1) timestamp HLC nhất quán nhân quả — nếu A → B, thì HLC(A) < HLC(B) — và (2) timestamp HLC luôn gần thời gian vật lý — HLC.wall luôn nằm trong một epsilon nhỏ so với thời gian thực.\n\nCockroachDB dùng HLC rộng rãi. Mỗi node duy trì một HLC, và mỗi transaction mang HLC của node khởi tạo nó. Khi một transaction chạm tới nhiều node, HLC được lan truyền và merge, giữ thời gian logic của cluster đồng bộ. Điều này cho phép tính năng `AS OF SYSTEM TIME` của CockroachDB: vì timestamp HLC tương ứng với thời gian lịch thật, bạn có thể query database như nó tồn tại tại một timestamp thực cụ thể, và hệ thống đảm bảo một snapshot nhất quán. YugabyteDB dùng cùng cách tiếp cận."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hybrid Logical Clock kết hợp một timestamp vật lý với một bộ đếm logic. Thành phần vật lý cho phép query theo thời gian thực (AS OF SYSTEM TIME của CockroachDB); thành phần logic duy trì causal consistency khi nhiều sự kiện xảy ra trong cùng một mili giây vật lý."
+    },
+    {
+      "type": "explanation",
+      "title": "Causal consistency: một đảm bảo thứ tự ngoài đời thực",
+      "content": "Toàn bộ lý thuyết logical clock rốt cuộc phục vụ một mục tiêu thực tế: **causal consistency**, một trong những consistency model quan trọng nhất trong hệ phân tán.\n\nMột hệ thống cung cấp **causal consistency** nếu nó đảm bảo các lần ghi có quan hệ nhân quả được mọi process thấy theo đúng thứ tự nhân quả. Các lần ghi concurrent có thể được thấy theo bất kỳ thứ tự nào (vì không cái nào gây ra cái kia), nhưng nếu Alice đăng một câu hỏi và Bob trả lời nó, không ai được thấy câu trả lời của Bob trước câu hỏi của Alice — kể cả khi bài của Alice được replicate tới một datacenter ở xa về địa lý.\n\nĐể cài đặt causal consistency, các hệ thống theo dõi phụ thuộc nhân quả bằng metadata kiểu vector clock hoặc danh sách phụ thuộc tường minh:\n\n1. Mỗi lần ghi được gắn vector clock của replica tại thời điểm ghi.\n2. Trước khi giao một lần ghi cho client hay replica khác, hệ thống kiểm tra mọi lần ghi đi trước theo nhân quả đều đã được giao.\n3. Nếu một lần ghi đến \"sai thứ tự\" (các phụ thuộc nhân quả của nó chưa tới), nó được đệm lại cho tới khi các phụ thuộc được thỏa mãn.\n\nCách đệm này gọi là **causal barrier** hay **causal delivery**. COPS (Clusters of Order-Preserving Servers) và người kế nhiệm Eiger là các hệ thống nghiên cứu kinh điển xây trên nó; causally consistent session của MongoDB đạt hiệu quả tương tự bằng cách để replica chờ tới khi nó đã áp dụng cluster time mà client thấy gần nhất.\n\nCausal consistency yếu hơn hẳn linearizability (tiêu chuẩn vàng của strong consistency) nhưng mạnh hơn hẳn eventual consistency. Nó là một điểm cân bằng tốt cho nhiều ứng dụng thật: bạn có đảm bảo thứ tự có ý nghĩa (các thao tác có quan hệ nhân quả được sắp đúng) mà không phải trả cái giá hiệu năng của phối hợp toàn cục (các thao tác concurrent được phép mà không cần tuần tự hóa). Mạng xã hội, editor tài liệu cộng tác và ứng dụng nhắn tin đều được lợi từ causal consistency — chúng cần giữ chuỗi hội thoại và lịch sử chỉnh sửa nhưng không cần toàn bộ overhead của transaction được tuần tự hóa toàn cục."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: Paper năm 1978 của Leslie Lamport có tựa đề 'Time, Clocks, and the Ordering of Events in a Distributed System'. Nó được đăng trên Communications of the ACM và giới thiệu không chỉ logical clock mà cả quan hệ happens-before và một lời giải hoàn chỉnh cho bài toán distributed mutual exclusion chỉ dùng truyền message. Lamport nhận ACM Turing Award năm 2013 — thường được gọi là giải Nobel của ngành máy tính — một phần nhờ công trình này và các đóng góp sau đó gồm Paxos và TLA+. Các paper về vector clock năm 1988 của Fidge ('Timestamps in Message-Passing Systems That Preserve the Partial Ordering') và Mattern ('Virtual Time and Global States of Distributed Systems') mở rộng khung lý thuyết của Lamport để phát hiện được concurrency đầy đủ."
+    },
+    {
+      "type": "explanation",
+      "title": "Hiểu lầm phổ biến và edge case",
+      "content": "**Hiểu lầm 1: Lamport timestamp thấp hơn nghĩa là sự kiện sớm hơn.** Lamport timestamp 5 không có nghĩa sự kiện xảy ra lúc 5, thậm chí không có nghĩa nó xảy ra trước một sự kiện có timestamp 7. L(A) < L(B) là điều kiện *cần* nhưng không *đủ* cho A → B. Hai sự kiện concurrent có thể có Lamport timestamp bất kỳ theo bất kỳ thứ tự tương đối nào. Đừng bao giờ dùng Lamport timestamp như thời gian thực.\n\n**Hiểu lầm 2: Vector clock rất đắt.** Chi phí O(N) mỗi message chỉ là vấn đề khi N (số bên tham gia được gắn timestamp độc lập) lớn. Với một cluster database 3 replica, vector clock là ba số nguyên mỗi object — về cơ bản là miễn phí. Chi phí chỉ trở nên đáng kể khi client cũng được coi là bên tham gia gắn timestamp (như trong một số hệ peer-to-peer).\n\n**Hiểu lầm 3: Concurrent nghĩa là đồng thời.** Hai sự kiện là concurrent nếu chúng không có quan hệ nhân quả — không có đường message nào nối chúng. Điều này hoàn toàn độc lập với thời gian thực. Sự kiện A trên Server 1 lúc 9:00:00.000 và sự kiện B trên Server 2 lúc 9:00:05.000 có thể concurrent nếu không có message nào được gửi giữa chúng trong khoảng đó. Ngược lại, các sự kiện có thể có thứ tự nhân quả dù trông như xảy ra đúng cùng một thời điểm thực.\n\n**Hiểu lầm 4: Version vector phát hiện mọi xung đột.** Chúng phát hiện các lần ghi concurrent *vào cùng một key*, và chỉ khi mỗi lần ghi mang theo version context mà client thực sự đã đọc (\"causal context\" của Riak). Nếu Client 1 đọc x=0, Client 2 đọc x=0 rồi ghi x=1, sau đó Client 1 ghi x=2 với context cũ của nó, thì các vector đánh dấu đúng hai lần ghi là sibling concurrent. Những gì chúng không thấy được: một client ghi mù (không có context, nên lần ghi của nó trông mới hơn mọi thứ), và các xung đột trải trên **nhiều key** — hai bác sĩ trực mỗi người đọc thấy \"người kia đang trực\" rồi tự rút tên (write skew). Những trường hợp đó cần transaction với isolation serializable, không phải version vector.\n\n**Edge case: lệch đồng hồ và vi phạm epsilon của HLC.** HLC giả định độ lệch đồng hồ giữa hai node bất kỳ bị chặn bởi một epsilon nào đó (CockroachDB mặc định 500ms). Nếu đồng hồ vật lý của hai node lệch nhau hơn epsilon, các đảm bảo của HLC sụp đổ. CockroachDB xử lý độ lệch trong giới hạn đó bằng cách coi một giá trị có timestamp rơi vào uncertainty window của lần đọc là có thể concurrent và khởi động lại lần đọc ở timestamp cao hơn; còn một node có đồng hồ trôi quá xa so với phần còn lại của cluster (vượt 80% maximum offset) sẽ tự tắt thay vì liều phục vụ đọc không nhất quán. Đây là lý do đồng hồ NTP chính xác hoặc đồng hồ được hiệu chỉnh bằng GPS (như TrueTime của Google trong Spanner) có giá trị lớn đến vậy trên thực tế."
+    },
+    {
+      "type": "callout",
+      "content": "**Góc nhìn cho interview và bài thi**: Bẫy interview phổ biến nhất là nhầm hai chiều của clock condition của Lamport. Hãy nhớ: A→B *suy ra* L(A)<L(B), nhưng L(A)<L(B) *không* suy ra A→B. Điều đúng là mệnh đề phản đảo: L(A)≥L(B) suy ra A KHÔNG happen-before B. Với vector clock, phép kiểm tra then chốt là so sánh theo từng thành phần — hãy luyện với ví dụ cụ thể, đặc biệt là trường hợp vector không so sánh được. Trong interview system design, hãy nhắc rằng phần lớn database thực tế dùng version vector (một biến thể thô hơn theo dõi lần ghi theo từng replica, không theo từng sự kiện), và kích thước vector bị chặn bởi số replica, không phải số client. Nếu được hỏi về ứng dụng thực tế: các cặp (counter, nodeId) kiểu Lamport sắp thứ tự ballot của Paxos và term của Raft; version vector vận hành việc phát hiện xung đột trong Riak và thiết kế Dynamo gốc (không phải dịch vụ DynamoDB, và không phải Git — Git sắp thứ tự commit qua DAG con trỏ tới parent); HLC vận hành CockroachDB và YugabyteDB."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Đồng hồ vật lý không thể sắp thứ tự sự kiện phân tán một cách tin cậy** vì chúng trôi và có thể lệch vài mili giây hoặc hơn — logical clock theo dõi *quan hệ nhân quả* thay vì thời gian, không cần đồng bộ đồng hồ.",
+        "**Happens-before (→)** là định nghĩa hình thức của Lamport về quan hệ nhân quả: A→B nếu chúng ở cùng process và A đi trước B, hoặc A gửi message mà B nhận, hoặc có một chuỗi bắc cầu. Các sự kiện không có đường nhân quả nào là **concurrent (∥)**.",
+        "**Lamport clock** dùng một số nguyên mỗi process (tăng khi có sự kiện cục bộ, max+1 khi nhận). Chúng đảm bảo A→B suy ra L(A)<L(B), nhưng *không* đảm bảo chiều ngược lại — chỉ nhìn Lamport timestamp thì sự kiện concurrent không phân biệt được với sự kiện có thứ tự nhân quả.",
+        "**Vector clock** cho mỗi process một vector bộ đếm (mỗi node một bộ đếm). Chúng hỗ trợ so sánh nhân quả đầy đủ: A→B khi và chỉ khi V_A nhỏ hơn thực sự V_B theo từng thành phần; **vector không so sánh được** báo hiệu dứt khoát các sự kiện concurrent — tính chất mà Riak và thiết kế Dynamo gốc dùng để phát hiện các lần ghi xung đột.",
+        "**Version vector** là biến thể database của vector clock, theo dõi lần ghi theo từng replica thay vì mọi sự kiện; khi hai replica có version vector không so sánh được cho cùng một key, một xung đột ghi được phát hiện và hệ thống lưu các sibling để giải quyết ở mức ứng dụng.",
+        "**Hybrid Logical Clock (HLC)** kết hợp thời gian vật lý với một bộ đếm logic, luôn gần thời gian thực trong khi vẫn duy trì causal consistency — điều này cho phép query time-travel (`AS OF SYSTEM TIME`) trong CockroachDB và YugabyteDB.",
+        "**Causal consistency** là đảm bảo thứ tự thực tế được xây trên logical clock: các lần ghi có quan hệ nhân quả được mọi node thấy theo thứ tự nhân quả, còn các lần ghi concurrent có thể được thấy theo bất kỳ thứ tự nào — một điểm giữa thân thiện với hiệu năng, nằm giữa eventual consistency và linearizability đầy đủ."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vì sao hệ phân tán không thể dùng timestamp đồng hồ thực vật lý để sắp thứ tự dứt khoát các sự kiện giữa các node?",
+      "options": [
+        "Đồng hồ trên các máy riêng trôi với tốc độ khác nhau và đồng bộ NTP có sai số mức mili giây, khiến việc sắp thứ tự dưới mili giây không tin cậy",
+        "Timestamp vật lý tốn quá nhiều dung lượng lưu trữ mỗi sự kiện",
+        "Hệ điều hành giới hạn độ phân giải của đồng hồ hệ thống ở một giây",
+        "Timestamp vật lý chỉ hoạt động trong một datacenter, không hoạt động giữa các vùng địa lý"
+      ],
+      "explanation": "Bộ dao động thạch anh trôi khoảng một phần triệu, lệch ~32 giây mỗi năm nếu không hiệu chỉnh. NTP đồng bộ tới mức 1–100ms trong điều kiện internet bình thường. Các sự kiện cách nhau vài micro giây trên các máy khác nhau dễ dàng có timestamp vật lý bị đảo ngược nếu đồng hồ của máy nhận chạy nhanh hơn. Logical clock né điều này bằng cách theo dõi quan hệ nhân quả — không phải thời gian — nên không cần đồng bộ bên ngoài."
+    },
+    {
+      "id": "q2",
+      "question": "Theo định nghĩa happens-before của Lamport, điều nào sau đây khiến sự kiện A happen-before sự kiện B?",
+      "options": [
+        "A và B xảy ra trên các máy khác nhau và A có node ID thấp hơn",
+        "A là việc gửi một message và B là việc nhận chính message đó ở một process khác",
+        "Lamport timestamp của A nhỏ hơn Lamport timestamp của B về giá trị số",
+        "A và B cùng sửa một biến trong một database dùng chung"
+      ],
+      "explanation": "Ba quy tắc happens-before của Lamport là: (1) thứ tự trong cùng process, (2) cặp gửi/nhận message, và (3) tính bắc cầu. Quy tắc 2 nói trực tiếp: nếu A là việc gửi và B là việc nhận cùng một message, thì A→B. Phương án Lamport timestamp mô tả một hệ quả của quan hệ, không phải định nghĩa của nó — L(A)<L(B) không suy ra A→B; chỉ A→B ⟹ L(A)<L(B) là được đảm bảo."
+    },
+    {
+      "id": "q3",
+      "question": "Lamport clock của một node đang ở 8 khi nó nhận một message có Lamport timestamp 15. Nó đặt clock của mình thành bao nhiêu?",
+      "options": [
+        "8 (giữ nguyên giá trị cục bộ)",
+        "15 (lấy timestamp nhận được)",
+        "16 (max(8,15) + 1)",
+        "23 (8 + 15)"
+      ],
+      "explanation": "Quy tắc nhận của Lamport là: L = max(cục bộ, nhận được) + 1. max(8, 15) = 15, rồi +1 = 16. Phần +1 là thiết yếu — nó đảm bảo sự kiện nhận (L=16) lớn hơn thực sự sự kiện gửi (L=15), giữ đúng quan hệ happens-before cho cặp gửi/nhận message."
+    },
+    {
+      "id": "q4",
+      "question": "Hai sự kiện A và B có Lamport timestamp L(A)=5 và L(B)=9. Bạn có thể kết luận gì?",
+      "options": [
+        "A chắc chắn happened-before B vì L(A) < L(B)",
+        "B chắc chắn happened-before A vì L(B) > L(A)",
+        "A và B chắc chắn concurrent vì chúng ở các process khác nhau",
+        "A có thể happened-before B, nhưng A và B cũng có thể concurrent — chỉ từ Lamport timestamp thì không thể biết"
+      ],
+      "explanation": "Clock condition của Lamport đảm bảo: A→B suy ra L(A)<L(B). Nhưng chiều ngược lại KHÔNG đúng: L(A)<L(B) không suy ra A→B. Hai sự kiện concurrent có thể có Lamport timestamp bất kỳ theo bất kỳ thứ tự tương đối nào, vì các process độc lập tăng bộ đếm độc lập. Để phát hiện concurrency, bạn cần vector clock."
+    },
+    {
+      "id": "q5",
+      "question": "Sự kiện A có vector clock {A:2, B:0, C:0} và sự kiện B có vector clock {A:1, B:2, C:0}. Quan hệ giữa chúng là gì?",
+      "options": [
+        "A và B concurrent vì không vector nào nhỏ hơn hoặc bằng vector kia theo từng thành phần",
+        "B happened-before A vì thành phần B của B (2) lớn hơn thành phần B của A (0)",
+        "A happened-before B vì thành phần A của A (2) lớn hơn thành phần A của B (1)",
+        "A và B có quan hệ nhân quả vì chúng có cùng giá trị thành phần C (0)"
+      ],
+      "explanation": "Để có A→B ta cần A[i] ≤ B[i] với mọi i: A[A]=2 > B[A]=1, nên A KHÔNG ≤ B. Để có B→A ta cần B[i] ≤ A[i] với mọi i: B[B]=2 > A[B]=0, nên B KHÔNG ≤ A. Không vector nào trội hơn vector kia — chúng không so sánh được, đó chính là định nghĩa chính xác của concurrent trong mô hình vector clock."
+    },
+    {
+      "id": "q6",
+      "question": "Khả năng nào khiến vector clock mạnh hơn Lamport clock cho database phân tán?",
+      "options": [
+        "Vector clock tốn ít bộ nhớ mỗi sự kiện hơn Lamport clock",
+        "Vector clock có thể phát hiện hai sự kiện là concurrent chứ không có thứ tự nhân quả, cho phép phát hiện xung đột",
+        "Vector clock tự động đồng bộ thời gian thực vật lý giữa các node",
+        "Vector clock được cài đặt bằng phần cứng nên nhanh hơn Lamport clock bằng phần mềm"
+      ],
+      "explanation": "Lợi thế định danh của vector clock là các vector không so sánh được (không cái nào ≤ cái kia theo từng thành phần) chỉ ra dứt khoát các sự kiện concurrent. Với Lamport clock, chỉ dựa vào timestamp thì sự kiện concurrent không phân biệt được với sự kiện có thứ tự nhân quả. Khả năng phát hiện concurrency này là thứ Riak dùng để nhận diện các lần ghi xung đột và lưu sibling để giải quyết ở mức ứng dụng."
+    },
+    {
+      "id": "q7",
+      "question": "Replica A có version vector {A:3, B:0} và Replica B có version vector {A:0, B:2} cho cùng một key. Điều này có nghĩa là gì?",
+      "options": [
+        "Phiên bản của Replica A mới hơn và nên ghi đè phiên bản của Replica B",
+        "Phiên bản của Replica B mới hơn và nên ghi đè phiên bản của Replica A",
+        "Hai phiên bản đại diện cho các lần ghi concurrent — một xung đột — và hệ thống phải áp dụng một chính sách giải quyết",
+        "Hai phiên bản giống hệt nhau và không cần hòa giải"
+      ],
+      "explanation": "Các version vector không so sánh được: A[A]=3 > B[A]=0 (A có nhiều lần ghi từ A hơn những gì B đã thấy), và B[B]=2 > A[B]=0 (B có nhiều lần ghi từ B hơn những gì A đã thấy). Không cái nào trội hơn cái kia, nên đây là các lần ghi concurrent. Các hệ như Riak lưu cả hai thành sibling; số khác áp dụng LWW hoặc một hàm merge."
+    },
+    {
+      "id": "q8",
+      "question": "Giới hạn chính của vector clock trong hệ thống quy mô lớn với hàng nghìn node là gì?",
+      "options": [
+        "Vector clock không phát hiện được sự kiện concurrent khi có hơn 3 node tham gia",
+        "Vector clock cần một bộ điều phối trung tâm để gán giá trị clock",
+        "Vector clock chỉ hoạt động đúng khi mọi node có đồng hồ vật lý đồng bộ",
+        "Kích thước vector và overhead mỗi message tăng tuyến tính O(N) theo số bên tham gia"
+      ],
+      "explanation": "Mỗi entry vector clock cần một bộ đếm cho mỗi node tham gia. Với 10,000 node, mỗi message sẽ mang 10,000 số nguyên và mỗi object được lưu sẽ kèm một vector metadata 10,000 entry. Overhead O(N) này khiến vector clock thuần không thực tế cho cluster lớn. Các cách giảm thiểu gồm dotted version vector, plausible clock, và giới hạn entry vector cho replica (không phải client)."
+    },
+    {
+      "id": "q9",
+      "question": "Hybrid Logical Clock (HLC) được dùng trong CockroachDB chủ yếu vì chúng cho phép:",
+      "options": [
+        "Query time-travel dùng timestamp lịch thật trong khi vẫn duy trì causal consistency",
+        "Throughput ghi nhanh hơn bằng cách bỏ qua consensus cho transaction cục bộ",
+        "Tự động giải quyết xung đột mà không cần lưu các phiên bản xung đột",
+        "Replication giữa các datacenter mà không cần round trip mạng nào"
+      ],
+      "explanation": "HLC kết hợp một thành phần đồng hồ thực với một bộ đếm logic, giữ timestamp HLC gần thời gian vật lý trong khi đảm bảo causal consistency. Vì thành phần đồng hồ thực tương ứng với thời gian lịch thật, tính năng AS OF SYSTEM TIME của CockroachDB cho phép bạn query database như nó tồn tại tại một timestamp thực cụ thể. Lamport clock hay vector clock thuần không làm được điều này vì timestamp của chúng không mang ý nghĩa thời gian thực."
+    },
+    {
+      "id": "q10",
+      "question": "Causal consistency đảm bảo rằng:",
+      "options": [
+        "Mọi replica luôn thấy mọi lần ghi theo đúng cùng một thứ tự toàn phần",
+        "Các lần ghi có quan hệ nhân quả được mọi node thấy theo đúng thứ tự nhân quả, còn các lần ghi concurrent có thể được thấy theo bất kỳ thứ tự nào",
+        "Mọi lần ghi hiện ra ngay lập tức với mọi node mà không có độ trễ lan truyền",
+        "Các lần ghi concurrent tự động được merge bằng một quy tắc định sẵn mà ứng dụng không cần can thiệp"
+      ],
+      "explanation": "Causal consistency là tính chất mà các thao tác có quan hệ nhân quả (nối với nhau bằng một chuỗi happens-before) luôn được quan sát theo thứ tự nhân quả, còn các thao tác concurrent không có ràng buộc thứ tự nào. Nó yếu hơn linearizability (đòi một thứ tự toàn phần duy nhất) nhưng mạnh hơn eventual consistency (không hứa hẹn gì về thứ tự). Điều này khiến nó là một điểm giữa thực dụng cho các ứng dụng như mạng xã hội và editor cộng tác."
+    }
+  ]
+}

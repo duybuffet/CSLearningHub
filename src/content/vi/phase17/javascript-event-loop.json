@@ -1,0 +1,223 @@
+{
+  "sourceHash": "06842896aa02",
+  "title": "JavaScript Event Loop",
+  "tagline": "Call stack, task queue, microtask, async/await và cách browser chen các frame render vào giữa các task — mô hình giúp JavaScript single-threaded mà vẫn non-blocking.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Có một nghịch lý mà developer JavaScript nào cũng gặp trước khi thực sự hiểu runtime: bạn viết code fetch dữ liệu từ server, phản hồi click chuột, chạy animation 60 frame mỗi giây và đặt timer — tất cả cùng lúc — vậy mà JavaScript chỉ làm được một việc tại một thời điểm. Nó là **single-threaded**: có đúng một call stack, và tại mỗi thời điểm chỉ một hàm chạy trên đó. Vậy mọi thứ vận hành ra sao?\n\nCâu trả lời là **event loop**, một kiến trúc được tích hợp sẵn trong mọi JavaScript engine và browser. Event loop không phải một phần của bản thân ngôn ngữ JavaScript — nó nằm trong môi trường host (browser, Node.js, Deno, Bun). Việc nó làm đơn giản một cách thanh lịch: mỗi khi call stack trống, nó nhìn vào một tập các queue, chọn phần việc tiếp theo và đẩy lên stack. Lặp lại, mãi mãi. Vòng lặp đó — liên tục kiểm tra và điều phối — chính là thứ cho JavaScript tính non-blocking.\n\nNhưng chi tiết lại cực kỳ quan trọng trong thực tế. Có hai queue riêng biệt với độ ưu tiên khác nhau. Có một rendering pipeline phải chen vào giữa các task. Có cú pháp `async/await` trông như đồng bộ nhưng thực chất được dệt từ các microtask callback. Và có cả một lớp bug hiệu năng chỉ trở nên dễ hiểu khi bạn biết mỗi callback rơi vào đâu và chạy lúc nào.\n\nNắm vững event loop là một trong số ít chủ đề có lợi ích cộng dồn: nó giải thích cùng lúc độ trễ của `setTimeout(fn, 0)`, thứ tự của Promise, UI bị giật (jank), ngữ nghĩa tạm dừng của `await`, cách giao tiếp với Web Worker và cách dùng đúng `requestAnimationFrame`. Chương này xây dựng toàn bộ mô hình từ nền móng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bức tranh tổng thể của event loop: các Web API xử lý việc async ngoài main thread rồi đặt callback vào queue. Vòng lặp drain microtask trước, cho phép một frame render, rồi xử lý một macrotask — rồi lặp lại."
+    },
+    {
+      "type": "analogy",
+      "title": "Bếp trưởng và bảng order trong bếp",
+      "content": "Hãy hình dung căn bếp của một nhà hàng chuyên nghiệp chỉ có một bếp trưởng (main thread của JavaScript). Chỉ có một bếp trưởng, và người này chỉ nấu được một món mỗi lúc — đó là ràng buộc single-threaded.\n\nỞ quầy ra món có hai khay nhận việc:\n- Một **xấp giấy note** trên quầy (**microtask queue**). Khi đang nấu mà bếp trưởng ghi chú — 'xong thì kiểm tra nồi sốt' — tờ note đó được dán lên xấp này. Những tờ note này là việc riêng và gấp; bếp trưởng xử lý hết mọi tờ note ngay sau khi xong món hiện tại, trước khi nhìn tới bất kỳ order mới nào.\n- Một **thanh kẹp phiếu order** chính thức (**task queue** / macrotask queue). Mỗi order mới của khách — một timer kích hoạt, một cú click tới, một response mạng trả về — được kẹp lên thanh này. Mỗi lượt nấu, bếp trưởng chỉ lấy đúng một phiếu.\n\nRendering engine giống như **ô cửa ra món**: sau khi bếp trưởng xong một món và xử lý hết note, nhà hàng kiểm tra xem có món nào cần bày đĩa và mang ra không (một frame render). Chỉ sau đó bếp trưởng mới lấy phiếu order tiếp theo.\n\nÝ quan trọng: một bếp trưởng đang bắt tay vào món nướng chậm hai tiếng (một phép tính đồng bộ dài) sẽ không thể đụng tới tờ note nào hay khách mới nào cho tới khi xong. Đây chính xác là lý do block main thread làm browser đứng hình — mọi cú click, mọi lần repaint, mọi timer callback đều bị kẹt chờ sau task dài đó.\n\nWeb Worker giống như thuê thêm **một đầu bếp thứ hai** làm sơ chế ở bếp sau. Người này không được chạm vào ô cửa ra món (DOM), nhưng có thể làm việc nặng và gửi món đã xong cho bếp trưởng qua thanh kẹp order — dưới dạng một task postMessage."
+    },
+    {
+      "type": "explanation",
+      "title": "Call stack: chi tiết về các execution frame",
+      "content": "Mô hình thực thi của JavaScript dựa trên **call stack** (còn gọi là execution context stack). Mỗi lần một hàm được gọi, một **execution context** mới được push lên stack. Context này giữ biến cục bộ của hàm, giá trị của `this` và một con trỏ chỉ về chỗ cần quay lại. Khi hàm return (hoặc throw), frame của nó bị pop và quyền điều khiển trở về frame bên dưới.\n\nStack là **LIFO** (last-in, first-out): hàm được gọi gần nhất luôn là hàm đang chạy. Đó là lý do code đệ quy quá sâu gây ra RangeError 'Maximum call stack size exceeded' — bạn đã dùng hết vùng nhớ cố định cấp cho stack. Giới hạn của V8 thường vào khoảng 10,000–15,000 frame, tùy kích thước mỗi frame.\n\n**Quy tắc then chốt** của event loop là: **event loop sẽ không bao giờ bắt đầu xử lý một callback trong queue khi call stack chưa trống.** Callback phải chờ — dù lâu bao nhiêu — cho tới khi stack trống hoàn toàn. Nghĩa là chỉ một hàm đồng bộ chạy lâu cũng sẽ làm trễ mọi timer trong queue, mọi lần resolve Promise và mọi event handler của người dùng trong suốt thời gian nó chạy.\n\nTrong các JavaScript engine hiện đại như V8 (Chrome, Node.js) và SpiderMonkey (Firefox), call stack là native — nó nằm trong runtime C++ của engine. JavaScript heap (nơi chứa các object) là vùng riêng. Khi stack trống, garbage collector có cơ hội tốt để chạy một chu kỳ thu gom, dù việc này do engine quản lý độc lập."
+    },
+    {
+      "type": "explanation",
+      "title": "Task queue: mỗi vòng lặp một task",
+      "content": "**Task queue** (thường gọi là **macrotask queue** khi muốn phân biệt với microtask queue) chứa các callback đến từ sự kiện bên ngoài, bất đồng bộ. Các nguồn đặt callback vào task queue gồm:\n\n- `setTimeout(fn, ms)` và `setInterval(fn, ms)` — timer hết hạn và callback được đưa vào queue\n- DOM event: `click`, `keydown`, `mousemove`, `input`, `resize`, `scroll`\n- Response mạng trả về qua `XMLHttpRequest` (API async IO đời cũ)\n- `MessageChannel.port.postMessage()` và `Worker.postMessage()`\n- `setImmediate(fn)` trong Node.js (chạy ở phase *check*, ngay sau phase poll/I/O)\n- Callback hoàn tất I/O trong Node.js (`fs.readFile`, `net.connect`, v.v.)\n\nNói cho chính xác thì không chỉ có một task queue: HTML spec cho mỗi **task source** (timer, tương tác người dùng, mạng, messaging…) một queue riêng, và browser chọn queue nào được phục vụ tiếp — ví dụ Chromium ưu tiên input của người dùng hơn timer. Trong cùng một source, thứ tự được giữ nguyên. Đặc điểm cốt lõi là event loop chọn **đúng một task mỗi vòng lặp**. Sau khi mỗi task chạy xong, vòng lặp không lấy ngay task tiếp theo — trước tiên nó drain toàn bộ microtask queue và có thể render một frame. Quyết định thiết kế này cho microtask độ ưu tiên thực tế cao hơn.\n\nVì mỗi vòng lặp chỉ chạy một task, một loạt event dồn dập (chẳng hạn rất nhiều lần di chuột nhanh) có thể khiến các task trong queue được xử lý từng cái một qua nhiều vòng lặp. Cũng vì vậy mà browser căn các event liên tục như `mousemove`, `pointermove`, `scroll` và `resize` theo animation frame (tối đa một lần dispatch mỗi frame).\n\n**Độ trễ tối thiểu của timer** đáng được hiểu cho chính xác. `setTimeout(fn, 0)` không chạy `fn` ngay lập tức, và browser ép độ trễ thành **ít nhất 4 ms khi timer lồng nhau quá năm cấp** (một timeout được đặt từ một timeout từ một timeout…, theo HTML specification). Một `setTimeout(fn, 0)` ở top-level có thể chạy sớm hơn, nhưng nó vẫn đặt `fn` vào task queue — nên mọi microtask đang chờ sẽ chạy trước, và một lần render cũng có thể chạy trước nếu đến lúc cần frame mới. Tab chạy nền bị throttle mạnh hơn nhiều (timer tối đa khoảng mỗi giây một lần, và \"intensive throttling\" của Chrome có thể gom chúng lại thành mỗi phút một lần). Trong thực tế bạn đừng bao giờ dựa vào setTimeout 0ms để căn thời gian chính xác; hãy dùng `requestAnimationFrame` hoặc `performance.now()` cho việc đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một vòng lặp event loop đầy đủ: task chạy, rồi drain TẤT CẢ microtask, rồi rAF + render (khi đến lúc cần frame), rồi lấy task tiếp theo ra khỏi queue. Không có render xen giữa các microtask."
+    },
+    {
+      "type": "explanation",
+      "title": "Microtask queue: callback ưu tiên, chạy cho đến hết",
+      "content": "**Microtask queue** là queue thứ hai, có độ ưu tiên cao hơn. Quy tắc định nghĩa nó: **sau bất kỳ task nào (hoặc sau khi script ban đầu chạy xong), engine drain toàn bộ microtask queue trước khi làm bất cứ việc gì khác** — trước khi render, trước khi chọn task tiếp theo. Nếu một microtask lên lịch một microtask khác, microtask mới đó cũng được xử lý trong cùng lượt drain. Engine không quay lại task queue cho tới khi microtask queue trống hoàn toàn.\n\nCác nguồn đẩy vào microtask queue:\n- `Promise.then(fn)`, `Promise.catch(fn)`, `Promise.finally(fn)` — callback chạy khi Promise settle\n- `queueMicrotask(fn)` — API tường minh để lên lịch một microtask\n- Callback của `MutationObserver` — kích hoạt khi các DOM node đang theo dõi thay đổi\n- Phần tiếp nối (continuation) của `async/await` — code sau biểu thức `await` được tiếp tục dưới dạng microtask\n\n**Vì sao có hệ thống ưu tiên này**: những người thiết kế Promise muốn đảm bảo các callback `.then` sẽ chạy 'ngay sau' script hiện tại — không bị trễ vì task setTimeout tiếp theo hay một lần paint. Microtask queue cung cấp đảm bảo đó. Bạn có thể coi microtask là 'dọn dẹp cuối task', bắt buộc phải chạy trước khi môi trường có thêm bất kỳ cơ hội nào để can thiệp.\n\n**Rủi ro starvation (bỏ đói)**: vì engine cứ drain microtask cho tới khi queue trống — mà microtask mới lại có thể được thêm vào trong lúc drain — một chuỗi resolve Promise mất kiểm soát có thể chặn render vô thời hạn. Browser sẽ không paint nổi một frame khi microtask cứ liên tục đến. Trong thực tế chuyện này thường không thành vấn đề (chuỗi Promise rồi cũng kết thúc), nhưng nó là cái bẫy thật khi dùng các vòng lặp `while(true) { await Promise.resolve(); }` mà không nhường cho task queue bằng lời gọi `setTimeout` hay `scheduler.yield()`."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Thứ tự (A, F, C, E, D, B) và demo async (start, before await, end, after await) là những câu hỏi interview kinh điển. Mấu chốt: code đồng bộ trong task hiện tại chạy trước, rồi TẤT CẢ microtask được drain (kể cả những cái mới được thêm vào), rồi mới tới các task như setTimeout. Dòng `await` trả quyền điều khiển của async function về cho caller — phần còn lại của thân async function là một microtask continuation, không phải code blocking.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "async/await: cú pháp ngọt bọc ngoài Promise",
+      "content": "Cú pháp `async/await`, ra đời trong ES2017, không phải một primitive concurrency mới — nó là syntactic sugar giúp code dựa trên Promise trông và đọc như code đồng bộ. Hiểu cách nó được \"gỡ đường\" (desugar) sẽ cho bạn thấy chính xác từng đoạn code chạy ở đâu trong event loop.\n\nMột hàm `async` luôn trả về **Promise**, bất kể bạn `return` gì. Nếu bạn `return 42`, caller nhận `Promise.resolve(42)`. Nếu bạn `throw`, caller nhận một Promise bị reject. Điều này được language spec đảm bảo.\n\nMột `await expression` làm ba việc:\n1. Tính giá trị của biểu thức (thường là một Promise).\n2. **Tạm dừng async function** — gỡ frame của nó khỏi call stack và trả quyền điều khiển cho nơi đã gọi async function. Nếu giá trị được await không phải Promise, nó được bọc trong `Promise.resolve()` trước khi tạm dừng.\n3. Lên lịch một **microtask** để tiếp tục thực thi async function khi Promise settle, truyền vào giá trị đã resolve (hoặc throw lại lỗi reject).\n\nNghĩa là `await` thực chất là một điểm cắt `.then()`. Code trước `await` chạy đồng bộ (trong task hiện tại). Code sau `await` chạy dưới dạng một microtask (hoặc một chuỗi microtask) sau khi Promise được await settle.\n\nHệ quả thực tế: **nhiều `await` liên tiếp trong vòng lặp là tuần tự**, không song song. Mỗi `await` tạm dừng và chờ rồi mới sang vòng tiếp theo. Muốn song song, hãy khởi động tất cả các thao tác trước (gọi `fetch` là request đã bắt đầu — Promise đại diện cho công việc đang diễn ra) rồi mới `await Promise.all([...])`, thứ chờ cho tất cả fulfil — hoặc reject ngay khi bất kỳ cái nào reject. Dùng `Promise.allSettled` khi bạn muốn có mọi kết quả bất kể có lỗi hay không.\n\n**Xử lý lỗi với async/await**: bọc `await` trong `try/catch` để xử lý reject. Một rejection không được xử lý trong async function tương đương với một Promise bị reject mà không ai xử lý — các môi trường hiện đại sẽ phát event `unhandledrejection`. Hãy luôn xử lý các rejection của bạn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Mô hình tạm dừng của await: async function giao một Promise đang pending cho caller và nhường quyền. Caller tiếp tục chạy đồng bộ. Async function được tiếp tục qua một microtask khi Promise được await settle."
+    },
+    {
+      "type": "explanation",
+      "title": "Rendering và requestAnimationFrame: đưa hình ảnh vào vòng lặp",
+      "content": "Rendering pipeline của browser — tính layout, paint pixel, composite các layer — phải dùng chung main thread với JavaScript. Event loop chừa chỗ cho render ở ranh giới giữa các task, nhưng chỉ khi browser quyết định đã đến lúc cần frame mới.\n\nBrowser nhắm tới **frame budget** 16.67ms cho màn hình 60Hz (1000ms ÷ 60 ≈ 16.67ms). Mỗi frame budget bao gồm thực thi JavaScript, tính style, layout, paint và composite. Nếu task JavaScript của bạn mất 20ms, frame bị trễ và người dùng thấy một frame bị rớt — thường gọi là **jank**.\n\nBước render diễn ra **sau khi microtask được drain và trước khi task tiếp theo được lấy ra** — nhưng chỉ khi browser quyết định cần một frame hình mới. Không phải vòng lặp task nào cũng kích hoạt paint. Đây là sắc thái quan trọng: event loop chạy nhanh hơn 60fps rất nhiều (hàng trăm tới hàng nghìn vòng mỗi giây ở một tab rảnh), nhưng việc render bị giới hạn theo tần số làm mới của màn hình.\n\n**`requestAnimationFrame(callback)`** lên lịch cho `callback` chạy ngay trước lần paint tiếp theo của browser. Đây là API đúng cho code animation vì:\n1. Nó đồng bộ với tần số làm mới của màn hình — không lãng phí frame.\n2. Nó tạm dừng khi tab bị ẩn (tab chạy nền), tiết kiệm pin.\n3. Callback nhận một timestamp độ phân giải cao (`DOMHighResTimeStamp`) đánh dấu thời điểm frame bắt đầu — hữu ích để tính các bước animation mượt.\n4. Callback rAF chạy *trước* các bước style và layout của frame, nên những gì được ghi ở đó sẽ được lần render ngay sau áp dụng. Đọc layout (`getBoundingClientRect()`) ở *đầu* callback rAF, trước mọi thao tác ghi, là rẻ vì layout vẫn còn sạch từ frame trước — nhưng đọc sau khi đã ghi trong callback thì vẫn ép một lần layout đồng bộ.\n\n**Layout thrashing** là một bug hiệu năng phổ biến: đọc một thuộc tính layout buộc browser flush mọi thay đổi style đang chờ và tính lại layout một cách đồng bộ, ngay giữa task JavaScript của bạn. Sau đó ghi một style lại kích hoạt một lần tính layout khác ở lần đọc kế tiếp. Cách sửa là gom các lần đọc và ghi lại với nhau, hoặc dùng `requestAnimationFrame` để tách chúng ra qua các ranh giới frame."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một chu kỳ rendering pipeline đầy đủ. JavaScript chạy ở phase task; callback rAF chạy ngay trước style/layout; tiếp theo là paint và composite. Cả chu kỳ có budget 16.67ms ở 60fps."
+    },
+    {
+      "type": "explanation",
+      "title": "Web Worker: song song thật sự cho việc nặng CPU",
+      "content": "Event loop và các queue của nó hoàn toàn là **cấu trúc của main thread**. Mô hình non-blocking của JavaScript xử lý concurrency dạng I/O-bound rất đẹp — bạn await một lệnh fetch, và thread làm việc khác trong lúc lời gọi mạng đang chạy. Nhưng việc CPU-bound lại là chuyện khác. Nếu bạn cần sort một triệu bản ghi, nén một bức ảnh hay chạy mô phỏng vật lý, phép tính đó chiếm call stack trong suốt thời gian chạy, chặn mọi callback khác.\n\n**Web Worker** là lời giải. Một Worker chạy trên **một OS thread riêng** với instance JavaScript engine riêng, heap riêng, event loop riêng, task queue và microtask queue riêng. Worker không truy cập được DOM (DOM không thread-safe), không thể chia sẻ object theo reference với main thread và không truy cập được phần lớn biến global của browser. Nhưng chúng có thể làm tính toán nặng một cách độc lập.\n\nGiao tiếp giữa Worker và main thread dùng `postMessage()`. Khi main thread gọi `worker.postMessage(data)`, một bản sao của `data` được tạo bằng **Structured Clone Algorithm** (serialize sâu, xử lý được hầu hết kiểu JS trừ function và DOM node). Bản sao này sau đó được đặt vào task queue của Worker dưới dạng một **task** (hoặc vào task queue của main thread với message gửi theo chiều ngược lại). Nghĩa là giao tiếp với Worker là bất đồng bộ — bên gửi không bị block. Với dữ liệu nhị phân lớn, hãy truyền **transferable** thay vì sao chép: `worker.postMessage(buf, [buf])` chuyển một `ArrayBuffer` (hoặc `ImageBitmap`, `MessagePort`, `OffscreenCanvas`) sang worker trong O(1), và bản ở phía bên gửi trở thành detached (độ dài bằng 0).\n\nĐể có bộ nhớ chia sẻ thật sự giữa main thread và Worker, **SharedArrayBuffer** (kết hợp với **Atomics**) cho phép chia sẻ một buffer byte thô mà không cần sao chép. Các thao tác trên SharedArrayBuffer dùng các method `Atomics` để phối hợp truy cập an toàn. Tính năng này từng bị tắt một thời gian sau khi lỗ hổng CPU Spectre được phát hiện, rồi được bật lại kèm các security header nghiêm ngặt (`Cross-Origin-Opener-Policy`, `Cross-Origin-Embedder-Policy`) nhằm khôi phục mức cô lập cần thiết để tấn công speculative execution khó hơn.\n\n**Service Worker** là một loại Worker đặc biệt, chặn bắt các request mạng và cho phép cache offline qua Cache API. Nó có event loop và vòng đời riêng, chạy cả khi không có trang nào thuộc origin của nó đang mở. Service Worker là nền tảng của Progressive Web App (PWA)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Web Worker tách việc tính toán CPU-bound khỏi main thread. Main thread gửi dữ liệu đi và vẫn phản hồi tốt. Worker tính xong và gửi kết quả về qua task queue."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Pattern chia chunk nhường quyền cho task queue giữa các chunk — qua `scheduler.yield()` nếu có, nếu không thì `await new Promise(r => setTimeout(r, 0))` — cho browser cơ hội xử lý input và render một frame giữa các chunk. Ví dụ Web Worker minh họa pattern giao tiếp qua postMessage/event message. Phần so sánh fetch song song và tuần tự là câu hỏi interview hiệu năng xuất hiện rất thường xuyên: Promise.all khởi động mọi request cùng lúc, còn await tuần tự tạo ra một request waterfall.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Event loop của Node.js: cùng ý tưởng, nhiều phase hơn",
+      "content": "Node.js có event loop riêng, xây trên thư viện C **libuv**, tuân theo cùng nguyên lý cơ bản như browser nhưng tổ chức task thành các **phase**. Hiểu event loop của Node.js là điều quan trọng với developer JavaScript backend, và nó làm rõ vài edge case khác với hành vi của browser.\n\nEvent loop của Node.js có sáu phase, chạy theo thứ tự:\n1. **timers** — chạy callback của `setTimeout` và `setInterval` đã hết thời gian chờ\n2. **pending callbacks** — chạy các I/O callback bị hoãn từ vòng lặp trước\n3. **idle/prepare** — libuv dùng nội bộ\n4. **poll** — lấy các I/O event mới và chạy callback của chúng; block tại đây chờ I/O nếu queue trống và không có timer nào đang chờ\n5. **check** — chạy callback của `setImmediate` (riêng của Node.js; luôn chạy sau I/O trong cùng vòng lặp)\n6. **close callbacks** — chạy callback của event close như `socket.on('close', ...)`\n\nTừ Node.js 11, microtask (`Promise.then`, `queueMicrotask`) được drain **sau từng callback riêng lẻ** — sau mỗi timer callback, mỗi callback `setImmediate` — khớp với hành vi của browser (trước Node 11 chúng chỉ chạy giữa các phase). `process.nextTick()` (riêng của Node.js, không có trong browser) là một queue riêng, được xử lý **trước** Promise microtask queue mỗi khi Node drain chúng, nên có độ ưu tiên thực tế cao nhất. Lưu ý: trong một **ES module**, bản thân code top-level chạy bên trong một promise job, nên một `Promise.then` được đưa vào queue ở đó sẽ chạy *trước* một `process.nextTick` được đưa vào cùng lúc — câu trả lời kinh điển \"nextTick chạy trước\" chỉ đúng với script CommonJS và trong callback.\n\nThứ tự giữa `setImmediate` và `setTimeout(fn, 0)` trong Node.js là không xác định khi gọi từ main module (phụ thuộc vào cách OS lập lịch), nhưng bên trong một I/O callback thì `setImmediate` luôn chạy trước `setTimeout(fn, 0)`, vì phase check đến trước phase timers của vòng lặp kế tiếp."
+    },
+    {
+      "type": "explanation",
+      "title": "Những hiểu lầm phổ biến và các bẫy thực tế",
+      "content": "**Hiểu lầm 1: `await` làm hàm chờ mà không block.**\nĐúng một nửa. `await` không block *thread* — nó tạm dừng *async function* và trả quyền điều khiển cho caller. Thread rảnh để chạy code khác. Nhưng nếu bạn có một vòng lặp gồm các lời gọi `await` tuần tự tới một API chậm, thì xét tổng thể hàm vẫn chậm — mỗi vòng phải chờ vòng trước xong. Thread không bị block, nhưng hàm thì có.\n\n**Hiểu lầm 2: `Promise.resolve()` là đồng bộ.**\nĐúng một phần. Promise được resolve ngay, nhưng callback `.then` của nó *không* được gọi đồng bộ — nó luôn được lên lịch như một microtask. Ngay cả `Promise.resolve(42).then(console.log)` cũng in ra sau khi code đồng bộ hiện tại chạy xong. Đây là đảm bảo của spec để giữ tính nhất quán, kể cả khi Promise đã settle.\n\n**Hiểu lầm 3: `setTimeout(fn, 0)` giống như chạy `fn` ngay lập tức.**\nSai. `fn` được đặt vào task queue. Mọi microtask hiện có chạy trước. Bất kỳ việc render nào đang chờ cũng chạy. Chỉ sau đó `fn` mới được thực thi. Trong thực tế, dù độ trễ là 0ms, `fn` vẫn có thể chạy muộn hàng chục mili giây nếu main thread đang bận.\n\n**Hiểu lầm 4: Nhiều microtask hơn nghĩa là code nhanh hơn.**\nChưa chắc. Vì microtask chặn render, một chuỗi microtask dài có thể gây rớt frame. Với lượng việc async rất lớn mà bạn muốn đan xen với render, cách đúng là nhường quyền qua `setTimeout` hoặc API mới hơn `scheduler.yield()` (stable trên Chromium từ 129 và Firefox từ 142, chưa có trên Safari; hãy feature-detect và có phương án dự phòng).\n\n**Bẫy thực tế — thời điểm phát hiện unhandled rejection**: Browser kiểm tra unhandled rejection sau khi microtask queue được drain, nên nếu bạn chỉ gắn handler `.catch` ở một *task sau đó* (ví dụ sau một `setTimeout` hoặc một `await` khác vào thứ gì đó chậm), `unhandledrejection` sẽ kích hoạt trước (rồi tới `rejectionhandled` khi cuối cùng bạn cũng gắn handler). Trong Node.js 15+, một unhandled rejection mặc định **làm crash process**. Hãy gắn error handler ngay khi tạo Promise, hoặc dùng `async/await` với `try/catch`.\n\n**Bẫy thực tế — memory leak do event listener**: Thêm một event listener tạo ra một reference từ DOM node tới callback của bạn. Nếu callback là closure giữ một object lớn, object đó bị giữ lại chừng nào listener còn tồn tại. Hãy luôn gỡ các event listener không còn cần bằng `removeEventListener`, hoặc dùng `{ once: true }` cho handler chỉ chạy một lần."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Bốn cái bẫy này bao quát những bug liên quan event loop hay gặp nhất trong JavaScript production. Hãy thuộc lòng thứ tự ưu tiên của các queue. Cách sửa layout thrashing (gom đọc rồi mới ghi) là một pattern hiệu năng DOM nền tảng. Pattern fetch tuần tự và song song là tối ưu hiệu năng async có tác động lớn nhất bạn có thể làm trong code lấy dữ liệu.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: Mô hình event loop có trước cả JavaScript. Nó xuất hiện trong GUI (message pump của Windows, run loop của macOS), trong các Unix server đời đầu dùng `select()`/`poll()`, và trong actor model của tính toán đồng thời. Nhận định then chốt của Ryan Dahl khi xây dựng Node.js năm 2009 là phong cách lập trình event loop, hướng callback của JavaScript — với V8 làm engine và thư viện libuv cung cấp vòng lặp thật cùng I/O non-blocking — rất lý tưởng cho các ứng dụng server nặng I/O: bạn có thể xử lý hàng nghìn kết nối mạng đồng thời chỉ với một thread, vì việc chờ của mỗi kết nối chỉ là một callback trong queue, không bao giờ thực sự giữ thread. Nhờ đó Node.js đạt throughput cạnh tranh được với server đa thread cho các workload I/O-bound, mà không phải gánh độ phức tạp của đồng bộ hóa thread.\n\nĐặc tả event loop của browser nằm trong **HTML Living Standard** (không phải ECMAScript spec). ECMAScript spec định nghĩa các Promise *job* và yêu cầu host lên lịch cho chúng qua một hook (`HostEnqueuePromiseJob`); HTML ánh xạ các job đó vào microtask queue của nó và định nghĩa microtask checkpoint cùng toàn bộ vòng lặp — cấu trúc được để cho môi trường host quyết định — đó là lý do Node.js có thể có các phase và `process.nextTick` mà browser không có."
+    },
+    {
+      "type": "callout",
+      "content": "**Những insight interview phải thuộc lòng**: (1) Câu hỏi về thứ tự output (đồng bộ → microtask → task) xuất hiện ở gần như mọi buổi interview JavaScript cấp senior. Hãy tập lần theo code trong đầu trước khi chạy. (2) Câu trả lời cho '`await` làm gì?' nên gồm: tạm dừng async function, trả một Promise cho caller, lên lịch phần tiếp nối như một microtask. Chỉ nói 'nó chờ' là chưa đủ. (3) Layout thrashing và cách sửa (gom đọc trước khi ghi, dùng rAF) là chủ đề phổ biến trong interview frontend senior. (4) 'Vì sao một hàm `async` có thể bỏ đói renderer?' kiểm tra độ hiểu sâu: microtask được drain trước khi render, và `await Promise.resolve()` trong vòng lặp liên tục thêm microtask. (5) Trong Chrome DevTools, track Main của panel **Performance** hiển thị mỗi task là một thanh \"Task\" màu xám với JavaScript màu vàng; task nào trên 50ms là 'long task' (có góc đánh dấu đỏ), chặn khả năng phản hồi input và làm xấu INP. **Async stack trace** (bật mặc định trong DevTools) dựng lại chuỗi lời gọi xuyên qua các ranh giới `await` và Promise, cho thấy việc async được lên lịch từ đâu."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**JavaScript là single-threaded**: tại mỗi thời điểm chỉ một hàm chạy trên call stack, và event loop không bao giờ ngắt một task đang chạy. Code đồng bộ chạy lâu sẽ chặn TẤT CẢ callback — click, timer, render — cho tới khi nó xong.",
+        "**Hai tầng queue với độ ưu tiên khác nhau**: **microtask queue** (Promise.then, queueMicrotask, phần tiếp nối của await) được drain hoàn toàn sau mỗi task và trước mọi lần render; **task queue** (setTimeout, I/O event, DOM event) giao một task mỗi vòng event loop.",
+        "**`async/await` là syntactic sugar bọc ngoài Promise**: một biểu thức `await` tạm dừng async function và lên lịch phần tiếp nối như một microtask; thread không bị block. Code sau `await` thực chất là một callback `.then()`.",
+        "**Render diễn ra ở ranh giới giữa các task**: browser có cơ hội paint khoảng mỗi 16.67ms; dùng `requestAnimationFrame` để đồng bộ code animation với tần số làm mới của màn hình, và tránh layout thrashing bằng cách gom các lần đọc DOM trước khi ghi.",
+        "**Web Worker cho song song thật sự**: chuyển tính toán nặng CPU ra khỏi main thread; giao tiếp qua `postMessage` (mặc định là Structured Clone, SharedArrayBuffer cho bộ nhớ chia sẻ thật sự). Worker không truy cập được DOM.",
+        "**Nhường quyền giúp tránh jank**: chia khối việc đồng bộ lớn thành các chunk, ngăn cách bởi `await new Promise(r => setTimeout(r, 0))` hoặc `scheduler.yield()` (Chromium 129+, Firefox 142+; feature-detect cho Safari) để browser có cơ hội render frame giữa các chunk.",
+        "**Promise.all chạy song song** các thao tác async độc lập; `await` tuần tự trong vòng lặp tạo ra request waterfall. Hãy luôn ưu tiên chạy song song khi các thao tác không phụ thuộc nhau."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Cho đoạn code: `console.log('A'); setTimeout(() => console.log('B'), 0); Promise.resolve().then(() => console.log('C')); console.log('D');` — thứ tự output là gì?",
+      "options": [
+        "A, B, C, D",
+        "A, C, D, B",
+        "A, D, B, C",
+        "A, D, C, B"
+      ],
+      "explanation": "Code đồng bộ chạy trước (A, D). Sau đó microtask queue được drain: callback Promise.then chạy (C). Chỉ khi đó event loop mới lấy task tiếp theo từ task queue: callback của setTimeout (B). Output: A, D, C, B."
+    },
+    {
+      "id": "q2",
+      "question": "`await` tác động gì lên main thread của JavaScript?",
+      "options": [
+        "Nó tạm dừng async function hiện tại và lên lịch phần tiếp nối như một microtask, để thread được rảnh",
+        "Nó block main thread cho tới khi Promise được await settle",
+        "Nó tạo một thread mới để chờ Promise",
+        "Nó liên tục poll Promise trong một vòng lặp chặt cho tới khi resolve"
+      ],
+      "explanation": "await tạm dừng async function (gỡ stack frame của nó) và trả một Promise đang pending cho caller. Main thread rảnh để chạy code khác. Khi Promise được await settle, phần tiếp nối của async function được đưa vào queue như một microtask và tiếp tục trên main thread. Thread không bao giờ bị block."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao `while(true) { await Promise.resolve(); }` có thể bỏ đói renderer trong browser?",
+      "options": [
+        "Nó gây memory leak làm crash GPU process",
+        "Promise.resolve() là đồng bộ và không bao giờ nhường quyền",
+        "Microtask được drain hoàn toàn trước khi render; mỗi await lại thêm một microtask, nên queue không bao giờ trống và browser không bao giờ paint",
+        "Vòng lặp while chặn callback của setTimeout, làm trễ tín hiệu render"
+      ],
+      "explanation": "Sau mỗi task, browser drain TẤT CẢ microtask trước khi render. Mỗi `await Promise.resolve()` lên lịch một microtask continuation. Khi continuation đó chạy, nó lại lên lịch một cái khác, cứ thế mãi. Microtask queue không bao giờ trống, nên bước render bị chặn vĩnh viễn. Cách sửa: nhường quyền qua setTimeout để đưa việc vào task queue."
+    },
+    {
+      "id": "q4",
+      "question": "Lựa chọn nào dưới đây là nguồn sinh MICROTASK (không phải macrotask)?",
+      "options": [
+        "setTimeout(fn, 0)",
+        "element.addEventListener('click', fn)",
+        "queueMicrotask(fn)",
+        "setInterval(fn, 100)"
+      ],
+      "explanation": "queueMicrotask(fn) đưa fn vào queue như một microtask một cách tường minh. Promise.then/catch/finally, callback của MutationObserver và phần tiếp nối của async/await cũng là microtask. Callback của setTimeout, setInterval, addEventListener và các I/O event đi vào macrotask (task) queue."
+    },
+    {
+      "id": "q5",
+      "question": "Khác biệt then chốt giữa dùng `Promise.all([...])` và `await` tuần tự trong vòng for khi gửi nhiều network request là gì?",
+      "options": [
+        "Promise.all là đồng bộ; await tuần tự là bất đồng bộ",
+        "Không có khác biệt về thời gian thực thi; chỉ khác về style code",
+        "Await tuần tự nhanh hơn vì dùng ít Promise hơn",
+        "Promise.all khởi động mọi request cùng lúc; await tuần tự chỉ khởi động request sau khi request trước resolve, tạo ra waterfall"
+      ],
+      "explanation": "Promise.all khởi tạo mọi request cùng một lúc, nên tổng thời gian xấp xỉ thời gian của request chậm nhất. Await tuần tự trong vòng for chỉ bắt đầu mỗi request sau khi request trước hoàn tất — tổng thời gian là tổng thời gian của mọi request. Với các request độc lập, Promise.all nhanh hơn đáng kể."
+    },
+    {
+      "id": "q6",
+      "question": "Callback của `requestAnimationFrame` chạy chính xác vào lúc nào so với event loop?",
+      "options": [
+        "Ngay sau task đồng bộ hiện tại, trước microtask",
+        "Sau khi mọi microtask được drain, ngay trước khi browser làm layout và paint",
+        "Như một macrotask trong task queue, giống setTimeout",
+        "Sau khi browser paint xong frame"
+      ],
+      "explanation": "Callback của requestAnimationFrame chạy sau khi microtask được drain và trước khi browser tính lại style, layout và paint. Điều này khiến callback rAF là nơi đúng để áp dụng thay đổi hình ảnh — chúng đồng bộ với rendering pipeline và chạy theo tần số làm mới của màn hình (60Hz, 120Hz…), tạm dừng khi tab bị ẩn."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao Web Worker giao tiếp với main thread qua `postMessage` thay vì gọi hàm trực tiếp?",
+      "options": [
+        "Worker chạy trên một OS thread riêng; truy cập bộ nhớ chia sẻ trực tiếp cần đồng bộ hóa. postMessage sao chép dữ liệu an toàn và giao nó dưới dạng một task async",
+        "Worker chạy bằng một ngôn ngữ lập trình khác và không gọi được hàm JavaScript",
+        "postMessage nhanh hơn gọi hàm với dữ liệu lớn",
+        "Worker không truy cập được JavaScript engine, chỉ truy cập được DOM"
+      ],
+      "explanation": "Worker chạy trên một OS thread thực sự riêng biệt với heap riêng. Cho phép truy cập bộ nhớ chia sẻ trực tiếp mà không đồng bộ hóa sẽ gây data race. postMessage serialize dữ liệu qua Structured Clone Algorithm (sao chép nó) và đặt message như một task vào event loop của bên nhận — giúp giao tiếp an toàn và bất đồng bộ. SharedArrayBuffer kèm Atomics có sẵn cho bộ nhớ chia sẻ thật sự, nhưng đòi hỏi phối hợp tường minh."
+    },
+    {
+      "id": "q8",
+      "question": "Sau khi call stack trống, thứ tự đúng của các thao tác trong một vòng event loop của browser là gì?",
+      "options": [
+        "Render frame → microtask → một macrotask",
+        "Một macrotask → microtask → render frame",
+        "Microtask → render frame → một macrotask",
+        "Microtask → một macrotask → render frame"
+      ],
+      "explanation": "Thứ tự đúng sau khi call stack trống là: (1) drain TẤT CẢ microtask, (2) chạy các callback requestAnimationFrame và cho browser render một frame nếu đã đến lúc, (3) lấy MỘT macrotask từ task queue và chạy nó. Rồi lặp lại. Không phải sau task nào cũng render — việc render bị giới hạn ở khoảng 60fps."
+    },
+    {
+      "id": "q9",
+      "question": "`console.log(value)` in ra gì trong đoạn code sau? `let value = null; Promise.resolve(42).then(v => { value = v; }); console.log(value);`",
+      "options": [
+        "null",
+        "42",
+        "undefined",
+        "Một Promise object"
+      ],
+      "explanation": "Callback Promise.then luôn được lên lịch như microtask — chúng không bao giờ chạy đồng bộ, kể cả khi Promise đã resolve. Dòng console.log(value) chạy đồng bộ trước khi microtask queue được drain, nên value vẫn là null. Phép gán cho value xảy ra sau đó, khi microtask chạy."
+    },
+    {
+      "id": "q10",
+      "question": "Kỹ thuật nào ngăn đúng cách một vòng lặp xử lý mảng lớn làm đứng UI của browser?",
+      "options": [
+        "Bọc vòng lặp trong khối try/catch",
+        "Dùng Promise.all để xử lý mọi phần tử cùng lúc trên nhiều thread",
+        "Chia mảng thành các chunk và dùng `await new Promise(r => setTimeout(r, 0))` giữa các chunk để nhường quyền cho event loop",
+        "Tăng độ ưu tiên của task bằng queueMicrotask để nó chạy trước khi render"
+      ],
+      "explanation": "Nhường quyền giữa các chunk bằng `await new Promise(r => setTimeout(r, 0))` (hoặc `scheduler.yield()` nếu được hỗ trợ) sẽ đặt một task vào task queue, cho phép browser xử lý render và event người dùng giữa các chunk. Promise.all không tạo ra nhiều thread — nó vẫn chạy các microtask callback trên main thread. queueMicrotask thực ra còn làm tình hình tệ hơn vì chặn render bằng thêm microtask. try/catch không ảnh hưởng gì tới việc lập lịch."
+    }
+  ]
+}

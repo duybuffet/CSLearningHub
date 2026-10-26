@@ -1,0 +1,226 @@
+{
+  "sourceHash": "a84f65bc0d4e",
+  "title": "Các pattern microservice (Microservice Patterns)",
+  "tagline": "Circuit breaker, saga, CQRS, event sourcing — những pattern giữ cho hệ thống phân tán không đổ sụp dây chuyền thành hỗn loạn.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Lời chào hàng của microservices nghe rất hấp dẫn: deploy độc lập, tự do đa ngôn ngữ, failure domain được cô lập, và khả năng scale một checkout service đang nóng mà không đụng tới notification service. Thực tế sau khi viết lại thì bừa bộn hơn. Không còn bộ nhớ dùng chung của monolith, không còn một ACID transaction duy nhất rollback được mọi thứ, không còn lời gọi hàm thẳng thắn kèm stack trace. Thay vào đó là: **lỗi mạng một phần**, **tính nhất quán dữ liệu rải trên cả chục database**, **timeout lan dây chuyền quật ngã cả những service khỏe mạnh**, và các workflow phân tán mà không máy nào nắm được toàn bộ state.\n\nMọi engineer hệ thống phân tán có kinh nghiệm đều từng bị gọi dậy lúc 3 giờ sáng vì Payment service bắt đầu trả 503 và, trong vòng chín mươi giây, thread pool của Order service đầy những connection bị treo, lan sang API gateway làm cạn kiệt upstream connection của nó, rồi lan tiếp sang frontend khiến mọi user đều bị timeout.\n\nMột bộ **pattern** kinh điển nhỏ tồn tại chính là để xử lý những failure mode này ở tầng kiến trúc. **Circuit Breaker** cắt các lời gọi tới service không khỏe. **Saga** điều phối workflow nhiều service mà không cần distributed lock. **CQRS** tách đường ghi khỏi đường đọc để mỗi bên được scale và tối ưu độc lập. **Event Sourcing** biến chính event log thành nguồn sự thật, mở ra audit trail và query theo thời gian. **API Gateway** và **Service Discovery** là phần hạ tầng chịu lực giữ mọi thứ lại với nhau.\n\nChương này đi qua cả năm pattern với độ sâu của sách giáo khoa: vấn đề mỗi pattern giải, cơ chế, state machine và luồng trình tự, cài đặt JavaScript cụ thể, các framework thực tế có sẵn pattern, và — quan trọng nhất — khi nào KHÔNG nên áp dụng từng cái."
+    },
+    {
+      "type": "diagram",
+      "caption": "Topology microservice tổng quan: API gateway route các request đã xác thực tới những service được tìm thấy qua registry. Circuit breaker bọc các lời gọi giữa service. Event bus tách rời producer khỏi các consumer phía sau, và một read database riêng phục vụ traffic query của CQRS."
+    },
+    {
+      "type": "analogy",
+      "title": "Lưới điện, chuyển khoản quốc tế và microservices",
+      "content": "Ba hệ thống đời thường soi sáng các pattern này.\n\n**Circuit breaker — hộp cầu dao trong nhà bạn.** Khi chập mạch đẩy một dòng điện tăng vọt qua dây, cầu dao nhảy ngay lập tức — nó ngắt mạch thay vì để nhiệt tích tụ tới khi dây cháy và cả căn nhà bốc lửa. Nó có ba trạng thái: hoạt động bình thường (đóng), đã nhảy (mở), và một lần thử nhanh sau khi bạn bật lại (nửa mở). Circuit breaker trong microservice hoạt động y hệt: khi Payment service bắt đầu lỗi hoặc treo, breaker mở và Order service ngừng gửi request. Bên gọi nhận một lỗi tức thì mà nó có thể xử lý êm ái — không còn thread dồn đống trên một connection đã chết.\n\n**Saga — một lần chuyển khoản quốc tế có chính sách hủy ở mỗi bước.** Chuyển tiền quốc tế không phải là atomic. Ngân hàng của bạn trừ tiền, gửi một message SWIFT, một ngân hàng trung gian nhận nó, ngân hàng đích ghi có cho người nhận — mỗi bước diễn ra ở một quốc gia khác, một database khác, theo những quy định khác. Nếu ngân hàng đích từ chối ghi có, ngân hàng trung gian phát lệnh đảo ngược, và ngân hàng của bạn hoàn tiền. Không có global lock nào trải qua mọi tổ chức. Thay vào đó, mỗi bước thành công cục bộ, kèm một *hành động bù trừ* (compensating action) đã biết trước nếu có gì phía sau thất bại. Đó chính xác là pattern Saga áp dụng cho các transaction phân tán giữa microservice.\n\n**CQRS — một thư viện có quầy biên mục và phòng đọc.** Quầy biên mục xử lý mọi thay đổi: nhận trả sách, cho mượn, sách mới nhập. Phòng đọc cung cấp một bộ thẻ mục lục riêng, phi chuẩn hóa, tối ưu thuần túy cho việc duyệt tìm — khách không bao giờ làm gián đoạn quy trình biên mục bằng cách chạy những tìm kiếm phức tạp trên hệ thống hồ sơ gốc. Ghi đi vào một model, đọc lấy từ model khác."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 1 — Circuit Breaker: chặn lỗi dây chuyền trước khi nó xảy ra",
+      "content": "**Vấn đề.** Trong một monolith, một query database chậm chặn một thread. Trong một mạng lưới microservice, một service phía sau chậm nguy hiểm hơn nhiều. Mọi bên gọi đang chờ service chậm đều giữ một thread hoặc connection. Nếu service phía sau mất 30 giây mới timeout và service của bạn có 50 thread, chỉ cần 50 request đồng thời là pool cạn kiệt — lúc đó chính service *của bạn* trở nên chậm, lan vấn đề sang các bên gọi *của bạn*. Đây là **cascading failure** (lỗi dây chuyền), và nó là lý do phổ biến nhất khiến một điểm suy giảm đơn lẻ leo thang thành sự cố toàn hệ thống.\n\n**Cơ chế.** Circuit breaker bọc mọi lời gọi remote đi ra ngoài. Bên trong, nó theo dõi các lỗi và latency gần đây bằng một **sliding window** (theo số lượng hoặc theo thời gian). Lời gọi chậm cũng được tính: mọi lời gọi được bảo vệ đều cần **timeout** riêng (và nhiều breaker còn ngắt mạch theo tỉ lệ lời gọi chậm), nếu không một dependency bị treo sẽ không bao giờ được ghi nhận là lỗi. Khi tỉ lệ lỗi vượt một ngưỡng cấu hình được, breaker **mở** — không còn lời gọi mạng nào được thực hiện. Bên gọi nhận ngay một lỗi (hoặc một giá trị fallback đã cache) nên thread của nó được giải phóng tức thì.\n\nSau một **sleep window** cấu hình được (ví dụ 10 giây), breaker chuyển sang **HALF_OPEN**: một lượng request thăm dò hạn chế được cho đi qua để kiểm tra service phía sau đã hồi phục chưa. Nếu các probe đó thành công, breaker **đóng** và traffic bình thường tiếp tục. Nếu thất bại, breaker mở lại và sleep window bắt đầu lại từ đầu.\n\n**Ba trạng thái chi tiết:**\n- `CLOSED` — mức nền khỏe mạnh. Mọi request đi qua bình thường. Lỗi được đếm. Nếu tỉ lệ lỗi trong sliding window vượt ngưỡng, chuyển sang OPEN.\n- `OPEN` — chế độ fail fast. Không request nào thử gọi mạng. Trả lỗi hoặc fallback ngay lập tức. Sau sleep window, chuyển sang HALF_OPEN.\n- `HALF_OPEN` — thăm dò hồi phục. Cho phép một lô request nhỏ. Nếu đủ số thành công, chuyển sang CLOSED. Nếu đủ số thất bại, quay lại OPEN.\n\n**Chiến lược fallback.** Một circuit breaker không có fallback thì kém hữu ích. Bên gọi nên có kế hoạch cho trạng thái OPEN: trả về giá trị tốt gần nhất đã cache; trả một response suy giảm (ví dụ hiển thị \"giá chưa có\" thay vì crash); đưa request vào queue để retry; chuyển hướng sang một service phụ. Pattern mạnh nhất khi bên gọi *suy giảm êm ái* thay vì đẩy lỗi lên trên.\n\n**Library production.** Netflix Hystrix (giờ đang ở chế độ bảo trì) đã phổ biến pattern này trên JVM. Người kế nhiệm, **Resilience4j**, cung cấp sliding window theo số lượng và theo thời gian, cô lập kiểu bulkhead, rate limiting và retry — tất cả kết hợp được với nhau. Trên .NET, **Polly** có bộ tính năng tương đương. Trong Node.js, **opossum** là library circuit breaker tiêu chuẩn. Trong Go, **gobreaker** và **hystrix-go** phổ biến. **Istio** và **Envoy** cài đặt circuit breaking dưới dạng sidecar proxy, nghĩa là nó hoạt động trong suốt qua mọi ngôn ngữ mà không cần sửa dòng code ứng dụng nào."
+    },
+    {
+      "type": "diagram",
+      "caption": "State machine của circuit breaker: CLOSED là đường bình thường, OPEN là chế độ fail fast, HALF_OPEN là thăm dò hồi phục. Ngưỡng chuyển trạng thái cấu hình được cho từng lời gọi service."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Sliding window (`this.window`) theo dõi kết quả N lời gọi gần nhất. Khi số lỗi trong cửa sổ đó chạm ngưỡng, breaker mở. Trạng thái HALF_OPEN chỉ nhận tối đa `halfOpenMax` lời gọi thử đồng thời (các bên gọi dư ra vẫn fail fast, để service đang hồi phục không bị ngập) — đòi hỏi *nhiều* lần thành công trước khi đóng giúp tránh chập chờn với một service mới hồi phục một phần. Giá trị đánh dấu `err.code = 'CIRCUIT_OPEN'` cho phép bên gọi phân biệt lỗi do mạch đang mở với một lỗi thật của service và chọn fallback phù hợp.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 2 — Saga: transaction phân tán không cần lock",
+      "content": "**Vấn đề.** Trong một monolith, đặt một đơn hàng — trừ tiền tài khoản, giữ hàng trong kho, tạo bản ghi giao hàng — là một ACID database transaction duy nhất. Nếu bước nào thất bại, transaction rollback và không gì được commit. Trong kiến trúc microservice, mỗi bước đó nằm ở một service khác với database riêng. Không có coordinator transaction toàn cục nào commit hay rollback một cách atomic trên tất cả chúng (hoặc nếu có — two-phase commit — thì nó là protocol **chặn** (blocking): nếu coordinator chết sau khi các bên tham gia đã bỏ phiếu đồng ý, chúng giữ lock cho tới khi coordinator hồi phục; và nhiều broker cũng như NoSQL store hoàn toàn không hỗ trợ nó).\n\n**Nhận định.** Các quy trình dài hạn ngoài đời thực vốn cũng chưa bao giờ thực sự atomic. Đặt khách sạn, đặt vé máy bay, chuyển khoản — mỗi cái gồm những bước độc lập với quy trình hủy hoặc đảo ngược đã biết. Pattern Saga chính thức hóa điều này: một saga là một **chuỗi các local transaction**, mỗi cái publish một event hoặc gửi một message khi hoàn tất. Nếu bước nào thất bại, một loạt **compensating transaction** (transaction bù trừ) được thực thi theo thứ tự ngược lại để hoàn tác tác dụng của mọi bước đã hoàn tất trước đó.\n\n**Hai biến thể của saga:**\n\n**Dựa trên choreography** — không có coordinator trung tâm. Mỗi service lắng nghe trên event bus event hoàn tất của bước trước, thực thi local transaction của mình, và publish event hoàn tất của riêng nó. Logic của saga được phân tán qua mọi service tham gia. Ưu điểm: không có single point of failure, phi tập trung hoàn toàn. Nhược điểm: luồng tổng thể là ngầm định — muốn hiểu saga bạn phải đọc event handler của từng service. Debug một saga thất bại nghĩa là đối chiếu event qua nhiều service và message queue. Cách này hợp với các luồng đơn giản 2–3 bước.\n\n**Dựa trên orchestration** — một **saga orchestrator** chuyên trách (thường là một state machine được lưu bền vững) dẫn dắt workflow. Nó gửi *command* tới từng service và chờ *reply event*. Nếu một bước thất bại, orchestrator phát các command bù trừ tới mọi bước đã hoàn tất trước đó theo thứ tự ngược lại. Ưu điểm: toàn bộ workflow nằm ở một chỗ, quan sát được và test được. Nhược điểm: orchestrator là một service mới phải deploy và vận hành; orchestrator bị coupling với API của mọi bên tham gia. Cách này được ưa chuộng cho các luồng phức tạp từ 4 bước trở lên, có rẽ nhánh điều kiện, hoặc có các bước song song.\n\n**Compensating transaction.** Điểm tinh tế then chốt: bù trừ là sự đảo ngược về mặt *ngữ nghĩa*, không phải rollback database. Nếu Payment service đã trừ tiền thẻ thành công, bù trừ là phát lệnh hoàn tiền — không phải rollback một transaction (vốn đã commit từ lâu). Bù trừ phải idempotent: nếu saga thất bại và khởi động lại, cùng một command bù trừ có thể được gửi hai lần. Hãy thiết kế bù trừ với idempotency key.\n\n**Saga cho bạn ACD, không phải ACID.** Không có isolation: các request khác có thể quan sát trạng thái trung gian (đã trừ tiền, chưa tạo giao hàng) và có thể hành động dựa trên dữ liệu mà sau này một lần bù trừ sẽ hoàn tác. Các biện pháp đối phó tiêu chuẩn là **semantic lock** (đánh dấu đơn hàng `PENDING` để các luồng khác coi nó là tạm thời), sắp xếp các bước sao cho bước không thể đảo ngược — **pivot transaction** — đứng cuối cùng, và đọc lại giá trị trước khi hành động. Các bước sau pivot phải retry được cho tới khi thành công, vì chúng không còn bù trừ được nữa.\n\n**At-least-once delivery, exactly-once effect.** Message broker thường đảm bảo giao *at-least-once*. Nghĩa là các bước của saga phải **idempotent**: xử lý cùng một event `OrderPlaced` hai lần phải cho kết quả như xử lý một lần. Một pattern phổ biến: dùng `correlation_id` (ID duy nhất của saga) làm idempotency key trong database của từng service, và bỏ qua xử lý nếu đã tồn tại bản ghi với key đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Saga dựa trên orchestration: orchestrator dẫn dắt từng bước một cách tuần tự. Khi Shipment thất bại, nó phát các command bù trừ theo thứ tự ngược lại — ReleaseInventory, rồi RefundPayment. sagaId gắn kết mọi message lại với nhau để tracing và idempotency."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Sau mỗi bước, saga gộp kết quả của bước đó (chargeId, reservationId) vào state của nó và lưu **toàn bộ** bản ghi trước khi đi tiếp — chỉ lưu `{ status }` sẽ âm thầm xóa mất những ID mà việc bù trừ cần tới. Nếu process crash giữa saga, nó có thể được tiếp tục từ state đã lưu gần nhất. Idempotency key trên mọi lời gọi service ngăn trừ tiền hai lần hay giữ hàng hai lần khi retry. compensate() dùng state đó để chỉ đảo ngược những bước đã hoàn tất; sau một lần process crash, một recovery worker sẽ nạp cùng bản ghi đó từ store và tiếp tục. Các durable workflow engine như Temporal cài đặt chính xác phần sổ sách này giúp bạn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 3 — CQRS: model riêng cho ghi và đọc",
+      "content": "**Vấn đề.** Phần lớn ứng dụng đọc nhiều hơn ghi rất nhiều. Vậy mà trong một kiến trúc CRUD điển hình, cùng một data model — cùng một bảng đã chuẩn hóa, cùng một ORM entity — phục vụ cả hai. Mối quan tâm của việc ghi (validate bất biến, áp đặt tính nhất quán, ngăn sửa đổi đồng thời) kéo model về phía chuẩn hóa và schema chặt chẽ. Mối quan tâm của việc đọc (gộp dữ liệu, join qua nhiều entity, filter phức tạp, pagination) kéo về phía phi chuẩn hóa và cấu trúc tối ưu cho query. Cố thỏa mãn cả hai bằng một model sẽ cho ra hoặc một lần đọc chậm một cách giả tạo (vì model đã chuẩn hóa), hoặc một lần ghi mong manh (vì schema đã bị phi chuẩn hóa cho việc đọc).\n\n**CQRS** (Command Query Responsibility Segregation, do Greg Young đưa ra dựa trên nguyên lý CQS của Bertrand Meyer) giải quyết bằng cách tách model làm hai:\n\n- **Phía command (write model):** Xử lý các thay đổi — `PlaceOrder`, `CancelOrder`, `UpdateShippingAddress`. Model được chuẩn hóa, nhất quán chặt chẽ, và áp đặt các bất biến nghiệp vụ. Command đi qua logic domain (validation, quy tắc aggregate) và được lưu vào **write store**.\n- **Phía query (read model):** Xử lý các lần đọc — `GetOrderById`, `ListOrdersByCustomer`, `OrderDashboardStats`. Read model là một **projection** phi chuẩn hóa, gộp sẵn, tối ưu đúng cho các query mà UI cần. Nó được cập nhật bất đồng bộ bằng cách lắng nghe các event phát ra từ phía command (được publish tin cậy qua transactional outbox, xem bên dưới).\n\n**Eventual consistency.** Vì read model được cập nhật bất đồng bộ, nó trễ hơn write model một chút. Một user đặt đơn hàng và danh sách đơn của họ có thể chưa cập nhật trong vài trăm mili giây. Điều này thường chấp nhận được — đó cũng là trade-off mà mọi CDN và mọi hệ thống DNS đang chấp nhận. CQRS không phù hợp khi việc đọc phải thấy ngay chính lần ghi của mình với độ trễ bằng không.\n\n**Dựng lại projection.** Một tính năng đắt giá của CQRS: nếu bạn nhận ra read model bị sai — thiếu một field, đánh index tệ — bạn có thể **dựng lại** nó từ đầu bằng cách phát lại mọi event từ phía ghi. Không dữ liệu nào bị mất; bạn chỉ suy ra lại read model. Điều này tách rời sự tiến hóa của schema đọc khỏi schema ghi.\n\n**Lựa chọn công nghệ.** Write store và read store không nhất thiết phải là cùng một database. Các tổ hợp phổ biến:\n- Ghi: PostgreSQL (quan hệ, có transaction). Đọc: Elasticsearch (tìm kiếm full-text), Redis (cache latency thấp), MongoDB (document linh hoạt).\n- Ghi: Event store (append-only). Đọc: Cassandra (wide-column, tối ưu cho các pattern truy cập đã biết).\n\n**Khi nào CQRS hợp lý:** Tỉ lệ đọc/ghi cao với yêu cầu đọc phức tạp. Nhu cầu mở rộng khác nhau cho đọc và ghi. Các team sở hữu những phần riêng của hệ thống. Đi kèm event sourcing, nơi projection là read model tự nhiên. **Khi nào nên tránh:** CRUD đơn giản, traffic thấp. Khi overhead vận hành của việc đồng bộ hai model lớn hơn lợi ích. Khi bắt buộc phải có read-your-writes consistency tức thì và không có cách vòng qua."
+    },
+    {
+      "type": "diagram",
+      "caption": "Luồng CQRS: command thay đổi write store và phát event. Một projector bất đồng bộ dựng read store từ các event đó. Query chỉ chạm vào read store — không join, không gộp dữ liệu lúc query."
+    },
+    {
+      "type": "explanation",
+      "title": "Vấn đề dual write và transactional outbox",
+      "content": "Saga, projection của CQRS và tích hợp event-driven đều dựa vào một bước trông có vẻ vô hại: **lưu thay đổi, rồi publish một event**. Làm việc đó bằng hai lần ghi riêng biệt — `INSERT INTO orders` rồi tới `kafka.send(OrderPlaced)` — chính là **vấn đề dual write**. Nếu process crash giữa hai bước, hoặc broker sập trong chốc lát, database nói đơn hàng tồn tại nhưng phía sau không ai hay biết. Đảo thứ tự (publish trước, commit sau) còn tệ hơn: consumer phản ứng với một đơn hàng mà sau đó có thể commit thất bại. Two-phase commit giữa database và broker hiếm khi có sẵn và sẽ chặn khi có lỗi.\n\n**Transactional outbox** loại bỏ dual write. Trong *cùng một local database transaction* thay đổi state nghiệp vụ, service insert event vào một bảng `outbox`. Hoặc cả hai dòng cùng commit, hoặc không dòng nào. Sau đó một **relay** riêng đọc các dòng outbox chưa publish và publish chúng lên broker, đánh dấu từng dòng là đã gửi. Có hai cách xây relay:\n- **Polling publisher** — `SELECT ... WHERE published_at IS NULL ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED`, publish, rồi đánh dấu. Đơn giản; thêm tải polling và một chút latency.\n- **Change data capture (CDC)** — một công cụ như **Debezium** bám theo write-ahead log của database (logical replication của Postgres, binlog của MySQL) và biến mỗi lần insert vào outbox thành một Kafka message. Latency thấp hơn, không có query polling, nhưng thêm hạ tầng.\n\nRelay có thể crash sau khi publish nhưng trước khi đánh dấu dòng, nên outbox cho **at-least-once** delivery — consumer phải khử trùng, thường bằng cách ghi lại các event ID đã xử lý (pattern **inbox** / idempotent consumer) trong cùng transaction với thay đổi state của chính nó. Thứ tự được giữ theo từng aggregate nếu relay publish với aggregate ID làm partition key."
+    },
+    {
+      "type": "diagram"
+    },
+    {
+      "type": "code_example",
+      "title": "Transactional outbox kèm idempotent consumer",
+      "explanation": "Dòng đơn hàng và dòng `OrderPlaced` được commit bởi cùng một transaction, nên không có khoảng thời gian nào mà cái này tồn tại còn cái kia thì không. Relay được cố ý làm đơn giản và có thể publish một dòng hai lần (crash sau khi publish, trước khi đánh dấu) — đó là lý do consumer kiểm tra event id trước khi hành động. Trong production, relay là một poller `FOR UPDATE SKIP LOCKED` hoặc Debezium đọc WAL, và consumer ghi lại các id đã xử lý trong database của chính nó, bên trong cùng transaction với side effect của nó."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 4 — Event Sourcing: log chính là sự thật",
+      "content": "**Vấn đề của CRUD.** Create/Read/Update/Delete truyền thống sửa đổi các dòng ngay tại chỗ. Khi trạng thái của một đơn hàng đổi từ `pending` sang `shipped`, dòng được cập nhật và trạng thái trước đó biến mất. Bạn dựng lại được đơn hàng *bây giờ là gì* nhưng không biết *trước đó là gì*, *đổi khi nào*, hay *vì sao*. Audit log phải gắn thêm riêng. Các query analytics trở thành những phép join phức tạp, đắt đỏ. Dựng lại một read cache từ đầu đòi hỏi một cuộc di chuyển dữ liệu đau đớn.\n\n**Event Sourcing** lật ngược mô hình. Thay vì lưu state hiện tại, bạn lưu một **luồng event bất biến** đại diện cho mọi thay đổi state. Stream `orders` có thể chứa: `OrderPlaced → PaymentReserved → InventoryAllocated → OrderShipped → OrderDelivered`. State hiện tại được suy ra bằng cách **phát lại** các event đó qua một phép fold (reduce). Event không bao giờ bị sửa hay xóa — chúng là những sự thật đã xảy ra.\n\n**Những gì bạn có được:**\n- **Audit trail đầy đủ** — mọi thay đổi đều có timestamp, ai làm, và vì sao (payload của event).\n- **Query theo thời gian** — phát lại event tới một thời điểm để xem hệ thống ở trạng thái nào vào hôm qua.\n- **Linh hoạt về projection** — dựng bao nhiêu view phía đọc cũng được từ cùng một event log mà không đụng tới write model.\n- **Debug và phân tích nguyên nhân gốc** — phát lại đúng chuỗi event đã dẫn tới một bug.\n- **Tích hợp event-driven** — các service phía sau subscribe cùng event stream, loại bỏ polling.\n\n**Cái giá phải trả:**\n- **Eventual consistency** — read model là projection được suy ra bất đồng bộ; chúng bị trễ.\n- **Tiến hóa schema event** — một khi đã publish, định dạng event thực chất là API public. Thay đổi nó đòi hỏi versioning và upcasting (nâng cấp event cũ lên định dạng mới) cẩn thận.\n- **Quản lý snapshot** — phát lại 10 triệu event để nạp một aggregate là rất tốn kém. **Snapshot** định kỳ cache state của aggregate tại một thời điểm; việc phát lại bắt đầu từ snapshot gần nhất.\n- **Độ phức tạp vận hành** — event store, projection service, chiến lược snapshot và quản lý offset của consumer đều là những mối lo hạ tầng mới.\n\n**Khi nào dùng:** Sổ cái tài chính, đơn hàng thương mại điện tử, tài liệu cộng tác, các domain chịu ràng buộc tuân thủ nơi mọi thay đổi phải audit được. **Khi nào nên tránh:** Domain CRUD đơn giản, nơi lịch sử không quan trọng. Hệ thống cần strong consistency tức thì trong read model. Các team chưa đủ độ trưởng thành vận hành để chạy event store.\n\n**Công cụ.** **EventStoreDB** được xây chuyên cho event sourcing. **Kafka** (với log compaction bị tắt) thường được dùng để *phân phối* event, nhưng nó là một event store chính khá yếu: nó không có thao tác append kèm optimistic concurrency theo từng aggregate, cũng không có query hiệu quả kiểu \"nạp mọi event của đơn hàng 42\", nên nhiều team giữ event store trong EventStoreDB hoặc Postgres và stream sang Kafka qua outbox. **Axon Framework** (Java) cung cấp một stack event sourcing + CQRS có định hướng rõ ràng. **Marten** (.NET) biến PostgreSQL thành một event store."
+    },
+    {
+      "type": "diagram",
+      "caption": "Event log của một đơn hàng: năm event bất biến theo thứ tự. State hiện tại là phép fold qua mọi event. Một snapshot tại t=2 cho phép phát lại bắt đầu từ giữa luồng, tránh phải phát lại toàn bộ từ đầu — điều sống còn với các aggregate khối lượng lớn."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Method `apply()` của aggregate là nơi duy nhất event làm thay đổi state — cả khi phát ra event mới lẫn khi phát lại lịch sử. Optimistic concurrency (expectedVersion) ngăn hai process đồng thời cùng append ở version 5 — lần append thứ hai ném lỗi xung đột, buộc phải retry. Projector là một listener riêng cập nhật view phi chuẩn hóa của read model; nó có thể được dựng lại từ đầu bằng cách phát lại mọi event từ store.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern 5 — API Gateway và Service Discovery: chất keo hạ tầng",
+      "content": "**API Gateway.** Các client bên ngoài — trình duyệt, mobile app, tích hợp bên thứ ba — không cần biết topology nội bộ của mạng lưới microservice. **API gateway** là điểm vào duy nhất cho mọi traffic bên ngoài. Nó xử lý các mối quan tâm xuyên suốt mà nếu không có nó sẽ bị lặp lại ở mọi service:\n\n- **Xác thực và phân quyền** — verify JWT, API key hoặc OAuth token trước khi request tới bất kỳ service phía sau nào.\n- **Rate limiting và throttling** — bảo vệ mạng lưới khỏi client lạm dụng mà không phải cài đặt giới hạn ở mọi service.\n- **Route request** — route `GET /orders/*` tới Order service, `POST /payments/*` tới Payment service, theo path, header hoặc query parameter.\n- **TLS termination** — xử lý certificate TLS public ở edge. Traffic nội bộ ngày càng được mã hóa (mạng zero-trust, thường là **mTLS** do một service mesh như Istio hay Linkerd tự động cấp) thay vì tin tưởng một VPC plaintext.\n- **Biến đổi request/response** — điều chỉnh hợp đồng API bên ngoài mà không phải đổi API của service nội bộ.\n- **Circuit breaking và retry** — một số gateway (Kong, Envoy) cài đặt những thứ này ở tầng edge.\n\nCác lựa chọn chính: **Kong** (dựa trên plugin, mở rộng nginx), **AWS API Gateway** (serverless, tích hợp sâu với AWS), **nginx** (cấu hình thủ công), **Traefik** (tự phát hiện service trong Docker/Kubernetes), **Envoy** (cấp thấp, được Istio dùng làm sidecar).\n\n**Service Discovery.** Trong một môi trường container động, service không nằm ở IP cố định. Một replica của Payment service bị crash sẽ được thay bằng một container mới với IP mới. Một Order service được scale từ 2 lên 10 replica đột nhiên có 10 IP khác nhau. Service discovery giải quyết chuyện này.\n\nCó hai mô hình:\n- **Client-side discovery** — service gọi tự query một **service registry** (Consul, etcd) để lấy danh sách instance healthy, rồi tự load balancing. Client có nhiều quyền kiểm soát hơn nhưng phải nhúng logic discovery.\n- **Server-side discovery** — client gọi một load balancer hoặc gateway; gateway query registry. Client không biết gì về discovery — code client đơn giản hơn, nhưng gateway trở thành một dependency.\n\nTrong Kubernetes, service discovery có sẵn: một object `Service` cung cấp một tên DNS ổn định (`payment-svc.default.svc.cluster.local`) được hậu thuẫn bởi `kube-proxy`, thứ cân bằng tải qua các pod healthy. Service được đăng ký bằng label selector, không phải bằng code. Đó là lý do Kubernetes đơn giản hóa đáng kể việc vận hành microservice — discovery, health check và rolling update đều là tính năng hạng nhất của nền tảng. Traffic north–south vẫn cần một ingress hoặc gateway controller (Ingress hoặc **Gateway API** mới hơn, được cài đặt bởi Envoy Gateway, NGINX, Kong, Traefik và các bên khác)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Server-side discovery: API gateway query registry để phân giải tên service thành địa chỉ của các instance healthy. Client chỉ biết địa chỉ của gateway — topology nội bộ vô hình với chúng."
+    },
+    {
+      "type": "callout",
+      "content": "**Hiểu lầm: \"các pattern microservice giải quyết vấn đề của microservice\".** Những pattern này giải quyết các vấn đề *do chính việc* chia nhỏ một monolith *tạo ra*. Một monolith có ranh giới module tốt không hề có những vấn đề về tính nhất quán, discovery hay lỗi dây chuyền mà các pattern này nhắm tới. Trước khi thêm circuit breaker, saga, CQRS và event sourcing vào một dự án mới, hãy hỏi liệu có thực sự cần microservices không. Martin Fowler gọi đây là **Microservice Premium** — overhead vận hành và kiến trúc mà bạn trả trước, trước khi thu được lợi ích của scaling và deploy độc lập. Phần lớn team nên bắt đầu với một monolith có cấu trúc tốt và chỉ tách service khi những áp lực cụ thể về scaling hay quyền tự chủ của team khiến việc chia nhỏ trở nên đáng giá."
+    },
+    {
+      "type": "callout",
+      "content": "**Chọn đúng pattern cho đúng vấn đề:**\n- Dùng **Circuit Breaker** cho mọi lời gọi đồng bộ giữa service vượt qua ranh giới mạng. Đây gần như luôn là lựa chọn đúng và có overhead vận hành thấp. Dùng **opossum** (Node), **Resilience4j** (Java), hoặc **Polly** (.NET), hoặc đẩy xuống tầng service mesh với Istio/Envoy.\n- Dùng **Saga** khi một thao tác nghiệp vụ trải qua nhiều service, mỗi service sở hữu database riêng. Choreography ổn cho hai ba bước; hãy ưu tiên **orchestration** khi luồng có từ bốn bước trở lên, có rẽ nhánh hoặc timeout. **Temporal.io** là một saga/workflow engine managed xuất sắc, lo hộ bạn việc lưu bền vững, retry và timeout.\n- Dùng **CQRS** khi traffic đọc và ghi có hình dạng hoặc yêu cầu mở rộng khác nhau đáng kể. ĐỪNG dùng CQRS chỉ vì nó nghe có vẻ tinh vi — nó thêm một pipeline projection bất đồng bộ cần được giám sát và bảo trì.\n- Chỉ dùng **Event Sourcing** khi bạn thực sự cần audit trail, query theo thời gian, hoặc khả năng dựng lại projection. Nếu không, một bảng event đơn giản (chỉ `INSERT`) bên cạnh một bảng state hiện tại cho 80% lợi ích với ít độ phức tạp hơn nhiều.\n- Dùng **transactional outbox** bất cứ khi nào một service phải vừa thay đổi database vừa publish event — đừng bao giờ ghi vào DB và broker như hai bước độc lập.\n- Dùng **API Gateway + Service Discovery** ngay từ ngày đầu trong mọi deployment microservice. Đây là yêu cầu tối thiểu, không phải tùy chọn — Kubernetes cho bạn discovery miễn phí và gateway qua một controller Ingress/Gateway API."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Circuit breaker** ngăn lỗi dây chuyền bằng cách theo dõi tỉ lệ lỗi trong một sliding window và chuyển giữa các trạng thái CLOSED (bình thường), OPEN (fail fast) và HALF_OPEN (thăm dò hồi phục) — giải phóng thread của bên gọi ngay lập tức thay vì để chúng dồn đống trên một service đã chết.",
+        "**Saga** điều phối transaction phân tán không cần global lock bằng cách chia workflow thành các local transaction kèm hành động bù trừ — cho atomicity nhờ bù trừ nhưng không có isolation, nên hãy dùng semantic lock (trạng thái PENDING) và đặt bước pivot không thể đảo ngược ở cuối. Saga dựa trên orchestration dùng một coordinator lưu bền vững cho các luồng phức tạp; choreography hợp với luồng đơn giản hai ba bước nhưng khó trace khi lên quy mô.",
+        "**Transactional outbox** giải vấn đề dual write: ghi dòng nghiệp vụ và dòng event trong một local transaction, rồi một relay (polling hoặc CDC như Debezium) publish event — at-least-once, nên consumer khử trùng theo event id.",
+        "**CQRS** tách write model (command áp đặt bất biến nghiệp vụ và thay đổi state đã chuẩn hóa) khỏi read model (projection phi chuẩn hóa tối ưu cho pattern query), cho phép mỗi bên mở rộng, tiến hóa và dùng database khác nhau một cách độc lập.",
+        "**Event Sourcing** lưu mọi thay đổi state dưới dạng event bất biến thay vì ghi đè dòng — state hiện tại được suy ra bằng cách phát lại event log. Nó mở ra audit trail đầy đủ, query theo thời gian và khả năng dựng lại projection, nhưng thêm độ phức tạp vận hành đáng kể quanh tiến hóa schema event và quản lý snapshot.",
+        "**API Gateway** gom các mối quan tâm xuyên suốt (auth, rate limiting, routing, TLS) về edge của mạng để từng service chỉ tập trung vào business logic. **Service Discovery** giải quyết vấn đề địa chỉ thay đổi liên tục trong môi trường container bằng cách duy trì một registry trực tiếp gồm các instance service healthy.",
+        "**Idempotency không phải tùy chọn.** At-least-once delivery nghĩa là các bước saga, event projector và mọi logic retry đều phải idempotent — dùng correlation key hoặc idempotency key để phát hiện và bỏ qua việc xử lý trùng.",
+        "Hãy áp dụng các pattern này ở nơi vấn đề đòi hỏi — không phải như một stack mặc định. Microservice Premium là có thật: phần lớn các pattern này tồn tại để quản lý độ phức tạp mà chính microservices đưa vào. Một modular monolith có cấu trúc tốt tránh được tất cả."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Circuit breaker làm gì khi đang ở trạng thái OPEN?",
+      "options": [
+        "Retry request tối đa 3 lần với exponential back-off trước khi báo lỗi",
+        "Thất bại ngay lập tức mà không thực hiện lời gọi mạng nào tới service phía sau",
+        "Route request tới một replica phụ của service phía sau",
+        "Xếp request vào queue trong bộ nhớ và xả ra khi service hồi phục"
+      ],
+      "explanation": "Ở trạng thái OPEN, circuit breaker bỏ qua hoàn toàn lời gọi mạng và ném lỗi ngay lập tức. Đây là giá trị then chốt: thread của bên gọi được giải phóng tức thì thay vì bị chặn suốt thời gian timeout, ngăn cạn kiệt thread pool và lỗi dây chuyền lan ngược lên chuỗi lời gọi."
+    },
+    {
+      "id": "q2",
+      "question": "Vì sao trạng thái HALF_OPEN của circuit breaker thường được thiết kế để đòi nhiều probe thành công trước khi đóng?",
+      "options": [
+        "Để đáp ứng yêu cầu pháp lý về SLA availability của service",
+        "Vì một probe đơn lẻ dùng quá ít bandwidth để xác nhận đã hồi phục",
+        "Để tránh breaker chập chờn đóng lại với một service chỉ khỏe mạnh lúc được lúc không",
+        "Các probe half-open phải khớp chính xác với ngưỡng lỗi ban đầu"
+      ],
+      "explanation": "Một service vừa online trở lại có thể chỉ khỏe một phần — thành công ở request đầu tiên nhưng vẫn thường xuyên lỗi. Đòi nhiều lần probe thành công liên tiếp trước khi đóng đảm bảo service thực sự ổn định, không chỉ tạm thời hoạt động, tránh dao động mở/đóng nhanh liên tục gây ra hành vi thất thường ở bên gọi."
+    },
+    {
+      "id": "q3",
+      "question": "Khác biệt căn bản giữa saga dựa trên choreography và saga dựa trên orchestration là gì?",
+      "options": [
+        "Choreography dùng lời gọi HTTP đồng bộ; orchestration dùng event bất đồng bộ",
+        "Choreography cần một database dùng chung; orchestration dùng database riêng cho mỗi service",
+        "Orchestration cần một distributed lock trên mọi service tham gia",
+        "Với choreography, mỗi service tự phản ứng với event một cách độc lập; với orchestration, một coordinator trung tâm dẫn dắt và theo dõi mọi bước"
+      ],
+      "explanation": "Choreography phân tán logic workflow qua mọi service — mỗi service lắng nghe event và biết phải làm gì tiếp, nhưng không có chỗ nào mô tả toàn bộ luồng. Orchestration tập trung luồng vào một coordinator gửi command tường minh và chờ phản hồi, khiến workflow quan sát được, test được và dễ vận hành hơn cho các quy trình nhiều bước phức tạp."
+    },
+    {
+      "id": "q4",
+      "question": "Trong một saga, vì sao compensating transaction phải idempotent?",
+      "options": [
+        "Vì message broker đảm bảo at-least-once delivery, nên cùng một command bù trừ có thể đến nhiều hơn một lần",
+        "Vì bù trừ chạy trong một database transaction khác với bước ban đầu",
+        "Vì idempotency là yêu cầu pháp lý với giao dịch tài chính",
+        "Vì saga orchestrator luôn gửi command bù trừ hai lần để phòng ngừa"
+      ],
+      "explanation": "Message broker và logic retry có thể giao cùng một message nhiều hơn một lần. Nếu ReleaseInventory được xử lý hai lần, bạn có thể nhả một lượt giữ hàng đã được nhả rồi — có khả năng làm hàng tồn kho khả dụng hai lần. Dùng idempotency key (ví dụ sagaId) cho phép service phát hiện và bỏ qua an toàn một command trùng."
+    },
+    {
+      "id": "q5",
+      "question": "Trong CQRS, read model chấp nhận eventual consistency vì:",
+      "options": [
+        "Read database không hỗ trợ được strong consistency ở quy mô lớn",
+        "Read model được cập nhật bất đồng bộ bởi các projector lắng nghe event phía command, nên nó trễ hơn write model một chút",
+        "CQRS đòi read store và write store ở các vùng địa lý khác nhau",
+        "Read model dùng optimistic locking, thứ cho phép đọc dữ liệu cũ"
+      ],
+      "explanation": "Projection của read model được cập nhật bởi các event listener bất đồng bộ. Giữa lúc một command được xử lý và lúc projector cập nhật read store, read model là dữ liệu cũ. Độ trễ này thường chỉ vài mili giây và chấp nhận được với phần lớn use case, nhưng CQRS không phù hợp khi user phải thấy ngay tác dụng của chính lần ghi của họ."
+    },
+    {
+      "id": "q6",
+      "question": "Lợi ích chính của việc có thể dựng lại một read model CQRS từ đầu là gì?",
+      "options": [
+        "Nó cho phép xóa write model sau khi read model đã được dựng",
+        "Nó loại bỏ nhu cầu backup database phía đọc",
+        "Nó nghĩa là thay đổi schema của read model không cần một cuộc di chuyển dữ liệu đầy rủi ro — chỉ cần phát lại event và project lại",
+        "Dựng lại cho phép mã hóa read model bằng một khóa mới"
+      ],
+      "explanation": "Nếu bạn phát hiện read model cần thêm một field hay một index khác, bạn có thể xóa read store, cập nhật projector, và phát lại mọi event từ event log (hoặc lịch sử của write store). Không cần di chuyển dữ liệu phức tạp vì event là nguồn sự thật và chứa mọi thông tin cần để dựng lại bất kỳ view nào."
+    },
+    {
+      "id": "q7",
+      "question": "Một Order service commit đơn hàng vào Postgres rồi gọi kafka.send(OrderPlaced). Thỉnh thoảng có đơn hàng tồn tại nhưng không service phía sau nào hay biết. Cách sửa chuẩn là gì?",
+      "options": [
+        "Publish lên Kafka trước, rồi mới commit database transaction",
+        "Bọc lời gửi Kafka trong một vòng retry với exponential backoff",
+        "Tăng thiết lập acks của Kafka producer lên all",
+        "Insert event vào một bảng outbox trong cùng database transaction và để một relay publish nó"
+      ],
+      "explanation": "Đây là vấn đề dual write: một cú crash giữa lúc commit và lúc gửi làm mất event, và retry không giúp được nếu process đã chết. Publish trước còn tệ hơn (consumer có thể phản ứng với một đơn hàng không bao giờ commit), còn acks=all chỉ ảnh hưởng tới độ bền khi broker đã có message. Transactional outbox ghi event trong cùng local transaction với đơn hàng; một poller hoặc relay CDC (ví dụ Debezium) publish nó sau đó với at-least-once delivery, nên consumer khử trùng theo event id."
+    },
+    {
+      "id": "q8",
+      "question": "Mục đích của kiểm tra optimistic concurrency (expectedVersion) trong một event store là gì?",
+      "options": [
+        "Ngăn hai process đồng thời cùng append vào cùng một aggregate stream, gây ra các thay đổi state xung đột",
+        "Đảm bảo event được lưu theo thứ tự bảng chữ cái của loại event",
+        "Kiểm tra event có tuân theo schema đã đăng ký không",
+        "Giới hạn số event lưu cho mỗi aggregate để giảm dung lượng đĩa"
+      ],
+      "explanation": "Nếu hai process cùng lúc nạp cùng một aggregate ở version 5 và cùng cố append ở version 6, một trong hai phải thất bại. Kiểm tra expectedVersion áp đặt điều này — lần append thứ hai ném lỗi xung đột concurrency, và bên gọi phải nạp lại aggregate, áp lại business logic, rồi retry. Đây là phiên bản phân tán của optimistic lock ở mức dòng."
+    },
+    {
+      "id": "q9",
+      "question": "Khác biệt then chốt giữa API gateway và load balancer là gì?",
+      "options": [
+        "Load balancer hoạt động ở Layer 7 (HTTP); API gateway hoạt động ở Layer 4 (TCP)",
+        "API gateway xử lý các mối quan tâm tầng ứng dụng như auth, route theo path và rate limiting; load balancer phân phối traffic qua các instance của cùng một service",
+        "API gateway chỉ dùng được với REST API; load balancer hỗ trợ mọi protocol",
+        "Load balancer cần service discovery; API gateway thì không"
+      ],
+      "explanation": "Load balancer phân phối request qua nhiều instance của một service để chia tải. API gateway là một thành phần tầng ứng dụng route tới các service khác nhau dựa trên thuộc tính của request, áp đặt xác thực, áp rate limit, kết thúc TLS, và có thể biến đổi request — những mối quan tâm trực giao với việc phân phối traffic đơn thuần."
+    },
+    {
+      "id": "q10",
+      "question": "Trong client-side service discovery, ai chịu trách nhiệm query registry và load balancing qua các instance?",
+      "options": [
+        "API gateway query registry thay cho mọi client",
+        "Chính service registry route request tới instance tốt nhất",
+        "Service gọi tự query registry và chọn một instance để gọi trực tiếp",
+        "DNS resolver của hệ điều hành xử lý việc chọn instance một cách trong suốt"
+      ],
+      "explanation": "Trong client-side discovery (ví dụ Netflix Eureka + Ribbon), service gọi lấy danh sách instance healthy từ registry và áp chiến lược load balancing của riêng nó (round-robin, least-connections, v.v.) để chọn một instance. Cách này cho client quyền kiểm soát chi tiết nhưng đòi nhúng logic discovery vào mọi service — trái ngược với server-side discovery, nơi gateway hoặc một proxy lo hết mọi việc này một cách trong suốt."
+    }
+  ]
+}

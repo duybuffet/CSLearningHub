@@ -1,0 +1,218 @@
+{
+  "sourceHash": "9cb485dcb277",
+  "title": "LRU and LFU Cache",
+  "tagline": "Get và put O(1) với cơ chế evict thông minh — LRU bằng hashmap + doubly linked list, LFU thêm một tầng tần suất.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mọi phần mềm quan tâm tới tốc độ rồi cũng sẽ va vào cùng một bức tường: dữ liệu bạn cần nhất lại nằm ở một nơi chậm, và lần nào cũng đi lấy thì hiệu năng chết. Giải pháp là **cache** — một kho nhỏ, nhanh, giữ sẵn một phần dữ liệu ở gần tay. Phần khó không phải là xây kho nhanh; mà là quyết định giữ lại gì và vứt bỏ gì khi kho đã đầy. Quyết định đó là **eviction policy** (chính sách loại bỏ), và nó nằm ở trung tâm của một số phần kỹ thuật quan trọng nhất trong các hệ thống hiện đại.\n\nHai eviction policy thống trị cả kỹ thuật thực tế lẫn interview: **LRU (Least Recently Used)** và **LFU (Least Frequently Used)**. LRU loại bỏ phần tử đã lâu nhất không được động tới. Triết lý của nó là **temporal locality** (tính cục bộ thời gian) — nếu bạn vừa truy cập thứ gì đó, nhiều khả năng bạn sẽ sớm truy cập lại; nếu đã lâu không động tới, có lẽ bỏ đi là an toàn. LFU loại bỏ phần tử có tổng số lần truy cập ít nhất. Triết lý của nó là **sự ổn định về tần suất** — những thứ thực sự phổ biến nên ở lại; những thứ tình cờ được truy cập gần đây nhưng nhìn chung hiếm khi cần thì nên đi.\n\n(Để so sánh: chính sách tối ưu về lý thuyết, MIN của Belady, loại bỏ phần tử mà lần dùng *tiếp theo* xa nhất trong tương lai. Nó đòi hỏi biết trước tương lai, nên cache thực tế dùng LRU, LFU hoặc các dạng lai như những phương án thay thế thực dụng.)\n\nCả hai nghe đơn giản khi chỉ là chính sách. Thử thách kỹ thuật là cài đặt chúng với **O(1) cho mọi thao tác** — cả đọc lẫn ghi. Một cache tốn O(n) để cập nhật gần như vô dụng trong thực tế, và ngay cả O(log n) cũng là một khoản thuế đáng kể trên mỗi lần hit; chi phí đó xóa sạch lợi ích của cache. Đạt O(1) thực sự cho LRU đòi hỏi kết hợp hai cấu trúc dữ liệu theo một cách không hiển nhiên. LFU còn nâng tiêu chuẩn lên nữa, đòi hỏi thêm một tầng ghi chép thứ ba. Chương này đi qua cả hai thiết kế một cách đầy đủ: trực giác, cấu trúc dữ liệu, cài đặt, edge case, và những hệ thống thực tế nơi mỗi chính sách được dùng.\n\nĐọc xong, bạn sẽ có thể tự cài đặt cả hai cache từ đầu, giải thích vì sao mỗi quyết định thiết kế được đưa ra, nhận ra khi nào chính sách này thắng chính sách kia, và nhận diện dấu vết của các thuật toán này trong các hệ thống production như Redis, CPU cache và buffer pool của database."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng đời một request tới cache. Một lần hit trả về ngay sau khi cập nhật metadata ghi chép. Một lần miss khi cache đã đầy sẽ kích hoạt evict trước khi chèn — eviction policy quyết định phần tử nào bị gỡ."
+    },
+    {
+      "type": "analogy",
+      "title": "Bàn bếp, chồng giấy nhớ và tờ đếm vạch",
+      "content": "Hình dung khu bếp làm việc bận rộn của một đầu bếp. Trên mặt bàn chỉ có chỗ cho năm nguyên liệu cùng lúc; mọi thứ khác nằm trong kho lạnh. Mỗi lần lấy một nguyên liệu, đầu bếp đưa nó ra phía trước mặt bàn (chỗ dễ với nhất). Khi bàn đã đầy mà cần nguyên liệu mới, đầu bếp trả lại thứ nằm xa nhất phía sau — nguyên liệu đã nằm im lâu nhất không ai động tới. Đó là **LRU**: độ gần đây quyết định cái gì ở lại.\n\nGiờ hãy tưởng tượng một đầu bếp khác giữ một tờ đếm vạch trên tường. Mỗi lần một nguyên liệu được dùng, anh ta đánh một vạch cạnh nó. Khi bàn đầy, anh ta trả lại nguyên liệu nào có ít vạch nhất — rõ ràng nó không được cần tới nhiều. Nếu hai nguyên liệu bằng số vạch, anh ta trả lại cái đã nằm đó lâu hơn (dùng LRU để phân xử). Đó là **LFU**: tần suất, với độ gần đây làm tiêu chí phụ.\n\nĐầu bếp thứ nhất cần một cách để biết ngay nguyên liệu nào nằm xa nhất phía sau mà không phải kiểm tra từng vị trí. Đó là **doubly linked list**: thứ tự các vị trí luôn được duy trì, và chuyển một món lên phía trước tốn thời gian hằng vì bạn chỉ cập nhật các pointer láng giềng. **Hash map** là hệ thống nhãn giúp đầu bếp nhảy thẳng tới vị trí của bất kỳ nguyên liệu nào mà không phải quét cả mặt bàn.\n\nĐầu bếp thứ hai cần tất cả những thứ đó cộng thêm chính tờ đếm vạch — một cấu trúc gom nguyên liệu theo số vạch và có thể tìm ngay cả nhóm có ít vạch nhất lẫn món cũ nhất trong nhóm đó. Mọi quyết định về cấu trúc dữ liệu trong các cài đặt cache này đều ánh xạ trực tiếp tới một nhiệm vụ ghi chép thực tế."
+    },
+    {
+      "type": "explanation",
+      "title": "Vì sao O(1) đòi hỏi LRU phải có hai cấu trúc dữ liệu",
+      "content": "Cách cài đặt LRU ngây thơ mà phần lớn mọi người nghĩ ra đầu tiên là một list có thứ tự: mỗi lần truy cập, tìm phần tử và chuyển nó lên đầu; khi evict, gỡ ở cuối. Về logic thì đúng nhưng về hiệu năng thì hỏng.\n\nVới array hoặc linked list thuần, **tìm** phần tử theo key phải quét từ đầu — O(n). Chỉ với hash map, bạn có tra cứu O(1), nhưng map không có khái niệm thứ tự; bạn không thể xác định phần tử nào lâu nhất không được dùng nếu không ghi chép thêm.\n\nInsight ở đây là hai yêu cầu này bổ sung cho nhau và không cấu trúc nào đáp ứng được cả hai:\n- **Hash map**: tra cứu theo key O(1), không có thứ tự.\n- **Doubly linked list**: chèn ở đầu O(1), gỡ ở bất kỳ vị trí nào O(1) (khi có pointer tới node), duy trì thứ tự. Nhưng tra cứu theo key là O(n).\n\nKết hợp chúng lại cho bạn điều tốt nhất của cả hai. Hash map lưu `key → node_pointer`. Doubly linked list lưu các node theo thứ tự gần đây (head = MRU, tail = LRU). Khi bạn truy cập một key:\n1. Tra pointer tới node trong map — O(1).\n2. Dùng pointer đó gỡ thẳng node khỏi vị trí hiện tại trong list — O(1) vì bạn có chính node đó và doubly linked list cho phép cập nhật `node.prev.next` và `node.next.prev`.\n3. Chèn lại node ở head — O(1).\n\nVì sao là doubly mà không phải singly linked? Với **singly linked list**, để gỡ một node bạn cần node đứng trước nó (để cập nhật `predecessor.next`). Nhưng node chỉ biết node đứng sau, không biết node đứng trước. Tìm node đứng trước đòi hỏi duyệt O(n). Doubly linked list lưu `prev` và `next` trong mọi node, nên gỡ bất kỳ node nào cũng chỉ là hai lần gán lại pointer — O(1) thực sự.\n\nKhi đó evict trở nên đơn giản: `prev` của sentinel tail luôn là node LRU. Gỡ nó ra, xóa khỏi map, xong — O(1)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bên trong LRU: HashMap cho truy cập trực tiếp O(1) tới bất kỳ node nào theo key. Doubly linked list duy trì thứ tự gần đây. Sentinel head và tail giả nghĩa là mọi node thật luôn có pointer prev và next khác null — không cần code xử lý edge case."
+    },
+    {
+      "type": "explanation",
+      "title": "Pattern sentinel node — loại bỏ edge case",
+      "content": "Một chi tiết cài đặt tinh tế nhưng quan trọng: mọi LRU cache production đều dùng **sentinel node giả** ở đầu và cuối doubly linked list. Vì sao điều này quan trọng đến vậy?\n\nHãy xem điều gì xảy ra khi không có sentinel lúc chèn node đầu tiên vào list rỗng. Bạn sẽ phải xử lý trường hợp `head` là null — đặt `head = newNode`, `tail = newNode`, `newNode.prev = null`, `newNode.next = null`. Khi gỡ node cuối cùng, bạn đặt `head = null`, `tail = null`. Những trường hợp đặc biệt này làm ô nhiễm mọi hàm insert và remove bằng các phép kiểm tra null.\n\nVới sentinel node, `head` và `tail` là các node giả cố định không bao giờ chứa dữ liệu thật. Chúng được tạo trong constructor và tồn tại mãi mãi. Các node thật nằm giữa chúng. Chèn ở đầu nghĩa là: `newNode.next = head.next; newNode.prev = head; head.next.prev = newNode; head.next = newNode;` — bốn lần gán pointer, không kiểm tra null, code giống hệt nhau dù cache có 0 hay 1000 node thật. Gỡ bất kỳ node thật nào luôn là: `node.prev.next = node.next; node.next.prev = node.prev;` — hai lần gán, chắc chắn khác null vì sentinel luôn ở đó.\n\nPattern này tổng quát: **sentinel node là một kỹ thuật tiêu chuẩn** trong cài đặt doubly linked list để đơn giản hóa logic ở biên. Bạn sẽ thấy nó trong thư viện chuẩn của các ngôn ngữ (`std::list` của C++, `LinkedList` của Java) và trong mọi cài đặt LRU cache gọn gàng ở interview."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các chuyển trạng thái của LRU cache. Bất biến then chốt: sau mỗi lần get hoặc put, node vừa được truy cập luôn nằm ở HEAD. TAIL.prev luôn là ứng viên bị evict."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Mỗi lần get và put chính xác là: một hoặc hai thao tác Map (kỳ vọng O(1) — `Map` là hash table), cộng tối đa hai lời gọi #remove và #insertFront (mỗi lời gọi O(1) — tổng cộng bốn lần gán lại pointer). Evict khi cache đầy là O(1) vì this.#tail.prev luôn là node LRU. Phép kiểm tra `#cap <= 0` rất quan trọng: thiếu nó, một cache dung lượng không sẽ cố \"evict\" sentinel head và crash. Map lưu reference tới chính object node, không phải bản sao, nên thao tác pointer từ phía list lập tức được nhìn thấy qua Map.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Phiên bản này ngắn và nhanh trong thực tế vì bản thân `Map` của V8 đã là một hash table có thứ tự chèn (một hash index trên một array entry). Đây là lựa chọn production hoàn toàn ổn trong JavaScript; trong interview, hãy trình bày nó như một lối tắt và sẵn sàng giải thích — hoặc viết ra — phiên bản hash map + doubly linked list ở trên, vốn là thứ Map thực chất đang làm giúp bạn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Lần theo get và put từng bước",
+      "content": "Hãy lần theo một chuỗi cụ thể để làm rõ hoàn toàn cơ chế pointer. Giả sử capacity = 2 và ta chạy `put(1, 'X')`, `put(2, 'Y')`, `get(1)`, `put(3, 'Z')`.\n\n**Sau put(1, 'X')**: Map: `{1 -> nodeA}`. List: `HEAD <-> nodeA <-> TAIL`. nodeA.val = 'X'.\n\n**Sau put(2, 'Y')**: Map: `{1 -> nodeA, 2 -> nodeB}`. List: `HEAD <-> nodeB <-> nodeA <-> TAIL`. nodeB được chèn ở đầu, nodeA lùi về sau. nodeB là MRU, nodeA là LRU.\n\n**get(1)**: Tra Map cho ra thẳng nodeA. `#remove(nodeA)` — đặt `nodeB.next = TAIL` và `TAIL.prev = nodeB`. Rồi `#insertFront(nodeA)` — đặt `nodeA.next = nodeB`, `nodeA.prev = HEAD`, `HEAD.next = nodeA`, `nodeB.prev = nodeA`. List: `HEAD <-> nodeA <-> nodeB <-> TAIL`. nodeA giờ là MRU. Trả về 'X'.\n\n**put(3, 'Z')**: Cache đã đầy (size = 2). LRU = `this.#tail.prev` = nodeB (key=2). `#remove(nodeB)` — tách nodeB ra. `this.#map.delete(2)` — xóa key 2 khỏi map. Tạo nodeC, `#insertFront(nodeC)`. List: `HEAD <-> nodeC <-> nodeA <-> TAIL`. Map: `{1 -> nodeA, 3 -> nodeC}`.\n\nĐể ý: get(2) giờ trả về -1 vì key 2 đã bị evict. Node của key 1 (nodeA) sống sót vì nó được truy cập ở bước get(1), khiến key 2 trở thành ứng viên LRU.\n\nLần lần theo này hé lộ bất biến then chốt: **thứ tự trong doubly linked list luôn khớp với dòng thời gian truy cập**. MRU ở head, LRU ở tail, và mọi thao tác đều duy trì bất biến này trong O(1)."
+    },
+    {
+      "type": "explanation",
+      "title": "LFU: thêm chiều tần suất",
+      "content": "LRU gọn đẹp nhưng có một điểm yếu: nó thiển cận về lịch sử. Nếu một phần tử nóng không được truy cập trong 60 giây qua nhưng được truy cập hàng nghìn lần mỗi giờ, LRU có thể evict nó trong một khoảng nghỉ. **LFU** giải quyết điều này bằng cách theo dõi **tổng số lần truy cập** của mỗi phần tử trong suốt thời gian nó nằm trong cache.\n\nCách cài đặt LFU ngây thơ khá thẳng: giữ một cặp `(key, frequency)` và một min-heap. Khi truy cập, tăng tần suất và sift up trong heap; khi evict, pop phần tử nhỏ nhất của heap. Cách này cho O(log n) mỗi thao tác — nhanh hơn quét tuyến tính O(n) nhưng vẫn chưa phải O(1).\n\nĐạt O(1) cho LFU đòi hỏi một cấu trúc khéo léo hơn. Insight then chốt là: thay vì sắp xếp phần tử theo tần suất, hãy **gom phần tử theo tần suất**. Duy trì một bucket cho mỗi giá trị tần suất, chứa mọi phần tử ở tần suất đó. Để tìm ứng viên bị evict, tra bucket có tần suất nhỏ nhất. Trong một bucket, áp dụng thứ tự LRU (thứ tự chèn) để phân xử khi bằng nhau.\n\nLFU O(1) dùng ba thành phần:\n1. **`keyMap: Map<key, {value, freq}>`** — tra cứu O(1) giá trị và tần suất hiện tại của bất kỳ key nào.\n2. **`freqMap: Map<freq, Set<key>>`** — gom các key theo tần suất hiện tại. `Set` trong JavaScript giữ thứ tự chèn, cho ra LRU bên trong mỗi bucket.\n3. **`minFreq: number`** — theo dõi bucket tần suất thấp nhất. Dùng để tìm mục tiêu evict mà không phải quét mọi bucket.\n\nBiến `minFreq` là phần tinh tế nhất. Nó chỉ có thể được cập nhật theo hai cách: (a) khi một lần get hoặc put-cập-nhật làm tăng tần suất của một key và bucket tần suất cũ trở nên rỗng, `minFreq` có thể cần tăng thêm 1; (b) khi chèn một key mới, `minFreq` luôn được reset về 1 vì key mới luôn bắt đầu với tần suất 1, vốn luôn là giá trị nhỏ nhất.\n\nĐiều cốt yếu: tăng `minFreq` sau một lần truy cập là hợp lệ chỉ vì phần tử vừa ở `minFreq` đã chuyển sang `minFreq + 1`. Nếu bucket cũ giờ rỗng, giá trị nhỏ nhất mới là `minFreq + 1`. Nếu bucket cũ vẫn còn phần tử khác, `minFreq` không đổi. Logic này được gói trong helper `#incrFreq`."
+    },
+    {
+      "type": "diagram",
+      "caption": "Ví dụ trạng thái bên trong LFU. keyMap cho truy cập O(1) tới tần suất của bất kỳ key nào. freqMap gom key theo tần suất; các Set có thứ tự chèn cho phép phân xử theo LRU trong mỗi bucket. minFreq=1 nghĩa là lần evict tiếp theo nhắm vào Set{C,D}, gỡ C (được chèn sớm nhất)."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Set trong JavaScript giữ thứ tự chèn theo đặc tả, và Set.values().next().value lấy ra phần tử được chèn đầu tiên (cũ nhất) trong O(1). Điều này cho mỗi bucket tần suất thứ tự LRU ngầm định một cách miễn phí. Biến minFreq được reset về 1 mỗi lần chèn key mới vì key mới luôn bắt đầu ở tần suất 1, vốn luôn là giá trị nhỏ nhất toàn cục tại thời điểm đó.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "So sánh LRU và LFU: khi nào chính sách nào thắng",
+      "content": "Hiểu khi nào dùng chính sách nào cũng quan trọng như biết cách cài đặt chúng. Lựa chọn đúng phụ thuộc hoàn toàn vào **mẫu truy cập (access pattern)** của workload.\n\n**LRU thắng với workload có temporal locality.** Cache trang web, CPU instruction cache, thay trang của hệ điều hành và buffer pool của database đều có temporal locality: dữ liệu vừa được truy cập có xác suất được truy cập lại sớm cao hơn nhiều về mặt thống kê. LRU (hoặc một dạng xấp xỉ của nó) là một chính sách mạnh và đơn giản cho những workload này, đó là lý do nó là lựa chọn phổ biến nhất: Memcached dùng segmented LRU, và Redis cung cấp LRU xấp xỉ (`allkeys-lru`) như eviction policy được cấu hình phổ biến nhất — dù `maxmemory-policy` *mặc định* của Redis là `noeviction`.\n\n**LFU thắng với workload có điểm nóng ổn định.** Hãy nghĩ về một nền tảng streaming nơi một nhúm bài hát phổ biến được phát hàng nghìn lần mỗi ngày. LFU giữ chúng trong cache vô thời hạn, bất kể những khoảng nghỉ nhất thời. Một bài hát hot không được phát trong 10 phút qua vẫn sống sót với LFU nhưng có thể bị LRU evict.\n\n**Quét tuần tự làm hại LRU, không phải LFU.** Nếu một process quét một bảng hay file lớn — chạm vào mỗi phần tử đúng một lần — mọi phần tử được quét đều trở thành entry *dùng gần nhất* theo LRU và đẩy những phần tử thực sự nóng về phía tail cho tới khi chúng bị evict. Một lần quét lớn hơn cache có thể xả sạch nó. Đây là **cache pollution** (hay *sequential flooding*). LFU tự nhiên chống lại điều này: các phần tử được quét vào ở tần suất 1 và chủ yếu evict *lẫn nhau* trong bucket tần suất nhỏ nhất, trong khi phần tử nóng có số đếm cao vẫn sống sót. Các hệ thống LRU production thay vào đó gắn thêm khả năng chống quét — midpoint insertion của InnoDB, 2Q, ARC, và danh sách active/inactive của Linux (xem bên dưới).\n\n**LFU khởi động lạnh tệ hơn.** Một key mới nhưng phổ biến bắt đầu ở tần suất 1. Trong một cache đầy những key có tần suất cao, key mới phổ biến đó sẽ bị evict ngay lập tức kể cả khi nó sắp trở thành phần tử nóng nhất trong tập dữ liệu. LRU coi một key mới là dùng gần nhất, cho nó thời gian chứng minh giá trị.\n\n**LFU bị số đếm tần suất cũ kỹ.** Một key được truy cập dày đặc hai giờ trước nhưng sau đó thì không có số đếm tần suất cao. Nếu workload thay đổi và key đó không còn cần nữa, LFU sẽ giữ nó trong cache lâu hơn nhiều so với LRU. Các biến thể giảm dần hoặc định kỳ chia đôi bộ đếm (LFU với aging; LFU của Redis, dùng bộ đếm logarit giảm dần theo thời gian; TinyLFU) giải quyết vấn đề này.\n\n**Khuyến nghị thực tế**: mặc định dùng LRU (hoặc dạng LRU xấp xỉ của nền tảng bạn dùng) cho phần lớn cache web và ứng dụng. Tìm tới các chính sách kiểu LFU hoặc lai khi bạn có bằng chứng về một tập nóng ổn định, traffic nhiều lần quét, hoặc các key chỉ dùng một lần đang làm ô nhiễm cache — các library hiện đại như Caffeine của Java (W-TinyLFU) làm sẵn điều này cho bạn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Chọn chính sách theo loại workload. LRU là mặc định an toàn cho traffic do độ gần đây chi phối; LFU bảo vệ một tập nóng ổn định và chống được quét, nhưng LFU thuần thích nghi chậm khi độ phổ biến thay đổi. Các dạng lai (ARC, 2Q, W-TinyLFU) nhắm tới cả hai."
+    },
+    {
+      "type": "explanation",
+      "title": "Các hệ thống thực tế dùng những chính sách này",
+      "content": "Eviction policy của cache không phải chuyện hàn lâm — chúng là những lựa chọn được cấu hình trong các hệ thống production mà bạn sẽ gặp khi làm kỹ sư.\n\n**Redis** hỗ trợ tám eviction policy qua `maxmemory-policy`: `noeviction` (mặc định — lệnh ghi thất bại khi bộ nhớ đầy), `allkeys-lru`, `volatile-lru` (chỉ các key có TTL), `allkeys-lfu` và `volatile-lfu` (thêm vào ở Redis 4.0), `allkeys-random`, `volatile-random`, và `volatile-ttl` (TTL còn lại ngắn nhất trước). Redis cài đặt LRU và LFU một cách xấp xỉ — lấy mẫu `maxmemory-samples` key (mặc định 5) và evict ứng viên tốt nhất trong số đó — vì duy trì một thứ tự toàn cục thực sự sẽ tốn bộ nhớ và thời gian ở mỗi lần truy cập. LFU của nó dùng một bộ đếm logarit 8 bit tí hon (kiểu Morris) giảm dần theo thời gian.\n\n**CPU cache (L1/L2/L3)** dùng các dạng LRU xấp xỉ bằng phần cứng trong chính sách thay cache line. Các set trong CPU cache đủ nhỏ (4–16 way) để phần cứng có thể theo dõi LRU cho từng set. CPU hiện đại thường dùng Pseudo-LRU (PLRU) — một cây bit xấp xỉ LRU mà không tốn toàn bộ chi phí — và các last-level cache gần đây dùng các chính sách thích nghi, chống quét như các biến thể RRIP.\n\n**Thay trang của hệ điều hành** dùng LRU xấp xỉ dựa trên các bit \"accessed\" của phần cứng, vì LRU thực sự sẽ đòi hỏi cập nhật một thứ tự ở mỗi lần truy cập bộ nhớ. Các thiết kế kinh điển dùng Clock (Second Chance); Linux truyền thống giữ các danh sách LRU active/inactive (một cơ chế kiểu 2Q, chống quét) và từ 6.1 có thể dùng Multi-Gen LRU (MGLRU).\n\n**Buffer pool của database** cần khả năng chống quét hơn ai hết. MySQL InnoDB chia list LRU thành sublist young và old, và chèn các trang mới đọc vào điểm giữa (mặc định 3/8 tính từ tail — đầu của sublist old), chỉ thăng hạng chúng nếu được truy cập lại, nên một lần quét tuần tự lớn không đẩy được các trang hay được truy cập ra ngoài. PostgreSQL dùng thuật toán **clock-sweep** với số đếm mức sử dụng cho từng buffer, cộng thêm các \"ring buffer\" nhỏ cho các lần quét tuần tự lớn và VACUUM để chúng không thể xả sạch shared buffer.\n\n**Các library cache hiện đại** kết hợp cả hai tín hiệu. Caffeine của Java dùng **W-TinyLFU**: một \"cửa sổ\" LRU nhỏ tiếp nhận phần tử mới, và một sketch tần suất gọn (count-min với việc chia đôi định kỳ) quyết định xem phần tử mới có đủ phổ biến để thay thế nạn nhân của cache chính không. **ARC** (IBM, 2003) cân bằng thích nghi giữa một list theo độ gần đây và một list theo tần suất. Cache của CDN và proxy thêm chính sách admission vì cùng lý do — để những thứ chỉ dùng một lần không evict được các object phổ biến.\n\nHiểu những chính sách này ở mức cài đặt — không chỉ như khái niệm cấp cao — cho phép bạn cấu hình và tinh chỉnh các hệ thống này một cách thông minh trong production."
+    },
+    {
+      "type": "explanation",
+      "title": "Edge case, lỗi thường gặp và cạm bẫy interview",
+      "content": "Các cài đặt cache này có vài cạnh sắc khiến cả ứng viên lẫn kỹ sư vấp ngã.\n\n**Capacity = 0**: Method `put` của LFU phải chặn trường hợp `this.#cap <= 0`. Thiếu phép kiểm tra này, kiểm tra kích thước so sánh 0 >= 0 và cố evict từ một cache rỗng — crash vì null pointer. Cài đặt LRU cũng cần phép kiểm tra tương tự — thiếu nó, một LRU dung lượng không sẽ cố evict `tail.prev`, vốn là sentinel head (một số interviewer hỏi thẳng điều này).\n\n**Cập nhật một key đã tồn tại**: Cả LRU và LFU đều có nhánh `put` cho key đã tồn tại. Với LRU, cập nhật key đã có cũng phải chuyển node lên vị trí MRU — không chỉ cập nhật giá trị. Với LFU, cập nhật phải tăng tần suất. Quên điều này khiến cache sai về logic: metadata cũ sẽ ngụ ý rằng phần tử không được dùng/truy cập gần đây.\n\n**minFreq và quy tắc tăng-khi-rỗng (LFU)**: `minFreq++` trong `#incrFreq` chỉ hợp lệ khi đang tăng tần suất của một key đã tồn tại, không phải khi chèn key mới. Lần chèn mới luôn reset `minFreq = 1`. Nếu bạn tăng `minFreq` vô điều kiện khi chèn mới, bạn làm hỏng pointer evict.\n\n**Evict nhầm key đã tồn tại khi put cập nhật trong LRU**: Khi gọi `put` trên một key đã có trong LRU cache với giá trị mới, bạn phải chuyển nó lên MRU. Nhiều cài đặt xử lý đúng nhánh chèn 'key chưa có trong cache' nhưng quên nhánh cập nhật 'key đã tồn tại', và thất bại với test case như (capacity 2): `put(1, 1), put(2, 2), put(1, 10), put(3, 3)` — cache đúng sẽ evict key 2, vì lần cập nhật đã khiến key 1 thành dùng gần nhất; cache có bug sẽ evict key 1.\n\n**Thread safety**: Không cài đặt nào ở trên là thread-safe. Trong production, cache phải được bảo vệ bằng lock hoặc xây trên thiết kế concurrent — ví dụ Caffeine buffer các lần đọc và áp dụng việc sắp xếp lại LRU theo lô để các reader không cùng tranh chấp trên một list. Redis né vấn đề bằng cách thực thi lệnh trên một main thread duy nhất; Memcached thì đa luồng và dùng lock chi tiết cho từng list LRU.\n\n**Lối tắt Map của JavaScript**: `Map` của JavaScript giữ thứ tự chèn. Bạn có thể cài đặt một LRU tối giản chỉ bằng một `Map`: xóa rồi chèn lại khi truy cập để làm mới thứ tự, evict qua `map.keys().next().value` (cũ nhất). Cách này chấp nhận được trong interview nhưng lời giải doubly linked list thể hiện hiểu biết hệ thống sâu hơn."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử:** Các chính sách thay trang được nghiên cứu kỹ lưỡng trong kỷ nguyên bộ nhớ ảo những năm 1960. Nghiên cứu năm 1966 của László Bélády so sánh các thuật toán thay thế và mô tả chính sách offline tối ưu (MIN: evict trang được dùng xa nhất trong tương lai), thước đo mà LRU, FIFO và các thuật toán khác vẫn được so sánh tới ngày nay. **Working set model** (mô hình tập làm việc) của Peter Denning (1968) giải thích vì sao độ gần đây hiệu quả: tại mỗi thời điểm, chương trình có xu hướng truy cập một tập con trang tương đối nhỏ và thay đổi chậm. Vì LRU chính xác quá tốn kém để duy trì ở mỗi lần truy cập bộ nhớ, các hệ thống thực tế xấp xỉ nó bằng các bit tham chiếu phần cứng — thuật toán Clock của Fernando Corbató cho Multics (1968) là ví dụ kinh điển. LFU và các dạng lai theo sau (LRU-K 1993, 2Q 1994, ARC 2003, TinyLFU 2015) ra đời từ quan sát rằng chỉ dựa vào độ gần đây sẽ bị đánh lừa bởi các lần quét và các truy cập một lần."
+    },
+    {
+      "type": "callout",
+      "content": "**Insight interview và cài đặt cần thuộc lòng:**\n- Nêu ngay yêu cầu hai cấu trúc dữ liệu: 'LRU cần một HashMap để tra cứu O(1) và một doubly linked list để sắp xếp lại O(1) — chỉ một trong hai là không đủ.'\n- Sentinel node giả không phải là thứ trang trí tùy chọn — chúng loại bỏ cả một lớp bug null pointer và được kỳ vọng có trong code interview gọn gàng.\n- Với LFU, dòng reset `minFreq = 1` khi chèn mới là dòng hay bị bỏ sót nhất — nó là chìa khóa của tính đúng.\n- `Map` của JavaScript duyệt theo thứ tự chèn, khiến một LRU ngây thơ có thể làm chỉ bằng `Map` — nhưng luôn nhắc tới cách DLL như lời giải kinh điển.\n- Khi được hỏi 'bạn sẽ dùng chính sách nào?', luôn hỏi lại về workload: temporal locality → LRU; điểm nóng ổn định → LFU; traffic nhiều lần quét → LFU hoặc một LRU chống quét (midpoint insertion, 2Q, ARC); độ phổ biến thay đổi → LRU (LFU thuần giữ số đếm cũ).\n- Cả get và put của LRU lẫn LFU đều O(1) mỗi thao tác, không có lần quét hay lượt dọn dẹp amortized nào — nói chặt chẽ là \"O(1) kỳ vọng\", vì tra cứu hash map là O(1) trong average case."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**LRU** evict phần tử lâu nhất không được truy cập; nó hoạt động tốt với workload có temporal locality và (ở dạng xấp xỉ) là nền tảng của Memcached, `allkeys-lru` của Redis, thay trang của hệ điều hành và CPU cache.",
+        "**LRU O(1)** đòi hỏi kết hợp một **HashMap** (tra key O(1)) với một **doubly linked list** (move-to-front và gỡ tail O(1)) — singly linked list không thể gỡ một node tùy ý trong O(1) vì thiếu pointer ngược.",
+        "**Sentinel head và tail giả** loại bỏ các edge case null pointer trong doubly linked list — mọi node thật luôn có prev và next khác null, khiến mọi thao tác insert và remove đều là những dòng lệnh đồng nhất.",
+        "**LFU O(1)** đòi hỏi ba cấu trúc: một map `key→{value,freq}`, một map `freq→insertion-ordered-Set(keys)` để gom bucket với phân xử theo LRU, và một biến `minFreq` theo dõi bucket cần evict.",
+        "**minFreq phải được reset về 1** mỗi lần chèn key mới trong LFU, vì key mới luôn bắt đầu ở tần suất 1 — việc reset vô điều kiện này là yêu cầu về tính đúng hay bị bỏ sót nhất.",
+        "**Quét tuần tự làm ô nhiễm LRU, không phải LFU**: mỗi phần tử được quét trở thành MRU và đẩy phần tử nóng ra ngoài, trong khi với LFU các phần tử được quét ở lại tần suất 1 và evict lẫn nhau. Điểm yếu của LFU thuần là trường hợp ngược lại — số đếm cũ kỹ khi độ phổ biến thay đổi.",
+        "**Hệ thống production xấp xỉ** LRU/LFU thực sự: Redis lấy mẫu key ngẫu nhiên và chọn ứng viên tốt nhất; kernel hệ điều hành dùng thuật toán Clock/PLRU; buffer pool của database dùng LRU chèn điểm giữa (InnoDB) hoặc clock-sweep (PostgreSQL) để chống ô nhiễm do quét; Caffeine dùng W-TinyLFU."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vì sao một LRU cache O(1) đòi hỏi doubly linked list thay vì singly linked list?",
+      "options": [
+        "Doubly linked list tốn ít bộ nhớ hơn và luôn nhanh hơn",
+        "Gỡ một node ở giữa list đòi hỏi cập nhật pointer next của node đứng trước — chỉ có được trong O(1) nếu node lưu pointer prev",
+        "Doubly linked list hỗ trợ truy cập ngẫu nhiên theo index, khác với singly linked list",
+        "Singly linked list không hỗ trợ chèn ở head"
+      ],
+      "explanation": "Khi một node được truy cập, nó phải được chuyển lên head MRU. Tách nó ra đòi hỏi đặt predecessor.next = node.next. Trong doubly linked list, node.prev cho ra node đứng trước trong O(1). Trong singly linked list, tìm node đứng trước đòi hỏi duyệt O(n) từ head."
+    },
+    {
+      "id": "q2",
+      "question": "Mục đích của sentinel node head và tail giả trong một cài đặt LRU là gì?",
+      "options": [
+        "Chúng loại bỏ các phép kiểm tra null pointer — mọi node thật luôn có prev và next khác null, khiến code insert và remove đồng nhất ở mọi vị trí",
+        "Chúng lưu capacity và kích thước hiện tại của cache dưới dạng metadata",
+        "Chúng lần lượt đóng vai trò phần tử MRU và LRU và được trả về khi get()",
+        "Chúng là bắt buộc để HashMap tham chiếu đúng tới các node"
+      ],
+      "explanation": "Không có sentinel, chèn vào list rỗng hoặc gỡ node cuối cùng đòi hỏi xử lý riêng các pointer null. Có head và tail giả, mọi node thật luôn có prev và next khác null (ít nhất là các sentinel), nên code #remove và #insertFront bốn dòng hoạt động y hệt nhau với cache kích thước từ 0 đến N."
+    },
+    {
+      "id": "q3",
+      "question": "LRU cache capacity 3, các thao tác: put(1), put(2), put(3), get(1), put(4). Key nào bị evict khi gọi put(4)?",
+      "options": [
+        "Key 1",
+        "Key 3",
+        "Key 2",
+        "Key 4"
+      ],
+      "explanation": "Sau put(1,2,3), list là [3,2,1] (3=MRU, 1=LRU). get(1) chuyển 1 lên MRU: list thành [1,3,2]. Cache đã đầy, nên put(4) evict tail LRU, giờ là key 2. Trạng thái cuối: [4,1,3]."
+    },
+    {
+      "id": "q4",
+      "question": "Trong một LFU cache O(1), cần ba thành phần nào?",
+      "options": [
+        "Min-heap, hash map và một array tần suất đã sắp xếp",
+        "Một priority queue, một hash map và một doubly linked list",
+        "Hai doubly linked list và một hash map duy nhất",
+        "Một map key-tới-{value,freq}, một map freq-tới-tập-key-có-thứ-tự, và một biến minFreq"
+      ],
+      "explanation": "Map key→{value,freq} cho tra cứu giá trị và tần suất O(1). Map freq→tập có thứ tự gom key theo tần suất và cho truy cập O(1) tới key LRU trong bất kỳ bucket tần suất nào. Biến minFreq theo dõi bucket cần evict trong O(1) mà không phải quét mọi tần suất."
+    },
+    {
+      "id": "q5",
+      "question": "Vì sao minFreq phải được reset về 1 mỗi khi chèn key mới vào LFU cache?",
+      "options": [
+        "Key mới luôn nên bị evict trước để nhường chỗ cho các key nóng đã có",
+        "Key mới luôn bắt đầu với tần suất 1, vốn luôn là giá trị nhỏ nhất toàn cục hiện tại, nên lần evict tiếp theo phải nhắm vào bucket tần suất 1",
+        "Reset minFreq ngăn bộ đếm tần suất bị tràn số nguyên theo thời gian",
+        "Set của JavaScript reset thứ tự mỗi lần gọi Map.set()"
+      ],
+      "explanation": "Key vừa chèn có tần suất 1 — giá trị tần suất nhỏ nhất có thể. Vì tần suất 1 luôn nhỏ hơn hoặc bằng tần suất của mọi key hiện có, mục tiêu evict tiếp theo phải là bucket tần suất 1. Đặt minFreq = 1 đảm bảo pointer evict đúng sau mỗi lần chèn."
+    },
+    {
+      "id": "q6",
+      "question": "Với mẫu truy cập nào thì LFU cache thuần hoạt động kém hơn LRU?",
+      "options": [
+        "Mẫu điểm nóng ổn định, nơi 10% key nhận 90% lượt truy cập",
+        "Một lần quét tuần tự lớn, mỗi key được truy cập đúng một lần",
+        "Một vòng lặp round-robin qua 5 key trong cache capacity 10",
+        "Độ phổ biến thay đổi: các key nóng cách đây một giờ không bao giờ được yêu cầu nữa, trong khi các key mới trở nên nóng"
+      ],
+      "explanation": "LFU thuần không bao giờ quên: những key tích lũy số đếm lớn khi còn phổ biến vẫn giữ số đếm đó sau khi workload đã thay đổi, nên chúng chiếm chỗ trong cache trong khi các key mới nóng — bắt đầu ở tần suất 1 — bị evict trước. LRU thích nghi ngay lập tức vì chỉ độ gần đây là quan trọng. Quét tuần tự thực ra là điểm yếu của LRU (các phần tử được quét xả sạch tập nóng), điểm nóng ổn định có lợi cho LFU, còn một working set vừa trong cache thì hành xử như nhau với cả hai."
+    },
+    {
+      "id": "q7",
+      "question": "Độ phức tạp thời gian của get và put trong một LRU cache được cài đặt đúng là bao nhiêu?",
+      "options": [
+        "O(1) mỗi thao tác — một số hằng các thao tác hash map và gán pointer, không có lần quét nào",
+        "O(1) amortized — trung bình thì nhanh nhưng thỉnh thoảng có lượt evict O(n)",
+        "O(log n) do cần duy trì thứ tự sắp xếp",
+        "O(n) worst case khi cache đầy và cần evict"
+      ],
+      "explanation": "Cả get và put đều O(1): không thao tác nào quét list hay map. (Nói chặt chẽ, các bước hash map là O(1) kỳ vọng, như với mọi hash table.) get thực hiện một lần tra Map cộng hai thao tác pointer O(1) (#remove, #insertFront). put thực hiện một lần tra Map, một lần chèn/xóa Map, một lần cấp phát node và một số hằng thao tác pointer. Evict là O(1) vì node LRU luôn ở tail.prev."
+    },
+    {
+      "id": "q8",
+      "question": "Hệ thống thực tế nào dùng chính sách LRU xấp xỉ bằng cách lấy mẫu key ngẫu nhiên thay vì duy trì thứ tự LRU toàn cục thực sự?",
+      "options": [
+        "Transaction log MVCC của PostgreSQL — dùng thứ tự FIFO",
+        "Bloom filter — dùng kiểm tra thành viên theo xác suất, không phải evict",
+        "Redis với maxmemory-policy=allkeys-lru — lấy mẫu một tập con ngẫu nhiên và evict ứng viên LRU tốt nhất trong mẫu",
+        "Journal của hệ thống file ext4 trên Linux — dùng thứ tự write-ahead log"
+      ],
+      "explanation": "Redis cài đặt LRU xấp xỉ bằng cách lấy mẫu một số key ngẫu nhiên có thể cấu hình (mặc định 5) và evict key có thời điểm truy cập cũ nhất trong mẫu. Cách này tránh chi phí duy trì một list LRU toàn cục thực sự (vốn sẽ đòi hỏi cập nhật một pointer ở mỗi lần đọc) trong khi vẫn xấp xỉ hành vi LRU trong thực tế."
+    },
+    {
+      "id": "q9",
+      "question": "Trong cài đặt LFU dùng Set của JavaScript, vì sao Set.values().next().value trả về key LRU trong một bucket tần suất?",
+      "options": [
+        "Set của JavaScript giữ thứ tự chèn theo đặc tả, nên giá trị đầu tiên luôn là key được thêm vào bucket tần suất đó sớm nhất",
+        "Set của JavaScript lưu key theo thứ tự bảng chữ cái, nên giá trị đầu tiên luôn là nhỏ nhất theo thứ tự từ điển",
+        "Method .next() trên iterator của Set chọn ngẫu nhiên một key cho công bằng",
+        "Set của JavaScript sắp xếp key số theo thứ tự tăng dần, khiến key nhỏ nhất đứng đầu"
+      ],
+      "explanation": "Đặc tả ECMAScript yêu cầu Set giữ thứ tự chèn. Trong mỗi bucket tần suất, key được thêm vào khi tần suất của nó tăng lên mức đó — nên những lần chèn sớm hơn (được thăng hạng ít gần đây hơn) xuất hiện trước. Giá trị đầu tiên trong Set là lần thăng hạng cũ nhất vào bucket đó, tương ứng với việc phân xử theo LRU trong mức tần suất đó."
+    },
+    {
+      "id": "q10",
+      "question": "Điều gì xảy ra trong LFU cache khi gọi put() cho một key đã tồn tại trong cache?",
+      "options": [
+        "Entry cũ bị evict và một entry mới với tần suất 1 được chèn vào bucket tần suất nhỏ nhất",
+        "Giá trị của entry được cập nhật và tần suất của nó được tăng — nó KHÔNG bị coi là lần chèn mới và minFreq KHÔNG bị reset về 1",
+        "Lời gọi put() bị bỏ qua vì key đã tồn tại",
+        "Giá trị của entry được cập nhật nhưng tần suất giữ nguyên"
+      ],
+      "explanation": "Cập nhật một key đã tồn tại trong LFU đi theo cùng nhánh tăng tần suất như get(): giá trị được cập nhật và #incrFreq được gọi để chuyển key từ bucket tần suất hiện tại sang bucket kế tiếp. minFreq KHÔNG bị reset về 1 — việc reset chỉ xảy ra với những lần chèn hoàn toàn mới. Coi một lần cập nhật là chèn mới sẽ làm mất sai lịch sử tần suất đã tích lũy của key."
+    }
+  ]
+}

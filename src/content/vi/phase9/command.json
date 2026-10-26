@@ -1,0 +1,214 @@
+{
+  "sourceHash": "08209c843cb9",
+  "title": "Command Pattern",
+  "tagline": "Biến request thành object hạng nhất, mở đường cho undo/redo, queue, logging và ghi macro.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy hình dung một trình soạn thảo văn bản có thanh công cụ, menu chuột phải và đủ bộ phím tắt. Mọi bề mặt đó (nút Bold, mục menu `Format > Bold` và `Ctrl+B`) đều kích hoạt cùng một thao tác. Cách cài đặt ngây thơ là gắn cứng cùng một lời gọi `applyBold()` trong ba event handler khác nhau. Rồi product manager nói: 'Mình cần thêm undo, redo, ghi macro và một action log cho crash report.' Bỗng nhiên, mỗi thao tác đơn lẻ đều cần lịch sử, khả năng đảo ngược và khả năng serialize. Nhân bản phần hạ tầng đó cho từng nút và từng mục menu là một cơn ác mộng bảo trì.\n\n**Command** pattern giải quyết chuyện này rất gọn: nó **đóng gói một request thành một object tự chứa**. Thay vì gọi trực tiếp `document.applyBold()`, bạn tạo một object `BoldCommand` *biết* cách in đậm văn bản và cách *bỏ* in đậm. Bạn đưa object đó cho một **Invoker** trung tâm; Invoker gọi `execute()` và đẩy command vào history stack. `Ctrl+Z` bảo Invoker lấy command trên cùng ra và gọi `undo()`; không bên gọi nào cần biết chi tiết.\n\nÝ tưởng đơn giản đến bất ngờ này mở ra cả một loạt khả năng: **undo/redo stack**, **ghi macro**, **rollback transaction**, **audit log**, **task queue** và **xử lý job phân tán**. Mỗi job BullMQ được serialize vào Redis, mỗi database migration có `up()` và `down()`, mỗi command của VS Code gắn với một phím tắt, và mỗi command được xử lý ở phía ghi của một hệ thống CQRS đều là Command; Redux action cũng mượn cùng hình dạng này.\n\nChương này đưa bạn đi từ ý tưởng cốt lõi tới các tình huống dùng ở mức production: năm thành phần, cơ chế undo/redo, ghép macro, command serialize được cho task queue, và những trade-off thật mà bạn cần biết trước khi dùng pattern này."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bản đồ đầy đủ các thành phần: interface Command, ba ConcreteCommand (gồm cả MacroCommand), Invoker (CommandHistory) và Receiver (Document). Mỗi mũi tên là một dependency; Invoker không bao giờ import Document."
+    },
+    {
+      "type": "analogy",
+      "title": "Phiếu gọi món ở nhà hàng",
+      "content": "Khi phục vụ nhận order của bạn, họ không đi thẳng vào bếp và tự nấu. Họ ghi mọi thứ lên một **phiếu**: số bàn, món, yêu cầu thêm bớt, rồi đưa phiếu qua ô cửa bếp. Tờ phiếu đó là **object Command**: nó chứa mọi thứ cần thiết để thực hiện hành động mà phục vụ và đầu bếp không cần nói chuyện trực tiếp với nhau.\n\nSự tách biệt vật lý này cho nhà hàng sự linh hoạt rất lớn. Nếu bếp bận, các phiếu dồn lại thành một **queue**: đầu bếp làm lần lượt, hoặc theo độ ưu tiên, hoặc gom các món giống nhau làm một lượt. Cuối buổi, quản lý có thể xem lại các phiếu như một **audit log**. Nếu món ra sai, phiếu ghi rõ khách đã gọi gì, nên việc sửa rất chính xác, một dạng **undo** tự nhiên.\n\nGiờ ánh xạ sang phần mềm. Người dùng bấm 'Gửi hóa đơn': thay vì gọi email API ngay trên HTTP thread (chậm, dễ hỏng, không retry), web server ghi một object `SendInvoiceCommand` với đủ dữ liệu cần thiết vào job queue (Redis qua BullMQ). Một worker process nhặt nó lên, gọi `execute()`, và retry nếu lỗi. Web server và bên gửi email **hoàn toàn tách rời**. Queue là ô cửa bếp; object job là tờ phiếu.\n\nĐó là lý do hiểu Command pattern cũng là hiểu vì sao job queue, event sourcing và database migration bên dưới trông giống hệt nhau."
+    },
+    {
+      "type": "explanation",
+      "title": "Năm thành phần và vai trò của từng cái",
+      "content": "Gang of Four định nghĩa Command với năm vai trò. Nắm rõ chúng giúp bạn tránh lỗi phổ biến là dồn nhiều vai trò vào một class:\n\n**1. Command (interface)**: khai báo `execute()` và, với hệ thống cần đảo ngược, `undo()`. Đây là hợp đồng mà mọi concrete command phải tuân theo. Trong JavaScript, đây thường là quy ước duck typing; trong TypeScript, là một interface tường minh.\n\n**2. ConcreteCommand**: cài đặt interface. Nó giữ reference tới một **Receiver** và lưu dữ liệu cần để đảo ngược hành động (`savedText`, `previousValue`, `snapshot`). Quy tắc thường gặp: *một ConcreteCommand có rất ít business logic của riêng nó*; nó giao việc cho Receiver, nên command là người đưa tin chứ không phải người làm. (GoF cũng ghi nhận thái cực ngược lại là được phép: một command tự làm toàn bộ công việc, không có receiver, nhưng như vậy mất đi sự tách biệt.)\n\n**3. Receiver**: object biết cách thực sự làm việc. Một `TextDocument`, một `Canvas`, một `DatabaseConnection`, một client của payment gateway. Receiver chứa business logic thật. Command gọi một hai method của Receiver, rồi lưu vừa đủ state để đảo ngược các lời gọi đó.\n\n**4. Invoker**: giữ và kích hoạt command. Nó gọi `command.execute()`, đẩy vào undo stack, quản lý redo stack và cung cấp `undoLast()` / `redoLast()`. Điểm mấu chốt: Invoker **không biết command làm gì**; nó chỉ biết mọi command đều có `execute()` và `undo()`. Đây là open/closed principle đang vận hành: thêm command mới không bao giờ đòi hỏi sửa Invoker.\n\n**5. Client**: lắp ráp các mảnh: tạo ConcreteCommand, inject Receiver vào, rồi đưa các command đã lắp cho Invoker. Trong UI, Client là event handler dựng đúng command khi một nút được bấm và gọi `history.run(cmd)`.\n\n**Luồng điều khiển** luôn là: Client dựng command → Client đưa cho Invoker → Invoker gọi `execute()` → ConcreteCommand giao việc cho Receiver. Việc phân lớp này chính là toàn bộ ý nghĩa: mỗi lớp chỉ biết lớp kế tiếp, không bao giờ biết cả chuỗi."
+    },
+    {
+      "type": "diagram",
+      "caption": "Client tạo và chuyển giao command. Invoker quản lý các stack. ConcreteCommand giao việc cho Document. Không thành phần nào cần biết về các thành phần khác ngoài hàng xóm trực tiếp của nó."
+    },
+    {
+      "type": "explanation",
+      "title": "Chi tiết cơ chế undo/redo",
+      "content": "Undo/redo là động lực kinh điển của Command pattern, nhưng nhiều developer đánh giá thấp mức độ chính xác cần có trong việc ghi chép. Đây là các quy tắc để nó chạy đúng:\n\n**Lưu state trước khi execute**: Một `DeleteCommand` phải giữ lại đoạn text sắp bị xóa *trước khi* việc xóa xảy ra. Nếu bạn xóa trước rồi mới cố dựng lại nội dung đã xóa, thông tin đã mất. Lưu state trước khi execute là quy tắc vàng cho command đảo ngược được.\n\n**Undo stack là LIFO**: Command được đẩy vào khi gọi `run()` và lấy ra khi gọi `undoLast()`. Undo đảo ngược hành động gần nhất trước, đúng hoàn toàn với kỳ vọng của người dùng.\n\n**Redo stack**: Khi một command bị undo, nó được chuyển sang redo stack. `redoLast()` lấy từ redo ra và gọi lại `execute()`, rồi đẩy ngược về undo. Đây là hành vi của Ctrl+Y.\n\n**Vì sao command mới xóa sạch redo stack**: Khi bạn undo hai bước rồi gõ text mới, hai khả năng redo kia bị bỏ đi, vì state của document đã rẽ sang hướng khác. Mọi trình soạn thảo lớn (VS Code, Word, Google Docs) đều theo quy tắc này. Không xóa redo stack khi có command mới sẽ dẫn tới những state không thể tồn tại, nơi redo sẽ ghi đè lên text mới.\n\n**Undo tổng hợp (Macro)**: Một số thao tác về logic là một hành động nhưng về vật lý là nhiều bước. 'Replace All' trong trình soạn thảo có thể là hàng trăm object `ReplaceCommand` riêng lẻ. Một `MacroCommand` bọc chúng lại và đưa ra cho người dùng một `undo()` duy nhất; bên trong, nó gọi `undo()` trên từng command con theo thứ tự ngược.\n\n**Snapshot hay delta tăng dần**: Với object phức tạp (cả một canvas hay một document lớn), lưu snapshot cho mỗi command rất tốn bộ nhớ. Các cài đặt tinh vi lưu *delta* tăng dần (cái gì đã thay đổi) thay vì bản sao đầy đủ. Command pattern hỗ trợ cả hai; lựa chọn nằm ở cách ConcreteCommand cài đặt `undo()`."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Field `_saved` trong DeleteCommand giữ lại đoạn text bị xóa bên trong `execute()`, không phải trong constructor, vì đến lúc `execute()` được gọi thì vị trí đó có thể đã chứa text khác. `run()` xóa sạch `_redo` vì bất kỳ hành động mới nào cũng rẽ nhánh cây lịch sử, làm nhánh redo trước đó mất hiệu lực.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "MacroCommand: ghép nhiều command thành một",
+      "content": "Biến thể **Composite** của Command, thường gọi là `MacroCommand`, cho phép bạn đối xử với một nhóm command như thể nó là một command duy nhất. Đây là cách tính năng 'Record Macro' hoạt động trong bảng tính, IDE và các công cụ tự động hóa.\n\nMột `MacroCommand` giữ một danh sách có thứ tự các command con. `execute()` của nó duyệt xuôi danh sách, gọi `execute()` của từng con. `undo()` của nó duyệt theo thứ tự *ngược*, gọi `undo()` của từng con, vì hành động cuối cùng phải được undo trước, giống như bóc hành từ lớp ngoài vào.\n\nĐiểm thanh lịch then chốt: vì `MacroCommand` cài đặt cùng interface `Command`, Invoker đối xử với nó y hệt mọi command khác. Invoker đẩy một macro vào history stack; người dùng thấy một bước undo. Sự phức tạp được giấu bên trong macro.\n\nVí dụ thực tế: 'Replace All mọi chỗ `foo` thành `bar`' trong một file 1000 dòng sinh ra 50 object `ReplaceCommand` riêng lẻ. Bọc chúng trong một `MacroCommand`, đẩy một lần vào history stack, và người dùng có thể undo toàn bộ lần thay thế chỉ với một Ctrl+Z. Không có MacroCommand, người dùng sẽ phải undo 50 lần.\n\n`MacroCommand` cũng là cách **macro bàn phím được ghi lại** hoạt động trong Emacs hay Vim: mỗi phím bấm sinh ra một command, bộ ghi gom chúng vào một danh sách, và khi phát lại thì thực thi lại danh sách đó, có thể nhiều lần liên tiếp."
+    },
+    {
+      "type": "code_example",
+      "explanation": "MacroCommand.undo() đảo ngược các command con theo thứ tự ngược; điều này là bắt buộc để đúng. Cặp SendEmailCommand.toJSON()/fromJSON() làm nó serialize được: lưu JSON vào Redis, dựng lại bằng fromJSON() ở worker, rồi gọi execute(). BullMQ cũng hoạt động như vậy, chỉ khác là bạn chỉ lưu payload dữ liệu thuần (`queue.add('send-email', { to, subject, body })`) và worker ánh xạ tên job tới một handler: hành vi không bao giờ được serialize, chỉ có dữ liệu.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "diagram",
+      "caption": "Luồng điều khiển cho execute và undo. Invoker quản lý cả hai stack; Receiver không bao giờ thấy các stack. Xóa redo stack khi có command mới giúp tránh các state lịch sử không thể tồn tại."
+    },
+    {
+      "type": "explanation",
+      "title": "Command serialize được và task queue",
+      "content": "Một trong những ứng dụng mạnh nhất của Command pattern trong phát triển backend hiện đại là **job queue**. Job queue tách một **producer** (HTTP request handler) khỏi một **consumer** (background worker process). Command pattern khớp tự nhiên vì:\n\n1. Một object Command gói loại hành động và mọi tham số cần thiết vào một value object duy nhất.\n2. *Payload* của nó là dữ liệu thuần, nên serialize được sang JSON; hành vi thì không được serialize.\n3. Worker deserialize JSON, tra handler (hoặc class ConcreteCommand) theo loại, rồi gọi `execute()`.\n4. Retry, delay, độ ưu tiên và dead-letter queue do hạ tầng queue quản lý; Command vẫn đơn giản.\n\n**BullMQ** (Node.js) là một cài đặt trực tiếp của pattern này. Bạn gọi `queue.add('send-email', { to, subject, body })`: dữ liệu job chính là payload của Command. Một `Worker` xử lý nó bằng một handler function, về bản chất là `command.execute()`. BullMQ lo serialize vào Redis, acknowledgement, backoff khi retry và lưu trữ các job thất bại.\n\n**Event sourcing** là một họ hàng gần, nhưng có một khác biệt quan trọng. Thay vì lưu state hiện tại của một entity (số dư tài khoản ngân hàng), bạn lưu chuỗi các **event** đã tạo ra nó (`Deposited(100)`, `Withdrew(30)`, `TransferredOut(20)`). Command (`Withdraw(30)`) là *request* có thể bị từ chối (không đủ tiền); event là *sự thật* được ghi lại sau khi command thành công. Bạn replay event, không bao giờ replay command, vì replay command sẽ chạy lại validation và side effect (trừ tiền thẻ thêm lần nữa). Replay event tới một mốc thời gian cho biết state của thứ Ba tuần trước ra sao; **event log là lịch sử bền vững, chỉ ghi thêm (append-only)**.\n\n**CQRS** (Command Query Responsibility Segregation) là một pattern kiến trúc ở tầng cao hơn, tách **Command** (thay đổi state) khỏi **Query** (đọc). Phía Command xử lý các object command, đúng pattern được mô tả ở đây, còn phía Query đọc từ các read model đã tối ưu. Cái tên của pattern không phải ngẫu nhiên.\n\n**Database migration** cũng là Command: `up()` tương ứng `execute()`, `down()` tương ứng `undo()`. Migration runner (Knex, Flyway, TypeORM) là Invoker, giữ log những command nào đã được áp dụng. Chạy `db:rollback` đúng nghĩa đen là `invoker.undoLast()`."
+    },
+    {
+      "type": "diagram",
+      "caption": "HTTP handler (Client/Invoker) serialize Command vào Redis. Worker deserialize rồi gọi execute(). Hai process không bao giờ chia sẻ bộ nhớ; chỉ có Command đã serialize nối chúng với nhau."
+    },
+    {
+      "type": "explanation",
+      "title": "Command pattern và các pattern tương tự",
+      "content": "Command pattern hay bị nhầm với ba pattern khác. Hiểu rõ khác biệt giúp tránh những sai lầm thiết kế thật:\n\n**Command và Strategy**: Cả hai đều đóng gói hành vi vào object. Khác biệt nằm ở *ý định*. Strategy thay một thuật toán hoán đổi được bên trong một object context (các thuật toán sắp xếp khác nhau, các bộ xử lý thanh toán khác nhau). Command đóng gói *cả một thao tác*, gồm tham số và receiver của nó, để có thể lưu, xếp queue, ghi log và đảo ngược. Object Strategy thường không có state và tái sử dụng được; object Command có state và dùng xong bỏ (nó mang dữ liệu cụ thể cho một lần gọi).\n\n**Command và Observer**: Observer (pub/sub) tự động gửi thông báo tới nhiều listener khi có gì đó thay đổi. Command là một request có chủ đích, có tên, từ một bên gửi tới một bên nhận, qua trung gian là invoker. Event trong hệ thống event sourcing có thể trông giống Command, nhưng event biểu diễn *điều đã xảy ra* (thì quá khứ, sự thật bất biến), còn Command biểu diễn *điều cần làm* (mệnh lệnh, có thể thất bại).\n\n**Command và Chain of Responsibility**: Chain of Responsibility chuyển request dọc một chuỗi handler cho tới khi có một handler xử lý. Command nêu rõ receiver, không đi tìm handler. Nhầm lẫn hai cái dẫn tới những chuỗi over-engineering trong khi một command trực tiếp là đủ.\n\n**Command và Memento**: Cả hai đều cho phép undo. Memento giữ lại *toàn bộ state* của một object (snapshot) mà không cần biết bên trong object; chính object tự tạo và khôi phục snapshot của nó. Command chỉ giữ *delta* cần cho `undo()`; nó biết chi tiết về thao tác. Memento thô hơn (mỗi state một snapshot đầy đủ) và phù hợp khi thao tác không dễ đảo ngược bằng cách gọi một method ngược lại. Với các trình chỉnh sửa đồ họa phức tạp, cách làm lai sẽ lưu một Memento khi delta quá phức tạp để tính.\n\n**Tương đương trong lập trình hàm: closure**: Trong JavaScript theo phong cách hàm, `const cmd = () => document.insert(text, pos)` là một closure giữ lại đúng những tham số mà một object Command sẽ lưu. Một thunk trong Redux (`dispatch(thunk)`) là phiên bản hàm của ConcreteCommand. Command hướng đối tượng được ưu tiên khi bạn còn cần `undo()`, `toJSON()` hay các method có tên khác, những thứ mà một closure trần không thể phơi ra nếu không có thêm cơ chế phụ."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bốn pattern đều liên quan tới đóng gói, nhưng có ý định và trade-off khác nhau. Chọn cái nào tùy vào việc bạn cần khả năng đảo ngược, khả năng hoán đổi, thông báo hay snapshot."
+    },
+    {
+      "type": "explanation",
+      "title": "Ứng dụng trong các framework thực tế",
+      "content": "Command pattern xuất hiện khắp các framework và công cụ hạ tầng bạn dùng hằng ngày. Nhận ra nó giúp những công cụ này dễ hiểu và dễ mở rộng hơn:\n\n**Redux (quản lý state cho React)**: Redux action là các object Command được dùng rộng rãi nhất trong phát triển frontend. `dispatch({ type: 'ADD_TODO', payload: { text: 'Buy milk' } })` chính là `invoker.run(command)`. Reducer là Receiver. `redux-undo` bọc store bằng một Invoker giữ stack past/future, cho bạn `undo()` miễn phí. Ràng buộc action phải là plain object serialize được chính là thứ làm cho logging, replay và time-travel debugging khả thi. Một sắc thái: Redux Style Guide khuyên mô hình hóa action như *event* (`todoAdded`, “việc này đã xảy ra”) thay vì setter kiểu mệnh lệnh; reducer quyết định làm gì với chúng.\n\n**Hệ thống command của VS Code**: VS Code phơi các hành động của editor thành các Command có tên: các command có sẵn như `editor.action.formatDocument`, và command của extension được đăng ký bằng `vscode.commands.registerCommand('myExt.sayHello', handler)`. Phím tắt, mục menu, Command Palette và lời gọi API đều đi qua `vscode.commands.executeCommand(id)`. Invoker là command registry. Extension đóng góp ConcreteCommand mới mà không phải sửa Invoker.\n\n**BullMQ / Sidekiq / Celery**: Các thư viện job queue này là Command pattern thuần túy ở quy mô lớn. Class `Job` là ConcreteCommand, `Queue` là Invoker, còn các process `Worker` cung cấp logic Receiver. Các tính năng như `job.remove()`, `job.retry()` và `queue.pause()` là thao tác ở mức Invoker; job (Command) giữ nguyên.\n\n**Database migration (TypeORM, Knex, Flyway)**: Mỗi file migration là một ConcreteCommand với `up()` (execute) và `down()` (undo). Migration runner là Invoker, ghi lại command nào đã được áp dụng trong một bảng migrations; `knex migrate:rollback` gọi `down()` trên batch gần nhất. (Undo migration của Flyway là tính năng của bản trả phí, và nhiều team chỉ chạy migration theo một chiều trên production, đảo ngược bằng một migration bù trừ mới.)\n\n**Transactional outbox pattern**: Trong hệ phân tán, để commit thay đổi database và phát event một cách atomic, bạn ghi Command vào một bảng `outbox` ngay trong cùng transaction. Một relay process riêng đọc outbox và thực thi các Command (publish event). Điều này đảm bảo message không bao giờ bị mất và không bao giờ được gửi cho một thay đổi đã rollback, nhưng việc gửi là *at-least-once* (relay có thể crash sau khi publish và trước khi đánh dấu dòng đã xong), nên consumer phải idempotent."
+    },
+    {
+      "type": "callout",
+      "content": "**Event Sourcing: command đi vào, event được lưu.** Trong một hệ thống event sourcing, bạn không bao giờ ghi đè state. Một command (`PlaceOrder`) được validate với state hiện tại; nếu thành công, các event kết quả (`OrderPlaced`, `StockReserved`) được ghi thêm vào một log bất biến. Để đọc state hiện tại của một entity, bạn replay các event của nó (thường bắt đầu từ một snapshot); để audit chuyện gì xảy ra thứ Ba tuần trước, bạn replay event tới mốc thời gian đó. Các cài đặt phổ biến: EventStoreDB (nay là KurrentDB), Axon Framework (Java) và Marten (.NET trên PostgreSQL). Command pattern định hình phía ghi; thứ được lưu trong log là event, không phải command."
+    },
+    {
+      "type": "explanation",
+      "title": "Khi nào nên dùng và khi nào không nên dùng Command",
+      "content": "**Hãy dùng Command khi:**\n- Bạn cần **undo/redo**: bất kỳ editor, công cụ vẽ hay form nào có thay đổi hoàn tác được.\n- Bạn cần **xếp queue hoặc lên lịch thao tác**: background job, logic retry, thực thi trì hoãn.\n- Bạn cần **audit log hoặc replay**: giao dịch tài chính, log tuân thủ, event sourcing.\n- Bạn muốn **tách invoker khỏi receiver**: nhiều bề mặt UI cùng kích hoạt một thao tác; API endpoint + phím tắt + mục menu.\n- Bạn cần **ghi macro**: cho người dùng ghi, đặt tên và phát lại chuỗi thao tác.\n- Bạn đang cài đặt **rollback transaction**: mỗi bước của một thao tác nhiều bước là một Command; rollback gọi `undo()` theo thứ tự ngược.\n\n**ĐỪNG dùng Command khi:**\n- Thao tác đơn giản, dùng một lần, không có yêu cầu undo, logging hay queue. Bọc `console.log('hello')` trong một object `LogCommand` là lãng phí cho có hình thức; **YAGNI áp dụng rất mạnh ở đây**.\n- Bạn chỉ cần đổi thuật toán lúc runtime: hãy dùng **Strategy**.\n- Bạn cần nhiều object phản ứng với một event: hãy dùng **Observer**.\n- Thao tác vốn không thể đảo ngược (ví dụ gửi một thông báo vật lý) và undo không phải yêu cầu nghiệp vụ; khi đó method `undo()` sẽ là một lời nói dối.\n- Dự án mới ở giai đoạn đầu và động lực duy nhất là 'biết đâu sau này cần undo'; hãy đưa nó vào khi yêu cầu đã cụ thể.\n\n**Ý thức về chi phí:** Mỗi thao tác mới cần một class ConcreteCommand mới (hoặc ít nhất một factory function mới). Trong một ứng dụng lớn với hàng trăm thao tác, điều này tạo ra rất nhiều class nhỏ. Hãy giảm nhẹ bằng một **command registry** (map từ chuỗi loại tới factory function) và các base class generic lo phần serialize. Generic của TypeScript có thể giảm boilerplate đáng kể."
+    },
+    {
+      "type": "callout",
+      "content": "**Checklist thực tế trước khi cài đặt Command:**\n1. Tôi có cần undo/redo, queue hay audit log không? Nếu không cái nào, dừng lại và dùng một hàm thường.\n2. Thao tác có đảo ngược được không? Nếu không, `undo()` sẽ gây hiểu lầm; hãy dùng snapshot Memento cho state cục bộ, hoặc một command *bù trừ* cho các tác động bên ngoài (bạn không thể hủy việc trừ tiền thẻ, nhưng có thể hoàn tiền).\n3. Command có serialize được không? Nếu nó giữ closure hoặc reference không serialize được, nó không thể được lưu vào Redis hay database; hãy thiết kế lại constructor để chỉ nhận dữ liệu thuần.\n4. Sẽ có nhiều hơn 2-3 thao tác không? Nếu có, hãy định nghĩa interface Command và một factory từ sớm; thêm command thứ 15 theo kiểu tùy hứng sẽ rất khổ.\n5. Các bước undo có hiển thị cho người dùng (Ctrl+Z) hay là nội bộ (rollback transaction)? Undo hiển thị cho người dùng cần một thuộc tính `description` cho UI ('Undo Bold', 'Undo Delete 5 characters'); rollback nội bộ thì không."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Đóng gói request thành object**: Một Command gói thao tác, tham số của nó và đủ state để đảo ngược hành động, khiến mọi thao tác tự chứa, lưu trữ được và audit được.",
+        "**Năm thành phần**: Command (interface), ConcreteCommand (cài đặt, giữ reference tới receiver và state đã lưu), Receiver (làm việc thật), Invoker (quản lý history stack), Client (nối chúng lại). Invoker không bao giờ import Receiver.",
+        "**Undo/redo cần ba quy tắc**: lưu state *bên trong* `execute()` trước khi thay đổi; duy trì undo stack và redo stack riêng; xóa redo stack khi có command mới được thực thi để tránh các state lịch sử không thể tồn tại.",
+        "**MacroCommand ghép nhiều command thành một**: bọc một danh sách command sau một interface `execute()`/`undo()` duy nhất; `undo()` phải đảo ngược các con theo thứ tự ngược. Đây là cách 'Replace All' và việc ghi macro bàn phím hoạt động.",
+        "**Command serialize được là nền tảng của hệ phân tán**: Command có `toJSON()`/`fromJSON()` có thể được lưu vào Redis (job BullMQ), database (event sourcing) hoặc bảng outbox, tách producer khỏi consumer qua ranh giới process.",
+        "**Command và event:** command là request có thể bị từ chối (`Withdraw(30)`); event là sự thật đã được ghi lại (`Withdrew(30)`). Event sourcing lưu và replay event, không bao giờ replay command. Outbox relay cho delivery at-least-once, nên handler phải idempotent.",
+        "**Redux, VS Code, BullMQ và database migration đều là Command pattern**: Nhận ra pattern trong các công cụ phổ biến giúp bạn tự tin mở rộng chúng và thiết kế hệ thống của riêng mình với cùng sự rõ ràng.",
+        "**Áp dụng YAGNI**: Command thêm chi phí mỗi thao tác một class. Hãy đưa nó vào khi có nhu cầu cụ thể (undo, queue, audit), đừng đưa vào theo kiểu phỏng đoán."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Command pattern chủ yếu đóng gói cái gì?",
+      "options": [
+        "Một họ thuật toán hoán đổi được cho nhau.",
+        "Một cơ chế thông báo một-nhiều giữa các object.",
+        "Một request dưới dạng object tự chứa với execute() và có thể có undo().",
+        "Một state dùng chung toàn cục, truy cập được từ mọi module."
+      ],
+      "explanation": "Command biến một request thành object hạng nhất mang mọi dữ liệu cần để execute, undo, xếp queue hoặc ghi log thao tác, nhờ đó tách bên gửi khỏi bên nhận."
+    },
+    {
+      "id": "q2",
+      "question": "Thành phần nào trong Command pattern quản lý history stack cho undo và redo?",
+      "options": [
+        "Invoker, bên gọi execute() và duy trì cả hai stack.",
+        "ConcreteCommand, vì nó tự lưu lịch sử của mình.",
+        "Receiver, vì nó biết cách đảo ngược thao tác.",
+        "Client, vì nó tạo ra các command."
+      ],
+      "explanation": "Invoker gọi execute(), đẩy vào undoStack và quản lý redoStack. Nó không biết bất kỳ command nào làm gì, chỉ biết mọi command đều có execute() và undo()."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao một DeleteCommand phải giữ lại text bị xóa bên trong execute() thay vì trong constructor?",
+      "options": [
+        "Để thỏa Open/Closed principle.",
+        "Vì constructor chạy trước khi document tồn tại.",
+        "Để ngăn Invoker gọi execute() hai lần.",
+        "Vì nội dung document tại vị trí đó có thể đã thay đổi vào lúc execute() được gọi."
+      ],
+      "explanation": "Command được tạo ra (có thể được lắp sẵn từ trước) rồi mới thực thi sau. Đến lúc execute() chạy, các command trước đó có thể đã làm dịch vị trí hoặc đổi nội dung, nên state phải được giữ lại lúc thực thi chứ không phải lúc khởi tạo."
+    },
+    {
+      "id": "q4",
+      "question": "Khi người dùng undo hai bước rồi thực hiện một hành động mới, redo stack phải thế nào?",
+      "options": [
+        "Redo stack được gộp vào undo stack cho an toàn.",
+        "Redo stack bị xóa sạch, vì hành động mới rẽ nhánh lịch sử.",
+        "Redo stack tăng thêm một phần tử để ghi lại lần undo.",
+        "Không có gì: redo stack chỉ bị ảnh hưởng bởi các lời gọi redo tường minh."
+      ],
+      "explanation": "Một hành động mới sau undo sẽ rẽ nhánh cây lịch sử. Nhánh redo trước đó không còn hợp lệ; áp dụng lại các command đó sẽ ghi đè nội dung mới. Mọi editor lớn (VS Code, Google Docs) đều xóa redo stack khi có input mới."
+    },
+    {
+      "id": "q5",
+      "question": "Trong MacroCommand, vì sao undo() phải duyệt các command con theo thứ tự ngược?",
+      "options": [
+        "Để khớp với thứ tự FIFO của undo stack.",
+        "Để tăng hiệu năng bằng cách tránh cấp phát lại.",
+        "Vì đảo ngược một chuỗi thao tác đòi hỏi phải undo bước cuối cùng trước.",
+        "Vì interface MacroCommand yêu cầu thứ tự bảng chữ cái."
+      ],
+      "explanation": "Nếu các command A, B, C được thực thi theo thứ tự đó, undo C phải xảy ra trước undo B, và undo B phải trước undo A, giống như tháo ngược một call stack. Duyệt xuôi sẽ để hệ thống ở một trạng thái trung gian không nhất quán."
+    },
+    {
+      "id": "q6",
+      "question": "Command serialize được giúp job queue phân tán như BullMQ hoạt động bằng cách nào?",
+      "options": [
+        "Nó cho phép payload của Command được lưu trong Redis và được bất kỳ worker nào dựng lại để thực thi.",
+        "Nó loại bỏ nhu cầu cần Redis server.",
+        "Nó làm command không có state để nhiều thread dùng chung cùng lúc.",
+        "Nó cho phép HTTP handler thực thi job đồng bộ mà không cần queue."
+      ],
+      "explanation": "toJSON() serialize command thành plain object để lưu vào Redis; fromJSON() dựng lại nó ở worker. HTTP handler (producer) và worker (consumer) chỉ chia sẻ Command đã serialize; chúng hoàn toàn tách rời qua ranh giới process."
+    },
+    {
+      "id": "q7",
+      "question": "Redux liên quan đến Command pattern như thế nào?",
+      "options": [
+        "Redux action là Command; dispatch() là Invoker; reducer cài đặt logic Receiver.",
+        "Redux action là các Strategy được đổi vào reducer lúc runtime.",
+        "Redux chỉ dùng Observer pattern, không dính gì tới Command.",
+        "Redux store là ConcreteCommand và reducer là Invoker."
+      ],
+      "explanation": "Redux action là các object Command thuần được dispatch tới store (Invoker). Reducer (Receiver) áp action để tạo ra state mới. redux-undo thêm một history stack phía trên, hoàn thiện pattern undo/redo đầy đủ."
+    },
+    {
+      "id": "q8",
+      "question": "Khác biệt then chốt giữa Command và Strategy pattern là gì?",
+      "options": [
+        "Strategy hỗ trợ undo; Command thì không.",
+        "Object Strategy serialize được; object Command thì không.",
+        "Command đóng gói cả một thao tác cùng receiver và state của nó; Strategy đóng gói một thuật toán hoán đổi được, không có state.",
+        "Object Command không có state; object Strategy có state."
+      ],
+      "explanation": "Strategy thay một thuật toán hoán đổi được bên trong một context (các hàm sắp xếp khác nhau). Command đóng gói cả một request: tham số cụ thể, reference tới receiver và state đã lưu để undo. Command có state và dùng xong bỏ; Strategy thường không có state và tái sử dụng được."
+    },
+    {
+      "id": "q9",
+      "question": "Database migration (up/down) tương ứng với Command pattern như thế nào?",
+      "options": [
+        "Mỗi migration là một Receiver; bảng migration là Command.",
+        "up() = execute(), down() = undo(); migration runner là Invoker giữ log các Command đã áp dụng.",
+        "Migration dùng Singleton pattern để tránh thay đổi schema trùng lặp.",
+        "Database engine là ConcreteCommand và migration là các Strategy."
+      ],
+      "explanation": "Mỗi file migration là một ConcreteCommand. up() áp dụng thay đổi schema (execute); down() hoàn tác nó (undo). Migration runner (Knex, TypeORM) là Invoker, ghi lại các command đã áp dụng trong một bảng _migrations và gọi down() khi rollback."
+    },
+    {
+      "id": "q10",
+      "question": "Khi nào bạn KHÔNG nên đưa Command pattern vào?",
+      "options": [
+        "Khi bạn cần xếp queue và retry các thao tác bất đồng bộ.",
+        "Khi nhiều phần tử UI cùng kích hoạt một thao tác nghiệp vụ.",
+        "Khi bạn đang cài đặt audit log cho các hành động của người dùng.",
+        "Khi một thao tác đơn giản, dùng một lần, không có yêu cầu undo, queue, logging hay lên lịch."
+      ],
+      "explanation": "YAGNI: bọc một lời gọi kiểu bắn-rồi-quên đơn giản trong một class Command chỉ thêm chi phí class và lớp gián tiếp mà không được lợi gì. Hãy đưa Command vào khi có yêu cầu cụ thể (undo, queue, audit, replay) biện minh cho lớp trừu tượng, đừng làm theo kiểu phỏng đoán."
+    }
+  ]
+}

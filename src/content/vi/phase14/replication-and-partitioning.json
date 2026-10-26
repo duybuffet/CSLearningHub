@@ -1,0 +1,228 @@
+{
+  "sourceHash": "cf608b2ee6d2",
+  "title": "Replication và Partitioning",
+  "tagline": "Database phân tán trải dữ liệu ra nhiều node để chịu lỗi và scale như thế nào — các chiến lược replication và pattern sharding.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mọi database đều khởi đầu trên một máy duy nhất. Máy đó có một đĩa, một CPU và một card mạng. Scale nó đủ mạnh là bạn chạm trần: đĩa đầy, query chậm như rùa khi tải nặng, hoặc — tệ nhất — chính cái máy đó crash và cả dịch vụ đi theo. Giải pháp mà ngành công nghiệp chọn là trải dữ liệu ra nhiều máy. Nhưng trải dữ liệu không đơn giản như copy file qua lại, và làm sai trên production sẽ gây mất dữ liệu, tình trạng split-brain và sự cố dây chuyền. Chương này trình bày hai kỹ thuật nền tảng để phân tán dữ liệu: **replication** và **partitioning**, vì sao chúng gần như luôn được dùng cùng nhau, và các trade-off chính xác bạn phải đưa ra khi chọn chiến lược.\n\n**Replication** nghĩa là lưu cùng một dữ liệu trên nhiều node cùng lúc. Nếu node A hỏng, node B có bản sao y hệt và phục vụ traffic được ngay. Ngoài khả năng chịu lỗi, các replica phục vụ query đọc song song, nhân throughput đọc tuyến tính theo số replica — một lý do then chốt khiến các workload đọc nhiều như feed mạng xã hội scale được tới hàng tỷ người dùng. Điểm vướng: mọi lần ghi rốt cuộc phải tới được mọi replica, và trong hệ phân tán, quá trình đó có thể thất bại hoặc bị trễ. Hiểu *khi nào* và *bằng cách nào* các replica lệch nhau — và bạn có thể đảm bảo gì cho client — là thách thức trí tuệ cốt lõi của replication.\n\n**Partitioning** (còn gọi là **sharding**) nghĩa là chia một tập dữ liệu lớn thành các tập con nhỏ hơn, độc lập, gọi là *shard* hay *partition*, mỗi cái lưu trên một node khác nhau. Khác với replication, mỗi node trong hệ thống được partition giữ một phần dữ liệu *khác nhau*. Điều này cho phép tổng dung lượng lưu trữ vượt quá khả năng của bất kỳ máy đơn lẻ nào, và định tuyến các lần ghi tới các node khác nhau để chúng scale theo chiều ngang. Thách thức là chọn một chiến lược partitioning tránh được **hotspot** — tình huống một partition nhận tải nhiều hơn hẳn các partition khác — trong khi vẫn cho phép query hiệu quả.\n\nTrên thực tế, các hệ thống quy mô lớn kết hợp cả hai kỹ thuật: dữ liệu trước tiên được partition thành các shard, rồi mỗi shard được replicate trên nhiều node. Một cluster ba node có thể giữ tổng cộng sáu shard, mỗi shard được replicate ba lần, trải ra sao cho bất kỳ một node nào hỏng thì mọi dữ liệu vẫn truy cập được trên các node còn sống. Hiểu cách thiết kế, tinh chỉnh và vận hành các hệ thống này là kỹ năng cốt lõi của kỹ sư senior ở bất kỳ công ty nào chạy vượt quá một database server."
+    },
+    {
+      "type": "diagram",
+      "caption": "Leader-follower replication: leader nhận mọi lần ghi và replicate tới các follower, nơi phục vụ traffic đọc. Khi leader hỏng, một follower được bầu làm leader mới."
+    },
+    {
+      "type": "analogy",
+      "title": "Mạng lưới thư viện và các phần danh mục",
+      "content": "Hãy tưởng tượng một hệ thống thư viện quốc gia. **Replication** giống như xây các thư viện chi nhánh, mỗi nơi giữ một bản sao đầy đủ mọi cuốn sách trong bộ sưu tập. Nếu thư viện trung tâm bị cháy (một server hỏng), mọi chi nhánh vẫn có đủ sách — người đọc không bị ảnh hưởng. Nhiều chi nhánh cũng cho phép nhiều người mượn sách cùng lúc mà không phải xếp một hàng duy nhất (scale-out việc đọc). Nhưng có một độ trễ: khi một cuốn sách mới về thư viện trung tâm, người chuyển phát cần thời gian để mang bản sao tới mọi chi nhánh. Trong khoảng đó, người đọc ở một chi nhánh có thể nhận bản bách khoa toàn thư của hôm qua — chi nhánh chưa nhận được bản cập nhật hôm nay. Độ trễ đó là **replication lag**, và quyết định cách xử lý nó là một trong những lựa chọn kỹ thuật hệ trọng nhất bạn sẽ đưa ra.\n\n**Partitioning** giống như chia danh mục theo cách khác: chi nhánh A giữ mọi sách có tác giả từ A tới M, chi nhánh B giữ từ N tới Z. Không chi nhánh nào có đủ bộ sưu tập, nhưng gộp lại chúng chứa được nhiều sách hơn hẳn bất kỳ tòa nhà đơn lẻ nào. Định tuyến rất đơn giản — cần sách của Tolstoy? Tới chi nhánh B. Mối nguy: nếu cả nước bỗng muốn sách của Taylor (một cuốn tiểu sử người nổi tiếng vừa ra mắt), chi nhánh B ngập trong nhu cầu còn chi nhánh A ngồi chơi. Đó là một **hotspot**, và tránh nó đòi hỏi chọn chiến lược chia cẩn thận. Kết hợp lại: hãy tưởng tượng mỗi nửa bộ sưu tập ở mỗi chi nhánh được replicate ba lần qua ba tòa nhà thật — đó chính là một database phân tán production."
+    },
+    {
+      "type": "explanation",
+      "title": "Leader-follower replication: mô hình thống trị",
+      "content": "**Leader-follower replication** (còn gọi là primary-replica, master-slave hay single-leader) là topology replication được triển khai rộng rãi nhất. Một node được chỉ định làm **leader** (primary); nó là node duy nhất nhận thao tác ghi. Mọi node khác là **follower** (replica, secondary); chúng nhận một luồng thay đổi từ leader và áp dụng vào bản sao dữ liệu cục bộ. Follower có thể phục vụ query đọc từ client, và một số hệ thống cũng cho phép leader phục vụ đọc.\n\nKhi client ghi vào database, leader xử lý lần ghi, ghi nó vào **replication log** (còn gọi là write-ahead log, WAL hay binlog tùy hệ thống), và gửi log đó tới follower. Follower phát lại các entry log theo thứ tự, giữ state đồng bộ với leader. Replication dựa trên log này được PostgreSQL (logical và physical streaming replication), MySQL (binlog replication) và MongoDB (oplog replication) dùng.\n\n**Synchronous so với asynchronous replication** là trade-off quan trọng nhất trong topology này. Với **synchronous replication**, leader chờ ít nhất một follower xác nhận đã ghi dữ liệu rồi mới báo client là lần ghi thành công. Điều này cho đảm bảo durability mạnh: kể cả khi leader crash ngay sau khi xác nhận, follower vẫn có một bản sao bền vững. Cái giá là latency ghi cao hơn — leader phải chờ một round trip mạng tới follower. Với **asynchronous replication**, leader xác nhận lần ghi cho client ngay, rồi replicate ở background. Latency thấp hơn, nhưng nếu leader crash trước khi replicate, các lần ghi chưa được replicate bị mất vĩnh viễn. Phần lớn hệ thống production dùng dạng lai **semi-synchronous**: một follower được chỉ định đồng bộ (cho durability), số còn lại bất đồng bộ (cho hiệu năng). PostgreSQL cấu hình điều này bằng `synchronous_standby_names` (cộng với `synchronous_commit` để chọn chờ standby nhận, flush hay áp dụng thay đổi); MySQL gọi nó là semi-synchronous replication (replica phải *nhận* thay đổi, chưa cần áp dụng).\n\n**Failover** là quá trình nâng một follower lên làm leader khi leader hiện tại hỏng. Failover tự động đòi hỏi: (1) phát hiện leader hỏng (thường qua heartbeat timeout), (2) chọn follower nào để nâng cấp (thường là follower mới nhất, để giảm thiểu mất dữ liệu), và (3) cập nhật định tuyến của client để lần ghi đi tới leader mới. Quá trình này mất vài giây tới vài phút và gây mất khả năng ghi trong chốc lát. Các rắc rối gồm **split-brain**: nếu network partition khiến leader tạm thời không với tới được nhưng thực ra chưa chết, leader cũ và leader mới được nâng cấp có thể cùng nhận ghi, gây phân kỳ. Hệ thống production ngăn split-brain bằng leader election dựa trên quorum (Raft, Paxos, hoặc một bộ điều phối bên ngoài như etcd/ZooKeeper như trong Patroni) cộng với **fencing**: leader cũ bị cắt ra (STONITH, thu hồi lease, hoặc một fencing token mà tầng lưu trữ từ chối) trước khi leader mới nhận ghi."
+    },
+    {
+      "type": "diagram",
+      "caption": "Semi-synchronous replication: leader chờ Follower 1 xác nhận rồi mới trả lời client. Follower 2 replicate bất đồng bộ và có thể chậm hơn một chút."
+    },
+    {
+      "type": "explanation",
+      "title": "Replication lag và consistency model",
+      "content": "Ngay cả khi asynchronous replication chạy trơn tru, luôn có một khoảng thời gian ngắn mà follower chưa áp dụng các lần ghi mới nhất từ leader. Đọc từ follower trong khoảng này trả về dữ liệu cũ — vi phạm **read-your-own-writes consistency**. Đây là một trong những bug phổ biến nhất trong hệ phân tán: người dùng gửi một form, lần ghi đi tới leader, nhưng lần tải trang tiếp theo đọc từ một follower bị trễ và người dùng thấy dữ liệu cũ, kết luận rằng cập nhật của họ đã mất.\n\nCó ba consistency model hữu ích trong thực tế nằm trên phổ giữa strong và eventual:\n\n**Read-your-own-writes (read-after-write consistency)**: client luôn đọc được tác động của các lần ghi trước đó của chính mình. Đạt được bằng cách định tuyến lần đọc của người dùng tới leader trong một khoảng thời gian ngắn sau khi họ ghi (ví dụ một giây), hoặc theo dõi timestamp logic của lần ghi và chỉ định tuyến tới follower đã bắt kịp timestamp đó. `pg_wal_lsn_diff` của PostgreSQL và GTID của MySQL có thể cài đặt điều này.\n\n**Monotonic reads**: một khi client đã đọc một giá trị tại thời điểm T, nó sẽ không bao giờ thấy giá trị cũ hơn ở các lần đọc sau. Không có điều này, một client refresh trang có thể thấy phiên bản mới nhất, rồi thấy phiên bản cũ hơn (nếu bị định tuyến tới một replica trễ hơn), tạo ra trải nghiệm du hành thời gian khó hiểu. Cài đặt bằng cách định tuyến cố định (sticky) các lần đọc của một người dùng tới cùng một replica.\n\n**Consistent prefix reads**: nếu một chuỗi lần ghi diễn ra theo thứ tự, bất kỳ người đọc nào cũng thấy chúng theo cùng thứ tự đó. Vi phạm điều này nghĩa là người đọc có thể thấy câu trả lời trước khi thấy câu hỏi — quan hệ nhân quả bị phá vỡ. Đặc biệt có vấn đề trong hệ thống được partition, nơi các partition khác nhau có thể có replication lag khác nhau.\n\nCác tính chất này cùng nhau xấp xỉ **causal consistency**: các thao tác có quan hệ nhân quả xuất hiện theo thứ tự nhân quả, kể cả trên replica. Strong consistency thật sự (linearizability) đòi hỏi lần đọc luôn đi tới leader hoặc dùng quorum read — tốn kém nhưng đôi khi cần thiết cho hệ thống tài chính hay tồn kho."
+    },
+    {
+      "type": "explanation",
+      "title": "Multi-leader replication: ghi xuyên các data center",
+      "content": "**Multi-leader replication** (active-active, multi-master) cho phép nhiều node cùng nhận ghi. Mỗi leader replicate các lần ghi của mình tới mọi leader khác một cách bất đồng bộ. Động lực chính là **hiệu năng ghi phân tán theo địa lý**: nếu người dùng của bạn trải khắp châu Âu và Bắc Mỹ, định tuyến mọi lần ghi tới một leader duy nhất ở một region buộc mọi người dùng ở region kia trả một round trip xuyên Đại Tây Dương (~70–150 ms) cho mỗi lần ghi. Với một leader ở mỗi region, người dùng ghi vào leader cục bộ (dưới 10ms) và lần ghi được replicate xuyên region ở background.\n\nRắc rối cơ bản là **xung đột ghi**: hai leader có thể đồng thời nhận các lần ghi khác nhau vào cùng một bản ghi. Người dùng A đổi email thành `alice@new.com` trên leader EU; người dùng B (hoặc một bug) đổi cùng field đó thành `alice@old.com` trên leader US — cả hai thay đổi đều hợp lệ cục bộ nhưng không tương thích toàn cục. Hệ thống phải giải quyết xung đột trước khi dữ liệu có thể hội tụ.\n\nCác chiến lược giải quyết xung đột:\n- **Last-write-wins (LWW)**: mỗi lần ghi mang một timestamp; timestamp cao nhất thắng. Đơn giản nhưng lặng lẽ làm rơi dữ liệu — lần ghi concurrent nào thua bị loại bỏ mà client không nhận được lỗi nào. Nguy hiểm với dữ liệu quan trọng.\n- **Merge ở mức ứng dụng**: ứng dụng nhận cả hai phiên bản xung đột và merge chúng. Google Docs dùng operational transformation (OT) để merge các chỉnh sửa tài liệu concurrent mà không mất nội dung. Phức tạp để cài đặt nhưng đúng đắn.\n- **CRDT (Conflict-free Replicated Data Type)**: cấu trúc dữ liệu được thiết kế để các cập nhật concurrent luôn có thể tự động merge mà không xung đột. Counter, set và map đều có bản cài đặt CRDT. Được dùng trong Redis Enterprise Active-Active, data type của Riak và các app dựa trên Automerge/Yjs.\n\nMulti-leader được dùng trong: CouchDB, các thiết lập MySQL active-active, app lịch cần hỗ trợ ghi offline (đồng bộ khi kết nối lại), và các công cụ chỉnh sửa cộng tác. Độ phức tạp tăng thêm khiến phần lớn ứng dụng tránh nó, trừ khi hiệu năng ghi phân tán theo địa lý là yêu cầu bắt buộc."
+    },
+    {
+      "type": "explanation",
+      "title": "Leaderless replication: quorum kiểu Dynamo",
+      "content": "**Leaderless replication** (kiểu Dynamo) loại bỏ hoàn toàn khái niệm leader được chỉ định. Bất kỳ node nào cũng nhận được bất kỳ lần ghi nào. Consistency đạt được không phải bằng cách phối hợp qua một node chính thức duy nhất, mà bằng cách đòi một lần ghi phải được một **quorum** — số node tối thiểu — xác nhận trước khi báo thành công.\n\nCông thức then chốt là: với **N** replica tổng cộng, đòi **W** lần xác nhận ghi và **R** phản hồi đọc sao cho **W + R > N**. Khi W + R > N, write quorum và read quorum phải chồng lên nhau — ít nhất một node đã xác nhận lần ghi cũng nằm trong tập đọc, nên người đọc luôn nhận được ít nhất một phản hồi mang lần ghi *đã được xác nhận* mới nhất. Chồng lấn không đồng nghĩa với linearizability: các lần ghi concurrent, last-write-wins với đồng hồ lệch, và các lần ghi thất bại sau khi đã tới một số replica vẫn có thể cho ra các lần đọc gây bất ngờ.\n\nCác cấu hình phổ biến với N=3:\n- W=2, R=2: W+R=4 > 3. Chịu được 1 node hỏng cho cả đọc lẫn ghi. Đảm bảo chồng lấn đọc/ghi.\n- W=1, R=3: Ghi nhanh, đọc chậm. Mọi node phải phản hồi khi đọc; bất kỳ node đơn lẻ nào cũng xác nhận được lần ghi.\n- W=3, R=1: Ghi chậm (mọi node xác nhận), đọc nhanh — nhưng chỉ một replica chết là lần ghi thất bại. Tốt cho dữ liệu ghi một lần, đọc nhiều lần.\n- W=1, R=1: KHÔNG phải quorum (W+R=2 không > N=3). Nhanh nhất nhưng có thể trả về dữ liệu cũ — chỉ là **eventual consistency**.\n\nKhi một lần ghi chỉ tới được W=2 trên 3 node (có thể một node tạm thời chết), node thứ ba giờ có dữ liệu cũ. Khi node đó quay lại, nó cần bắt kịp. Cassandra dùng **read repair** (nếu một lần đọc trả về các giá trị không nhất quán từ các node khác nhau, coordinator cập nhật các node cũ ở background) và **hinted handoff** (nếu một node không với tới được trong lúc ghi, một node khác lưu một hint và chuyển tiếp lần ghi khi node đích quay lại). Riak và Cassandra cũng chạy **anti-entropy** ở background (so sánh Merkle tree) để sửa dữ liệu ít khi được đọc. (Amazon **DynamoDB** *không* phải leaderless dù cái tên gợi vậy: mỗi partition là một nhóm Multi-Paxos có leader; thiết kế leaderless đến từ paper **Dynamo** năm 2007, thứ truyền cảm hứng cho Cassandra, Riak và Voldemort.)\n\n**Sloppy quorum** là một phần mở rộng tinh tế: nếu W node trong tập replica được chỉ định không khả dụng, lần ghi đi tới W node bên ngoài tập replica như một chỗ ở tạm — chúng giữ một hint và chuyển tiếp tới đúng replica khi chúng hồi phục. Điều này cải thiện khả năng ghi nhưng nghĩa là W+R>N không còn đảm bảo chồng lấn — đọc dữ liệu cũ trở nên có thể ngay cả với quorum read. Dynamo và Riak dùng sloppy quorum; Cassandra không tính hint vào consistency level (chỉ mức đặc biệt `ANY` chấp nhận một hint như một lần ghi). `LOCAL_QUORUM` và `EACH_QUORUM` của Cassandra là một núm vặn khác: chúng quyết định quorum được tính chỉ trong datacenter cục bộ hay trong mọi datacenter."
+    },
+    {
+      "type": "diagram",
+      "caption": "Lần ghi leaderless với N=3, W=2: Node 3 không khả dụng nên hai node xác nhận lần ghi. Hinted handoff sẽ chuyển tiếp lần ghi tới Node 3 khi nó hồi phục."
+    },
+    {
+      "type": "explanation",
+      "title": "Nền tảng partitioning: vì sao một node là không đủ",
+      "content": "Ngay cả một thiết lập single-leader replicate dày đặc cũng có nút thắt ghi: mọi lần ghi đều đi tới leader. Nếu ứng dụng của bạn sinh ra 500,000 lần ghi mỗi giây, không máy đơn lẻ nào xử lý hết được. Partitioning phá vỡ trần này bằng cách chia tập dữ liệu để các lần ghi khác nhau đi tới các node khác nhau — thêm node là thêm khả năng ghi tương ứng.\n\nQuyết định thiết kế đầu tiên là **partition theo cái gì**. Partition key (còn gọi là shard key) là field dùng để xác định một bản ghi thuộc partition nào. Chọn nó tốt quyết định tải được phân bố đều hay tập trung thành hotspot.\n\nMột partition key tốt có ba tính chất:\n1. **Cardinality cao**: nhiều giá trị khác nhau, để bản ghi trải ra các partition\n2. **Phân bố đều**: các giá trị xuất hiện với tần suất xấp xỉ nhau, để các partition nhận tải bằng nhau\n3. **Khớp với query**: key xuất hiện trong hầu hết predicate của query, để phần lớn query chỉ chạm một partition thay vì tất cả\n\nLựa chọn phổ biến: `user_id` cho app xoay quanh người dùng (ngẫu nhiên, cardinality cao), `order_id` cho thương mại điện tử, `device_id` cho IoT. Lựa chọn tồi: `country_code` (không đều — người dùng Mỹ làm ngập một partition), `status` (cardinality thấp — ba giá trị status nghĩa là tối đa ba partition), `timestamp` thô (hotspot — mọi lần ghi hiện tại đều rơi vào một partition)."
+    },
+    {
+      "type": "explanation",
+      "title": "Range partitioning vs. hash partitioning",
+      "content": "**Range partitioning** chia không gian key thành các khoảng liên tiếp, mỗi khoảng gán cho một partition. Nếu partition người dùng theo thứ tự chữ cái của họ, partition 1 giữ A-G, partition 2 H-M, partition 3 N-S, partition 4 T-Z. Range partitioning có một lợi thế quyết định: **range scan hiệu quả**. Để lấy mọi người dùng có họ bắt đầu bằng 'M', query planner định tuyến thẳng tới partition 2 và quét nó tuần tự — không cần scatter-gather qua mọi partition. HBase, Bigtable, Spanner, CockroachDB và TiKV chia bảng thành các khoảng key theo cách này (và storage engine của chúng giữ mỗi khoảng được sắp xếp trên đĩa trong SSTable).\n\nĐiểm yếu là **hotspot ghi tuần tự**. Nếu key của bạn là timestamp và bạn đang ghi log số đo cảm biến, mọi số đo hiện tại đều có timestamp hôm nay — chúng đều rơi vào partition mới nhất. Mọi lần ghi đi tới partition 4 trong khi partition 1-3 ngồi chơi. Bạn không được chút song song nào về ghi dù có bốn node. Cách sửa là thêm tiền tố bucket ngẫu nhiên vào key: `key = shard_id + ':' + timestamp` với `shard_id = hash(device_id) % 8`. Lần đọc giờ phải query cả 8 bucket cho một khoảng thời gian, nhưng lần ghi trải đều.\n\n**Hash partitioning** đưa mỗi key qua một hash function và dùng output để xác định partition. Với bốn partition, `partition = hash(key) % 4`. Một hash function tốt (MurmurHash, xxHash) phân bố key đồng đều bất kể giá trị thật của chúng — timestamp tuần tự, ID tụm lại và string cục bộ đều rơi vào các partition ngẫu nhiên. Đây là công cụ chính để loại bỏ hotspot ghi.\n\nTrade-off là **thứ tự sắp xếp bị phá hủy**. Các key liền kề theo thứ tự sắp xếp (ví dụ user ID 1000-1100) rơi vào các partition khác nhau, không đoán trước được sau khi hash. Một range query `WHERE user_id BETWEEN 1000 AND 1100` giờ phải tỏa ra mọi partition rồi merge kết quả — một **scatter-gather query**. Với app xoay quanh người dùng nơi query gần như luôn là `WHERE user_id = ?`, điều này chấp nhận được. Với workload analytics có nhiều range query, đây là vấn đề nghiêm trọng. Trade-off này là lý do chọn chiến lược partition đòi hỏi hiểu sâu pattern query của ứng dụng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Range partitioning giữ thứ tự sắp xếp cho range scan hiệu quả nhưng tạo hotspot với key tuần tự. Hash partitioning phân bố đều nhưng phá hủy thứ tự, buộc range query phải scatter-gather."
+    },
+    {
+      "type": "explanation",
+      "title": "Consistent hashing: giảm thiểu xáo trộn khi rebalance",
+      "content": "Hash partitioning ngây thơ với `key % N` có một lỗ hổng thảm họa khi thêm hoặc bớt node: đổi N làm đổi kết quả của `key % N` với gần như mọi key. Thêm node thứ tư vào cluster ba node khiến khoảng 75% số key chuyển sang node khác — một cuộc xáo trộn khổng lồ, gây gián đoạn, làm bão hòa mạng và giảm hiệu năng trong nhiều phút hoặc lâu hơn. Với một cluster cache, điều này nghĩa là một thundering herd cache miss khi client bỗng định tuyến tới các node chưa kịp làm nóng.\n\n**Consistent hashing** giải quyết chuyện này bằng cách sắp cả node lẫn key lên một vòng tròn ảo (hash ring). Key được ánh xạ lên ring bằng cùng hash function như node. Mỗi key được gán cho node đầu tiên theo chiều kim đồng hồ trên ring tính từ vị trí của key. Khi thêm một node mới, nó chỉ tiếp quản các key nằm giữa nó và node đứng trước — khoảng 1/(N+1) tổng số key, tất cả lấy từ node kế tiếp theo chiều kim đồng hồ. Mọi key khác ở nguyên node hiện tại, không bị đụng tới. Bớt một node chỉ gán lại các key của nó cho node kế tiếp.\n\nCông thức: nếu bạn có N node, thêm hoặc bớt một node chỉ cần di chuyển đúng ~1/N tổng số key, không phải ~N/N như với hash modulo. Với một cluster cache 100 node, thêm một node chỉ di chuyển 1% số key — gián đoạn không đáng kể.\n\n**Virtual node (vnode)** giải quyết một vấn đề tinh tế còn lại: với chỉ một vài node vật lý đặt ở các vị trí ngẫu nhiên trên ring, vị trí của chúng có thể tụm lại không đều, khiến một node chịu trách nhiệm cho một cung lớn hơn nhiều (và do đó nhiều key hơn) so với các node khác. Cách sửa là ánh xạ mỗi node vật lý tới nhiều vị trí trên ring — thường 100–256 virtual node cho mỗi node vật lý (các cache kiểu ketama kinh điển dùng ~100–160; Cassandra dùng 256 token mỗi node trong nhiều năm và từ 4.0 mặc định là 16 với một thuật toán phân bổ token thông minh hơn). Các virtual node của mỗi node vật lý được trải đều quanh ring. Thêm một node vật lý chèn vào 150 vị trí ảo, mỗi vị trí kéo một lượng nhỏ key từ nhiều hàng xóm — việc phân bố lại tải vừa nhỏ về tổng thể vừa được lấy đều từ mọi node hiện có. Đây là cách Cassandra, Riak và các library client memcached đạt phân bố cân bằng khi kích thước cluster thay đổi. (Redis Cluster đi một con đường liên quan nhưng khác: 16,384 **hash slot** cố định — `CRC16(key) mod 16384` — được gán cho các node và di chuyển từng slot một.)"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Với 3 node và mỗi node 150 virtual node, ta có 450 vị trí trên ring. Thêm node thứ 4 chèn vào 150 vị trí mới, mỗi vị trí lấy các key nằm giữa nó và vị trí đứng trước khỏi node kế tiếp theo chiều kim đồng hồ — tổng mức xáo trộn khoảng 150/600 = 25% số key (một lần chạy in ra ~27%), so với ~75% khi `key % 3` trở thành `key % 4`. Không có virtual node và chỉ có 3 vị trí vật lý, một node có thể phủ 60% ring còn node khác chỉ 15% — rất không đều. Phép tìm theo chiều kim đồng hồ bằng binary search chạy trong thời gian O(log V), với V là tổng số virtual node.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Partitioning và secondary index",
+      "content": "Partition theo primary key khá thẳng thắn — bạn hash hoặc range-partition key, và mọi lần tra theo key đó định tuyến tới đúng một partition. Khó khăn bắt đầu khi ứng dụng cần **secondary index**: các query lọc hoặc sắp xếp theo field khác partition key.\n\nCó hai chiến lược, cả hai đều có trade-off đáng kể:\n\n**Secondary index partition theo document (local index)**: mỗi partition duy trì index riêng chỉ bao các document trong partition đó. Ghi hiệu quả — bạn ghi vào một partition và nó cập nhật index cục bộ của mình. Đọc thì đắt: để tìm mọi người dùng ở 'California', bạn phải query song song index trên mọi partition (scatter-gather), thu thập mọi kết quả rồi merge. Elasticsearch và MongoDB dùng mô hình này. Đọc scatter-gather về bản chất có latency cao và biến động — một partition chậm làm trễ cả kết quả. Hệ thống production giảm thiểu bằng timeout, circuit breaker và tổng hợp bất đồng bộ.\n\n**Secondary index partition theo term (global index)**: một global index riêng được partition theo term được index, không theo document. Để tìm mọi người dùng ở 'California', bạn query một partition duy nhất của global index sở hữu term 'California' — tra một partition, không phải scatter-gather. Ghi trở nên đắt: thêm một người dùng ở California đòi ghi document người dùng vào partition người dùng *và* cập nhật entry California trong partition của global index, có thể nằm trên một node khác. Global secondary index của Amazon DynamoDB và một số pattern materialized view của Cassandra dùng mô hình này. Global index thường được cập nhật bất đồng bộ, nghĩa là lần đọc index có thể hơi cũ ngay sau một lần ghi."
+    },
+    {
+      "type": "explanation",
+      "title": "Rebalancing: di chuyển dữ liệu khi cluster thay đổi",
+      "content": "Không sơ đồ partitioning nào là tĩnh. Node hỏng và được thay. Traffic tăng và node mới được thêm vào. Khối lượng dữ liệu tăng và partition trở nên quá lớn. Tất cả những điều này đòi hỏi **rebalancing** — phân bố lại partition hoặc key trên tập node đã cập nhật. Rebalancing tốt có ba yêu cầu: (1) tải nên được phân bố đều sau khi rebalance, (2) trong lúc rebalance database nên tiếp tục nhận đọc và ghi, (3) di chuyển càng ít dữ liệu giữa các node càng tốt để giảm thời gian rebalance và tải mạng.\n\nBa chiến lược thống trị trong hệ thống production:\n\n**Số partition cố định**: tạo trước nhiều partition hơn hẳn số node (ví dụ 1000 partition cho cluster 10 node, mỗi node 100). Khi thêm node mới, di chuyển nguyên partition từ các node hiện có sang node mới cho tới khi tải cân bằng. Partition không bao giờ bị tách hay gộp — con số là cố định. Elasticsearch, Kafka và Riak dùng cách này. Thách thức: chọn đúng số partition ngay từ đầu là khó. Quá ít thì bạn không rebalance đủ mịn; quá nhiều thì overhead theo dõi hàng nghìn partition trở nên đáng kể.\n\n**Dynamic partitioning**: partition tách ra khi vượt một ngưỡng cấu hình (ví dụ HBase tách một region khi nó vượt 10 GB) và gộp lại khi co lại quá nhỏ. Điều này tự động thích nghi với khối lượng dữ liệu. HBase, các hệ kiểu Bigtable, CockroachDB và TiKV hoạt động theo cách này (sharding của MongoDB cũng dựa trên range, với balancer di chuyển dữ liệu giữa các shard). Một thách thức: một database mới tạo bắt đầu với một partition trên một node — mọi lần ghi đi tới một node duy nhất cho tới khi dữ liệu đủ lớn để tách, tạo ra hotspot ban đầu. Cách sửa là **pre-splitting**: cấu hình ranh giới partition ban đầu trước khi nạp dữ liệu.\n\n**Tỷ lệ theo số node**: Cassandra dùng mô hình này với consistent hashing — mỗi node có một số virtual node cố định trên hash ring. Thêm một node vật lý là thêm các virtual node của nó, tự nhiên phân bố lại khoảng 1/N số key. Số partition tự động scale theo số node thay vì theo khối lượng dữ liệu. Đây là lời giải thanh lịch nhất cho các workload kiểu cache, nơi topology cluster thay đổi thường xuyên."
+    },
+    {
+      "type": "diagram",
+      "caption": "Rebalancing với số partition cố định: thêm node thứ tư lấy bớt partition từ các node hiện có. Chỉ nguyên partition di chuyển — không cần di chuyển từng key."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Cách sửa hotspot cho dữ liệu time-series thêm một tiền tố `bucket` suy ra từ device ID: lần đọc cho khoảng thời gian của một thiết bị vẫn chỉ chạm một bucket, trong khi lần ghi từ nhiều thiết bị trải ra cả 8. Bộ mô phỏng quorum ghi vào W node *đầu tiên* và đọc từ R node *cuối cùng* — lựa chọn bất lợi nhất — mà vẫn trả về phiên bản mới nhất, vì với W+R>N có ít nhất một node nằm trong cả hai tập (ở đây là node 1). Với W=R=1, tập đọc có thể bỏ lỡ hoàn toàn lần ghi, đó chính là lần đọc dữ liệu cũ mà bạn chấp nhận với eventual consistency.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Kết hợp replication và partitioning trên production",
+      "content": "Database phân tán thực tế luôn kết hợp cả hai kỹ thuật. Một cluster Cassandra 6 node với replication factor 3 hoạt động như sau: tập dữ liệu được chia trên 6 node qua consistent hashing (partitioning), nhưng mỗi mảnh dữ liệu được lưu trên 3 node liên tiếp trên ring (replication). Bất kỳ một node nào hỏng thì mọi dữ liệu vẫn nguyên vẹn — hai replica còn sống của dữ liệu thuộc node đó vẫn truy cập được. Với hai node hỏng đồng thời, mọi key vẫn có ít nhất một replica còn sống (đọc được ở consistency level ONE), nhưng các key có tập replica chứa cả hai node hỏng không còn đạt được QUORUM (2 trên 3) cho tới khi một node hồi phục.\n\nElasticsearch shard một index thành các primary shard (partitioning) và replicate mỗi primary shard tới một hoặc nhiều replica shard (replication). Một index 5 shard với 1 replica có tổng cộng 10 shard trải trên các node. Lần ghi đi tới primary shard và replicate tới replica. Lần đọc có thể đi tới primary hoặc replica, cho phép scale-out việc đọc. Nếu một node giữ primary shard hỏng, một replica được tự động nâng lên.\n\nKafka dùng cùng mô hình cho luồng message: topic được chia thành partition (sharding), và mỗi partition được replicate trên một số broker có thể cấu hình. Partition leader xử lý mọi lần ghi (và, theo mặc định, cả đọc; consumer có thể fetch từ một follower ở gần từ Kafka 2.4). Các follower đã bắt kịp tạo thành **ISR** (in-sync replicas); một lần ghi với `acks=all` chờ toàn bộ ISR, và khi leader hỏng, controller (một quorum KRaft dựa trên Raft trong Kafka hiện đại) nâng một thành viên của ISR lên.\n\nSố replica (replication factor) và số partition (sharding) được đặt độc lập với nhau. Tăng replication cải thiện khả năng chịu lỗi và scale đọc. Tăng số partition cải thiện song song ghi. Giá trị tối ưu phụ thuộc vào kích thước cluster, khối lượng ghi, khối lượng đọc và latency chấp nhận được — tinh chỉnh chúng là kỹ năng cốt lõi của DBA và kỹ sư hạ tầng."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: Consistent hashing được giới thiệu trong một paper bước ngoặt năm 1997 của Karger và cộng sự ở MIT, ban đầu được thiết kế cho web cache (CDN Akamai). Paper Dynamo năm 2007 của Amazon (một kho lưu trữ nội bộ có ý tưởng truyền cảm hứng cho Cassandra, Riak và Voldemort — không phải thiết kế của dịch vụ DynamoDB ngày nay, vốn dùng leader Multi-Paxos) phổ biến leaderless replication với quorum và sloppy quorum cho giỏ hàng có availability cao — không sự cố node đơn lẻ nào được ngăn người dùng thêm món hàng vào giỏ. CAP theorem (Brewer 2000, được Gilbert và Lynch chứng minh hình thức năm 2002) hình thức hóa trade-off cơ bản: trong một hệ phân tán chịu được partition, bạn phải chọn giữa consistency và availability — không thể có cả hai cùng lúc. Replication lag, cấu hình quorum và lựa chọn consistency model đều là những cách xoay xở với trade-off này trên thực tế."
+    },
+    {
+      "type": "callout",
+      "content": "**Những sai lầm phổ biến trong interview và production cần thuộc lòng**: (1) **Hiểu sai W+R>N**: W=1, R=1 với N=3 cho W+R=2, KHÔNG lớn hơn N — đây chỉ là eventual consistency, không phải quorum consistency. Nhiều kỹ sư nhầm 'quorum' với 'đa số' và quên kiểm tra bất đẳng thức. (2) **Shard key tuần tự trong time-series**: dùng `timestamp` làm partition key của Cassandra nghĩa là mọi lần ghi trong phút hiện tại rơi vào một partition. Luôn dùng key ghép với device/sensor ID hoặc thêm tiền tố bucket. (3) **Split-brain khi failover**: leader election tự động phải dùng fencing token hoặc cơ chế dựa trên lease — chỉ nâng follower có replication offset cao nhất là không đủ nếu leader cũ vẫn sống nhưng bị partition cô lập. Hai leader cùng nhận các lần ghi xung đột mà không có bảo vệ quorum sẽ lặng lẽ phân kỳ. (4) **Over-partitioning**: quá nhiều partition Kafka hay shard Elasticsearch thêm overhead phối hợp có thể vượt quá lợi ích song song với tập dữ liệu nhỏ. Hãy bắt đầu thận trọng rồi scale dần."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Replication** lưu bản sao của cùng dữ liệu trên nhiều node để chịu lỗi và scale-out việc đọc; **partitioning** (sharding) chia dữ liệu ra các node để dung lượng lưu trữ và khả năng ghi tăng theo chiều ngang — hệ thống production luôn dùng cả hai cùng nhau.",
+        "**Leader-follower replication** chỉ định một node làm nơi có quyền ghi; synchronous replication đổi latency ghi lấy durability mạnh, asynchronous replication đổi durability lấy latency thấp hơn — semi-synchronous (một follower đồng bộ, còn lại bất đồng bộ) là lựa chọn production phổ biến nhất.",
+        "**Multi-leader** cho phép ghi khả dụng ở nhiều vùng địa lý nhưng đòi giải quyết xung đột tường minh; **leaderless** (kiểu Dynamo: Cassandra, Riak — không phải DynamoDB) dùng quorum (W+R > N) để đảm bảo chồng lấn đọc-ghi mà không cần leader nào được chỉ định; sloppy quorum đổi đảm bảo đó lấy khả năng ghi.",
+        "**Range partitioning** giữ thứ tự sắp xếp cho range scan hiệu quả nhưng tạo hotspot ghi với key tuần tự; **hash partitioning** loại bỏ hotspot nhờ phân bố đồng đều nhưng phá hủy thứ tự sắp xếp, buộc range query phải scatter-gather.",
+        "**Consistent hashing** đặt node và key lên một ring ảo để thêm hoặc bớt một node chỉ di chuyển ~1/N số key; **virtual node** (100-150 cho mỗi node vật lý) đảm bảo phân bố tải đồng đều về mặt thống kê ngay cả với cluster nhỏ.",
+        "**Các chiến lược rebalancing** — số partition cố định, tách động và tỷ lệ theo số node — mỗi cái có trade-off khác nhau giữa sự đơn giản, linh hoạt và mức gián đoạn khi cluster thay đổi; hãy chọn dựa trên việc khối lượng dữ liệu hay số node là thứ thúc đẩy việc scale của bạn.",
+        "**Replication lag** là không tránh khỏi với asynchronous replication; các consistency model (read-your-own-writes, monotonic reads, consistent prefix reads) là công cụ thực tế để đưa ra những đảm bảo cụ thể cho client mà không phải trả toàn bộ cái giá của strong consistency linearizable."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Một người dùng gửi cập nhật form. Lần ghi đi tới leader. Ngay sau đó, một lần refresh trang đọc từ một follower chưa áp dụng entry replication log đó. Người dùng thấy dữ liệu cũ của mình. Consistency model nào, nếu được áp đặt, sẽ ngăn điều này?",
+      "options": [
+        "Monotonic reads",
+        "Linearizability",
+        "Consistent prefix reads",
+        "Read-your-own-writes consistency"
+      ],
+      "explanation": "Read-your-own-writes (read-after-write consistency) đảm bảo client luôn đọc được tác động của các lần ghi trước đó của chính mình. Cài đặt nó thường gồm định tuyến lần đọc của người dùng đó tới leader trong một khoảng ngắn sau khi ghi, hoặc theo dõi vị trí log của lần ghi và chỉ đọc từ follower đã bắt kịp vị trí đó. Monotonic reads ngăn việc du hành thời gian (thấy dữ liệu mới rồi lại thấy cũ hơn) nhưng không đảm bảo cụ thể rằng người dùng thấy lần ghi của chính mình."
+    },
+    {
+      "id": "q2",
+      "question": "Trong một hệ leaderless replication với N=5 replica, W=3 lần xác nhận ghi và R=3 phản hồi đọc, hệ thống chịu được bao nhiêu node hỏng đồng thời mà vẫn đảm bảo đọc strongly consistent?",
+      "options": [
+        "2 node hỏng",
+        "1 node hỏng",
+        "3 node hỏng",
+        "0 — quorum không được thỏa mãn"
+      ],
+      "explanation": "W+R=6 > N=5, nên chồng lấn quorum được đảm bảo — đây là strongly consistent. Để chịu được sự cố, bạn cần ít nhất W=3 node cho ghi và R=3 cho đọc, nên tối đa N-W=2 node có thể hỏng với ghi và N-R=2 với đọc. Hệ thống chịu được 2 sự cố đồng thời mà vẫn giữ được cả khả năng đọc lẫn ghi. Sự cố thứ ba sẽ khiến số node khả dụng còn 2, dưới cả ngưỡng W lẫn R."
+    },
+    {
+      "id": "q3",
+      "question": "Bạn đang xây một database active-active đa region, nơi người dùng ở EU và US đều ghi được. Hai người dùng cùng lúc cập nhật cùng một field profile ở hai region khác nhau. Điều này đưa vào thách thức cốt lõi nào?",
+      "options": [
+        "Replication lag giữa các region làm lần đọc chậm",
+        "Xung đột ghi khi cả hai leader đồng thời nhận các giá trị khác nhau cho cùng một key",
+        "Follower không phục vụ được lần đọc khi có nhiều leader",
+        "Hệ thống không đảm bảo được monotonic reads giữa các region"
+      ],
+      "explanation": "Multi-leader replication cho phép ghi concurrent vào cùng một key trên các leader khác nhau, tạo ra xung đột ghi. Cả hai lần ghi đều hợp lệ cục bộ nhưng không tương thích toàn cục. Hệ thống phải phát hiện và giải quyết xung đột — các chiến lược gồm last-write-wins (lặng lẽ làm rơi dữ liệu), merge ở mức ứng dụng, hoặc CRDT. Độ phức tạp tăng thêm này là lý do chính khiến multi-leader bị tránh, trừ khi hiệu năng ghi phân tán theo địa lý là yêu cầu bắt buộc."
+    },
+    {
+      "id": "q4",
+      "question": "Một nền tảng IoT lưu số đo cảm biến trong Cassandra với phút hiện tại (timestamp làm tròn tới phút) làm partition key. Sau khi triển khai, một tập replica xử lý gần như toàn bộ traffic ghi trong khi các node khác ngồi chơi. Nguyên nhân gốc là gì?",
+      "options": [
+        "Consistent hashing của Cassandra bị hỏng với workload IoT",
+        "Cluster có quá ít virtual node để phân bố đều lần ghi",
+        "Mọi lần ghi trong cùng một phút có cùng giá trị partition key, nên hash ra cùng một token và rơi vào cùng một tập replica",
+        "Cột timestamp cần cấu hình partitioning đặc biệt trong Cassandra"
+      ],
+      "explanation": "Cassandra hash partition key (Murmur3), nên vấn đề không phải range partitioning — mà là mọi lần ghi concurrent dùng chung một giá trị partition key. Mọi số đo trong phút hiện tại hash ra cùng một token và do đó cùng các replica; hotspot chỉ đơn giản dời sang node khác mỗi phút. Cách sửa là một partition key ghép như (sensor_id, day) để các lần ghi concurrent từ các cảm biến khác nhau trải ra khắp ring."
+    },
+    {
+      "id": "q5",
+      "question": "Một cluster cache dùng hash modulo ngây thơ (key % N) trên 10 node. Bạn thêm node thứ 11. Xấp xỉ bao nhiêu phần trăm key trong cache phải được ánh xạ lại sang node khác?",
+      "options": [
+        "~9% (1/11 số key)",
+        "~50% số key",
+        "~100% số key",
+        "~91% số key"
+      ],
+      "explanation": "Với hash modulo, một key chỉ ở nguyên chỗ nếu key % 10 == key % 11, điều này xảy ra đúng khi key mod 110 nằm trong khoảng 0 tới 9 — 10 trên mỗi 110 key, tức 1/11 ≈ 9%. Vậy khoảng 91% số key chuyển sang node khác, gây ra cơn bão cache miss. Consistent hashing chỉ di chuyển khoảng 1/11 ≈ 9% số key (những key mà node mới tiếp quản)."
+    },
+    {
+      "id": "q6",
+      "question": "Vì sao các bản cài đặt consistent hashing dùng 100-150 virtual node cho mỗi node vật lý?",
+      "options": [
+        "Để cải thiện độ đồng đều phân bố key khi cluster có ít node vật lý",
+        "Để một node đơn lẻ phục vụ được nhiều client cùng lúc",
+        "Để cho phép range query xuyên partition trong hệ thống hash-partitioned",
+        "Để giảm overhead bộ nhớ khi lưu cấu trúc ring"
+      ],
+      "explanation": "Với chỉ vài node vật lý trên ring, vị trí ngẫu nhiên của chúng có thể rất không đều — một node có thể sở hữu cung 60% trong khi node khác chỉ 10%. Virtual node (100-150 cho mỗi node vật lý) trải mỗi node vật lý ra nhiều vị trí trên ring, nên tải thống kê trên mỗi node vật lý hội tụ về 1/N bất kể có ít node vật lý tới đâu. Trade-off là tốn thêm chút bộ nhớ để lưu ring (150×N entry thay vì N entry)."
+    },
+    {
+      "id": "q7",
+      "question": "Một query `SELECT * FROM orders WHERE order_date BETWEEN '2024-01-01' AND '2024-03-31'` được chạy trên một bảng orders hash-partitioned (partition theo order_id). Pattern thực thi query là gì?",
+      "options": [
+        "Quét một partition: query định tuyến tới partition giữ khoảng ngày tháng 1-3",
+        "Scatter-gather: query tỏa ra mọi partition và merge kết quả",
+        "Quét hai partition: ngày bắt đầu và kết thúc ứng với hai partition",
+        "Index scan: global secondary index định tuyến query trực tiếp"
+      ],
+      "explanation": "Hash partitioning phá hủy thứ tự sắp xếp — các key liền kề theo thứ tự ngày bị rải ra các partition ngẫu nhiên. Một query theo khoảng ngày không thể định tuyến tới partition cụ thể; nó phải query song song mọi partition (scatter-gather) rồi merge kết quả. Đây là lý do hash partitioning không phù hợp với workload có nhiều range query. Range partitioning theo order_date sẽ cho phép range scan hiệu quả trên một partition."
+    },
+    {
+      "id": "q8",
+      "question": "Cơ chế hinted handoff của Cassandra xử lý kịch bản sự cố cụ thể nào?",
+      "options": [
+        "Leader hỏng trong topology leader-follower gây mất khả năng ghi",
+        "Read repair khi các replica khác nhau trả về giá trị không nhất quán cho cùng một key",
+        "Một node replica tạm thời chết trong lúc ghi nên một node khác lưu lần ghi và chuyển tiếp nó khi node đích hồi phục",
+        "Giải quyết xung đột khi hai leader nhận các lần ghi concurrent vào cùng một key"
+      ],
+      "explanation": "Hinted handoff xử lý việc node tạm thời không khả dụng trong lúc ghi ở hệ leaderless. Nếu một replica đích đang chết, một node coordinator lưu lần ghi dưới dạng 'hint' (một lần chuyển giao đang chờ). Khi node đích quay lại, coordinator chuyển tiếp hint, giúp node bắt kịp lần ghi đã lỡ. Điều này cải thiện khả năng ghi nhưng nghĩa là node vừa hồi phục có thể phục vụ dữ liệu cũ trong chốc lát cho tới khi các hint được áp dụng."
+    },
+    {
+      "id": "q9",
+      "question": "Một secondary index partition theo document (local) được dùng trên một cluster Elasticsearch 20 shard. Một query lọc theo một field không phải partition key (city='London'). Đặc tính hiệu năng là gì?",
+      "options": [
+        "Tra một shard: global index định tuyến tới shard duy nhất chứa document London",
+        "Tra hai shard: query dùng shard primary index và shard secondary index",
+        "Quét tuần tự: các shard được query lần lượt từng cái cho tới khi đủ kết quả",
+        "Scatter-gather: query tỏa ra cả 20 shard và merge kết quả"
+      ],
+      "explanation": "Local secondary index chỉ bao các document trong shard của chính nó. Để tìm mọi document London trên cả 20 shard, query phải được gửi tới mọi shard (scatter-gather), mỗi shard trả về kết quả London cục bộ, và coordinator merge chúng. Đây là lý do query Elasticsearch trên các field phụ về bản chất có latency cao hơn tra theo primary key — chúng luôn là thao tác scatter-gather."
+    },
+    {
+      "id": "q10",
+      "question": "Một index Elasticsearch mới được tạo với 5 primary shard và replication factor 2 (mỗi primary một replica). Node chứa một primary shard bị hỏng. Điều gì xảy ra với khả năng ghi của shard đó?",
+      "options": [
+        "Replica shard được nâng lên làm primary, khôi phục khả năng ghi sau một cuộc bầu ngắn",
+        "Lần ghi tiếp tục không gián đoạn vì cả primary lẫn replica đều nhận ghi",
+        "Lần ghi vào shard đó bị mất vĩnh viễn; một primary mới được tạo rỗng",
+        "Mọi lần ghi vào index bị tạm dừng cho tới khi node hỏng hồi phục"
+      ],
+      "explanation": "Elasticsearch dùng leader-follower replication cho mỗi shard. Replica là một follower phản chiếu primary. Khi node primary hỏng, cơ chế điều phối cluster của Elasticsearch (qua master election) nâng replica lên trạng thái primary. Trong lúc bầu (vài giây tới một phút), lần ghi vào shard đó tạm thời không khả dụng. Khi replica đã được nâng lên, lần ghi tiếp tục bình thường. Index vẫn phục vụ mọi shard khác không gián đoạn."
+    }
+  ]
+}

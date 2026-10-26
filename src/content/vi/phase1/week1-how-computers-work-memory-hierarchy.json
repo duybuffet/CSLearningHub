@@ -1,0 +1,221 @@
+{
+  "sourceHash": "cee289a30f2a",
+  "title": "Phân cấp bộ nhớ (Memory Hierarchy)",
+  "tagline": "Vì sao máy tính dùng một kim tự tháp lưu trữ — và khoảng cách giữa tốc độ với dung lượng định hình mọi quyết định về hiệu năng ra sao.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Có một mâu thuẫn cốt lõi trong bộ nhớ máy tính: bạn muốn bộ lưu trữ càng nhanh thì nó càng phải nhỏ và đắt. Register nhanh như chớp nhưng chỉ chứa được vài giá trị. Bộ nhớ chính (RAM) chứa được hàng gigabyte nhưng chậm hơn hàng trăm lần. Ổ đĩa chứa được hàng terabyte nhưng còn chậm hơn hàng nghìn lần nữa.\n\nCác kiến trúc sư máy tính giải bài toán này bằng một **phân cấp bộ nhớ (memory hierarchy)** — một kim tự tháp gồm nhiều tầng lưu trữ, mỗi tầng nhanh hơn, nhỏ hơn và đắt hơn tầng bên dưới. Khi CPU cần dữ liệu, nó tìm ở tầng nhanh nhất trước; chỉ khi không có mới leo thang xuống tầng chậm hơn. Làm tốt, cách này cho chương trình ảo giác rằng mình có bộ nhớ vừa nhanh *vừa* lớn — sự kết hợp mà không thái cực nào tự mình cung cấp được.\n\nHiểu phân cấp bộ nhớ có lẽ là điều có tác động lớn nhất bạn có thể học để viết chương trình chạy nhanh. Một vòng lặp thân thiện với cache có thể nhanh hơn 10-100 lần so với một vòng lặp không thân thiện, dù cả hai làm cùng số phép tính. Khác biệt gần như không bao giờ nằm ở phần tính toán — mà ở chỗ dữ liệu có nằm trong cache hay không.\n\nChương này bao gồm: các tầng của phân cấp từ register tới ổ đĩa, các con số latency và dung lượng bạn nên thuộc lòng, nguyên lý cục bộ (lý do cache hoạt động được), cache line và cách dữ liệu thực sự được truyền đi, cache hit và cache miss cùng chi phí của chúng, và các pattern lập trình thực tế tận dụng phân cấp này. Ta cũng sẽ chạm tới virtual memory, kiến trúc NUMA, và những gì SSD hiện đại thay đổi so với các giả định truyền thống."
+    },
+    {
+      "type": "analogy",
+      "title": "Bàn làm việc, tủ hồ sơ, nhà kho",
+      "content": "Hãy hình dung bạn là một nhà nghiên cứu đang làm dự án. **Bàn làm việc** của bạn chứa những tài liệu đang dùng ngay lúc này — có thể là năm tập. Bạn với lấy bất kỳ tập nào trong một giây. Khi cần tài liệu khác, bạn bước tới **tủ hồ sơ** (cách ba bước) và lấy nó trong mười giây. Nếu tài liệu không có trong tủ, nó có thể nằm trong **phòng lưu trữ** cuối hành lang — mất hai phút. Tệ nhất, nó nằm trong **nhà kho** ở đầu kia thành phố — có khi phải giao qua đêm.\n\nBàn làm việc là register của CPU. Tủ hồ sơ là L1 cache. Phòng lưu trữ là L2/L3 cache. Nhà kho là RAM hoặc ổ đĩa. Điểm mấu chốt: tài liệu bạn hay dùng có xu hướng nằm lại trên bàn. Tủ hồ sơ chứa tài liệu gần đây. Nhà kho chứa mọi thứ từng được viết ra.\n\nNhà nghiên cứu làm việc hiệu quả không phải nhờ làm nhà kho nhanh hơn (đắt khủng khiếp) mà nhờ giữ tài liệu hay cần trên bàn và trong tủ hồ sơ. Máy tính tự động làm đúng điều đó — đó chính là việc của cache."
+    },
+    {
+      "type": "explanation",
+      "title": "Các tầng của phân cấp",
+      "content": "Từ nhanh nhất tới chậm nhất, nhỏ nhất tới lớn nhất. Các con số là khoảng điển hình cho CPU desktop/laptop/server năm 2026 chạy ở 4-5 GHz; giá trị chính xác khác nhau tùy chip.\n\n**Register** — Nằm trong nhân. Đọc mất chưa tới một nano giây (thực tế là 0 chu kỳ thêm — toán hạng được đọc như một phần của lệnh). Dung lượng: 16-32 register đa dụng 64-bit (vài trăm byte), cộng thêm register vector (32 × register AVX-512 512-bit = 2 KB). Nhân out-of-order còn giữ hàng trăm register *vật lý* ẩn để renaming. ALU làm việc trên register; mọi tầng bên dưới tồn tại để nuôi chúng.\n\n**L1 Cache (Level 1)** — Trên die, chia thành instruction cache (L1-I) và data cache (L1-D). Latency load-to-use ~4-5 chu kỳ ≈ ~1 ns. Kích thước: 32-64 KB L1-D mỗi nhân trên hầu hết thiết kế x86 và ARM (nhân hiệu năng của Apple có 128 KB). Riêng cho từng nhân.\n\n**L2 Cache (Level 2)** — Trên die, hợp nhất (lệnh + dữ liệu). ~12-18 chu kỳ ≈ ~3-5 ns. Kích thước: 1-3 MB mỗi nhân trên x86 hiện tại (AMD Zen 5: 1 MB; nhân hiệu năng Intel: 2-3 MB). Riêng mỗi nhân trên x86; Apple dùng chung một L2 lớn (12-16 MB) cho cả cụm nhân.\n\n**L3 Cache (Level 3, 'Last Level Cache')** — Trên die hoặc trên một chiplet cache, xa nhân hơn. ~40-70 chu kỳ ≈ ~10-20 ns. Kích thước: 8-128 MB trên desktop (các dòng \"X3D\" xếp chồng của AMD đạt 96-128 MB), vài trăm MB trên các chip server lớn, **dùng chung** giữa các nhân. Miss ở last-level cache nghĩa là phải xuống DRAM.\n\n**Bộ nhớ chính (RAM — DRAM)** — DIMM ngoài chip hoặc LPDDR trên package, truy cập qua memory controller trên chip. ~70-120 ns ≈ ~300-500 chu kỳ. Kích thước: 16-64 GB trên laptop và desktop, hàng trăm GB tới vài TB trên server. Dễ mất (volatile — mất dữ liệu khi tắt nguồn).\n\n**NVMe SSD** — Trên PCIe. Đọc ngẫu nhiên 4 KB ~20-100 µs (≈ 20,000-100,000 ns); throughput tuần tự vài GB/s (7-14 GB/s với ổ PCIe 4.0/5.0). Kích thước: 512 GB tới vài TB. Không mất dữ liệu khi tắt nguồn. Đọc ngẫu nhiên chậm hơn DRAM khoảng 1000 lần.\n\n**HDD (ổ đĩa quay)** — Cơ học. Truy cập ngẫu nhiên ~5-10 ms (seek + quay đĩa). Kích thước: tới ~30 TB mỗi ổ. Tầng chậm nhất và rẻ nhất tính theo byte — ngày nay chủ yếu dùng cho lưu trữ khối lớn/lưu trữ lâu dài.\n\nCác tỷ lệ thật choáng: L1 nhanh hơn DRAM ~100 lần, DRAM nhanh hơn đọc ngẫu nhiên SSD ~1000 lần, SSD lại nhanh hơn seek HDD ~100 lần. Nếu một lần hit L1 mất một giây, thì một lần truy cập DRAM mất khoảng một phút rưỡi, đọc SSD mất khoảng một ngày, và seek HDD mất khoảng bốn tháng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Kim tự tháp phân cấp bộ nhớ: tốc độ giảm và dung lượng tăng ở mỗi tầng. CPU luôn kiểm tra từ trên xuống."
+    },
+    {
+      "type": "explanation",
+      "title": "Vì sao phân cấp hoạt động: nguyên lý cục bộ",
+      "content": "Cache sẽ vô dụng nếu chương trình truy cập bộ nhớ hoàn toàn ngẫu nhiên — bạn gần như không bao giờ tìm thấy dữ liệu trong cache. Cache hoạt động được vì chương trình thực tế có hai quy luật thống kê rất mạnh, gọi chung là **nguyên lý cục bộ (principle of locality)**:\n\n**Cục bộ thời gian (temporal locality)**: Nếu một vị trí bộ nhớ được truy cập, nhiều khả năng nó sẽ sớm được truy cập lại. Một biến vòng lặp như `i` trong `for (let i = 0; i < n; i++)` được truy cập ở mọi vòng lặp. Một method của đối tượng được gọi nhiều lần. Lợi ích cho cache: giữ dữ liệu vừa truy cập trong bộ lưu trữ nhanh vì nhiều khả năng sẽ cần lại.\n\n**Cục bộ không gian (spatial locality)**: Nếu một vị trí bộ nhớ được truy cập, các vị trí lân cận nhiều khả năng sẽ sớm được truy cập. Duyệt mảng sẽ truy cập `arr[0]`, `arr[1]`, `arr[2]` theo thứ tự. Các field của một struct được lưu liền nhau và truy cập cùng nhau. Lệnh trong chương trình (phần lớn) chạy tuần tự. Lợi ích cho cache: khi lấy một vị trí từ bộ nhớ chậm, hãy lấy luôn các vị trí lân cận — nạp nguyên một **cache line**.\n\nNhững quy luật này không phải phép màu — chúng nảy sinh từ cách chương trình được viết:\n- Vòng lặp tạo ra cục bộ thời gian (cùng code và biến được truy cập lặp đi lặp lại)\n- Mảng và duyệt tuần tự tạo ra cục bộ không gian\n- Code của hàm và biến cục bộ nằm gom cụm trong không gian\n\nKhi chương trình vi phạm tính cục bộ — ví dụ truy cập bộ nhớ theo kiểu ngẫu nhiên, rải rác — cache không giúp được gì, và hiệu năng sụp đổ. Đó là lý do duyệt ma trận theo cột hay theo hàng lại quan trọng đến vậy."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache line: đơn vị truyền của cache",
+      "content": "Cache không truyền dữ liệu từng byte một. Mỗi lần dữ liệu được lấy từ một tầng bộ nhớ thấp hơn, nó được mang lên theo đơn vị gọi là **cache line** (còn gọi là cache block). Một cache line dài **64 byte** trên gần như mọi CPU x86 và hầu hết nhân ARM và RISC-V. Ngoại lệ đáng chú ý: chip Apple M-series dùng line **128 byte** (chip IBM POWER cũng vậy) — nên đừng bao giờ hard-code 64 khi điều đó quan trọng; hãy truy vấn nó (`sysctl hw.cachelinesize` trên macOS, `getconf LEVEL1_DCACHE_LINESIZE` trên Linux) hoặc dùng `std::hardware_destructive_interference_size` của C++.\n\nNghĩa là: khi CPU truy cập `array[0]` (một số nguyên 4 byte, với mảng được căn theo biên của line), cache mang lên từ `array[0]` tới `array[15]` (cả 64 byte = 16 số nguyên) trong một lần truyền. Lúc đó `array[1]` tới `array[15]` đã nằm sẵn trong L1 — những lần truy cập đó là hit rẻ.\n\nCache line có hệ quả lên thiết kế cấu trúc dữ liệu:\n\n**Array of Structs (AoS) và Struct of Arrays (SoA)**: Xét một game engine với 1000 thực thể, mỗi thực thể có vị trí (x, y, z) và máu. AoS: `[{x,y,z,health}, {x,y,z,health}, ...]`. SoA: `{xs:[...], ys:[...], zs:[...], healths:[...]}`. Nếu một vòng lặp chỉ cập nhật vị trí, SoA thân thiện với cache: `xs`, `ys`, `zs` nằm liền nhau. AoS lãng phí chỗ trong cache vì mang theo các giá trị `health` mà bạn không cần.\n\n**False sharing**: Trong chương trình đa thread, nếu hai thread ghi vào các biến tình cờ nằm trên cùng một cache line (kể cả khi các biến không liên quan gì về logic), cache line sẽ bị đá qua đá lại giữa các nhân, phá nát hiệu năng. Cách sửa là pad hoặc căn dữ liệu của mỗi thread để chúng nằm trên line riêng — thường căn theo 128 byte, vì bộ prefetch line kề nhau của Intel lấy line theo cặp và Apple dùng line 128 byte.\n\n**Dung lượng cache**: Một L3 cache 32 MB chứa 32 MB / 64 byte = 524,288 cache line. Nếu working set của bạn (dữ liệu được truy cập trong một vòng lặp chặt) vừa trong L3, hầu hết lần truy cập sẽ là cache hit. Nếu không vừa, bạn sẽ liên tục bị evict và miss."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một cache miss sẽ lấy nguyên một cache line 64 byte. Các lần truy cập tiếp theo tới địa chỉ lân cận sẽ hit cache — đó là cục bộ không gian đang phát huy tác dụng."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache hit, cache miss và chi phí của chúng",
+      "content": "**Cache hit** xảy ra khi địa chỉ cần đọc có trong cache. Lần truy cập được phục vụ từ cache với tốc độ cache, và việc thực thi tiếp tục. **Cache miss** xảy ra khi địa chỉ cần đọc không có trong cache. Khi đó cache phải lấy dữ liệu từ tầng kế tiếp, và trong lúc chờ, pipeline của CPU bị đứng lại (hoặc ít nhất là phép tính phụ thuộc bị trì hoãn).\n\n**Miss penalty** là chi phí của một lần miss: số chu kỳ thêm phải bỏ ra để lấy dữ liệu từ tầng chậm hơn. Chi phí điển hình trên CPU ~4-5 GHz:\n- Miss L1 → hit L2: ~12-18 chu kỳ\n- Miss L2 → hit L3: ~40-70 chu kỳ\n- Miss L3 → DRAM: ~300-500 chu kỳ\n- Trang không có trong RAM → đọc từ SSD (major page fault): ~100,000-500,000 chu kỳ\n\n**Miss rate** là tỷ lệ số lần truy cập bộ nhớ bị miss cache. Kết hợp lại: **AMAT** (Average Memory Access Time — thời gian truy cập bộ nhớ trung bình) = hit_time + miss_rate × miss_penalty. Ví dụ: hit time 4 chu kỳ, miss rate 5%, penalty 15 chu kỳ xuống L2 → AMAT = 4 + 0.05 × 15 = 4.75 chu kỳ. Với nhiều tầng, bản thân penalty cũng là một AMAT: `AMAT = t_L1 + m_L1 × (t_L2 + m_L2 × (t_L3 + m_L3 × t_DRAM))`. Chỉ một phần nhỏ số lần truy cập phải đi tận xuống DRAM (~400 chu kỳ) cũng có thể chiếm phần lớn thời gian.\n\nMột lưu ý: CPU out-of-order chồng các lần miss độc lập lên nhau (memory-level parallelism), nên một vòng lặp đọc trôi qua một mảng phải trả ít hơn nhiều so với \"một lần latency DRAM đầy đủ cho mỗi miss\" — trong khi các lần load phụ thuộc nhau (lần theo pointer trong linked list) phải trả đủ latency mỗi lần.\n\n**Chính sách thay thế cache**: Khi cache đầy và phải mang lên một line mới, một line cũ phải bị evict. Các chính sách phổ biến:\n- **LRU (Least Recently Used)**: Evict line lâu nhất chưa được truy cập. Tận dụng tốt cục bộ thời gian nhưng phải theo dõi thứ tự truy cập.\n- **Pseudo-LRU**: Một xấp xỉ rẻ hơn được dùng trong thực tế.\n- **Thay thế ngẫu nhiên**: Evict một line ngẫu nhiên. Với cache lớn, nó cạnh tranh được với LRU một cách đáng ngạc nhiên.\n\n**Chính sách ghi**:\n- **Write-through**: Mọi lần ghi đi thẳng xuống tầng kế tiếp. Đơn giản nhưng sinh ra rất nhiều lần ghi.\n- **Write-back**: Ghi chỉ vào cache; line chỉ được ghi xuống tầng kế tiếp khi bị evict. Hiệu quả hơn nhưng cần một **dirty bit** để đánh dấu các line đã bị sửa."
+    },
+    {
+      "type": "explanation",
+      "title": "Tổ chức cache: set, way và độ kết hợp",
+      "content": "Cache không phải một kho key-value đơn giản — nó có cấu trúc cố định quyết định một địa chỉ bộ nhớ được phép nằm ở những ô cache line nào.\n\n**Direct-mapped cache**: Mỗi địa chỉ bộ nhớ ánh xạ tới đúng một ô cache. Đơn giản và nhanh (không cần tìm kiếm) nhưng gây ra **conflict miss**: nếu hai địa chỉ hay dùng ánh xạ vào cùng một ô, chúng liên tục evict lẫn nhau dù các ô khác còn trống.\n\n**Fully associative cache**: Một cache line có thể nằm ở bất kỳ ô nào. Loại bỏ conflict miss nhưng phải kiểm tra mọi ô ở mỗi lần truy cập — rất đắt về phần cứng.\n\n**Set-associative cache (n-way)**: Một giải pháp dung hòa. Cache được chia thành các set; mỗi địa chỉ bộ nhớ ánh xạ vào đúng một set, nhưng trong set đó nó có thể nằm ở bất kỳ way (ô) nào trong n way. Một cache 4-way set-associative kiểm tra 4 ô mỗi lần tra cứu — nhanh về phần cứng khi độ kết hợp nhỏ, và tránh được phần lớn conflict miss.\n\nCache của CPU hiện đại:\n- L1 data cache: thường 8-way tới 12-way set associative\n- L2: 8-way tới 16-way\n- L3: 12-way tới 16-way hoặc cao hơn\n\nCác bit địa chỉ được chia thành ba field: **tag** (xác định khối bộ nhớ nào), **set index** (tìm ở set nào trong cache), và **block offset** (byte nào trong cache line). Phần cứng cache tách các field này ra và so sánh song song tag với mọi tag trong set tương ứng."
+    },
+    {
+      "type": "explanation",
+      "title": "Cache coherence: giữ bản sao của mọi nhân trung thực",
+      "content": "Mỗi nhân có L1/L2 cache riêng, nên cùng một cache line có thể nằm trong nhiều cache một lúc. Nếu nhân A ghi vào nó, nhân B không được tiếp tục đọc một bản sao đã cũ. Phần cứng giải quyết việc này bằng **cache coherence protocol** — phổ biến nhất là một biến thể của **MESI**, gắn cho mỗi line trong mỗi cache một trong bốn trạng thái:\n\n- **Modified** — chỉ cache này có line đó, và nó đã bị sửa (mới hơn bộ nhớ).\n- **Exclusive** — chỉ cache này có line đó, và nó còn sạch.\n- **Shared** — nhiều cache cùng giữ bản sao sạch, chỉ đọc.\n- **Invalid** — bản sao này đã cũ và không được dùng.\n\nCác lần đọc có thể được phục vụ song song từ các bản Shared. Một lần **ghi** cần quyền sở hữu độc quyền: nhân ghi sẽ broadcast (hoặc hỏi một directory) để **invalidate** mọi bản sao khác, rồi chuyển line của mình sang Modified. CPU thật dùng các bản mở rộng (MOESI trên AMD, MESIF trên Intel) và directory/snoop filter để mở rộng lên nhiều nhân.\n\nHai hệ quả mà mọi kỹ sư nên biết:\n- **Dữ liệu dùng chung có thể thay đổi rất đắt.** Một biến đếm được 16 thread cùng tăng sẽ khiến line của nó bị đá qua đá lại giữa các nhân — mỗi lần chuyển tốn hàng chục nano giây. Dùng biến đếm riêng cho mỗi thread rồi cộng lại ở cuối mở rộng tốt hơn rất nhiều.\n- **False sharing** là lưu lượng coherence cho dữ liệu chưa bao giờ thực sự được dùng chung — chỉ là hai biến tình cờ nằm trên cùng một line.\n\nCoherence bảo đảm mọi nhân thống nhất về giá trị của *một* vị trí; còn thứ tự mà các lần ghi vào *những* vị trí khác nhau trở nên nhìn thấy được lại là một hợp đồng riêng, gọi là **memory model** — đó là lý do code concurrent cần atomic và memory barrier."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Tổng tuần tự chạy nhanh vì mỗi lần lấy line cho 16 số nguyên dùng được và bộ prefetch đẩy line lên trước khi cần. Stride-16 chạm vào một line mới ở mỗi lần đọc, nhưng mỗi lần đọc vẫn rẻ vì pattern dễ đoán và bộ prefetch theo kịp. Bản ngẫu nhiên thực hiện *cùng* những lần đọc trên *cùng* những line như stride-16 — chỉ khác thứ tự — nhưng mỗi lần đọc tốn gấp vài lần (≈ 13 lần trong một lần chạy trên Apple M1 Pro), vì lần đọc nào cũng là cache miss mà bộ prefetch không che được latency. Khác biệt nằm ở thứ tự truy cập, không phải lượng công việc.",
+      "label": "Demo cache"
+    },
+    {
+      "type": "explanation",
+      "title": "Các pattern tối ưu cache thực tế",
+      "content": "Hiểu phân cấp bộ nhớ cho bạn một bộ công cụ cụ thể để viết code nhanh hơn:\n\n**1. Duyệt mảng tuần tự, đừng duyệt ngẫu nhiên.** Đây là quy tắc có tác động lớn nhất. Khi buộc phải truy cập phần tử không tuần tự, hãy cân nhắc sắp xếp các chỉ số trước để cải thiện cục bộ không gian (mẹo sắp xếp trước).\n\n**2. Giữ working set nhỏ.** Nếu dữ liệu truy cập trong một vòng lặp nóng vừa trong L1 hoặc L2 cache, hiệu năng bị giới hạn bởi tính toán chứ không phải bộ nhớ. Giảm kích thước struct, dùng kiểu gọn (float32 thay vì float64 nếu độ chính xác cho phép), và tránh mang các field không dùng vào hot path.\n\n**3. Dùng cache-blocking (loop tiling) cho các phép toán ma trận.** Phép nhân ma trận ngây thơ truy cập cột của B theo thứ tự cột — cục bộ không gian rất tệ. Tiling chia ma trận thành các khối vừa trong cache, giúp cả truy cập theo hàng lẫn theo cột đều cục bộ.\n\n**4. Struct of Arrays (SoA) cho workload song song dữ liệu.** Nếu một vòng lặp chỉ chạm vào một field của struct, hãy gói field đó vào một mảng liền nhau (SoA). Cách này tối đa hóa mật độ dữ liệu trên mỗi cache line cho field đó.\n\n**5. Prefetching.** CPU hiện đại có **bộ prefetch phần cứng** phát hiện các pattern truy cập tuần tự và lấy cache line trước khi cần (che đi latency). Duyệt tuần tự tự động được hưởng lợi. Với các pattern bất thường, C/C++ có thể phát gợi ý `__builtin_prefetch` tường minh. JavaScript không có lệnh prefetch — đòn bẩy của bạn ở đó là cách bố trí dữ liệu: typed array và dữ liệu liền nhau được duyệt theo thứ tự.\n\n**6. Tránh lần theo pointer trong vòng lặp nóng.** Linked list nổi tiếng là không thân thiện với cache: mỗi node có thể nằm bất kỳ đâu trong bộ nhớ, nên mỗi node khi duyệt gây ra một cache miss. Mảng các giá trị gần như luôn duyệt nhanh hơn.\n\n**7. Căn các cấu trúc dữ liệu nóng theo biên cache line.** Ngăn false sharing trong code đa thread bằng cách bảo đảm dữ liệu của các thread khác nhau nằm trên các cache line khác nhau."
+    },
+    {
+      "type": "explanation",
+      "title": "Virtual memory và TLB",
+      "content": "Chương trình không dùng trực tiếp địa chỉ RAM vật lý. Mỗi process nhìn thấy một **không gian địa chỉ ảo (virtual address space)** — một không gian địa chỉ đồng nhất và riêng tư (pointer 64-bit, trong đó CPU x86-64/ARM64 hiện tại dùng 48 bit — 256 TiB — hoặc 57 bit với paging 5 cấp) mà hệ điều hành âm thầm ánh xạ sang các trang RAM vật lý. **Memory Management Unit (MMU)** của CPU dịch địa chỉ ảo sang địa chỉ vật lý bằng page table.\n\n**Trang (page)** là đơn vị ánh xạ ảo-sang-vật-lý — 4 KB trên x86 và hầu hết hệ thống Linux ARM, 16 KB trên Apple Silicon. Page table là một cây nhiều cấp (4 cấp trên x86-64, 5 cấp với địa chỉ 57-bit) được lưu ngay trong bộ nhớ. Trong trường hợp xấu nhất, dịch một địa chỉ ảo cần bốn lần đọc bộ nhớ phụ thuộc nhau chỉ để đi qua page table — trước cả khi lấy dữ liệu (các entry của page table thường được cache, giúp giảm nhẹ chuyện này).\n\n**TLB (Translation Lookaside Buffer)** là một cache nhỏ chứa các ánh xạ ảo-sang-vật-lý gần đây, thường có hai cấp: L1 data TLB khoảng ~64-100 entry và L2 TLB dùng chung khoảng ~1,500-3,000 entry. Với trang 4 KB, con số đó chỉ phủ được vài MB tới ~12 MB bộ nhớ. Một lần TLB hit được tra song song với L1 cache, nên gần như không tốn gì. Một lần TLB miss kích hoạt việc đi page table bằng phần cứng — hàng chục tới hàng trăm chu kỳ.\n\nHiệu năng TLB quan trọng với các chương trình có working set lớn hoặc nhiều đối tượng nhỏ nằm rải rác trong bộ nhớ. Database hiệu năng cao và game engine thường dùng **huge page** (2 MB hoặc 1 GB thay vì 4 KB) để giảm áp lực lên TLB — thay 512 trang thường bằng một huge page nghĩa là cần ít hơn 512 lần số entry TLB cho cùng working set.\n\n**Page fault** xảy ra khi một địa chỉ ảo hiện chưa có ánh xạ hợp lệ. Một lỗi **minor** (lần chạm đầu tiên vào bộ nhớ vừa cấp phát, hoặc trang đã nằm sẵn trong page cache của hệ điều hành) chỉ cần hệ điều hành gắn một trang vật lý vào — khoảng một micro giây. Một lỗi **major** cần đọc ổ đĩa (trang đã bị swap ra, hoặc dữ liệu file chưa được nạp qua `mmap`) — hàng chục micro giây trên NVMe, hàng mili giây trên HDD: từ hàng trăm nghìn tới hàng triệu chu kỳ."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pipeline dịch địa chỉ. TLB hit được chồng lên lần tra L1; TLB miss thêm một lần đi page table. Virtual memory gần như miễn phí khi TLB phủ được working set của bạn."
+    },
+    {
+      "type": "explanation",
+      "title": "NUMA: khi vị trí bộ nhớ quan trọng trên server lớn",
+      "content": "Trên máy một socket, mọi vùng RAM đều nhanh như nhau. Trên server lớn nhiều socket (hình dung hai CPU 32 nhân trên một bo mạch chủ), mỗi CPU có RAM gắn trực tiếp của riêng nó — **bộ nhớ cục bộ (local memory)** — và phải đi qua một đường kết nối tốc độ cao (UPI trên Intel — trước đây là QPI; Infinity Fabric trên AMD) để tới **bộ nhớ từ xa (remote memory)** của CPU kia.\n\nĐiều này gọi là **NUMA — Non-Uniform Memory Access**. Latency bộ nhớ cục bộ có thể là ~80-100 ns; bộ nhớ từ xa ~130-200 ns. Với workload nhạy cảm về latency, chênh lệch ~1.5-2 lần này cực kỳ quan trọng. Ngay cả CPU chiplet một socket (ví dụ AMD EPYC) cũng có hiệu ứng kiểu NUMA nhỏ hơn giữa các cụm nhân.\n\nPhần mềm hệ thống hiệu năng cao (database, kernel HPC, scheduler của hệ điều hành) đều biết về NUMA: chúng ghim thread vào các nhân gần nhất với dữ liệu mà chúng xử lý. Linux phơi bày topology NUMA qua `numactl`. Chương trình C/C++ dùng `libnuma`; JVM có cấp phát nhận biết NUMA (`-XX:+UseNUMA`).\n\nVới hầu hết lập trình viên ứng dụng trên laptop và VM cloud nhỏ, NUMA là vô hình (dù vậy, instance cloud lớn có thể trải trên nhiều socket và phơi bày các NUMA node). Nhưng nếu bạn đang debug những đợt tăng latency khó giải thích trên một server lớn, topology NUMA là thứ đáng kiểm tra."
+    },
+    {
+      "type": "explanation",
+      "title": "SSD và đáy phân cấp đang thay đổi",
+      "content": "Ổ cứng truyền thống (HDD) có đầu đọc cơ học phải di chuyển vật lý tới đúng track — **seek time** 5-10 ms hoàn toàn mang tính cơ học và không thể giảm bằng mạch điện tử thông minh.\n\n**NVMe SSD** (Non-Volatile Memory Express, thường dùng NAND flash) không có bộ phận chuyển động. Latency đọc ngẫu nhiên giảm còn ~20-100 micro giây — nhanh hơn seek HDD khoảng 100-500 lần — và một ổ có thể phục vụ hàng trăm nghìn tới hàng triệu lần đọc ngẫu nhiên mỗi giây khi có nhiều request đang chạy song song. Điều này thay đổi căn bản việc cái gì có thể để trên ổ đĩa và cái gì phải nằm trong RAM.\n\nTheo truyền thống, database được thiết kế quanh giả định rằng truy cập ổ đĩa chậm thảm hại — vì vậy mới giữ dữ liệu nóng trong buffer pool trên RAM. Với NVMe SSD, truy cập file trực tiếp cho các tập dữ liệu kích thước vừa phải đôi khi là chấp nhận được. Các giao diện như **io_uring** của Linux và driver user-space như **SPDK** ra đời vì ở tốc độ NVMe, chi phí syscall và interrupt cũ cho mỗi request đã trở thành một phần đáng kể của tổng chi phí; các storage engine như RocksDB được tinh chỉnh cho flash (ghi tuần tự, nhiều lần đọc song song).\n\n**Bộ nhớ bền vững (Optane)**: Công nghệ 3D XPoint của Intel (bán dưới tên Optane) mang lại tốc độ truy cập gần như RAM (hàng trăm nano giây) với tính bền vững như SSD. Intel đã khai tử Optane vào năm 2022. Tầng giữa DRAM và SSD giờ đang được lấp bởi bộ nhớ gắn qua **CXL**: DRAM bổ sung trên một đường link dựa trên PCIe, thêm dung lượng với latency xấp xỉ bộ nhớ NUMA từ xa (~150-300 ns).\n\n**Điều này có nghĩa gì với bạn**: Năm 2026, phân cấp thực tế là: L1/L2/L3 cache (trên die, ~1-20 ns) → DRAM (~100 ns) → NVMe SSD (hàng chục micro giây) → HDD (mili giây) → lưu trữ qua mạng và object store (từ mili giây trở lên). Lưu dữ liệu 'lạnh' trên SSD và làm nóng nó vào RAM khi cần là một pattern đã rất thành thục. Giữ dữ liệu hay được query hoàn toàn trong RAM (Redis, Memcached) vẫn quan trọng với các service nhạy cảm về latency."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Lần theo pointer cô lập được **latency**: mỗi lần load phụ thuộc vào lần trước, nên không có gì chồng lên nhau và bộ prefetch không giúp được. Khi working set vượt quá L1, rồi L2, rồi L3, chi phí mỗi lần load nhảy vọt — phân cấp bộ nhớ hiện ra như một bậc thang. (Một phép tổng *tuần tự* sẽ đo bandwidth thay vì latency, và trong JavaScript một vòng lặp scalar thường bị giới hạn bởi tính toán, nên các kích thước nằm trong cache trông gần như y hệt nhau — đó là lý do benchmark này dùng các lần load ngẫu nhiên phụ thuộc nhau.)",
+      "label": "Working set"
+    },
+    {
+      "type": "callout",
+      "content": "**Những con số mọi lập trình viên nên biết (2026, CPU 4-5 GHz điển hình):**\n- L1 cache: 32-128 KB mỗi nhân, ~4-5 chu kỳ / ~1 ns\n- L2 cache: 1-3 MB mỗi nhân (hoặc dùng chung mỗi cụm), ~12-18 chu kỳ / ~3-5 ns\n- L3 cache: 8-128+ MB dùng chung, ~40-70 chu kỳ / ~10-20 ns\n- DRAM: ~70-120 ns / ~300-500 chu kỳ\n- Đọc ngẫu nhiên NVMe SSD: ~20-100 µs\n- Seek HDD: ~5-10 ms\n- Round trip mạng trong cùng datacenter: ~0.1-0.5 ms\n- Cache line: 64 byte (128 trên Apple M-series)\n- Kích thước trang: mặc định 4 KB (16 KB trên Apple Silicon), huge page 2 MB / 1 GB\nThuộc lòng các tỷ lệ: L1 → DRAM là ~100 lần; DRAM → SSD là ~1000 lần; SSD → HDD là ~100 lần."
+    },
+    {
+      "type": "callout",
+      "content": "**Debug hiệu năng với cache trong đầu:**\n- Profile bằng perf (Linux) hoặc Instruments (macOS), xem tỷ lệ cache miss trước khi tối ưu logic code — nút thắt thường là bộ nhớ, không phải tính toán.\n- Nếu một vòng lặp chậm bất ngờ trong khi phần số học rất đơn giản, hãy kiểm tra: working set có lớn hơn L3 không? Truy cập có tuần tự không?\n- Truy cập theo cột trên ma trận lưu theo hàng (C, Java, JS) là nguồn cache thrashing rất phổ biến — luôn duyệt theo từng hàng.\n- Dùng `sizeof` (C/C++) hoặc `typedArray.byteLength` (JS) để ước lượng kích thước working set và so với kích thước cache.\n- Với code đa thread: nếu thêm thread mà hiệu năng không tăng tuyến tính, hãy nghi ngờ false sharing — kiểm tra xem các biến nóng của các thread khác nhau có chung một cache line 64 byte không."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Phân cấp bộ nhớ** (register → L1 → L2 → L3 → RAM → SSD → HDD) đánh đổi tốc độ lấy dung lượng: tầng nhanh hơn thì nhỏ hơn và đắt hơn; CPU kiểm tra từ trên xuống.",
+        "**Cục bộ thời gian** (dữ liệu vừa dùng sẽ được dùng lại) và **cục bộ không gian** (dữ liệu lân cận sẽ sớm được dùng) giải thích vì sao cache hoạt động — chương trình không truy cập bộ nhớ một cách ngẫu nhiên.",
+        "Dữ liệu di chuyển giữa các tầng theo **cache line** — 64 byte trên x86 và hầu hết ARM, 128 byte trên Apple M-series. Chạm vào một byte là mang lên cả line, nên truy cập lân cận rất rẻ và truy cập tuần tự thắng truy cập ngẫu nhiên.",
+        "Chi phí ước lượng năm 2026: L1 ~1 ns, L2 ~3-5 ns, L3 ~10-20 ns, DRAM ~100 ns (300-500 chu kỳ), NVMe ~20-100 µs, HDD ~5-10 ms. **AMAT = hit time + miss rate × miss penalty**; load phụ thuộc nhau (lần theo pointer) phải trả đủ latency, còn load dạng streaming thì chồng các lần miss lên nhau.",
+        "**Code thân thiện với cache** nghĩa là: duyệt mảng tuần tự, working set nhỏ, Struct of Arrays cho vòng lặp song song dữ liệu, cấu trúc căn theo cache line, và tránh lần theo pointer.",
+        "**TLB** cache các bản dịch địa chỉ ảo-sang-vật-lý; TLB miss kích hoạt một lần đi page table tốn kém. Working set lớn hoặc nhiều lần cấp phát nhỏ rải rác làm tăng áp lực lên TLB.",
+        "Kiến trúc **NUMA** nghĩa là bộ nhớ từ xa (RAM của CPU khác) chậm hơn bộ nhớ cục bộ ~2 lần trên server nhiều socket — bố trí thread và dữ liệu có nhận biết NUMA là thiết yếu cho hệ thống quy mô lớn.",
+        "**Cache coherence** (các protocol kiểu MESI) giữ cho cache của từng nhân nhất quán: một lần ghi phải invalidate bản sao của line đó ở các nhân khác — chính là lý do false sharing và các biến đếm dùng chung bị tranh chấp lại chậm."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Trong phân cấp bộ nhớ, tầng lưu trữ nào có dung lượng nhỏ nhất nhưng thời gian truy cập nhanh nhất?",
+      "options": [
+        "L1 Cache",
+        "L2 Cache",
+        "Register của CPU",
+        "RAM"
+      ],
+      "explanation": "Register của CPU nằm trên die, truy cập dưới 1 ns, và tổng cộng chỉ chứa vài chục giá trị 64-bit. L1 cache nhanh thứ hai nhưng lớn hơn nhiều (32-64 KB). Register là tầng nhỏ nhất và nhanh nhất."
+    },
+    {
+      "id": "q2",
+      "question": "Cục bộ thời gian (temporal locality) là gì?",
+      "options": [
+        "Dữ liệu vừa được truy cập nhiều khả năng sẽ sớm được truy cập lại",
+        "Các vị trí bộ nhớ lân cận được truy cập cùng nhau",
+        "Pattern truy cập bộ nhớ lặp lại theo một chu kỳ thời gian cố định",
+        "Bộ nhớ được tổ chức theo thứ tự thời gian dữ liệu được ghi"
+      ],
+      "explanation": "Cục bộ thời gian nghĩa là: nếu bạn vừa truy cập một vị trí bộ nhớ, nhiều khả năng bạn sẽ sớm truy cập lại nó. Biến vòng lặp và các hàm hay được gọi là ví dụ kinh điển. Đó là lý do cache giữ dữ liệu vừa dùng trong bộ lưu trữ nhanh."
+    },
+    {
+      "id": "q3",
+      "question": "Cache line là gì?",
+      "options": [
+        "Một byte đơn lẻ được truyền giữa cache và CPU",
+        "Ranh giới giữa L1 và L2 cache",
+        "Một hàng trong cấu trúc set-associative của cache",
+        "Khối bộ nhớ kích thước cố định (thường 64 byte) được truyền giữa các tầng cache"
+      ],
+      "explanation": "Cache line (64 byte trên CPU hiện đại) là đơn vị truyền nhỏ nhất giữa các tầng bộ nhớ. Truy cập một byte trong line sẽ lấy về cả 64 byte, khiến các lần truy cập sau tới địa chỉ lân cận gần như miễn phí — đó là cách tận dụng cục bộ không gian."
+    },
+    {
+      "id": "q4",
+      "question": "Vì sao duyệt mảng tuần tự nhanh hơn nhiều so với truy cập ngẫu nhiên trên mảng lớn?",
+      "options": [
+        "Truy cập tuần tự dùng ít lệnh CPU hơn",
+        "Truy cập ngẫu nhiên gây ra nhiều lỗi tràn hơn",
+        "Truy cập tuần tự tận dụng cục bộ không gian: một lần lấy cache line cho nhiều phần tử dùng được",
+        "Về mặt vật lý, mảng được đọc theo thứ tự trên ổ đĩa nhanh hơn"
+      ],
+      "explanation": "Duyệt tuần tự tận dụng cục bộ không gian. Mỗi lần lấy cache line 64 byte cho 16 số nguyên liền kề. Truy cập ngẫu nhiên chạm vào một cache line khác cho mỗi phần tử, gây ra số cache miss nhiều hơn ~16 lần với cùng số phần tử."
+    },
+    {
+      "id": "q5",
+      "question": "Trên CPU hiện đại, một lần truy cập RAM chậm hơn khoảng bao nhiêu so với một lần hit L1 cache?",
+      "options": [
+        "2 lần",
+        "10 lần",
+        "50 lần",
+        "1000 lần"
+      ],
+      "explanation": "Truy cập L1 cache mất ~1 ns; truy cập DRAM mất ~70-120 ns — khoảng 50-100 lần, nên 50 lần là phương án gần nhất (1000 lần là khoảng cách giữa DRAM và SSD). Đó là lý do cache miss có ảnh hưởng lớn đến vậy: chỉ một lần miss ở last-level cache đã tốn hàng trăm chu kỳ."
+    },
+    {
+      "id": "q6",
+      "question": "False sharing trong chương trình đa thread là gì?",
+      "options": [
+        "Hai thread ghi vào các biến không liên quan về logic nhưng tình cờ nằm trên cùng một cache line",
+        "Hai thread dùng chung cùng một biến một cách sai",
+        "Hệ điều hành báo sai một cache miss cho chương trình",
+        "Một bug cache coherence khi hai cache không thống nhất về một giá trị"
+      ],
+      "explanation": "False sharing xảy ra khi hai thread ghi vào các biến khác nhau nhưng nằm trên cùng một cache line 64 byte. Mỗi lần ghi lại invalidate cache line ở nhân kia, khiến line bị đá qua đá lại giữa các nhân. Cách sửa là pad hoặc căn các cấu trúc để dữ liệu nóng của mỗi thread nằm trên một cache line riêng."
+    },
+    {
+      "id": "q7",
+      "question": "TLB (Translation Lookaside Buffer) cache thứ gì?",
+      "options": [
+        "Các lệnh CPU vừa được thực thi",
+        "Các kết quả số học vừa được tính",
+        "Các bản dịch địa chỉ ảo-sang-vật-lý gần đây",
+        "Các file handle vừa được mở"
+      ],
+      "explanation": "TLB cache các entry từ page table — ánh xạ từ số trang ảo sang số khung trang vật lý. Một lần TLB hit hoàn tất việc dịch địa chỉ trong ~1 chu kỳ; một lần TLB miss kích hoạt việc đi page table, cần nhiều lần truy cập RAM."
+    },
+    {
+      "id": "q8",
+      "question": "Chính sách thay thế cache nào evict cache line lâu nhất chưa được truy cập?",
+      "options": [
+        "Thay thế ngẫu nhiên",
+        "FIFO (First In First Out)",
+        "LRU (Least Recently Used)",
+        "MRU (Most Recently Used)"
+      ],
+      "explanation": "LRU (Least Recently Used) evict line được truy cập xa nhất trong quá khứ. Đây là chính sách thay thế cache phổ biến nhất và tận dụng tự nhiên cục bộ thời gian — line được truy cập từ lâu ít khả năng sẽ cần lại."
+    },
+    {
+      "id": "q9",
+      "question": "NUMA là gì, và vì sao nó quan trọng với hiệu năng?",
+      "options": [
+        "Một chuẩn RAM mới giúp tăng gấp đôi băng thông bộ nhớ",
+        "Một kỹ thuật prefetch cache line trước",
+        "Một cache coherence protocol cho CPU đa nhân",
+        "Non-Uniform Memory Access — một số vùng RAM truy cập chậm hơn các vùng khác tùy vào socket CPU nào đang truy cập"
+      ],
+      "explanation": "Trên server nhiều socket, mỗi CPU có RAM cục bộ (nhanh, ~60 ns) và phải dùng đường kết nối để tới RAM từ xa gắn với socket CPU khác (~120-150 ns). Code nhận biết NUMA ghim thread và dữ liệu vào cùng một socket để tránh mức phạt latency gấp 2 lần này."
+    },
+    {
+      "id": "q10",
+      "question": "Vòng lặp nóng của một chương trình truy cập tập dữ liệu 512 MB theo thứ tự ngẫu nhiên. Nút thắt hiệu năng khả dĩ nhất là gì?",
+      "options": [
+        "Các đơn vị số học của CPU bị bão hòa",
+        "Cache miss xuống RAM chiếm phần lớn thời gian vì working set vượt xa mọi tầng cache",
+        "TLB quá lớn và làm chậm việc dịch địa chỉ",
+        "Tốc độ clock của CPU không đủ cho phép tính"
+      ],
+      "explanation": "Working set 512 MB vượt xa mọi cache (L3 thường là 8-128 MB). Truy cập ngẫu nhiên nghĩa là gần như mọi lần truy cập đều là cache miss, tốn hàng trăm chu kỳ để lấy từ DRAM (cộng thêm TLB miss thường xuyên). Phần số học trong vòng lặp không quan trọng — chương trình bị giới hạn bởi bộ nhớ (memory-bound). Cách sửa là giảm working set, cải thiện cục bộ không gian, hoặc tái cấu trúc việc truy cập dữ liệu cho tuần tự hơn."
+    }
+  ]
+}

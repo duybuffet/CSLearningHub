@@ -1,0 +1,220 @@
+{
+  "sourceHash": "54e3a8d96123",
+  "title": "Message Queue và Streaming",
+  "tagline": "Tách rời bất đồng bộ là xương sống của các hệ thống bền bỉ — queue và stream cho phép các service giao tiếp mà không phải chờ nhau.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Hãy hình dung trang checkout của một site thương mại điện tử đông khách: user bấm **Buy**. API của bạn phải xác nhận đơn hàng, kích hoạt việc trừ tiền, giữ hàng trong kho, gửi email xác nhận, cập nhật điểm thưởng và log một event analytics — tất cả trước khi phản hồi. Nếu bất kỳ bước nào chậm hay lỗi, user phải chờ. Nếu nhà cung cấp email sập, checkout của bạn thất bại. Đây là sự chuyên chế của **coupling đồng bộ**: các service gọi trực tiếp lẫn nhau sẽ gánh chung latency và failure mode của nhau.\n\n**Message queue** và **event stream** phá vỡ coupling này ở tầng kiến trúc. Thay vì Service A gọi Service B rồi chờ, A publish một message tới một trung gian bền vững và trả về ngay. B đọc và xử lý message đó bất cứ khi nào sẵn sàng — vài giây sau, hoặc sau khi hồi phục từ một lần crash. User nhận response nhanh; công việc phía sau diễn ra tin cậy ở chế độ nền.\n\nChương này bao quát toàn cảnh messaging bất đồng bộ: **point-to-point queue** (RabbitMQ, SQS, BullMQ) so với fan-out kiểu **publish/subscribe**, bước nhảy khái niệm từ queue sang **event stream bền vững** (Apache Kafka, Redpanda), những trade-off then chốt quanh **đảm bảo giao nhận** (at-most-once, at-least-once, exactly-once), **backpressure** và **consumer lag**, cùng các pattern giúp hệ thống bất đồng bộ đáng tin cậy trong production — idempotency, dead-letter queue và quản lý consumer group. Đọc xong, bạn sẽ lập luận được công cụ messaging nào thuộc về phần nào của hệ thống, và vì sao."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern cốt lõi: producer publish một lần và trả về ngay. Broker giữ message một cách bền vững và giao nó tới từng consumer. Consumer ack sau khi xử lý thành công; broker giao lại nếu lỗi. Điều này tách tốc độ của producer khỏi tốc độ của consumer."
+    },
+    {
+      "type": "analogy",
+      "title": "Thanh treo phiếu order ở nhà hàng",
+      "content": "Trong một nhà hàng đông khách, bồi bàn không đứng trong bếp xem đầu bếp nấu. Bồi bàn viết một **phiếu order**, kẹp lên thanh treo phía trên quầy chuyển món, rồi quay lại phục vụ các bàn khác ngay. Bếp đọc phiếu theo thứ tự, nấu từng món, và bấm chuông khi món đã xong. Thanh treo chính là **message queue**: nó tách tốc độ của bồi bàn khỏi tốc độ của bếp, đệm nhu cầu trong giờ cao điểm, và cho phép bếp mở rộng độc lập — thêm đầu bếp, sắp xếp lại khu nấu — mà không phải đổi cách bồi bàn nhận order.\n\nGiờ hãy hình dung nhà hàng còn có một **thanh tra vệ sinh** muốn kiểm tra mọi order từng được đặt, và một học viên muốn phát lại toàn bộ order hôm nay để học các pattern. Một thanh treo order bình thường không giúp được họ — phục vụ xong là phiếu bị vứt đi. **Apache Kafka** giống như một nhà hàng giữ một cuốn sổ ghi vĩnh viễn, đánh số, chứa mọi phiếu từng được viết, xếp theo ngày. Bếp vẫn đọc và nấu như trước. Nhưng thanh tra có thể đọc sổ từ bất kỳ điểm nào. Học viên có thể phát lại từ 9 giờ sáng. Cả hai đều làm vậy mà không cản trở bếp. Nhiều người đọc, một bản ghi vĩnh viễn — đó là mô hình streaming."
+    },
+    {
+      "type": "explanation",
+      "title": "Point-to-point queue: phân phối tác vụ",
+      "content": "Pattern bất đồng bộ đơn giản nhất là **point-to-point queue**: một producer publish một message; đúng một consumer nhận và xử lý nó. Nhiều consumer có thể cùng lắng nghe một queue — chúng **cạnh tranh** nhau giành message, mỗi consumer lấy một message khác nhau từ queue. Sự cạnh tranh này chính là cơ chế mở rộng: thêm worker process để xử lý thêm message mỗi giây.\n\n**Khi nào dùng point-to-point queue:**\n- **Background job**: resize ảnh này, gửi email này, xử lý khoản thanh toán này. Mỗi job nên được một worker làm đúng một lần.\n- **Task queue có rate limiting**: BullMQ cho phép cấu hình concurrency theo worker và một rate limit toàn cục, điều thiết yếu khi gọi các API bên thứ ba có áp quota.\n- **Phân phối công việc cho các worker không đồng nhất**: các worker khác nhau có thể chuyên về các loại tác vụ khác nhau bằng cách lắng nghe các queue khác nhau.\n\n**Các cài đặt phổ biến:**\n- **RabbitMQ** — trưởng thành, dựa trên AMQP, routing xuất sắc qua exchange và binding key. Hỗ trợ priority queue, message có trễ (qua plugin hoặc TTL + dead-lettering) và các topology phức tạp; **quorum queue** (replicate bằng Raft) là loại queue bền vững được khuyến nghị, còn RabbitMQ Streams bổ sung một log phát lại được giống Kafka.\n- **Amazon SQS** — managed, gần như không cần vận hành, có hai biến thể Standard (at-least-once, thứ tự best-effort) và FIFO (thứ tự nghiêm ngặt theo từng message group, cộng khử trùng các lần gửi trong 5 phút — AWS gọi đây là \"exactly-once processing\", nhưng một consumer không xóa message trước khi hết visibility timeout vẫn sẽ thấy lại nó). Tự động mở rộng.\n- **BullMQ** (dựa trên Redis) — phổ biến trong hệ sinh thái Node.js. Hỗ trợ độ ưu tiên job, retry với exponential backoff, job theo lịch/cron, và có sẵn dashboard.\n\n**Cơ chế chính:**\n- **Visibility timeout**: khi một consumer lấy message, broker ẩn nó khỏi các consumer khác trong một khoảng timeout cấu hình được. Nếu consumer không ack trong khoảng đó (ví dụ nó crash), message hiện lại và được giao lại. Đây là cơ chế đứng sau at-least-once delivery.\n- **Dead-letter queue (DLQ)**: sau N lần giao thất bại, message được chuyển sang một DLQ để kiểm tra. Không có DLQ, một poison message (message luôn làm consumer crash) có thể chặn queue vô thời hạn."
+    },
+    {
+      "type": "explanation",
+      "title": "Publish/Subscribe: fan-out event",
+      "content": "**Pub/sub** (publish/subscribe) đảo ngược mô hình: thay vì cạnh tranh giành message, mọi subscriber đều nhận một bản sao của mọi message. Một event — `order.placed` — đồng thời kích hoạt thông báo email, trừ kho và một bản ghi analytics, mỗi service tiêu thụ độc lập.\n\nPattern fan-out này là nền móng của **kiến trúc event-driven**. Các service không biết về nhau — email service không biết inventory service tồn tại. Cả hai chỉ đơn giản subscribe `order.placed`. Thêm một service phía sau mới (chẳng hạn service điểm thưởng) không cần sửa gì ở order API: chỉ cần thêm một subscriber mới.\n\n**Các cài đặt pub/sub:**\n- **Redis Pub/Sub** — fan-out trong bộ nhớ, cực nhanh. Message chỉ được giao cho các subscriber đang kết nối; nếu một subscriber offline, message bị mất. Không bền vững. Hợp nhất cho broadcast real-time (tin nhắn chat, tín hiệu cache invalidation, dashboard trực tiếp) khi thỉnh thoảng mất message là chấp nhận được.\n- **Amazon SNS** — pub/sub managed. Mỗi SNS topic có thể fan-out đồng thời tới nhiều SQS queue, Lambda function, HTTP endpoint và địa chỉ email. Giao bền vững tới các subscriber SQS. Pattern kinh điển là **SNS → nhiều SQS queue**: fan-out + queue bền vững riêng cho từng subscriber.\n- **Google Cloud Pub/Sub** — bền vững, replicate toàn cầu, at-least-once delivery. Xử lý hàng triệu message mỗi giây.\n\n**Redis Pub/Sub vs Redis Streams**: Redis Streams (có từ Redis 5.0) là một lựa chọn bền vững, nhận biết consumer group, thay cho Pub/Sub cơ bản. Streams lưu message và hỗ trợ consumer group kèm ack — gần với Kafka hơn là Pub/Sub cổ điển, nhưng nằm trong hệ sinh thái Redis."
+    },
+    {
+      "type": "diagram",
+      "caption": "SNS fan-out tới nhiều SQS queue: pattern kinh điển của AWS. SNS broadcast tới mọi subscriber; mỗi SQS queue cung cấp bộ đệm độc lập và at-least-once delivery cho consumer group của nó. Thêm một service phía sau mới chỉ là subscribe một SQS queue mới vào SNS — không phải sửa Order API."
+    },
+    {
+      "type": "explanation",
+      "title": "Apache Kafka: event log bền vững",
+      "content": "Apache Kafka khác biệt về mặt khái niệm so với các queue truyền thống. Queue xóa message sau khi tiêu thụ, còn **Kafka là một log chỉ-ghi-thêm (append-only), bền vững, có thứ tự**. Message được ghi xuống đĩa và giữ lại trong một khoảng thời gian cấu hình được (vài giờ, vài ngày, vài tuần, hoặc mãi mãi). Consumer đọc log bằng cách tự theo dõi vị trí của mình — message không bao giờ bị xóa chỉ vì có consumer đã đọc nó.\n\nChỉ một quyết định thiết kế này đã mở ra những khả năng mà queue không cung cấp được:\n- **Replay**: xử lý lại mọi event từ đầu, hoặc từ bất kỳ thời điểm nào. Thiết yếu cho việc debug, chuyển sang data model mới, hay khởi động một service mới.\n- **Nhiều consumer group độc lập**: team analytics và team notification mỗi bên đọc cùng một topic từ vị trí riêng. Không bên nào ảnh hưởng bên nào.\n- **Event sourcing**: log là bản ghi chính thức về những gì đã xảy ra. State phía sau (database, cache) được suy ra từ log và luôn có thể dựng lại.\n- **Stream processing**: các công cụ như **Kafka Streams**, **Apache Flink** và **ksqlDB** có thể join, gộp và biến đổi event stream theo thời gian thực ngay trên Kafka log.\n\n**Các khái niệm Kafka cốt lõi, đi sâu:**\n\n**Broker**: Một Kafka server. Một cluster production có nhiều broker để replication và availability. Mỗi broker giữ một số partition của mỗi topic.\n\n**Topic**: Một log có tên, chia partition, có thứ tự, bền vững. Hãy nghĩ nó như một bảng database mà các dòng chỉ được thêm vào, không bao giờ bị sửa hay xóa.\n\n**Partition**: Một topic được chia thành N partition có thứ tự, bất biến. Mỗi partition là một log append-only lưu trên đĩa dưới dạng một thư mục các file segment. Thứ tự chỉ được đảm bảo **trong phạm vi một partition**, không bao giờ trên toàn topic. Partition là đơn vị song song: một topic 12 partition có thể được tối đa 12 consumer tiêu thụ song song trong một consumer group.\n\n**Offset**: Mỗi message trong một partition có một offset số nguyên tăng đơn điệu (0, 1, 2, …). Consumer commit offset hiện tại để theo dõi tiến độ. Chúng có thể seek tới bất kỳ offset nào còn được giữ (hoặc tới một timestamp) vào bất cứ lúc nào. Đây là cơ chế cho replay.\n\n**Consumer group**: Một nhóm logic có tên gồm các consumer cùng nhau xử lý một topic. Kafka phân chia partition cho cả nhóm: mỗi partition thuộc về đúng một consumer trong nhóm tại một thời điểm. Nếu một consumer chết, Kafka chia lại các partition của nó cho các thành viên khác (một sự kiện **rebalance**). Thêm consumer giúp tăng throughput, tối đa bằng số partition.\n\n**Replication factor**: Mỗi partition được replicate tới N broker (thường là 3). Một replica là **leader** (nhận các lần ghi); các **follower** fetch từ nó. Các follower đã bắt kịp tạo thành **in-sync replica set (ISR)**. Với `acks=all` (mặc định của producer từ Kafka 3.0), leader chỉ ack sau khi mọi thành viên ISR đều có bản ghi, và `min.insync.replicas=2` khiến lần ghi thất bại thay vì tiếp tục chỉ với một bản sao. Nếu leader chết, một follower in-sync được đôn lên.\n\n**Metadata và KRaft**: Ban đầu Kafka lưu metadata của cluster (broker, topic, leader) trong một ensemble **ZooKeeper** riêng. **KRaft** — một quorum các controller node của Kafka dựa trên Raft — đã thay thế nó: sẵn sàng cho production từ Kafka 3.3, và **Kafka 4.0 (2025) đã gỡ bỏ hoàn toàn hỗ trợ ZooKeeper**, nên cluster mới chỉ chạy một hệ thống thay vì hai. Kafka 4.0 còn đưa protocol rebalance consumer mới (KIP-848) lên GA, tránh được các lần rebalance kiểu \"stop-the-world\", và giới thiệu bản early-access của **share group** (KIP-932, \"Queues for Kafka\") cho kiểu tiêu thụ giống queue, nơi nhiều consumer có thể cùng làm việc trên một partition với ack theo từng bản ghi; share group sẵn sàng cho production từ Kafka 4.2 (tháng 2/2026)."
+    },
+    {
+      "type": "diagram",
+      "caption": "Hai consumer group độc lập cùng đọc một topic. Nhóm notifications và nhóm analytics mỗi nhóm duy trì offset riêng cho từng partition. Nhóm analytics có thể tụt lại phía sau mà không ảnh hưởng notifications. Mỗi nhóm thấy mọi message một cách độc lập."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Dùng `order.id` làm partition key là pattern chuẩn để có thứ tự trong Kafka: mọi event của một đơn hàng đều rơi vào cùng một partition, được một consumer tiêu thụ tuần tự. Idempotent producer chặn các bản trùng phía broker do retry. Consumer chỉ đánh dấu một đơn hàng là đã gửi email *sau khi* gửi thành công — đặt dấu trước (một bug phổ biến) nghĩa là một lần gửi thất bại sẽ bị bỏ qua vĩnh viễn khi giao lại — và truyền một idempotency key cho nhà cung cấp email để che khoảng hở crash còn lại giữa lúc gửi và lúc đánh dấu. TTL 24 giờ giữ bộ nhớ Redis có giới hạn.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Đảm bảo giao nhận: trade-off then chốt",
+      "content": "Mọi hệ thống messaging đều đánh đổi về bản chất giữa **hiệu năng**, **sự đơn giản** và **tính đúng đắn**. Hiểu ba mức đảm bảo giao nhận là điều không thể thiếu khi thiết kế hệ thống production.\n\n**At-most-once delivery** (giao nhiều nhất một lần)\nBroker giao message mà không chờ consumer xác nhận. Nếu consumer crash sau khi nhận message nhưng trước khi xử lý, message bị mất — nó sẽ không được giao lại. Broker coi như xong việc ngay khi gửi đi.\n- **Khi nào dùng**: metric, log, event analytics khi thỉnh thoảng mất là chấp nhận được và throughput là trên hết. Bạn thà bỏ 0.01% event còn hơn làm chậm pipeline.\n- **Cài đặt**: producer kiểu bắn-rồi-quên (`acks=0` trong Kafka) và/hoặc consumer commit offset *trước* khi xử lý — nếu crash giữa chừng thì message bị bỏ qua.\n\n**At-least-once delivery** (giao ít nhất một lần)\nBroker giữ message cho tới khi consumer ack một cách tường minh. Nếu consumer crash trước khi ack, message được giao lại (có thể cho một consumer khác). Consumer có thể thấy cùng một message nhiều hơn một lần.\n- **Khi nào dùng**: mặc định cho gần như mọi hệ thống production. Chấp nhận được miễn là consumer **idempotent** — xử lý cùng một message hai lần có tác dụng như xử lý một lần.\n- **Cài đặt**: Kafka producer với `acks=all` và retry (mặc định từ Kafka 3.0), consumer chỉ commit offset *sau* khi xử lý. RabbitMQ thì `basic.ack` thủ công. SQS: chỉ xóa message sau khi xử lý; nếu không, nó sẽ xuất hiện lại khi visibility timeout kết thúc.\n\n**Exactly-once delivery** (giao đúng một lần)\nMỗi message được xử lý đúng một lần — không mất, không trùng. Nghe thì lý tưởng; thực tế nó đòi hỏi phối hợp giữa broker và state của consumer, thêm độ phức tạp và latency đáng kể.\n- **Cách của Kafka**: Kafka 0.11+ hỗ trợ exactly-once semantics (EOS) thông qua idempotent producer (mỗi message có một số thứ tự; các bản trùng được khử ở broker) kết hợp với transactional producer (ghi atomic trên nhiều partition) và consumer commit offset đầu vào *bên trong* transaction của producer (`sendOffsetsToTransaction`), với các reader phía sau dùng `isolation.level=read_committed`.\n- **Phạm vi là lưu ý sống còn**: Kafka EOS chỉ bao trùm *đọc từ Kafka → xử lý → ghi vào Kafka*. Bất kỳ side effect nào bên ngoài Kafka — một dòng database, một lần trừ tiền thẻ, một email — không thuộc transaction. Nếu consumer crash sau khi gọi API thanh toán nhưng trước khi transaction commit, transaction bị hủy, message được xử lý lại, và thẻ bị trừ tiền lần nữa trừ khi bản thân lời gọi đó idempotent. Exactly-once *delivery* qua mạng là bất khả thi; thứ hệ thống cung cấp là exactly-once *effect* (tác dụng đúng một lần), được xây từ at-least-once delivery cộng khử trùng.\n- **Khi nào dùng**: giao dịch tài chính, trừ kho, bất kỳ domain nào không chấp nhận được bản trùng và việc đạt idempotency ở phía consumer là khó hoặc bất khả thi.\n- **Cái giá**: overhead về throughput khá khiêm tốn khi transaction được gom batch (commit mỗi ~100 ms), nhưng latency end-to-end tăng vì consumer `read_committed` chỉ thấy bản ghi sau khi transaction commit, và vận hành phức tạp hơn. Trong phần lớn hệ thống, at-least-once kèm idempotency là câu trả lời đúng.\n\n**Khuyến nghị thực tế**: thiết kế consumer **idempotent** và chấp nhận at-least-once delivery. Chỉ dùng exactly-once khi domain thực sự đòi hỏi và bạn sẵn sàng trả giá."
+    },
+    {
+      "type": "diagram",
+      "caption": "Trình tự at-least-once delivery. Broker chỉ ack sau khi đã ghi tới N replica. Consumer commit offset kế tiếp (current+1) sau khi xử lý thành công. Nếu consumer crash giữa lúc nhận và lúc commit, message được giao lại — vì thế mới gọi là \"ít nhất một lần\"."
+    },
+    {
+      "type": "explanation",
+      "title": "Các pattern idempotency cho hệ thống at-least-once",
+      "content": "Vì at-least-once là mặc định thực tế, **consumer idempotent** là pattern quan trọng nhất trong thiết kế hệ thống bất đồng bộ. Một thao tác là idempotent nếu chạy nó nhiều lần với cùng input cho kết quả như chạy một lần.\n\n**Pattern 1: Idempotency key trong một store nhanh**\nLưu một định danh duy nhất cho mỗi message đã xử lý (một UUID gắn trong message, hoặc `orderId` + loại event) vào Redis kèm TTL. Phần tinh tế là ghi nhận nó *khi nào*: đánh dấu quá sớm thì một lần thử thất bại bị bỏ qua vĩnh viễn; đánh dấu quá muộn thì hai consumer có thể cùng làm việc. Pattern giành-rồi-xác-nhận (claim-then-confirm) xử lý được cả hai:\n\n```javascript\nasync function processIdempotent(event) {\n  const key = `proc:${event.id}`;\n  // Claim atomically (NX). The short TTL frees the claim if this worker\n  // dies mid-work, so a later redelivery can try again.\n  const claimed = await redis.set(key, 'processing', 'NX', 'EX', 300);\n  if (!claimed) {\n    if ((await redis.get(key)) === 'done') return; // true duplicate: ack + skip\n    throw new Error('in progress elsewhere');      // don't ack: retry later\n  }\n  try {\n    await doActualWork(event);\n    await redis.set(key, 'done', 'EX', 86400);    // remember for 24 h\n  } catch (err) {\n    await redis.del(key);                          // release so a retry can claim it\n    throw err;\n  }\n}\n```\n\nMột cú crash giữa `doActualWork` và lúc đánh dấu `done` vẫn khiến công việc bị lặp lại khi giao lại, nên bản thân công việc cũng nên idempotent (pattern 2–4) — Redis key là một bộ lọc nhanh, không phải một bảo đảm.\n\n**Pattern 2: Ràng buộc unique trong database**\nVới các event ghi vào database, thêm event ID làm một cột unique. Một message trùng sẽ kích hoạt lỗi vi phạm ràng buộc unique khi insert, bạn bắt lỗi đó và bỏ qua. Chính database là nơi lưu idempotency — không cần Redis riêng. Tốt nhất là insert dòng processed-event và thực hiện lần ghi nghiệp vụ trong **cùng một transaction**: hoặc cả hai cùng commit hoặc không cái nào, nhờ đó bịt kín hoàn toàn khoảng hở crash.\n\n**Pattern 3: Ngữ nghĩa upsert**\nThay vì INSERT, dùng `INSERT ... ON CONFLICT DO UPDATE` (PostgreSQL) hoặc tương đương. Lần thực thi thứ hai của cùng một message ghi đè bằng cùng dữ liệu — tự nhiên idempotent.\n\n**Pattern 4: Idempotency tự nhiên**\nMột số thao tác vốn đã idempotent. Đặt địa chỉ email của user thành một giá trị cụ thể là idempotent — làm hai lần, cùng kết quả. Đánh dấu một đơn hàng là \"shipped\" (nếu đã shipped, lần ghi thứ hai không làm gì nhờ một bước kiểm tra trạng thái) có thể làm cho idempotent. Hãy thiết kế các thao tác domain idempotent ở mọi nơi có thể, và tầng messaging bất đồng bộ sẽ dễ lập luận hơn nhiều.\n\n**Những gì idempotency KHÔNG giải quyết**: vấn đề thứ tự. Nếu bạn nhận `order.cancelled` trước `order.placed` (có thể xảy ra nếu chúng rơi vào các partition khác nhau), consumer phải xử lý được event đến không đúng thứ tự. Dùng cùng một partition key cho mọi event của cùng một entity (ví dụ `orderId`) đảm bảo thứ tự trong phạm vi entity — một quyết định thiết kế then chốt cho hệ thống event-driven."
+    },
+    {
+      "type": "code_example",
+      "explanation": "`jobId` tùy chỉnh của BullMQ khử trùng trong lúc job vẫn còn được lưu: một form bị submit hai lần chỉ thêm job một lần. Khi job đã bị xóa (`removeOnComplete` chỉ giữ 100 job gần nhất), cùng ID đó có thể được thêm lại, nên đây là khử trùng ngắn hạn, không phải bảo đảm vĩnh viễn. Exponential backoff (1 s, 2 s, 4 s, 8 s cho 5 lần thử) tránh nện liên tục vào một nhà cung cấp email đang chật vật, còn `UnrecoverableError` dừng retry các job vô vọng. Thiết lập `concurrency` kiểm soát mức song song cho mỗi worker process; còn `limiter` được áp đặt trên mọi worker của queue thông qua Redis — thiết yếu khi API bên thứ ba có quota. Lưu ý tùy chọn connection `maxRetriesPerRequest: null`, thứ mà worker BullMQ bắt buộc phải có.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Backpressure và consumer lag",
+      "content": "Một message queue chỉ hữu ích khi consumer của nó theo kịp. Khi producer publish nhanh hơn consumer xử lý, message dồn đống — đó là **consumer lag**. Lag không được kiểm soát gây ra rắc rối:\n- Độ sâu queue tăng không giới hạn, ngốn bộ nhớ và đĩa.\n- Event được xử lý với độ trễ ngày càng lớn, phá hỏng mục đích xử lý gần real-time.\n- Trong các hệ thống có cửa sổ retention (Kafka), consumer chậm có thể tụt ra ngoài ranh giới retention: offset đã commit của chúng giờ trỏ vào dữ liệu đã bị xóa, và consumer nhảy tới offset sớm nhất hoặc mới nhất theo `auto.offset.reset` — âm thầm bỏ qua mọi thứ ở giữa (hoặc lỗi out-of-range nếu reset bị tắt).\n\n**Backpressure** là cơ chế để capacity phía sau báo hiệu cho producer phía trước chậm lại. Trong hệ thống đồng bộ, backpressure là tự động: nếu database chậm, bên gọi bị chặn và tự nhiên chậm lại. Trong hệ thống bất đồng bộ, bạn phải thiết kế nó một cách tường minh.\n\n**Các chiến lược quản lý consumer lag:**\n\n**Mở rộng consumer theo chiều ngang**: Thêm instance consumer (tối đa bằng số partition trong Kafka). Đây là công cụ đầu tiên và hiệu quả nhất. BullMQ và SQS tự động mở rộng; Kafka cần partition được cấp sẵn từ trước để tiêu thụ song song.\n\n**Tăng số partition (Kafka)**: Nhiều partition hơn = song song hơn. Nhưng số partition chỉ tăng được, không bao giờ giảm được — và tăng nó **làm thay đổi ánh xạ key → partition**, nên event mới của một key hiện có có thể rơi vào partition khác với các event cũ của nó, phá vỡ thứ tự theo key trong giai đoạn chuyển tiếp. Hãy lên kế hoạch số partition rộng rãi ngay khi tạo topic (12 hoặc 24 là những điểm khởi đầu phổ biến).\n\n**Tối ưu xử lý của consumer**: Profile đường xử lý nóng. Consumer có đang tốn phần lớn thời gian vào một query database? Thêm index. Gọi API bên ngoài? Gom batch các lời gọi. Làm việc nặng CPU? Đẩy sang một worker pool.\n\n**Bỏ bớt tải không quan trọng**: Nếu lag tăng vọt trong một đợt traffic, cân nhắc chỉ xử lý N message mới nhất và bỏ qua các message cũ hơn (seek tới gần offset mới nhất). Với pipeline analytics, câu trả lời xấp xỉ từ dữ liệu gần đây thường giá trị hơn câu trả lời chính xác từ dữ liệu đã cũ.\n\n**Cảnh báo theo lag**: Đo lag của consumer group như một metric (Kafka phơi nó qua JMX và API; các công cụ như Burrow, Kminion hay Confluent operator gộp nó lại). Cảnh báo khi lag vượt ngưỡng — ví dụ khi lag tương ứng với hơn 5 phút event. Đây là chỉ báo dẫn trước của một hệ thống đang gặp nạn, chứ không phải chỉ báo trễ."
+    },
+    {
+      "type": "explanation",
+      "title": "Dead-letter queue và poison message",
+      "content": "**Poison message** là message luôn khiến consumer crash hoặc lỗi — có thể là payload sai định dạng, một field null bất ngờ, hoặc dữ liệu vi phạm một bất biến mà code của bạn mặc định. Không có cơ chế bảo vệ, một poison message có thể lặp vô hạn: tiêu thụ, crash, giao lại, tiêu thụ, crash.\n\nLời giải là một **dead-letter queue (DLQ)**: sau N lần giao thất bại, broker tự động chuyển message sang một DLQ topic hoặc queue riêng. Các consumer bình thường được giải phóng; DLQ gom các poison message lại để kiểm tra và can thiệp thủ công.\n\n**Cấu hình DLQ:**\n- **SQS**: Cấu hình một `RedrivePolicy` trên queue nguồn với ARN của DLQ và một `maxReceiveCount`. Sau `maxReceiveCount` lần thất bại, SQS tự động chuyển message.\n- **RabbitMQ**: Cấu hình một dead-letter exchange (DLX) và routing key trên queue. Message bị từ chối bằng `nack` (hoặc hết hạn, hoặc vượt độ dài tối đa) được chuyển tiếp tới DLX.\n- **Kafka**: Bản thân Kafka không có khái niệm DLQ dựng sẵn (các sink connector của Kafka Connect thì có). Ở đây nó còn quan trọng hơn: vì một partition được xử lý theo thứ tự, một poison message chặn mọi message phía sau nó trong partition đó. Pattern là tự cài đặt trong consumer: bắt mọi exception, publish message lỗi sang một topic `-dlq` (ví dụ `orders-dlq`), và commit offset. Một consumer DLQ riêng sau này có thể phát lại message về topic chính khi bug đã được sửa.\n- **BullMQ**: Các job lỗi vượt quá `attempts` được chuyển sang trạng thái `failed`. Chúng tồn tại trong Redis và có thể được retry bằng code qua `job.retry()`.\n\n**Tiến hóa schema và DLQ**: Một nguyên nhân phổ biến của poison message là thay đổi schema ở producer làm hỏng các consumer hiện có. Producer thêm một field bắt buộc; code consumer cũ crash khi truy cập null. **Schema registry** (Confluent Schema Registry, AWS Glue Schema Registry) kiểm tra mọi version schema mới theo một chế độ tương thích trước khi producer được dùng nó. **BACKWARD** (mặc định của Confluent) nghĩa là consumer dùng schema mới đọc được dữ liệu cũ — nâng cấp consumer trước. **FORWARD** nghĩa là consumer vẫn dùng schema cũ đọc được dữ liệu mới — nâng cấp producer trước. **FULL** đòi hỏi cả hai. Chọn chế độ khớp với thứ tự deploy của bạn sẽ ngăn được cả lớp poison message gây ra bởi schema bị trôi lệch."
+    },
+    {
+      "type": "diagram",
+      "caption": "Pattern dead-letter queue. Sau N lần thử thất bại, broker chuyển poison message sang DLQ. Một cảnh báo vận hành được bắn ra; engineer kiểm tra DLQ, sửa bug của consumer, và phát lại các message về topic chính. DLQ ngăn một message xấu chặn cả queue."
+    },
+    {
+      "type": "explanation",
+      "title": "Kafka Streams và stream processing",
+      "content": "Đọc event từ Kafka và ghi kết quả trở lại Kafka — biến đổi, lọc, join hay gộp event theo thời gian thực — chính là **stream processing**. Nó là phiên bản bất đồng bộ của một query database online, nhưng chạy trên một luồng event vô hạn, liên tục thay vì một tập dữ liệu tĩnh.\n\n**Kafka Streams** là một library Java (thuộc dự án Apache Kafka) để xây ứng dụng stream processing. Nó chạy như một ứng dụng bình thường — không cần cluster riêng — và dùng Kafka topic làm cả đầu vào lẫn đầu ra. Các thao tác chính:\n- **map / filter**: biến đổi hoặc loại bỏ từng event.\n- **groupByKey + aggregate**: tính các giá trị gộp lũy kế (đếm, tổng) theo key, lưu trong một local state store (RocksDB) được hậu thuẫn bởi một changelog topic của Kafka.\n- **join**: join hai stream (ví dụ `orders` và `payments`) trên một key chung trong một cửa sổ thời gian. Đòi hỏi hai topic phải được co-partition (cùng số partition, cùng key).\n- **windowing**: nhóm event theo cửa sổ thời gian (tumbling: các cửa sổ cố định không chồng lấn; hopping: có chồng lấn; session: dựa trên khoảng trống). Thiết yếu cho các query kiểu \"đếm event trong 5 phút gần nhất\".\n\n**ksqlDB** cung cấp giao diện SQL trên nền Kafka Streams — các query streaming chạy liên tục trên Kafka topic (đây là phương ngữ của ksqlDB, không phải PostgreSQL; `orders` phải được khai báo là một STREAM). Confluent hiện đang hướng các dự án mới sang **Flink SQL**, thứ đảm nhận cùng vai trò.\n```sql\n-- ksqlDB: hourly order count per user, continuously updated\nCREATE TABLE order_counts AS\n  SELECT userId, COUNT(*) AS order_count\n  FROM orders\n  WINDOW TUMBLING (SIZE 1 HOUR)\n  GROUP BY userId\n  EMIT CHANGES;\n```\n\n**Apache Flink** là lựa chọn mạnh hơn cho stream processing có state phức tạp: đảm bảo exactly-once, ngữ nghĩa event-time (xử lý event đến muộn), và quy mô khổng lồ. Được Uber, Netflix và Alibaba dùng cho analytics real-time ở mức hàng tỉ event mỗi ngày.\n\n**Dùng stream processing khi**: bạn cần làm giàu event (join event đơn hàng với dữ liệu sản phẩm), phát hiện pattern xuyên nhiều event (phát hiện gian lận: hơn 3 lần thanh toán thất bại trong 10 phút), tính các giá trị gộp real-time (dashboard hiển thị số đơn mỗi phút), hoặc cài đặt các microservice event-driven đọc từ một topic và ghi sang topic khác."
+    },
+    {
+      "type": "callout",
+      "content": "**Khi nào KHÔNG nên dùng Kafka**: Kafka xuất sắc với các event stream throughput cao, bền vững, có thứ tự — nhưng nó nặng nề về vận hành. Với background job đơn giản trong một service hoặc một team nhỏ, **BullMQ** (dựa trên Redis) hoặc **Amazon SQS** đơn giản hơn nhiều mà vẫn tin cậy ngang ngửa. Với pub/sub real-time trong một datacenter và chấp nhận được việc mất message, **Redis Pub/Sub** nhanh và đơn giản hơn. Hãy đưa Kafka vào khi bạn cần: (1) fan-out cho nhiều consumer group với offset độc lập, (2) phát lại event lịch sử, (3) giữ lại dữ liệu sau khi đã tiêu thụ, hoặc (4) throughput ở mức hàng triệu event mỗi giây. Nếu team của bạn tốn nhiều thời gian quản lý Kafka hơn là xây tính năng, hãy xem lại liệu bạn đã vượt qua ngưỡng phức tạp mà ở đó Kafka đáng đồng tiền chưa. Dù vậy, rào cản vận hành đã thấp đi: KRaft gỡ bỏ ZooKeeper, các dịch vụ managed (Confluent Cloud, Amazon MSK) gánh phần vận hành, và các lựa chọn tương thích Kafka API như Redpanda (một binary duy nhất, không JVM) hay các thiết kế dựa trên object storage (WarpStream, Kafka tiered storage) thay đổi bức tranh chi phí."
+    },
+    {
+      "type": "callout",
+      "content": "**Checklist production cho mọi hệ thống messaging**: (1) **Đã cấu hình DLQ** — đừng bao giờ để poison message lặp vô hạn. (2) **Giám sát consumer lag** — cảnh báo trước khi lag thành thảm họa. (3) **Consumer idempotent** — thiết kế cho at-least-once ngay từ ngày đầu. (4) **Versioning schema** — dùng schema registry hoặc thêm field `schemaVersion` vào mọi message; consumer cũ phải xử lý êm ái các field mới. (5) **Tắt máy êm ái** — consumer phải hoàn tất các message đang xử lý và commit offset trước khi tắt; kill đột ngột gây ra những cơn bão giao lại không cần thiết. (6) **Lên kế hoạch số partition rộng rãi** — trong Kafka, bạn tăng được nhưng không giảm được partition, và tăng chúng sẽ ánh xạ lại key (phá vỡ thứ tự theo key một thời gian); hãy bắt đầu với 12 hoặc hơn cho bất kỳ topic nào dự kiến sẽ lớn. (7) **Cấu hình retention theo từng topic** — đừng dùng mặc định của cluster cho mọi thứ; topic khối lượng lớn, ít quan trọng (click event) có thể giữ 1 ngày; topic event tài chính quan trọng có thể cần 30 ngày hoặc hơn."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Message queue** tách rời producer khỏi consumer: producer publish và trả về ngay, consumer xử lý theo nhịp riêng. Điều này loại bỏ coupling về latency và sự lan truyền lỗi — nếu email service sập, checkout API không bị ảnh hưởng.",
+        "**Point-to-point queue** (SQS, RabbitMQ, BullMQ) giao mỗi message cho đúng một consumer trong số các consumer cạnh tranh — lý tưởng cho phân phối tác vụ. **Pub/sub** (SNS, Redis Pub/Sub) giao mỗi message cho mọi nhóm subscriber — lý tưởng cho fan-out event qua các service độc lập.",
+        "**Apache Kafka** là một log bền vững, append-only, chia partition. Message được giữ lại sau khi tiêu thụ; nhiều consumer group độc lập mỗi nhóm theo dõi offset riêng, cho phép replay, event sourcing và stream processing song song với các consumer tác vụ thông thường.",
+        "**Nội tại Kafka cần biết**: thứ tự chỉ trong phạm vi một partition; `acks=all` + `min.insync.replicas` để đảm bảo độ bền; metadata do **KRaft** quản lý (ZooKeeper đã bị gỡ trong Kafka 4.0); thêm partition sẽ ánh xạ lại key.",
+        "**Đảm bảo giao nhận**: at-most-once (có thể mất), at-least-once (mặc định thực tế — có thể trùng), exactly-once. Kafka EOS (idempotent + transactional producer, `read_committed`) chỉ bao trùm việc xử lý từ Kafka sang Kafka; side effect trong database hay API bên ngoài vẫn cần idempotency. Hãy thiết kế consumer **idempotent**.",
+        "**Kafka partition** là đơn vị song song: một topic có N partition được tối đa N consumer tiêu thụ song song trong một consumer group. Partition key (ví dụ `orderId`) route các event liên quan vào cùng một partition, giữ thứ tự theo từng entity.",
+        "**Dead-letter queue** ngăn poison message chặn consumer vô thời hạn. Sau N lần thử thất bại, broker chuyển message sang DLQ để kiểm tra — một lưới an toàn không thể thiếu trong mọi hệ thống messaging production.",
+        "**Consumer lag** — khoảng cách giữa offset được produce mới nhất và offset được consume mới nhất — là metric sức khỏe then chốt của mọi pipeline bất đồng bộ. Giám sát nó, cảnh báo theo nó, và lên kế hoạch số partition cũng như việc mở rộng consumer để giữ lag có giới hạn khi tải đỉnh.",
+        "**Đánh dấu message đã xử lý sau khi công việc thành công**, không phải trước — nếu không, một lần thử thất bại sẽ âm thầm bị bỏ qua khi giao lại. Tốt nhất: ghi bản ghi khử trùng và thay đổi nghiệp vụ trong cùng một database transaction."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Lợi ích kiến trúc chính của việc dùng message queue giữa hai service thay vì một lời gọi HTTP đồng bộ trực tiếp là gì?",
+      "options": [
+        "Producer được tách rời khỏi consumer — nó publish và trả về ngay mà không chờ xử lý phía sau",
+        "Message queue luôn nhanh hơn HTTP với từng request riêng lẻ",
+        "Message queue tự động mã hóa message khi truyền",
+        "Queue ngăn request trùng lặp đến được consumer"
+      ],
+      "explanation": "Với queue, producer publish rồi đi tiếp ngay. Consumer xử lý bất đồng bộ theo nhịp riêng. Điều này loại bỏ coupling về latency và sự lan truyền lỗi của lời gọi đồng bộ — nếu consumer crash, producer không bị ảnh hưởng."
+    },
+    {
+      "id": "q2",
+      "question": "Trong Kafka, \"consumer offset\" là gì và vì sao nó quan trọng?",
+      "options": [
+        "Số mili giây một message bị trì hoãn trước khi giao",
+        "Một counter phía broker theo dõi bao nhiêu consumer đã đọc một message",
+        "Kích thước byte của một message Kafka lưu trên broker",
+        "Một số nguyên tuần tự xác định vị trí của mỗi message trong một partition, được theo dõi theo từng consumer group để cho phép tiến độ độc lập và replay"
+      ],
+      "explanation": "Mỗi message trong một Kafka partition có một offset tăng đơn điệu. Mỗi consumer group commit offset hiện tại của mình một cách độc lập, cho phép các nhóm khác nhau ở các vị trí khác nhau trong cùng một topic. Một nhóm có thể seek tới bất kỳ offset nào trong quá khứ để phát lại event — khả năng mà các queue xóa-khi-tiêu-thụ không cung cấp được."
+    },
+    {
+      "id": "q3",
+      "question": "Một Kafka topic có 8 partition. Tối đa bao nhiêu consumer trong cùng một consumer group có thể chủ động tiêu thụ song song?",
+      "options": [
+        "Không giới hạn — bao nhiêu consumer cũng có thể đọc bất kỳ partition nào cùng lúc",
+        "4 — Kafka gán partition theo từng cặp",
+        "8 — mỗi partition được gán cho tối đa một consumer trong một nhóm",
+        "1 — Kafka là đơn luồng cho mỗi topic trong một nhóm"
+      ],
+      "explanation": "Kafka gán mỗi partition cho đúng một consumer trong một consumer group tại một thời điểm. Với 8 partition, tối đa 8 consumer đọc song song được. Consumer thứ 9 trong cùng nhóm sẽ ngồi không, chờ một partition trống ra qua rebalance."
+    },
+    {
+      "id": "q4",
+      "question": "Khác biệt then chốt giữa at-least-once và exactly-once delivery trong hệ thống messaging là gì?",
+      "options": [
+        "At-least-once chậm hơn; exactly-once luôn nhanh hơn",
+        "At-least-once có thể giao lại message sau crash gây ra bản trùng; exactly-once ngăn bản trùng nhưng đòi hỏi overhead phối hợp làm giảm throughput",
+        "At-least-once cần consumer ack; exactly-once là bắn-rồi-quên",
+        "Exactly-once chỉ có trong RabbitMQ, không có trong Kafka hay SQS"
+      ],
+      "explanation": "At-least-once giao lại message nếu consumer crash trước khi commit offset, có thể gây ra bản trùng. Exactly-once ngăn điều này qua idempotent producer và commit offset trong transaction, nhưng thêm chi phí phối hợp (commit transaction, latency của read_committed) và chỉ bao trùm việc xử lý từ Kafka sang Kafka. Khuyến nghị thực tế là at-least-once kèm consumer idempotent."
+    },
+    {
+      "id": "q5",
+      "question": "Một Kafka consumer dùng exactly-once semantics (transactional producer, offset được commit trong transaction). Nó đọc một event thanh toán, gọi API của bên xử lý thẻ, rồi ghi một event \"charged\". Nó crash sau lời gọi API nhưng trước khi transaction commit. Chuyện gì xảy ra?",
+      "options": [
+        "Không có gì bị lặp lại — Kafka exactly-once đảm bảo lời gọi API chỉ được thực hiện một lần",
+        "Event bị mất vì offset đã được commit",
+        "Broker tự động hoàn tác lần trừ tiền thẻ",
+        "Transaction bị hủy, event được xử lý lại, và thẻ bị trừ tiền lần nữa trừ khi lời gọi API dùng một idempotency key"
+      ],
+      "explanation": "Kafka EOS khiến offset đầu vào và bản ghi đầu ra commit một cách atomic — nhưng chỉ bên trong Kafka. Lời gọi API bên ngoài không thuộc transaction. Transaction bị hủy nghĩa là event được đọc lại và xử lý lần nữa, nên lần trừ tiền lặp lại trừ khi lời gọi đó idempotent (ví dụ dùng một idempotency key suy ra từ event ID). Exactly-once effect lên hệ thống bên ngoài luôn đòi hỏi idempotency."
+    },
+    {
+      "id": "q6",
+      "question": "Chuyện gì xảy ra với các message được publish lên một kênh Redis Pub/Sub khi hiện không có subscriber nào kết nối?",
+      "options": [
+        "Message được đệm trong bộ nhớ Redis và giao khi subscriber kết nối lại",
+        "Message bị bỏ ngay lập tức — Redis Pub/Sub không có persistence hay bộ đệm giao nhận",
+        "Message được lưu tối đa 24 giờ rồi tự động hết hạn",
+        "Redis chuyển sang chế độ queue bền vững và giữ message cho tới khi subscriber kế tiếp kết nối"
+      ],
+      "explanation": "Redis Pub/Sub không bền vững. Nếu không có subscriber nào đang lắng nghe khi message được publish, message bị bỏ một cách âm thầm. Để giao tin cậy qua các lần service restart, hãy dùng Redis Streams, BullMQ, SQS hoặc Kafka."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao dùng `orderId` làm Kafka partition key cho các event đơn hàng lại quan trọng?",
+      "options": [
+        "Nó đảm bảo mọi event của cùng một đơn hàng rơi vào cùng một partition, giữ thứ tự event theo từng đơn hàng ngay cả khi có retry và nhiều producer",
+        "Nó nén payload message để giảm chi phí lưu trữ ở broker",
+        "Nó route message tới một instance consumer cụ thể bằng cách khớp ID",
+        "Nó bật ngữ nghĩa exactly-once delivery cho riêng message đó"
+      ],
+      "explanation": "Kafka hash partition key để chọn partition một cách tất định. Mọi message có cùng key đi vào cùng một partition, được một consumer trong nhóm tiêu thụ tuần tự. Điều này giữ thứ tự theo đơn hàng (order.placed trước order.shipped trước order.delivered) ngay cả ở throughput cao với nhiều producer."
+    },
+    {
+      "id": "q8",
+      "question": "Dead-letter queue (DLQ) là gì và vì sao nó thiết yếu trong hệ thống messaging production?",
+      "options": [
+        "Một queue lưu các message đang chờ duyệt thủ công trước khi giao",
+        "Một queue replica dùng cho khôi phục thảm họa và failover giữa các region",
+        "Một queue riêng nơi message được chuyển tới sau N lần giao thất bại, ngăn một poison message duy nhất chặn các consumer bình thường vô thời hạn",
+        "Một queue giữ các message vượt giới hạn kích thước payload tối đa"
+      ],
+      "explanation": "Một poison message — message luôn khiến consumer thất bại — có thể lặp mãi nếu không có DLQ: nhận, lỗi, giao lại, nhận, lỗi. DLQ phá vỡ vòng lặp này bằng cách chuyển message đi sau N lần thử. Engineer có thể kiểm tra DLQ, sửa bug và phát lại message. Không có DLQ, một message xấu có thể làm đình trệ cả queue."
+    },
+    {
+      "id": "q9",
+      "question": "Một Kafka topic giữ message trong 7 ngày. Một service analytics mới cần xử lý mọi event trong 5 ngày qua. Nó có thể làm gì?",
+      "options": [
+        "Không làm gì được — message cũ hơn một giờ không truy cập được với consumer group mới",
+        "Nó có thể tạo một consumer group mới với fromBeginning=true hoặc seek tới một offset cụ thể trong cửa sổ retention 7 ngày và xử lý mọi event còn được giữ",
+        "Nó phải yêu cầu producer publish lại các event bị thiếu sang một topic riêng",
+        "Kafka tự động gom batch và giao mọi message còn giữ cho consumer group mới ở lần kết nối đầu tiên"
+      ],
+      "explanation": "Log bền vững của Kafka giữ mọi message trong suốt khoảng retention đã cấu hình, bất kể chúng đã được tiêu thụ hay chưa. Một consumer group mới có thể đặt fromBeginning=true để bắt đầu từ offset cũ nhất còn giữ, hoặc seek tới một offset cụ thể dựa trên timestamp. Khả năng replay này là điểm khác biệt cốt lõi của Kafka so với các queue truyền thống xóa message sau khi tiêu thụ."
+    },
+    {
+      "id": "q10",
+      "question": "Kịch bản nào phù hợp với kiến trúc fan-out pub/sub hơn là một point-to-point queue?",
+      "options": [
+        "Phân phối các job transcode video cho một pool GPU worker process, mỗi video chỉ transcode một lần",
+        "Lên lịch các job dọn dẹp database hằng đêm phải chạy đúng một lần",
+        "Xử lý giao dịch thanh toán tuần tự để loại bỏ mọi khả năng trừ tiền hai lần",
+        "Một event order.placed phải đồng thời kích hoạt thông báo email, trừ kho và một bản ghi analytics ở ba service độc lập"
+      ],
+      "explanation": "Pub/sub fan-out một event tới nhiều nhóm subscriber độc lập, mỗi nhóm nhận một bản sao đầy đủ. Cả ba service tiêu thụ cùng một event mà không cản trở nhau. Một point-to-point queue chỉ giao message cho một trong ba consumer. Fan-out tới các service độc lập chính là use case mà pub/sub giải quyết."
+    }
+  ]
+}

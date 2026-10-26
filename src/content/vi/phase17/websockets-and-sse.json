@@ -1,0 +1,218 @@
+{
+  "sourceHash": "29a264cb22eb",
+  "title": "WebSockets & Server-Sent Events",
+  "tagline": "Real-time full-duplex với WebSocket, server push một chiều với SSE, so sánh với polling và long-polling — chọn đúng cơ chế truyền cho từng bài toán.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "HTTP được thiết kế như một giao thức request-response: client luôn nói trước, server luôn trả lời, rồi kết nối kết thúc. Suốt nhiều thập kỷ, mô hình đó phục vụ web rất tốt. Nhưng ứng dụng hiện đại đòi hỏi điều khác — **server cần được nói trước**, đẩy dữ liệu xuống client ngay khi có gì thay đổi. Dashboard cập nhật trực tiếp mà không cần reload trang. Tin nhắn chat hiện ra tức thì. Giá cổ phiếu nhảy theo thời gian thực. Tài liệu cộng tác hiển thị chỉnh sửa của đồng nghiệp ngay khi họ gõ. Không cái nào trong số này khớp tự nhiên với mô hình request-response.\n\nCác kỹ sư đã nghĩ ra nhiều kỹ thuật để vượt qua giới hạn của HTTP, mỗi kỹ thuật có một cán cân chi phí–lợi ích khác nhau. **Polling** để client hỏi đi hỏi lại theo timer — đơn giản nhưng phần lớn là lãng phí. **Long-polling** để client giữ một request mở cho đến khi server có gì để nói — latency thấp hơn, nhưng khó scale. **Server-Sent Events (SSE)** thiết lập một kết nối HTTP bền vững, qua đó server có thể stream một chuỗi sự kiện liên tục — gọn gàng, theo chuẩn, và mạnh mẽ đến bất ngờ. **WebSocket** bỏ hẳn mô hình HTTP sau một lần handshake ban đầu, thay bằng một giao thức đóng khung (framing) nhị phân full-duplex, nơi cả hai phía có thể nói và nghe cùng lúc mà không tốn overhead cho từng message.\n\nChọn sai cơ chế truyền là lỗi phổ biến và đắt giá. Nhiều team vội dùng WebSocket trong khi SSE đơn giản hơn, rẻ hơn và làm được y như vậy. Số khác cứ bám lấy polling trong khi một kết nối bền vững có thể giảm mạnh tải server và kéo latency từ vài giây xuống vài mili giây. Chương này xây dựng một mô hình tư duy đầy đủ về cả bốn cách — chúng hoạt động thế nào ở tầng dữ liệu trên đường truyền, trade-off thật sự là gì, khi nào chọn cái nào, và cách triển khai đúng, kể cả những chi tiết tinh tế (logic kết nối lại, thứ tự message, xác thực, tương thích proxy) hay gây rắc rối ở production."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bốn chiến lược truyền real-time. Polling và long-polling dùng lại ngữ nghĩa HTTP chuẩn. SSE mở rộng HTTP bằng một response dạng stream. WebSocket thay HTTP bằng một giao thức framing riêng sau một lần handshake upgrade duy nhất."
+    },
+    {
+      "type": "analogy",
+      "title": "Các cơ chế truyền như những dịch vụ giao hàng",
+      "content": "Hãy tưởng tượng bạn đang chờ một kiện hàng quan trọng từ một kho hàng ở nước ngoài.\n\n**Polling** là cứ năm phút lại nhấc máy gọi kho hỏi 'Hàng của tôi gửi đi chưa?' Phần lớn thời gian câu trả lời là chưa và bạn tốn một cuộc gọi vô ích. Khi câu trả lời cuối cùng là rồi, có thể bạn vừa gọi cách đó 30 giây và giờ phải chờ gần trọn năm phút mới biết. Overhead cao, latency cao.\n\n**Long-polling** là phiên bản khôn hơn: bạn gọi kho và nói 'Tôi sẽ giữ máy chờ đến khi có câu trả lời.' Kho giữ máy bạn cho đến khi hàng thực sự được gửi, rồi báo ngay. Latency thấp hơn nhiều — nhưng vừa báo xong là bạn phải cúp máy rồi gọi lại để chờ lần cập nhật tiếp theo. Và trong lúc chờ, đường dây bị chiếm trọn cho cuộc gọi của bạn.\n\n**Server-Sent Events** là đăng ký nhận SMS thông báo trạng thái tự động. Kho chủ động nhắn cho bạn mỗi khi trạng thái thay đổi — 'Đã gửi', 'Đã đến hải quan', 'Đang giao', 'Đã giao'. Sau khi đăng ký, bạn không phải chủ động làm gì nữa. Ràng buộc duy nhất: bạn không thể nhắn lại cho kho qua kênh này. Muốn nói gì với họ, bạn dùng kênh khác (một cuộc gọi bình thường — tức là một HTTP POST request thông thường).\n\n**WebSocket** là cuộc nói chuyện qua bộ đàm. Hai bên có thể nói bất cứ lúc nào mà không cần chờ bên kia nói xong. Bạn và nhân viên kho có thể trao đổi qua lại thoải mái, tức thì, gần như không cần thủ tục. Trade-off: thiết lập kênh bộ đàm phức tạp hơn một chút so với đăng ký nhận tin nhắn, và bạn phải cẩn thận xử lý các tình huống mất sóng.\n\nVì vậy câu hỏi thiết kế then chốt là: client có cần gửi dữ liệu *thường xuyên* qua cùng kênh real-time không, hay server là bên nói còn client chủ yếu chỉ nghe? Câu trả lời quyết định bạn cần WebSocket hay SSE mới là công cụ đúng (và đơn giản hơn)."
+    },
+    {
+      "type": "explanation",
+      "title": "Polling và long-polling: các cách tiếp cận thuần HTTP",
+      "content": "**Polling** là cách tiếp cận vũ phu. Client dùng `setInterval` hoặc `setTimeout` đệ quy để bắn fetch request mỗi N giây, bất kể có dữ liệu mới hay không. Ở phía server, mỗi lần poll là một HTTP request hoàn toàn bình thường — stateless, rẻ khi xét riêng từng cái, load-balance dễ dàng. Sự đơn giản chính là ưu điểm lớn nhất của polling.\n\nCái giá thì đáng kể. Thứ nhất, **latency bị giới hạn bởi chu kỳ poll**: nếu bạn poll mỗi 10 giây và một sự kiện xảy ra một giây sau lần poll, client phải chờ thêm 9 giây mới biết. Thứ hai, **phần lớn các lần poll không trả về gì mới** — với tần suất sự kiện vừa phải, 95% request trở lên hoàn toàn là overhead. Ở quy mô lớn, lưu lượng lãng phí này cộng lại thành chi phí bandwidth và CPU server đáng kể. Thứ ba, **server không phân biệt được 'không có gì xảy ra' với 'có chuyện xảy ra nhưng đang chậm'** — nó phải query kho dữ liệu ở mọi lần poll bất kể thế nào.\n\nPolling hợp lý khi tần suất sự kiện rất thấp (một lần mỗi phút hoặc ít hơn), khi server không thể duy trì kết nối mở (một số nền tảng serverless), hoặc khi bạn làm việc với hạ tầng cũ không hỗ trợ SSE hay WebSocket.\n\n**Long-polling** cải tiến polling bằng cách đảo ngược thời điểm. Client gửi request và server giữ nó mở — treo HTTP response — cho đến khi có dữ liệu mới hoặc hết timeout (thường 25–30 giây, ngay dưới timeout của đa số proxy và load balancer). Nếu dữ liệu đến, server gửi ngay và đóng response. Client lập tức bắn request khác để chờ sự kiện kế tiếp.\n\nLong-polling đạt latency gần như bằng 0 xét từ phía server — dữ liệu sẵn sàng là được gửi ngay. Latency còn lại chỉ là thời gian round-trip mạng. Cái giá là giữ hàng nghìn HTTP connection đang treo đòi hỏi kiến trúc server cẩn thận. Các server truyền thống kiểu thread-per-connection (như Rails hay Django cổ điển chạy với worker đồng bộ) không xử lý hiệu quả số lượng lớn kết nối long-poll; bạn cần một server dựa trên event loop (Node.js, Python asyncio, Netty) hoặc một server xử lý kết nối bất đồng bộ. Ngoài ra, mỗi message vẫn mang đầy đủ HTTP header — cookie, user agent, content negotiation — thêm hàng trăm byte overhead cho mỗi sự kiện."
+    },
+    {
+      "type": "explanation",
+      "title": "Server-Sent Events: stream qua HTTP",
+      "content": "**Server-Sent Events (SSE)** được chuẩn hóa như một phần của HTML5 và cho bạn một API gọn gàng, có sẵn trong trình duyệt, cho các stream một chiều từ server xuống client. Client mở một đối tượng `EventSource` trỏ tới một URL. Trình duyệt gửi một HTTP GET request chuẩn tới URL đó, nhưng thay vì chờ một response body hoàn chỉnh, nó stream body vô thời hạn — server giữ kết nối mở và ghi các bản ghi sự kiện phân tách bằng dòng mới mỗi khi có gì để gửi.\n\n**Định dạng trên đường truyền** cố tình được làm đơn giản và con người đọc được. Server đặt `Content-Type: text/event-stream` rồi ghi các dòng theo định dạng này:\n\n```\nid: 42\nevent: tick\ndata: {\"price\": 42.5}\n\n```\n\nMỗi trường là một dòng `name: value`, và một dòng trống kết thúc sự kiện (nên trên đường truyền mọi sự kiện đều kết thúc bằng `\\n\\n`). Định dạng hỗ trợ bốn trường: `data:` cho payload, `id:` cho mã định danh sự kiện, `event:` cho tên loại sự kiện (mặc định là `message`), và `retry:` để báo trình duyệt phải chờ bao lâu trước khi kết nối lại. Dòng bắt đầu bằng `:` là comment, thường dùng làm heartbeat để giữ kết nối sống qua các proxy hay đóng kết nối rảnh.\n\n**Cơ chế `Last-Event-ID`** là tính năng sát thủ của SSE về độ tin cậy. Khi server gửi sự kiện kèm trường `id:` và kết nối bị rớt, trình duyệt tự động kết nối lại và gửi kèm HTTP header `Last-Event-ID` chứa `id:` cuối cùng nó nhận được. Server đọc header này và tiếp tục stream từ điểm đó, nhờ vậy client không bao giờ bỏ lỡ sự kiện khi mạng chập chờn — không cần chút logic nào phía client.\n\nSSE chạy được trên cả **HTTP/1.1 và HTTP/2**. Trên HTTP/1.1, mỗi kết nối SSE dùng một TCP connection, và trình duyệt chỉ cho phép khoảng 6 kết nối đồng thời mỗi host — dùng chung cho **tất cả các tab** của trình duyệt, nên một người dùng mở sáu tab có thể dùng cạn giới hạn và làm treo mọi request khác tới site của bạn. Trên HTTP/2, các stream SSE được multiplex qua một TCP connection duy nhất cùng các request và response khác, nên giới hạn này biến mất — bạn có thể có hàng chục subscription SSE mà không đụng giới hạn kết nối.\n\nRàng buộc chính của SSE là tính **một chiều**: chỉ server mới gửi được sự kiện. Nếu client cần gửi thông tin lên server (submit form, gửi tin nhắn chat, xác nhận đã nhận), nó làm qua một HTTP request thông thường riêng biệt. Trên thực tế đây không phải hạn chế với nhiều use case — thông báo, live feed, thanh tiến trình, dashboard real-time — và thậm chí còn làm kiến trúc đơn giản hơn đáng kể.\n\nThêm hai hạn chế của `EventSource` cần biết: nó chỉ mang **văn bản** (UTF-8), và bạn **không thể đặt request header** — không có `Authorization: Bearer …`. Hãy xác thực bằng cookie (`withCredentials: true` cho cross-origin), hoặc nếu cần header hay body POST, tự đọc stream bằng `fetch()` và `response.body.getReader()` — cách mà các API stream token kiểu LLM thường dùng — đổi lại bạn phải tự cài đặt lại việc kết nối lại và `Last-Event-ID`."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng đời kết nối SSE. Server giữ một HTTP response mở và ghi các bản ghi sự kiện phân tách bằng dòng mới. Khi kết nối lại, trình duyệt gửi Last-Event-ID để server tiếp tục mà không bỏ sót sự kiện."
+    },
+    {
+      "type": "explanation",
+      "title": "WebSocket: full-duplex trên TCP",
+      "content": "**WebSocket** giải quyết bài toán SSE bỏ ngỏ: nếu client cũng cần gửi dữ liệu tần suất cao, latency thấp qua cùng một kết nối thì sao? Hãy nghĩ tới một game nhiều người chơi mà client gửi vị trí người chơi mỗi 16ms, một trình soạn thảo cộng tác mà mỗi lần gõ phím phải lan tới người khác, hay một terminal giao dịch mà người dùng đặt lệnh dựa trên giá trực tiếp.\n\nGiao thức WebSocket (RFC 6455) bắt đầu bằng một **HTTP upgrade handshake**. Client gửi một HTTP GET request chuẩn nhưng kèm hai header đặc biệt:\n\n```\nGET /chat HTTP/1.1\nUpgrade: websocket\nConnection: Upgrade\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\nSec-WebSocket-Version: 13\n```\n\n`Sec-WebSocket-Key` là một giá trị 16 byte sinh ngẫu nhiên, mã hóa base64. Server **bắt buộc** tính `Sec-WebSocket-Accept` bằng cách nối key với GUID cố định `258EAFA5-E914-47DA-95CA-C5AB0DC85B11` rồi lấy SHA-1 hash mã hóa base64. Handshake này ngăn cache poisoning và bảo đảm server thực sự hỗ trợ WebSocket, chứ không phải vô tình nhận upgrade request qua một proxy cấu hình sai.\n\nNếu server chấp nhận, nó trả về `101 Switching Protocols` cùng các header upgrade tương ứng. Lúc đó TCP connection được **chuyển mục đích sử dụng** — nó không còn là HTTP nữa. Từ thời điểm này, cả client và server giao tiếp bằng **WebSocket frame**: một định dạng nhị phân gọn với 2–14 byte overhead (so với hàng trăm byte của HTTP header). Frame mang cờ `FIN` 1 bit (cho message bị chia mảnh), opcode 4 bit (text, binary, ping, pong, close), một masking key 4 byte tùy chọn (frame từ client lên server luôn được mask để ngăn cache poisoning), và payload.\n\n**Frame text và binary**: WebSocket định nghĩa hai loại payload. Frame text mang chuỗi mã hóa UTF-8 — gần như luôn dùng với payload JSON. Frame binary mang byte tùy ý, dùng cho các giao thức nhị phân gọn hơn (MessagePack, Protocol Buffers, định dạng tự chế). Sự phân biệt này quan trọng vì trình duyệt kiểm tra UTF-8 trên frame text và có thể đóng kết nối với mã 1007 nếu nội dung không phải UTF-8 hợp lệ.\n\n**Heartbeat ping/pong**: Giao thức có sẵn các control frame ping và pong. Server thường gửi ping định kỳ; bên kia phải trả lời bằng pong. Trình duyệt tự động trả lời ping — API `WebSocket` của JavaScript không thể gửi hay quan sát frame ping/pong, nên nếu *client* cần phát hiện kết nối chết thì phải tự gửi message heartbeat ở tầng ứng dụng. Việc này giữ kết nối sống qua các router NAT và load balancer hay đóng TCP connection rảnh, đồng thời giúp cả hai phía phát hiện kết nối chết mà không phải chờ TCP timeout (có thể mất vài phút).\n\n**Close handshake**: Đóng một kết nối WebSocket là quy trình hai bước. Một phía gửi Close frame kèm status code và chuỗi lý do tùy chọn. Phía còn lại phải gửi lại một Close frame. Chỉ sau cuộc trao đổi này TCP connection mới được đóng. Một kết nối đóng mà không qua close handshake đúng cách (rớt mạng, server crash) sẽ cho ra close code `1006` ở trình duyệt; mã này do trình duyệt tự đặt cục bộ và không bao giờ được truyền trên đường dây."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Phép tính `Sec-WebSocket-Accept` là một phép biến đổi cố định trên key ngẫu nhiên của client — nó chứng minh server chủ ý nói WebSocket (một HTTP server hay cache thông thường không thể tạo ra giá trị này), nhưng **không** cung cấp xác thực hay mã hóa gì cả. Các kiểm tra bảo mật thật sự nên đặt ngay tại đây: đối chiếu `Origin` với allowlist (trình duyệt không chặn WebSocket cross-origin giúp bạn) và xác thực upgrade request trước khi trả `101`. Chạy key mẫu trong RFC 6455 qua hàm này sẽ cho ra đúng giá trị mà RFC mong đợi.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "diagram",
+      "caption": "Một phiên WebSocket: HTTP upgrade, rồi các message đóng khung tự do theo cả hai chiều. Ping/pong giữ kết nối sống. Close handshake hai frame kết thúc gọn gàng."
+    },
+    {
+      "type": "explanation",
+      "title": "Xác thực, bảo mật và tương thích proxy",
+      "content": "WebSocket mang theo nhiều vấn đề bảo mật và vận hành dễ bị bỏ qua.\n\n**Xác thực trong WebSocket handshake**: HTTP upgrade request ban đầu mang cookie và các HTTP header chuẩn, nên xác thực session dựa trên cookie hoạt động trong suốt. Tuy nhiên, một khi handshake xong và kết nối chuyển giao thức, HTTP header không còn tồn tại — bạn không thể làm mới hay kiểm tra lại xác thực trên các frame tiếp theo. API `WebSocket` của trình duyệt cũng không thể đặt header tùy chỉnh như `Authorization`. Các pattern phổ biến là: (1) xác thực bằng cookie trên upgrade request; (2) một **ticket dùng một lần**, sống ngắn đặt trong URL (`wss://api.example.com/ws?ticket=…`), lấy từ một HTTP call đã xác thực bình thường và được kiểm tra trong handshake — phải để nó dùng một lần vì URL sẽ nằm trong log của proxy và server; (3) chấp nhận kết nối và yêu cầu client gửi message xác thực làm frame đầu tiên, đóng với mã 4001 (do ứng dụng tự định nghĩa) nếu xác thực thất bại. Các kết nối sống lâu cũng cần phương án cho việc **token hết hạn và bị thu hồi** — ví dụ server đóng socket khi session kết thúc, hoặc yêu cầu message xác thực lại định kỳ.\n\n**CORS không áp dụng cho WebSocket frame**: Trình duyệt kiểm tra same-origin policy trên HTTP handshake ban đầu, nhưng đó là kiểm tra header `Origin` — không phải cơ chế preflight dùng cho fetch request. Server phải chủ động kiểm tra header `Origin` trong handshake để ngăn cross-site WebSocket hijacking (CSWSH), khi một trang độc hại ở origin khác thiết lập kết nối WebSocket mang theo cookie của nạn nhân rồi đọc các response (khác với `fetch`, trình duyệt không bao giờ chặn WebSocket cross-origin giúp bạn). Session cookie `SameSite=Lax`/`Strict` có giúp ích, vì chúng không được gửi trong handshake cross-site, nhưng vẫn bắt buộc phải có allowlist `Origin` rõ ràng.\n\n**Tương thích proxy và load balancer**: Đây là mối lo vận hành lớn. Nhiều proxy doanh nghiệp, CDN và load balancer đời cũ không hỗ trợ WebSocket upgrade — chúng hoặc bỏ header `Upgrade`, hoặc giữ kết nối ở tầng TCP vì tưởng đó là một HTTP request bị treo. WebSocket qua TLS (`wss://`) thân thiện với proxy hơn nhiều vì proxy không đọc được lưu lượng đã mã hóa và không can thiệp được vào upgrade. Vì lý do này, hãy dùng `wss://` ở production — luôn luôn.\n\n**Tương thích proxy của SSE**: SSE tương thích proxy tốt hơn WebSocket vì nó là một HTTP response chuẩn — vấn đề duy nhất là các proxy buffer response body trước khi chuyển tiếp, làm hỏng việc stream. Đặt `X-Accel-Buffering: no` cho nginx hoặc header phù hợp cho proxy của bạn thường giải quyết được.\n\n**Sticky session khi load balancing**: Vì kết nối WebSocket (và SSE) là bền vững và có trạng thái, một load balancer chia request kiểu round-robin sẽ gửi các kết nối sau tới server khác với server đang giữ WebSocket. Bạn cần hoặc sticky session (consistent hashing theo IP hoặc session cookie), hoặc — kiến trúc tốt hơn — một message broker (Redis Pub/Sub, Kafka, v.v.) định tuyến message tới đúng server đang giữ kết nối WebSocket liên quan."
+    },
+    {
+      "type": "diagram",
+      "caption": "Cây quyết định chọn cơ chế truyền real-time. SSE xử lý được phần lớn use case server-push. Chỉ chọn WebSocket khi client cũng phải gửi dữ liệu thường xuyên trên cùng kết nối."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Hai chi tiết tinh tế ở đây: thứ nhất, jitter (`Math.random() * 500`) cộng thêm một độ trễ ngẫu nhiên nhỏ lên trên exponential backoff. Không có jitter, mọi client bị ngắt cùng lúc sẽ kết nối lại đúng cùng những thời điểm (1s, 2s, 4s, 8s...) và tạo ra các đỉnh tải đồng bộ. Jitter làm chúng tản ra. Thứ hai, khi kết nối thất bại, sự kiện `error` bắn ra ngay trước `close` (sự kiện error cố tình không mang chi tiết hữu ích nào), nên error handler chỉ nên ghi log chứ không kết nối lại — handler `close` mới là nơi đúng để khởi động logic kết nối lại.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "code_example",
+      "explanation": "Handler SSE phía server minh họa bốn chi tiết quan trọng: (1) `res.flushHeaders()` gửi HTTP header ngay lập tức để trình duyệt biết stream đã bắt đầu; (2) header `X-Accel-Buffering: no` ngăn nginx buffer response body; (3) header `last-event-id` được kiểm tra khi kết nối lại để phát lại các sự kiện bị lỡ; (4) một dòng comment bắt đầu bằng dấu hai chấm gửi mỗi 25 giây đóng vai trò heartbeat, giữ TCP connection sống qua các proxy và load balancer hay đóng kết nối rảnh.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Cấu tạo WebSocket frame và readyState",
+      "content": "Hiểu định dạng WebSocket frame và vòng đời `readyState` giúp bạn tránh cả một nhóm bug phổ biến.\n\n**Bốn giá trị readyState** định nghĩa vòng đời của một đối tượng WebSocket:\n- `0 CONNECTING`: đã gọi `new WebSocket(url)` nhưng handshake chưa xong. Gọi `send()` lúc này sẽ ném `InvalidStateError`.\n- `1 OPEN`: handshake đã hoàn tất thành công. `send()` hoạt động. Đây là trạng thái duy nhất có thể truyền message.\n- `2 CLOSING`: một phía đã khởi động close handshake bằng cách gửi Close frame, nhưng cuộc trao đổi chưa xong. `send()` **không** ném lỗi — dữ liệu bị bỏ đi trong im lặng (chỉ `bufferedAmount` tăng lên).\n- `3 CLOSED`: kết nối đã đóng hoàn toàn. `send()` cũng lại bỏ dữ liệu trong im lặng.\n\nLuôn kiểm tra `ws.readyState === WebSocket.OPEN` trước khi gọi `send()` — lỗi ném ra ở CONNECTING thì ồn ào, nhưng việc âm thầm rơi dữ liệu sau khi đóng còn tệ hơn. Để xử lý back-pressure, theo dõi `ws.bufferedAmount` và tạm ngừng gửi khi nó tăng. Một pattern phổ biến để tăng khả năng chịu lỗi là đưa message vào hàng đợi khi socket chưa mở và flush hàng đợi khi sự kiện `open` bắn ra — rất quan trọng trong khoảng thời gian kết nối lại.\n\n**Cấu trúc frame**: Mỗi WebSocket frame bắt đầu bằng hai byte. Bit 0 là cờ `FIN` (bằng 1 nếu đây là mảnh cuối của message). Bit 1–3 được dành riêng. Bit 4–7 là opcode: `0x1` cho text, `0x2` cho binary, `0x8` cho Close, `0x9` cho Ping, `0xA` cho Pong. Bit tiếp theo là cờ mask (1 cho frame client lên server, 0 cho frame server xuống client). 7 bit tiếp theo mã hóa độ dài payload (0–125 byte thì ghi trực tiếp; 126 nghĩa là 2 byte kế tiếp là độ dài; 127 nghĩa là 8 byte kế tiếp là độ dài). Nếu có mask, 4 byte masking key theo sau. Rồi đến payload (được XOR với key từng byte một).\n\n**Bộ mã đóng kết nối (close code)** đã được chuẩn hóa:\n- `1000`: Đóng bình thường — hai bên đồng ý đóng gọn gàng.\n- `1001`: Going away — client đang rời khỏi trang.\n- `1002`: Lỗi giao thức.\n- `1003`: Kiểu dữ liệu không được hỗ trợ (ví dụ nhận binary khi đang chờ text).\n- `1006`: Đóng bất thường — **không nhận được close frame**, do trình duyệt tự đặt cục bộ khi TCP connection rớt mà không có lời chào tạm biệt ở tầng WebSocket. Đây là mã bạn thấy sau khi mất mạng hoặc server crash, và là tác nhân chính kích hoạt logic kết nối lại.\n- `1007`: UTF-8 không hợp lệ trong frame text.\n- `1008`: Vi phạm chính sách.\n- `1009`: Message quá lớn.\n- `1011`: Lỗi nội bộ của server.\n- `4000–4999`: Mã do ứng dụng định nghĩa. Dùng chúng cho ngữ nghĩa riêng của bạn (ví dụ `4001` cho xác thực thất bại, `4002` cho kết nối trùng lặp).\n\nCác mã ứng dụng trong khoảng `4000–4999` là do bạn tự định nghĩa. Nếu server phát hiện một client đã kết nối từ một session khác, nó có thể đóng kết nối cũ với `4002` (session trùng lặp, như trên) để client biết là không nên kết nối lại."
+    },
+    {
+      "type": "diagram",
+      "caption": "Máy trạng thái readyState của WebSocket. Mã 1006 (đóng bất thường) chuyển thẳng từ OPEN sang CLOSED mà không qua close handshake — đây là tác nhân kích hoạt kết nối lại với exponential backoff."
+    },
+    {
+      "type": "explanation",
+      "title": "Scale WebSocket và SSE: những bài toán khó",
+      "content": "Một server chỉ duy trì được một số lượng kết nối bền vững có hạn trước khi đụng giới hạn file descriptor của hệ điều hành hoặc giới hạn bộ nhớ. Một process Node.js trên một server cấu hình khiêm tốn trên thực tế xử lý được hàng chục nghìn kết nối WebSocket đồng thời. Nhưng khi ứng dụng lớn lên, bạn cần nhiều instance server — và điều này nảy sinh bài toán phân tán.\n\n**Bài toán sticky session**: Khi một user kết nối tới server A rồi gửi message, message đó được server A xử lý. Nhưng nếu request `POST /messages` của user bị load balancer định tuyến sang server B, server B không có kết nối WebSocket tới các client khác đang ở server A. Có hai giải pháp tiêu chuẩn:\n\n1. **Sticky session** (session affinity): load balancer luôn định tuyến một user cụ thể tới cùng một server dựa trên IP, session cookie hoặc một hash. Cách này đơn giản nhưng phân bổ không đều — một user nổi tiếng có thể làm quá tải một server. Và nếu server đó sập, mọi kết nối của nó mất cùng lúc.\n\n2. **Pub/Sub message bus**: mỗi server subscribe vào một message broker dùng chung (Redis Pub/Sub, NATS, Kafka). Khi cần broadcast một message tới user X, bất kỳ server nào cũng có thể publish nó lên broker, và server đang giữ kết nối WebSocket của user X sẽ nhận nó từ broker rồi chuyển tiếp. Đây là pattern scale ngang được các hệ thống chat như Slack và Discord sử dụng.\n\n**Thundering herd khi kết nối lại**: Khi một server khởi động lại hoặc crash, cả N client đang kết nối đều nhận ra gần như cùng lúc (close code 1006) và cố kết nối lại đồng thời. Nếu chúng đều dùng cùng một độ trễ cố định trước khi kết nối lại, server bị dội N lượt kết nối cùng lúc — có thể làm nó sập lần nữa trước khi kịp khởi động xong. **Exponential backoff kèm jitter** phá vỡ sự đồng bộ này. Bắt đầu từ 1 giây, nhân đôi mỗi lần thử, giới hạn ở 30 giây, cộng thêm tối đa 0.5 giây jitter ngẫu nhiên, các lần kết nối lại của client sẽ trải ra theo thời gian và server hồi phục êm ái.\n\n**Những cân nhắc khi scale SSE**: SSE stream qua HTTP, nên được hưởng lợi từ toàn bộ hạ tầng HTTP chuẩn — edge server của CDN, multiplexing kết nối của HTTP/2, các load balancer sẵn có. Điểm mấu chốt là một kết nối HTTP/2 multiplex nhiều stream qua một TCP connection duy nhất, nên một user có thể subscribe năm endpoint SSE mà trình duyệt chỉ mở một TCP connection. Đây là lợi thế đáng kể so với WebSocket, nơi mỗi subscription cần một kết nối WebSocket riêng, trừ khi giao thức tầng ứng dụng của bạn multiplex các subscription qua một socket duy nhất."
+    },
+    {
+      "type": "explanation",
+      "title": "Các pattern kiến trúc trong thực tế",
+      "content": "**Pattern 1: SSE cho thông báo, REST cho hành động**\nĐây là pattern phổ biến nhất ở production. Client duy trì một kết nối SSE để nhận các cập nhật server đẩy xuống (thay đổi trạng thái đơn hàng, tin nhắn chat đến, cảnh báo hệ thống, tiến độ background job). Mọi giao tiếp từ client lên server đi qua các request `POST`/`PUT`/`DELETE` bình thường. Server xử lý hành động, ghi vào database, rồi publish một sự kiện lên message bus. Handler SSE đã subscribe bus đó nhận sự kiện và gửi xuống stream SSE tới client liên quan. Cách này giữ server stateless cho việc ghi, đồng thời vẫn có push real-time cho việc đọc.\n\n**Pattern 2: WebSocket với sub-protocol negotiation**\nVới các ứng dụng mà client thực sự gửi dữ liệu tần suất cao, WebSocket với một sub-protocol được định nghĩa rõ là lựa chọn phổ biến. Client gửi `Sec-WebSocket-Protocol: json-rpc` (hoặc tên khác) trong upgrade request, và server lặp lại giao thức đã thống nhất trong response. Sub-protocol định nghĩa schema của message — thường là một JSON envelope với các trường `type`, `id` và `payload`. Trường `id` cho phép có ngữ nghĩa request-response trên dòng frame vốn không có khái niệm kết nối theo từng cặp (client gửi request với id 42 và server phản hồi với id 42, giúp client ghép response với request — bản thân WebSocket chỉ là một dòng message, không có sẵn cơ chế ghép cặp request/response).\n\n**Pattern 3: WebSocket gateway với backend microservice**\nMột service WebSocket gateway chuyên trách xử lý mọi kết nối từ client. Nó chịu trách nhiệm xác thực, rate limiting và định tuyến. Nó dịch các WebSocket frame đến thành HTTP request hoặc message trong queue cho các microservice phía sau, và dịch các sự kiện từ phía sau (từ message bus) ngược lại thành WebSocket frame cho client. Cách này giữ mỗi microservice stateless và thuần HTTP, còn gateway nắm toàn bộ trạng thái kết nối real-time.\n\n**Lược sử**: Long-polling là kỹ thuật real-time chủ đạo từ giữa những năm 2000, được phổ biến bởi Comet và các thư viện như Bayeux/CometD. SSE bắt nguồn từ một đề xuất của WHATWG năm 2004; Opera thử nghiệm năm 2006, rồi Chrome, Safari và Firefox đưa `EventSource` vào trong giai đoạn 2010–2011 (Microsoft chỉ có nó khi Edge chuyển sang Chromium năm 2020). Giao thức WebSocket được đặc tả thành RFC 6455 vào tháng 12/2011 và có mặt trong mọi trình duyệt lớn vào năm 2012. Trước WebSocket, người ta dùng Flash socket hoặc Java applet cho real-time hai chiều. WebSocket đã khiến những cách đó trở nên lỗi thời."
+    },
+    {
+      "type": "callout",
+      "content": "**HTTP/2 và multiplexing SSE**: Với HTTP/2, mọi stream dùng chung một TCP connection. Nghĩa là nhiều subscription SSE từ cùng một trình duyệt tới cùng một origin dùng chung một TCP connection — một cải thiện hiệu quả đáng kể — và giới hạn ~6 kết nối mỗi host của HTTP/1.1 biến mất (HTTP/2 mặc định cho phép ~100 stream đồng thời). WebSocket cổ điển thì mỗi cái cần kết nối riêng, nhưng **RFC 8441** (WebSocket qua HTTP/2 bằng extended CONNECT, được Chrome và Firefox hỗ trợ) và **RFC 9220** (tương tự cho HTTP/3) cho phép một WebSocket chạy như một stream trong kết nối dùng chung khi server hỗ trợ. Với các thiết kế latency thấp mới, **WebTransport** (chạy trên HTTP/3/QUIC, có trong Chromium và Firefox) cung cấp nhiều stream cùng datagram không tin cậy (unreliable datagram) — hữu ích cho game và media — dù WebSocket vẫn là lựa chọn được hỗ trợ rộng rãi nhất."
+    },
+    {
+      "type": "callout",
+      "content": "**Lỗi thường gặp và bẫy interview**: Thứ nhất, 'SSE cần WebSocket' là sai — SSE là HTTP thuần. Thứ hai, cho rằng WebSocket frame mang HTTP header là sai: sau handshake, frame không còn HTTP header nào; CORS và cookie chỉ áp dụng cho upgrade request ban đầu. Thứ ba, quên kiểm tra header `Origin` trong WebSocket handshake là một lỗ hổng bảo mật (tấn công CSWSH). Thứ tư, không cài đặt logic kết nối lại tức là mặc định mạng luôn ổn định — mạng ở production thì không. Thứ năm, dùng `wss://` (WebSocket qua TLS) không phải tùy chọn ở production: kết nối `ws://` thuần bị chặn bởi quy tắc mixed-content trên trang HTTPS và bị proxy doanh nghiệp can thiệp. Thứ sáu, với câu hỏi interview 'server đẩy dữ liệu xuống client bằng cách nào?' — phân loại đúng là polling / long-polling / SSE / WebSocket, trong đó SSE thường là câu trả lời đúng nhưng hay bị đánh giá thấp cho đa số use case chỉ cần push."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Polling** để client request lặp đi lặp lại theo timer — đơn giản nhưng phí bandwidth và latency bằng chu kỳ poll. **Long-polling** giữ request mở cho đến khi có dữ liệu — latency thấp hơn nhưng khó scale và có overhead HTTP cho từng message.",
+        "**SSE** (`EventSource`) mở một kết nối HTTP bền vững và server stream các sự kiện `text/event-stream` phân tách bằng dòng mới. Nó chỉ đi từ server xuống client, chạy trên HTTP/1.1 và HTTP/2, tự kết nối lại với `Last-Event-ID`, và là lựa chọn đúng cho thông báo, live feed và cập nhật tiến độ. `EventSource` không gửi được header tùy chỉnh (dùng cookie, hoặc stream bằng `fetch`), và trên HTTP/1.1 nó ăn vào giới hạn ~6 kết nối mỗi host dùng chung cho mọi tab.",
+        "**WebSocket** bắt đầu bằng handshake HTTP `Upgrade: websocket` trả về `101 Switching Protocols`. Sau đó TCP connection được chuyển sang truyền message full-duplex đóng khung nhị phân với 2–14 byte overhead — ít hơn rất nhiều so với HTTP header.",
+        "**Close code 1006** (đóng bất thường — không nhận được close frame) do trình duyệt đặt khi rớt mạng hoặc server crash làm đứt TCP connection. Luôn cài đặt **exponential backoff kèm jitter** để kết nối lại — không có jitter, mọi client kết nối lại cùng lúc sau khi server khởi động lại và có thể làm nó sập lần nữa.",
+        "**Xác thực** với WebSocket phải xử lý trong HTTP handshake (token trong query param hoặc cookie) hoặc bằng message ứng dụng đầu tiên — WebSocket frame không có HTTP header, và API của trình duyệt không đặt được `Authorization`; nên dùng ticket dùng một lần thay vì token sống lâu trong URL. Luôn kiểm tra header `Origin` để ngăn cross-site WebSocket hijacking (CSWSH).",
+        "**Scale các kết nối bền vững** đòi hỏi hoặc sticky session (đơn giản nhưng không đều), hoặc một pub/sub message broker (Redis, NATS, Kafka) để bất kỳ instance server nào cũng định tuyến được message tới nơi giữ kết nối. SSE được hưởng lợi từ hạ tầng HTTP sẵn có, gồm CDN và multiplexing của HTTP/2.",
+        "**Ưu tiên SSE** cho các use case server-push và thêm một REST endpoint thông thường cho hành động từ client lên server. Chỉ dùng **WebSocket** khi client cũng phải gửi dữ liệu tần suất cao trên cùng kênh — game nhiều người chơi, trình soạn thảo cộng tác, terminal giao dịch trực tiếp."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Server trả về HTTP status code nào để hoàn tất một WebSocket upgrade?",
+      "options": [
+        "101 Switching Protocols",
+        "204 No Content",
+        "200 OK",
+        "301 Moved Permanently"
+      ],
+      "explanation": "101 Switching Protocols là response của server cho một WebSocket upgrade request thành công. Sau response này, TCP connection được chuyển sang dùng WebSocket framing và không còn là HTTP. Server cũng phải trả về Upgrade: websocket, Connection: Upgrade, và Sec-WebSocket-Accept là SHA-1 hash tính từ key của client."
+    },
+    {
+      "id": "q2",
+      "question": "Hạn chế chính của Server-Sent Events (SSE) so với WebSocket là gì?",
+      "options": [
+        "SSE cần HTTP/2 và không chạy trên HTTP/1.1",
+        "SSE không gửi được dữ liệu JSON",
+        "SSE không hỗ trợ kết nối lại sau khi mất kết nối",
+        "SSE là một chiều — chỉ server mới đẩy được dữ liệu xuống client"
+      ],
+      "explanation": "SSE chỉ đi từ server xuống client. Client không thể gửi dữ liệu qua chính kết nối SSE — để giao tiếp từ client lên server, người ta dùng HTTP request thông thường (POST, v.v.) song song với kết nối SSE. SSE chạy trên cả HTTP/1.1 lẫn HTTP/2, và API EventSource tự động xử lý kết nối lại bằng Last-Event-ID."
+    },
+    {
+      "id": "q3",
+      "question": "WebSocket close code 1006 cho biết điều gì?",
+      "options": [
+        "Client đóng kết nối bình thường, gọn gàng",
+        "Server đóng kết nối do lỗi nội bộ",
+        "Đóng bất thường — không nhận được WebSocket close frame, thường do rớt mạng hoặc server crash",
+        "Kích thước message vượt giới hạn của server"
+      ],
+      "explanation": "Mã 1006 do trình duyệt tự đặt cục bộ — nó không bao giờ được truyền trên đường dây. Nó có nghĩa là TCP connection đã đóng mà không có close frame ở tầng WebSocket nào được trao đổi. Điều này xảy ra khi mất mạng, server crash hoặc process bị kill. Đây là tác nhân chính kích hoạt logic kết nối lại. Mã 1000 là đóng bình thường; 1011 là lỗi server."
+    },
+    {
+      "id": "q4",
+      "question": "Cơ chế nào của SSE giúp trình duyệt tiếp tục stream sau khi kết nối lại mà không bỏ lỡ sự kiện?",
+      "options": [
+        "Header Last-Event-ID mà trình duyệt tự động gửi khi kết nối lại",
+        "Trường retry: trong response SSE",
+        "Một session cookie được đặt trong handshake SSE ban đầu",
+        "Máy trạng thái reconnecting của EventSource"
+      ],
+      "explanation": "Khi EventSource kết nối lại, trình duyệt tự động gửi kèm header Last-Event-ID, mang giá trị trường id: của sự kiện SSE cuối cùng đã nhận. Server đọc header này và tiếp tục gửi sự kiện từ điểm đó trở đi. Server đặt event ID bằng cách ghi `id: <value>\\n` trước dòng data trong mỗi bản ghi sự kiện."
+    },
+    {
+      "id": "q5",
+      "question": "Vì sao logic kết nối lại WebSocket nên dùng exponential backoff kèm jitter?",
+      "options": [
+        "Kết nối WebSocket giảm chất lượng theo thời gian và cần được thiết lập lại dần dần",
+        "Để ngăn mọi client kết nối lại cùng lúc sau khi server khởi động lại, tránh thundering herd có thể làm sập server đang hồi phục",
+        "Đặc tả RFC của WebSocket yêu cầu exponential backoff như một phần của giao thức",
+        "Để server có thời gian dọn trạng thái session cũ trước khi nhận kết nối mới"
+      ],
+      "explanation": "Không có backoff và jitter, mọi client bị ngắt cùng thời điểm sẽ cố kết nối lại theo cùng những khoảng thời gian — 1s, 2s, 4s — tạo ra các đỉnh tải đồng bộ. Jitter cộng thêm một độ trễ ngẫu nhiên nhỏ để các client lệch nhịp nhau. Exponential backoff cũng tránh dồn quá tải lên một server đang hồi phục. Bắt đầu từ 1s, nhân đôi đến mức trần 30s, cộng tối đa 500ms jitter là một pattern tiêu chuẩn."
+    },
+    {
+      "id": "q6",
+      "question": "Sau khi WebSocket handshake hoàn tất, những tính năng HTTP nào vẫn áp dụng cho WebSocket frame?",
+      "options": [
+        "Tất cả tính năng HTTP, gồm cả CORS header và cookie trên từng frame",
+        "Chỉ CORS — cookie không được gửi sau khi upgrade",
+        "Không gì cả — WebSocket frame không mang HTTP header nào; xác thực phải xử lý trong handshake hoặc message đầu tiên",
+        "Cookie và cache header, nhưng không có CORS"
+      ],
+      "explanation": "Một khi handshake 101 hoàn tất, kết nối không còn là HTTP. WebSocket frame hoàn toàn không có HTTP header — không CORS, không cookie, không cache control. Xác thực thường được xử lý bằng cookie hoặc ticket dùng một lần trong URL lúc handshake, hoặc bằng message ứng dụng đầu tiên sau khi kết nối. CORS và cookie chỉ áp dụng cho HTTP upgrade request ban đầu."
+    },
+    {
+      "id": "q7",
+      "question": "Một endpoint SSE phải trả về header Content-Type nào, và thường cần thêm những header gì khác?",
+      "options": [
+        "application/json với Content-Encoding: chunked",
+        "application/octet-stream với Transfer-Encoding: chunked",
+        "text/event-stream với Cache-Control: no-cache và Connection: keep-alive",
+        "multipart/mixed với header boundary"
+      ],
+      "explanation": "Endpoint SSE phải dùng Content-Type: text/event-stream — EventSource chỉ xử lý response có content type này. Cache-Control: no-cache ngăn các tầng trung gian cache stream. Connection: keep-alive bảo đảm kết nối giữ mở trên HTTP/1.1. Với nginx, X-Accel-Buffering: no ngăn việc buffer response body, thứ sẽ làm hỏng việc stream."
+    },
+    {
+      "id": "q8",
+      "question": "Vì sao bạn phải kiểm tra `ws.readyState === WebSocket.OPEN` trước khi gọi `ws.send()`?",
+      "options": [
+        "send() là bất đồng bộ và việc kiểm tra readyState sẽ await Promise",
+        "WebSocket yêu cầu một xác nhận ở tầng giao thức trước mỗi message",
+        "Trạng thái OPEN bật một tối ưu buffer gửi nội bộ",
+        "Gọi send() khi không ở trạng thái OPEN sẽ ném InvalidStateError hoặc âm thầm bỏ message, tùy trạng thái"
+      ],
+      "explanation": "WebSocket.send() ném InvalidStateError nếu được gọi khi đang CONNECTING (0); ở trạng thái CLOSING (2) và CLOSED (3) nó không ném lỗi — dữ liệu bị bỏ đi trong im lặng. Dù trường hợp nào, thiếu kiểm tra này thì các message gửi trong khoảng thời gian kết nối lại đều bị mất. Một pattern vững chắc là đưa message gửi đi vào hàng đợi khi chưa OPEN và flush hàng đợi khi sự kiện open bắn ra."
+    },
+    {
+      "id": "q9",
+      "question": "Một hệ thống thông báo trực tiếp đẩy cập nhật trạng thái đơn hàng từ server xuống trình duyệt. Client không bao giờ gửi dữ liệu qua cùng kênh. Cơ chế truyền nào phù hợp nhất?",
+      "options": [
+        "WebSocket, vì real-time lúc nào cũng cần WebSocket",
+        "Polling mỗi giây cho đơn giản và tương thích",
+        "Server-Sent Events, vì server push một chiều là đủ và SSE dễ triển khai, dễ scale hơn",
+        "Long-polling, vì nó có đặc tính latency tốt hơn SSE"
+      ],
+      "explanation": "Với thông báo server-push mà client không cần gửi dữ liệu qua cùng kênh, SSE là lựa chọn đúng. Nó đơn giản hơn WebSocket, chạy trên HTTP/2 với multiplexing, tự kết nối lại qua Last-Event-ID, tích hợp được với CDN, và dễ load-balance hơn mà không cần sticky session. WebSocket chỉ thêm phức tạp mà không mang lại lợi ích gì cho push một chiều."
+    },
+    {
+      "id": "q10",
+      "question": "Mục đích của việc trao đổi header `Sec-WebSocket-Key` / `Sec-WebSocket-Accept` trong WebSocket handshake là gì?",
+      "options": [
+        "Để mã hóa payload WebSocket bằng key dùng chung",
+        "Để ngăn cache poisoning bằng cách bảo đảm server thực sự hỗ trợ WebSocket và upgrade không phải là một HTTP response bị cache nhầm",
+        "Để xác thực người dùng và thiết lập danh tính session của họ",
+        "Để thương lượng thuật toán nén dùng cho WebSocket frame"
+      ],
+      "explanation": "Client gửi một Sec-WebSocket-Key 16 byte ngẫu nhiên mã hóa base64. Server nối nó với GUID cố định của WebSocket, SHA-1 hash kết quả, rồi trả hash mã hóa base64 trong Sec-WebSocket-Accept. Trình duyệt kiểm tra giá trị này. Điều này ngăn tình huống một WebSocket upgrade request được phục vụ từ HTTP cache — một response trong cache sẽ không biết key ngẫu nhiên của client và không thể tạo ra giá trị Accept đúng. Đây không phải cơ chế mã hóa hay xác thực."
+    }
+  ]
+}

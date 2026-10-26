@@ -1,0 +1,229 @@
+{
+  "sourceHash": "b8fe0cb5395b",
+  "title": "Các phong cách thiết kế API (API Design Styles)",
+  "tagline": "REST, GraphQL, gRPC — chọn đúng phong cách API sẽ định hình cách client nói chuyện với hệ thống của bạn trong nhiều năm.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "API là hợp đồng. Ngay khi có một client phụ thuộc vào nó, mọi tên field, mọi status code, mọi hình dạng URL đều trở thành lời hứa bạn phải giữ — hoặc phá vỡ một cách công khai và có chủ đích. Ba phong cách API thống trị hiện nay — **REST**, **GraphQL** và **gRPC** — mỗi cái ra đời để giải một loại \"nỗi đau\" cụ thể. REST dẹp loạn những web service XML tùy tiện hồi đầu những năm 2000. GraphQL sinh ra trong đội mobile của Facebook khoảng năm 2012, khi nhóm news feed nhận ra hàng chục màn hình client khác nhau cần những lát cắt dữ liệu rất khác nhau từ cùng một backend. gRPC là câu trả lời của Google để thay thế framework RPC nội bộ đã cũ (Stubby) bằng một thứ portable, hiệu năng cao và open-source.\n\nHiểu vì sao mỗi phong cách tồn tại không phải chuyện hàn lâm. Trong sự nghiệp, bạn sẽ đưa ra những quyết định kiến trúc sống hàng năm — có khi hàng chục năm. Endpoint REST bạn thiết kế hôm nay vẫn sẽ được gọi bởi những client bạn chưa từng gặp. Schema GraphQL bạn định nghĩa sẽ là bề mặt API mà team mobile thương lượng với bạn mỗi sprint. File `.proto` của gRPC bạn viết sẽ sinh ra client stub bằng Go, Python và Java mà hàng chục service nội bộ phụ thuộc vào. Chọn sai không làm hỏng mọi thứ ngay lập tức; nó từ từ rút cạn năng lượng của mọi engineer đụng vào hệ thống đó.\n\nChương này xây dựng hiểu biết thực sự về từng phong cách: cơ chế hoạt động ở tầng wire, những trade-off mà mỗi cái tối ưu, những failure mode cắn các team chọn nhầm công cụ, và các pattern (versioning, pagination, xử lý lỗi, caching) xuyên suốt cả ba. Đọc xong, bạn sẽ đủ sức bảo vệ lựa chọn phong cách API trong một buổi design review với độ chính xác kỹ thuật — và biết khi nào nên đổi ý.\n\nBản đồ nội dung: (1) REST — resource, verb, tính stateless, caching; (2) GraphQL — ngôn ngữ truy vấn, resolver, N+1, persisted query; (3) gRPC — Protobuf, HTTP/2, streaming; (4) chiến lược versioning cho từng phong cách; (5) pagination — offset và cursor; (6) thiết kế lỗi qua các phong cách; (7) một khung ra quyết định để chọn."
+    },
+    {
+      "type": "diagram",
+      "caption": "Ba phong cách, ba định dạng wire. REST dùng URL + HTTP verb + JSON. GraphQL dùng một ngôn ngữ truy vấn trên một endpoint duy nhất. gRPC dùng Protobuf nhị phân trên các stream multiplex của HTTP/2."
+    },
+    {
+      "type": "analogy",
+      "title": "Gọi món ở nhà hàng — ba hệ thống khác nhau",
+      "content": "**REST** là thực đơn in sẵn cố định. Mỗi món có tên, giá và một bộ nguyên liệu cố định. Bạn chỉ vào món số 7 và bếp mang ra đúng như mô tả. Bạn không thể gọi \"burger nhưng bỏ bánh mì và gấp đôi thịt\" — thực đơn không hỗ trợ tổ hợp đó. Bạn phải gọi riêng một miếng thịt (thêm một round-trip). Điểm mạnh: người phục vụ, nhà bếp và mọi nền tảng giao đồ ăn trên thế giới đều đã hiểu thực đơn in sẵn.\n\n**GraphQL** là quầy tự chọn kiểu \"build-your-own bowl\". Bạn bước tới và nói chính xác thứ mình muốn: \"cơm, đậu đen, gà nướng, không sour cream, thêm guac\". Bạn nhận đúng như vậy — không thừa, không thiếu — trong một lượt. Bếp phức tạp hơn (phải xử lý vô số tổ hợp), và dây chuyền khó nấu sẵn hàng loạt. Nhưng với một khách mobile không đủ dư dả data hay pin cho những nguyên liệu thừa, đây là một bước thay đổi lớn.\n\n**gRPC** là bộ đàm nối thẳng vào bếp kèm một cuốn mật mã dùng chung. Bạn bấm nút và nói \"7-B-4\" — mã đó nghĩa là \"burger gấp đôi thịt, bỏ bánh mì, hai lát dưa chua\" trong cuốn mật mã mà cả bạn và bếp cùng giữ. Thông điệp ngắn gọn, nhị phân và nhanh kinh khủng. Nhưng nó hoàn toàn mù mờ với ai không có cuốn mật mã. Tuyệt vời cho việc phối hợp hậu trường giữa các khu bếp; nhưng cực kỳ khó chịu với một khách mới bước vào và chưa từng thấy cuốn mật mã."
+    },
+    {
+      "type": "explanation",
+      "title": "REST: resource, verb và tính stateless",
+      "content": "**REST** (Representational State Transfer) được Roy Fielding mô tả trong luận án tiến sĩ năm 2000, rút ra từ các nguyên tắc kiến trúc ông quan sát được khi đồng tác giả HTTP/1.1. REST không phải protocol hay standard — nó là một tập **ràng buộc kiến trúc** (architectural constraints) mà khi tuân thủ cùng nhau sẽ cho ra hệ thống có những tính chất đáng mong muốn như khả năng mở rộng, tính quan sát được và khả năng tiến hóa độc lập. Fielding liệt kê sáu ràng buộc: **client–server**, **stateless**, **cacheable**, **uniform interface** (định danh resource, thao tác qua representation, message tự mô tả, và hypermedia/HATEOAS), **layered system** (client không biết mình đang nói chuyện với origin hay một proxy/CDN), và ràng buộc tùy chọn **code on demand**.\n\nÝ tưởng cốt lõi là mọi thứ server quản lý đều là một **resource** với URL ổn định. Resource là danh từ, không phải động từ: `/users/42`, `/orders/99`, `/products/catalog`. Thao tác được biểu diễn qua **HTTP method**:\n- `GET /users/42` — lấy user 42, **safe và idempotent** (không có side effect, lần nào cũng cùng kết quả)\n- `POST /users` — tạo user mới, **không idempotent** (gọi hai lần tạo ra hai user)\n- `PUT /users/42` — thay thế toàn bộ user 42, **idempotent** (gửi cùng một PUT hai lần cho cùng trạng thái cuối)\n- `PATCH /users/42` — cập nhật một phần user 42, **không đảm bảo idempotent** (RFC 5789). Một JSON Merge Patch như `{\"name\":\"Ana\"}` tình cờ là idempotent; còn một patch kiểu \"append vào `tags`\" hay \"tăng `loginCount`\" thì không\n- `DELETE /users/42` — xóa user 42, **idempotent** (xóa một resource đã bị xóa thì nó vẫn ở trạng thái đã xóa — *trạng thái* như nhau dù lần gọi thứ hai trả về `404`)\n\nIdempotency nói về **tác động lên trạng thái server**, không phải về response: lặp lại `DELETE` có thể trả `204` rồi `404`, và như vậy vẫn là idempotent. `GET`, `HEAD`, `OPTIONS`, `PUT` và `DELETE` idempotent theo định nghĩa (RFC 9110); `POST` và `PATCH` thì không, nên muốn retry chúng an toàn bạn cần một **idempotency key** (xem bên dưới).\n\n**Stateless** là ràng buộc REST quan trọng nhất cho khả năng mở rộng. Mỗi request phải mang đủ mọi thông tin cần để xử lý nó — không có session state phía server giữa các request. Server không nhớ rằng năm giây trước bạn vừa gọi `GET /users/42`. Nhờ vậy bất kỳ instance server nào trong pool sau load balancer cũng xử lý được bất kỳ request nào, và bạn có thể thêm bớt server mà không phải lo session affinity.\n\n**Cacheability** là hệ quả của stateless. Vì request `GET` không có side effect và kết quả chỉ phụ thuộc vào URL và header, các trung gian HTTP — trình duyệt, CDN, reverse proxy — có thể cache chúng. Header `Cache-Control: max-age=300` trên `GET /products` nghĩa là CDN phục vụ nó trong năm phút mà không đụng tới database của bạn. Đây là \"vũ khí tối thượng\" của REST cho các API public thiên về đọc.\n\n**HATEOAS** (Hypermedia as the Engine of Application State) là ràng buộc REST bị vi phạm nhiều nhất và ít ai tiếc nhất. Hiểu theo nghĩa chặt, response nên chứa link tới các hành động liên quan, để client điều hướng API mà không cần hardcode URL. Phần lớn API production tự gọi mình là \"RESTful\" trong khi hoàn toàn bỏ qua HATEOAS. Về mặt thực dụng, điều này ổn với hầu hết use case."
+    },
+    {
+      "type": "code_example",
+      "title": "Làm cho POST retry an toàn bằng Idempotency-Key",
+      "explanation": "POST không idempotent, nhưng mạng buộc ta phải retry (một timeout không cho bạn biết đơn hàng đã được tạo hay chưa). Client sinh một key cho mỗi thao tác logic và gửi kèm ở mọi lần retry; server **giành key một cách atomic trước khi làm việc**, lưu lại response, và phát lại nó cho các request trùng. Từ chối key bị dùng lại với body khác (422) và request trùng đang xử lý dở (409) sẽ bịt được hai lỗ hổng kinh điển. Stripe, Adyen và bản draft header `Idempotency-Key` của IETF đều theo hình dạng này; ở production, key được lưu trong một bảng database hoặc Redis kèm TTL (ví dụ 24h)."
+    },
+    {
+      "type": "explanation",
+      "title": "REST trong thực tế: over-fetching và under-fetching",
+      "content": "Ma sát thực tế của REST lộ ra qua hai pattern, càng đau khi ứng dụng càng phức tạp.\n\n**Over-fetching** xảy ra khi endpoint trả về nhiều dữ liệu hơn client cần. Endpoint `GET /users/42` trả về 15 field — name, email, bio, avatar_url, created_at, address, phone, preferences, v.v. Màn hình danh sách trên mobile chỉ cần name và avatar_url. Các field thừa lãng phí bandwidth và pin ở mỗi request.\n\n**Under-fetching** (còn gọi là vấn đề N+1 ở tầng API) xảy ra khi client phải gửi nhiều request để ráp một màn hình. Hiển thị trang profile của user cần `GET /users/42`, rồi `GET /users/42/orders`, rồi `GET /users/42/loyalty-points` — ba round-trip riêng, mỗi cái có latency riêng, và cái nào cũng có thể lỗi độc lập.\n\nCác team thường xoay xở với hai vấn đề này theo một trong ba cách:\n1. **Endpoint chuyên biệt** — `GET /user-profile-page?userId=42` trả về đúng các field trang profile cần. Chạy được, nhưng sinh ra cả rừng endpoint-theo-màn-hình, khó bảo trì.\n2. **Field projection** — `GET /users/42?fields=name,email,orders`. Thêm độ phức tạp cho mọi endpoint và cần cài đặt cẩn thận để tránh SQL injection qua tham số fields.\n3. **Chuyển sang GraphQL** — giải pháp ở mức kiến trúc, trình bày ngay sau đây.\n\nVới các service nội bộ đơn giản có client đã biết trước, over/under-fetching thường không đáng để giải. Sự đơn giản và hệ công cụ phổ quát của REST nặng ký hơn sự kém hiệu quả. Điểm đau xuất hiện khi bạn có client đa dạng (web, iOS, Android, bên thứ ba), mỗi cái cần hình dạng dữ liệu khác nhau từ cùng một resource."
+    },
+    {
+      "type": "diagram",
+      "caption": "Under-fetching trong REST: một trang profile cần ba request riêng. Mỗi request thêm latency và thêm cơ hội lỗi một phần."
+    },
+    {
+      "type": "explanation",
+      "title": "GraphQL: ngôn ngữ truy vấn cho API của bạn",
+      "content": "**GraphQL** là một ngôn ngữ truy vấn kèm runtime do các engineer Facebook tạo ra năm 2012 và open-source năm 2015. Nó giải over/under-fetching bằng cách đảo ngược trách nhiệm định hình dữ liệu: thay vì server quyết định mỗi endpoint trả về gì, **client khai báo chính xác thứ nó cần** trong một query có cấu trúc, và graph resolver của server ráp dữ liệu lại.\n\nMọi API GraphQL có một endpoint duy nhất (thường là `/graphql`) và một **schema** định nghĩa các type và quan hệ mà server phục vụ được. Schema có kiểu mạnh — mọi field đều có type khai báo, và hệ thống type được áp đặt cả lúc parse lẫn lúc runtime. Schema là hợp đồng ràng buộc giữa client và server, viết bằng **Schema Definition Language (SDL)**:\n\n```\ntype User {\n  id: ID!\n  name: String!\n  email: String!\n  orders: [Order!]!\n}\n\ntype Order {\n  id: ID!\n  total: Float!\n  status: String!\n}\n\ntype Query {\n  user(id: ID!): User\n  orders(userId: ID!, first: Int, after: String): OrderConnection!\n}\n```\n\nQuery của client chỉ rõ chính xác các field nó muốn:\n\n```\nquery GetUserProfile($id: ID!) {\n  user(id: $id) {\n    name\n    orders {\n      id\n      total\n    }\n  }\n}\n```\n\nServer resolve từng field qua một **resolver function** — một hàm biết cách lấy dữ liệu cho một type và field cụ thể. Các resolver được ghép thành một cây phản chiếu hình dạng của query. Kết quả là một round-trip HTTP duy nhất chỉ trả về các field được yêu cầu, bất kể phía sau có bao nhiêu backend service hay bảng database.\n\n**Mutation** trong GraphQL là các thao tác ghi (tạo, sửa, xóa). Spec cho phép các field cấp cao nhất của một query được resolve song song, nhưng yêu cầu các field cấp cao nhất của một mutation phải chạy **tuần tự**, đúng thứ tự đã viết.\n\n**Subscription** là cơ chế của GraphQL cho cập nhật real-time. Nó duy trì một connection lâu dài (thường qua WebSocket) và đẩy dữ liệu tới client khi có sự kiện phía server."
+    },
+    {
+      "type": "explanation",
+      "title": "GraphQL resolver, N+1 và DataLoader",
+      "content": "Sự thanh lịch của mô hình resolver trong GraphQL che giấu một cái bẫy hiệu năng nghiêm trọng: **vấn đề N+1 query**.\n\nHãy hình dung một query yêu cầu danh sách 50 user, mỗi user kèm các đơn hàng:\n\n```\nquery {\n  users {\n    name\n    orders { id total }\n  }\n}\n```\n\nMột cài đặt resolver ngây thơ sẽ bắn:\n1. Một query để lấy cả 50 user (`SELECT * FROM users LIMIT 50`)\n2. Rồi với mỗi user, một query riêng để lấy đơn hàng của họ (`SELECT * FROM orders WHERE user_id = ?`) — **thêm 50 query**\n\nTổng cộng: 51 query database chỉ để hiển thị một trang. Với 1000 user thì thành thảm họa.\n\nGiải pháp chuẩn là **DataLoader**, một tiện ích batching và caching ban đầu do Facebook xây dựng. DataLoader gom mọi lời gọi resolver riêng lẻ trong cùng một tick của request, rồi phát ra một query gộp duy nhất (`SELECT * FROM orders WHERE user_id IN (1, 2, 3, ...50)`), và phân phối kết quả về lại từng resolver. Một query thay vì 50.\n\nDataLoader dùng hai cơ chế:\n- **Batching**: các lời gọi `.load(key)` riêng lẻ trong cùng một tick của JavaScript event loop được gom lại và gửi cho batch function dưới dạng một array\n- **Cache theo request**: các lời gọi `.load(42)` lặp lại trong cùng một request trả về một promise đã cache, tránh fetch trùng\n\nPhạm vi cache theo từng request (không phải toàn cục) là then chốt. Cache kết quả database toàn cục giữa các request sẽ phục vụ dữ liệu cũ cho user khác.\n\n**Giới hạn độ sâu query** là một mối lo khác đặc thù của GraphQL. Một client độc hại hoặc bị bug có thể dựng một query lồng rất sâu, gây ra khối lượng resolve tăng theo cấp số nhân. Các công cụ như `graphql-depth-limit` áp độ sâu query tối đa (thường 5–10 cấp). Tương tự, **chấm điểm độ phức tạp query** gán chi phí cho mỗi field và từ chối các query vượt ngân sách."
+    },
+    {
+      "type": "diagram",
+      "caption": "GraphQL tỏa ra nhiều service ở phía trong nhưng trả về cho client một response duy nhất, đúng hình dạng yêu cầu — một round-trip bất kể có bao nhiêu nguồn dữ liệu tham gia."
+    },
+    {
+      "type": "explanation",
+      "title": "gRPC: nhị phân, streaming và hợp đồng chặt chẽ",
+      "content": "**gRPC** (gRPC Remote Procedure Calls) là một framework RPC hiệu năng cao do Google tạo ra và open-source năm 2016. Nó xây trên hai công nghệ khiến nó khác hẳn REST và GraphQL: **Protocol Buffers** (Protobuf) làm định dạng định nghĩa interface và serialization, và **HTTP/2** làm tầng vận chuyển.\n\n**Protocol Buffers** là một định dạng serialization nhị phân, trung lập ngôn ngữ, schema-first. Bạn định nghĩa API trong một file `.proto`, và trình biên dịch Protobuf (`protoc`) sinh ra client stub và server stub type-safe bằng bất kỳ ngôn ngữ nào trong hơn 12 ngôn ngữ được hỗ trợ. Schema là nguồn sự thật duy nhất — cả định dạng wire lẫn code đều sinh ra từ nó, loại bỏ sự lệch pha giữa tài liệu và cài đặt vốn là bệnh kinh niên của REST API.\n\nProtobuf mã hóa dữ liệu theo **số thứ tự field** (field number), không theo tên field. Message nhị phân cho `{ id: 42, name: 'Ana' }`, với `id` là field 1 và `name` là field 2, trông như: `[field 1, varint, 42][field 2, length-delimited, 3, Ana]`. Tên field hoàn toàn không xuất hiện trên wire. Điều này khiến message nhỏ hơn đáng kể — thường **nhỏ hơn 3–10 lần** so với JSON tương đương — và parse nhanh hơn vì không phải chuyển văn bản sang số.\n\n**HTTP/2** cung cấp các tính năng tầng vận chuyển giúp gRPC hiệu quả:\n- **Multiplexing**: nhiều RPC đồng thời dùng chung một TCP connection dưới dạng các stream độc lập, loại bỏ head-of-line blocking ở mức request của HTTP/1.1 (một gói TCP bị mất vẫn làm đứng mọi stream trên connection đó — HTTP/3/QUIC mới là thứ loại bỏ được chuyện này)\n- **Binary framing**: HTTP/2 là protocol nhị phân; không tốn overhead parse văn bản\n- **Nén header**: nén HPACK giảm overhead metadata, đặc biệt quan trọng với các RPC call nhỏ và dày đặc\n- **Flow control**: flow control theo từng stream ngăn bên sản xuất nhanh làm ngập bên tiêu thụ chậm\n\n**gRPC hỗ trợ bốn kiểu giao tiếp**:\n1. **Unary RPC**: client gửi một request, server trả một response. Giống một lời gọi REST. `GetUser(id) -> User`\n2. **Server streaming RPC**: client gửi một request, server trả về một stream các response. Lý tưởng cho live feed, theo dõi log (log tailing). `ListOrders(userId) -> stream Order`\n3. **Client streaming RPC**: client gửi một stream các request, server trả một response. Hữu ích cho upload lớn, insert hàng loạt. `UploadChunks(stream Chunk) -> UploadResult`\n4. **Bidirectional streaming RPC**: cả hai phía stream độc lập trên cùng một connection. Lý tưởng cho cộng tác real-time, chat, đồng bộ trạng thái game.\n\n**Hạn chế của gRPC với trình duyệt**: Fetch API không cho JavaScript kiểm soát framing của HTTP/2 cũng như truy cập HTTP trailer, cả hai đều là thứ gRPC dựa vào (status code đi trong trailer). Cách vòng qua là **gRPC-Web**, một protocol framing hơi khác, hoạt động thông qua một proxy (như Envoy) dịch qua lại giữa gRPC-Web và gRPC gốc. Chặng trung gian này thêm độ phức tạp, và đó là lý do gRPC chủ yếu được dùng cho giao tiếp server-to-server. (Protocol **Connect** của Buf là một lựa chọn thay thế phổ biến, phục vụ cùng các Protobuf service cho trình duyệt qua HTTP thường mà không cần proxy dịch.)"
+    },
+    {
+      "type": "diagram",
+      "caption": "gRPC hỗ trợ bốn kiểu giao tiếp. Unary phổ biến nhất. Server streaming đứng sau các feed real-time. Bidirectional streaming cho phép chat và chỉnh sửa cộng tác."
+    },
+    {
+      "type": "code_example",
+      "explanation": "REST cần ba round-trip tuần tự để ráp một trang profile. GraphQL gộp chúng thành một query trả về đúng các field được yêu cầu. Cursor pagination mã hóa một con trỏ ổn định tới bản ghi cuối cùng đã thấy — các bản ghi mới chèn vào giữa các lần lấy trang không làm xê dịch những bản ghi đã thấy, loại bỏ vấn đề trùng/sót của offset pagination.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "API versioning: chiến lược cho từng phong cách",
+      "content": "**Versioning** là cơ chế giúp bạn tiến hóa API mà không làm hỏng các client hiện có. Mỗi phong cách có quy ước riêng, được định hình bởi cấu trúc nền tảng của nó.\n\n**Versioning cho REST** có hai cách chính:\n\n*Version trên URL path* (`/v1/users`, `/v2/users`) phổ biến nhất trong ngành. Version hiển thị rõ, bookmark được và dễ route ở tầng hạ tầng. Các thay đổi phá vỡ (breaking change) — bỏ một field, đổi kiểu một field, tái cấu trúc một resource — đi vào một major version mới. Version cũ vẫn được giữ cho tới khi client chuyển đổi xong. Nhược điểm là version sinh sôi: về lý thuyết, chỉ một breaking change ở một resource cũng buộc phải nâng version mọi endpoint.\n\n*Version trên header* (`Accept: application/vnd.myapi.v2+json` hoặc `API-Version: 2024-06`) giữ URL ổn định và được Stripe, GitHub, Heroku ưa chuộng. Stripe dùng version API theo ngày (ví dụ `Stripe-Version: 2024-06-20`) gắn với changelog — tích hợp của bạn được ghim vào version lúc nó được xây dựng, và hành vi mới chỉ áp dụng nếu bạn chủ động opt in. Cách này thanh lịch nhưng đòi hỏi kỷ luật: route theo header khó hơn ở tầng CDN/load balancer.\n\n*Thay đổi chỉ-thêm* (additive-only) — thêm một field tùy chọn, một endpoint mới, một giá trị enum mới — là **tương thích ngược** và không cần nâng version ở cả hai cách. Rủi ro: thêm một **giá trị enum** hay thành viên union mới vẫn có thể làm hỏng client dùng câu lệnh `switch` vét cạn hoặc deserializer chặt — hãy ghi rõ trong tài liệu rằng client phải chịu được giá trị lạ.\n\n**Versioning cho GraphQL** theo một triết lý khác: đồng thuận của cộng đồng là schema GraphQL **không bao giờ nên được versioning**. Thay vào đó, nó tiến hóa liên tục:\n- Thoải mái thêm field mới; client bỏ qua những field nó không yêu cầu\n- Đánh dấu các field sẽ bỏ là `@deprecated(reason: \"Use newField instead\")` và giữ chúng hoạt động qua một chu kỳ deprecation\n- Không bao giờ xóa field chưa bị deprecated; không bao giờ đổi kiểu của một field\n- Dùng **schema introspection** (`__schema`) để công cụ tự động phát hiện thay đổi\n\n**Versioning cho Protobuf/gRPC** được áp đặt ngay ở tầng mã hóa nhị phân. Quy tắc đơn giản nhưng sống còn: **field number là vĩnh viễn**. Một khi `id = 1` và `name = 2` đã được deploy, chúng không bao giờ được đổi nghĩa. Bạn có thể:\n- Thêm field mới với field number mới — client cũ bỏ qua field lạ, client mới đọc được chúng\n- Đánh dấu các field đã deprecated bằng `reserved 3; reserved \"old_field_name\"` để tránh vô tình dùng lại\n- Xóa một field là an toàn với client cũ (chúng chỉ đơn giản không thấy nó nữa), nhưng luôn `reserve` số và tên của nó — nếu sau này ai đó dùng lại số đó với kiểu khác, client cũ sẽ hiểu sai các byte"
+    },
+    {
+      "type": "explanation",
+      "title": "Pagination: offset và cursor",
+      "content": "Pagination là mối quan tâm xuyên suốt mà phong cách API nào cũng phải giải quyết. Lựa chọn cơ chế pagination ảnh hưởng tới tính đúng đắn, hiệu năng và độ phức tạp phía client.\n\n**Offset pagination** (`?page=2&limit=20` hoặc `?offset=20&limit=20`) rất trực quan: bỏ qua N dòng đầu và trả về M dòng tiếp theo. Nó ánh xạ thẳng sang `LIMIT/OFFSET` của SQL. Client có thể nhảy tới một trang bất kỳ. Vấn đề xuất hiện khi lên quy mô:\n\n*Dòng bị xê dịch*: Nếu một bản ghi mới được chèn vào vị trí 5 trong lúc client đang lấy trang 2 (bản ghi 21–40), mọi bản ghi từ vị trí 5 trở đi bị dịch đi một. Client thấy lại bản ghi 20 ở trang 2 (bị trùng) hoặc bỏ sót bản ghi 21 (bị sót). Trong một news feed cập nhật liên tục, chuyện này xảy ra ở mỗi lần tải trang.\n\n*Hiệu năng sụt giảm*: `OFFSET 50000 LIMIT 20` trong SQL buộc database đọc rồi bỏ đi 50,000 dòng trước khi trả về 20 dòng. Với pagination sâu trên bảng lớn, mỗi lần là một lần quét toàn bảng.\n\n**Cursor pagination** giải được cả hai vấn đề. Cursor là một token mờ (opaque) mã hóa vị trí của bản ghi cuối cùng đã thấy — thường là một object JSON mã hóa base64 chứa sort key và ID của bản ghi cuối. Query cho trang kế tiếp là: `WHERE (created_at, id) < (cursor.created_at, cursor.id) ORDER BY created_at DESC, id DESC LIMIT 20`. Đây là một index range scan — nhanh bất kể bạn đã đi sâu vào tập dữ liệu tới đâu. Và vì nó trỏ tới một bản ghi cụ thể chứ không phải một offset, các thao tác chèn và xóa ở chỗ khác trong tập dữ liệu không ảnh hưởng tới nó.\n\nTrade-off: cursor pagination không hỗ trợ nhảy tới số trang tùy ý (không có \"trang 47\"), và token cursor phải giữ mờ với client (base64 hoặc mã hóa) để bạn có thể đổi cách biểu diễn bên trong mà không làm hỏng chúng.\n\n**Relay Connection Spec** là định dạng cursor pagination được cộng đồng GraphQL chuẩn hóa:\n```\ntype OrderConnection {\n  edges: [OrderEdge!]!\n  pageInfo: PageInfo!\n}\ntype OrderEdge {\n  node: Order!\n  cursor: String!\n}\ntype PageInfo {\n  hasNextPage: Boolean!\n  hasPreviousPage: Boolean!\n  startCursor: String\n  endCursor: String\n}\n```\nCấu trúc này dài dòng nhưng cho phép client và công cụ xử lý pagination thống nhất trên mọi API GraphQL áp dụng nó.\n\n**Pagination trong gRPC** thường dùng một field chuỗi `page_token` trong message request và response — về ngữ nghĩa giống hệt cursor pagination nhưng dùng cách mã hóa field của Protobuf."
+    },
+    {
+      "type": "explanation",
+      "title": "Thiết kế lỗi: HTTP status code, lỗi GraphQL và gRPC status code",
+      "content": "Cách API báo thất bại cũng quan trọng như cách nó báo thành công. Mỗi phong cách có quy ước riêng.\n\n**Thiết kế lỗi trong REST** tận dụng HTTP status code, vốn mang ngữ nghĩa mà mọi trung gian HTTP đều hiểu:\n- `400 Bad Request` — client gửi input không hợp lệ (lỗi validation)\n- `401 Unauthorized` — chưa xác thực (tên gọi dễ gây nhầm lẫn)\n- `403 Forbidden` — đã xác thực nhưng không có quyền với resource này\n- `404 Not Found` — resource không tồn tại\n- `409 Conflict` — xung đột do sửa đổi đồng thời (ví dụ optimistic locking thất bại)\n- `422 Unprocessable Content` (trước đây là \"Unprocessable Entity\") — input đúng cú pháp nhưng sai về ngữ nghĩa\n- `429 Too Many Requests` — vượt rate limit\n- `500 Internal Server Error` — bug phía server\n- `503 Service Unavailable` — dependency sập hoặc circuit breaker đang mở\n\nNgoài status code, body nên chứa một object lỗi máy đọc được. RFC 9457 (Problem Details for HTTP APIs) định nghĩa một định dạng chuẩn: `{ type, title, status, detail, instance }`. Nhiều team dùng một định dạng riêng đơn giản hơn, nhưng tính nhất quán trong cùng một API là không thể thương lượng.\n\n**Thiết kế lỗi trong GraphQL** khá khác thường: lỗi ở mức field được trả về với HTTP 200. Lỗi nằm trong array `errors` của response, bên cạnh phần `data` một phần. Điều này cho phép thành công một phần — một query resolve năm field nhưng lỗi ở một field sẽ trả về năm field thành công và một mục lỗi cho field thất bại. HTTP 200 làm hỏng việc giám sát dựa trên HTTP status code; bạn phải parse body để biết có thành công hay không. Với lỗi ở mức request (query không parse được, lỗi validation, auth, rate limit), spec **GraphQL over HTTP** — với media type `application/graphql-response+json` — dùng status code 4xx/5xx; các server cũ dùng `application/json` thường vẫn trả 200 cho mọi thứ, nên hãy kiểm tra server của bạn làm gì.\n\n**gRPC status code** là một enum định nghĩa riêng, tách khỏi mã HTTP: `OK` (0), `INVALID_ARGUMENT` (3), `NOT_FOUND` (5), `ALREADY_EXISTS` (6), `PERMISSION_DENIED` (7), `RESOURCE_EXHAUSTED` (8, cho rate limit), `INTERNAL` (13), `UNAVAILABLE` (14). Chúng ánh xạ về mặt ngữ nghĩa sang HTTP status code nhưng được truyền dưới dạng HTTP/2 trailer, không phải header. Client library phơi chúng ra dưới dạng exception hoặc giá trị lỗi tự nhiên của từng ngôn ngữ."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Field number là xương sống của tính tương thích ngược trong Protobuf. Thêm một field mới (avatar_url = 4) là an toàn: client cũ chỉ đơn giản bỏ qua field lạ. Khai báo `reserved` ngăn một developer sau này vô tình gán field number 6 cho một field mới có kiểu khác, điều sẽ âm thầm làm hỏng việc deserialize ở client cũ. Chữ ký của các streaming RPC trong file .proto trông y hệt unary — chỉ có từ khóa `stream` làm thay đổi chữ ký của code được sinh ra.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Caching: mỗi phong cách thắng và thua ở đâu",
+      "content": "Caching là một trong những điểm khác biệt rõ rệt nhất giữa ba phong cách.\n\n**REST và HTTP caching** là đồng minh tự nhiên. Request `GET` idempotent và safe, nên các trung gian HTTP (CDN như Cloudflare, Fastly; cache của trình duyệt; reverse proxy như Varnish) có thể cache chúng với key là toàn bộ URL cộng các header `Vary`. Một response API public có `Cache-Control: public, max-age=300` có thể được CDN phục vụ trong 5 phút mà origin server không phải tham gia gì. Điều này gỡ bỏ một lượng tải database khổng lồ cho các API thiên về đọc.\n\nCác header cache HTTP chính:\n- `Cache-Control: public, max-age=300` — CDN và trình duyệt được cache trong 300 giây\n- `Cache-Control: private, max-age=60` — chỉ trình duyệt được cache (dữ liệu riêng của user)\n- `Cache-Control: no-store` — không bao giờ cache (token xác thực, thao tác nhạy cảm)\n- `ETag: \"abc123\"` — một dấu vân tay; client có thể dùng `If-None-Match: \"abc123\"` để nhận 304 Not Modified nếu không có gì thay đổi\n- `Last-Modified` + `If-Modified-Since` — GET có điều kiện dựa trên thời gian\n\n**Caching cho GraphQL** khó về mặt cấu trúc. Mọi query đều gửi tới cùng một URL (`POST /graphql`) với query nằm trong body. HTTP cache dùng URL làm key, không phải body — nên dưới góc nhìn của cache, không thể phân biệt hai query GraphQL với nhau. Mặc định, caching ở tầng CDN gần như bất khả thi.\n\nCác cách vòng qua:\n- **Persisted query**: client đăng ký một query với server (server gán cho nó một hash), rồi các lần gọi sau dùng `GET /graphql?queryId=abc123&variables=...`. Dạng GET thì cache được. Apollo Client và Relay hỗ trợ persisted query.\n- **Cache chuẩn hóa phía client**: `InMemoryCache` của Apollo Client và store của Relay duy trì một cache entity đã chuẩn hóa với key `__typename:id`. Khi một mutation cập nhật `User:42`, mọi query có chứa field của user đó đều tự động bị vô hiệu hóa.\n- **Cache response ở tầng resolver**: từng resolver có thể cache kết quả của mình trong Redis hoặc thứ tương tự.\n\n**gRPC và caching**: gRPC chạy trên HTTP/2 và thường dùng ngữ nghĩa tương đương POST cho mọi RPC. HTTP caching chuẩn không áp dụng được. Caching trong hệ thống gRPC được cài đặt ở tầng ứng dụng — cache Redis dùng chung, cache LRU trong process của service, hoặc memoization trong phạm vi một request."
+    },
+    {
+      "type": "diagram",
+      "caption": "Một cây quyết định thực tế. Bắt đầu từ bức tranh client và mức độ đa dạng dữ liệu; dùng yêu cầu latency để chọn giữa REST và gRPC cho service nội bộ."
+    },
+    {
+      "type": "callout",
+      "content": "**Kiến trúc lai trong thực tế** rất phổ biến. Một hệ thống lớn có thể dùng gRPC cho mọi giao tiếp service-to-service nội bộ (nhanh, có kiểu, streaming), phơi ra một REST API cho developer bên thứ ba (đơn giản, cache được, công cụ phổ quát), và phục vụ một API GraphQL cho các mobile client của chính mình (linh hoạt, một round-trip). Ba phong cách không loại trừ nhau — chúng giải các vấn đề khác nhau trong cùng một hệ thống. Pattern **BFF (Backend For Frontend)** chính thức hóa điều này: mỗi loại client có một tầng API mỏng riêng, tối ưu cho nhu cầu của client đó, tất cả cùng dựa trên các gRPC service nội bộ."
+    },
+    {
+      "type": "callout",
+      "content": "**Những cái bẫy trong interview và design review cần thuộc lòng:**\n- \"GraphQL trả HTTP 200 cho lỗi field\" — điều này làm hỏng cảnh báo dựa trên status code. Bạn phải kiểm tra array `errors` trong body (server tuân theo spec GraphQL-over-HTTP thì có trả 4xx cho request không hợp lệ).\n- \"PATCH là idempotent\" — không theo định nghĩa. GET/PUT/DELETE thì có; POST và PATCH cần `Idempotency-Key` để retry an toàn.\n- \"gRPC không hợp với browser client nếu không có proxy\" — gRPC-Web có tồn tại nhưng thêm độ phức tạp; đừng hứa gRPC gốc trên trình duyệt khi chưa có kế hoạch.\n- \"REST PUT và PATCH\": PUT thay thế toàn bộ resource; PATCH áp một cập nhật một phần. Dùng lẫn lộn sẽ gây bug khi client bỏ trống các field tùy chọn.\n- \"Cursor pagination không truy cập ngẫu nhiên được\" — bạn không thể nhảy tới trang 47 bằng cursor. Nếu sản phẩm cần nhảy trang, có thể bạn cần offset hoặc một cách lai.\n- \"GraphQL không tự batch giúp bạn\" — trong các server dựa trên resolver (Apollo Server, graphql-js, graphql-java), DataLoader phải được nối thủ công cho từng quan hệ; chỉ các engine biên dịch query (ví dụ Hasura, PostGraphile) mới tránh được N+1 bằng cách biến cả query thành SQL.\n- \"Không bao giờ dùng lại field number của Protobuf\" — mã hóa nhị phân dùng field number, không dùng tên. Dùng lại một số với kiểu khác gây hỏng dữ liệu âm thầm ở các client đã deploy."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**REST** ánh xạ resource thành URL và thao tác thành HTTP verb, mặc định stateless và cache được — phong cách API public thống trị, nhưng dễ dính over/under-fetching khi nhu cầu dữ liệu của client phân hóa.",
+        "**Idempotency**: GET, PUT và DELETE là idempotent (lặp lại cho cùng trạng thái server, dù response có thể khác); POST và PATCH thì không — hãy làm chúng retry an toàn bằng một **Idempotency-Key** do client sinh ra, được server giành một cách atomic và phát lại.",
+        "**GraphQL** cho phép client khai báo chính xác dữ liệu cần trong một request, giải over/under-fetching với cái giá là caching phức tạp hơn, rủi ro N+1 query, và một tầng server tinh vi hơn.",
+        "**gRPC** dùng Protobuf nhị phân trên HTTP/2 — payload nhỏ hơn đáng kể, kiểu mạnh và hỗ trợ streaming sẵn có — hợp nhất cho lời gọi service-to-service nội bộ, nơi cả hai phía đều trong tầm kiểm soát.",
+        "Chiến lược **API versioning** khác nhau theo phong cách: version trên URL path hoặc header cho REST, tiến hóa schema liên tục kèm deprecation cho GraphQL, field number được reserve cho Protobuf — quy tắc chung là không bao giờ âm thầm làm hỏng client hiện có.",
+        "**Pagination dựa trên cursor** được ưu tiên hơn offset khi lên quy mô: nó ổn định khi có dòng được chèn hoặc xóa, và chạy như một index range scan hiệu quả thay vì bỏ qua dòng kiểu quét toàn bảng.",
+        "**Caching** là vũ khí tối thượng của REST: response GET có thể được CDN phục vụ mà không chạm tới origin. Caching cho GraphQL cần persisted query hoặc store chuẩn hóa phía client. Caching cho gRPC chỉ có ở tầng ứng dụng.",
+        "**Hệ thống production thường trộn cả ba**: gRPC giữa các service nội bộ, REST cho developer bên thứ ba, và GraphQL (hoặc REST kiểu BFF) cho mobile/web client của chính mình — mỗi phong cách tối ưu một mối quan tâm khác nhau trong cùng một kiến trúc."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Vấn đề cốt lõi mà GraphQL được thiết kế để giải so với REST là gì?",
+      "options": [
+        "Over-fetching và under-fetching — client nhận quá nhiều hoặc quá ít dữ liệu mỗi request",
+        "REST không hỗ trợ được token xác thực",
+        "REST quá chậm vì dùng TCP",
+        "REST không hỗ trợ dữ liệu real-time"
+      ],
+      "explanation": "Endpoint REST trả về hình dạng cố định, buộc client hoặc nhận cả những field không cần (over-fetching), hoặc phải gửi nhiều request để ráp một màn hình (under-fetching). GraphQL cho client chỉ định chính xác các field nó muốn trong một query duy nhất."
+    },
+    {
+      "id": "q2",
+      "question": "Vì sao gRPC nhìn chung KHÔNG được khuyến nghị cho API public hướng tới trình duyệt?",
+      "options": [
+        "gRPC không hỗ trợ xác thực",
+        "Trình duyệt không nói được framing HTTP/2 gRPC thô nếu không có proxy dịch",
+        "Response gRPC không phải JSON nên JavaScript không parse được",
+        "gRPC chỉ hỗ trợ request GET"
+      ],
+      "explanation": "Trình duyệt cung cấp Fetch API, vốn không cho kiểm soát trực tiếp framing HTTP/2 mà gRPC cần. Phải có một proxy như gRPC-Web hoặc Envoy để dịch, thêm độ phức tạp. gRPC tỏa sáng ở các lời gọi server-to-server nơi cả hai phía đều trong tầm kiểm soát."
+    },
+    {
+      "id": "q3",
+      "question": "Trong thiết kế REST API, HTTP method nào vừa safe VÀ idempotent?",
+      "options": [
+        "POST",
+        "PATCH",
+        "GET",
+        "DELETE"
+      ],
+      "explanation": "GET vừa safe (không có side effect) vừa idempotent (lặp lại không làm đổi trạng thái server). DELETE idempotent nhưng không safe. POST không phải cả hai. PATCH không đảm bảo idempotent (RFC 5789) — tùy vào ngữ nghĩa của patch — và không bao giờ safe."
+    },
+    {
+      "id": "q4",
+      "question": "Vấn đề N+1 query trong GraphQL là gì, và giải pháp chuẩn là gì?",
+      "options": [
+        "GraphQL cần N+1 round-trip mạng cho N resource; giải bằng persisted query",
+        "Endpoint GraphQL chỉ xử lý được N+1 connection đồng thời; giải bằng connection pooling",
+        "GraphQL giới hạn response ở N+1 field mỗi query; giải bằng schema stitching",
+        "Resolver ngây thơ phát một query DB cho mỗi phần tử trong danh sách (N query cho N phần tử); giải bằng batching của DataLoader"
+      ],
+      "explanation": "Nếu một resolver danh sách trả về 100 user và resolver orders của mỗi user bắn một query DB riêng, tổng cộng là 101 query (1 + 100). DataLoader gom các lời gọi resolver riêng lẻ trong một tick của event loop và phát ra một query gộp duy nhất, rồi phân phối kết quả về lại."
+    },
+    {
+      "id": "q5",
+      "question": "Vì sao pagination dựa trên cursor được ưu tiên hơn pagination dựa trên offset cho các tập dữ liệu lớn, cập nhật thường xuyên?",
+      "options": [
+        "Offset pagination làm xê dịch dòng khi có bản ghi mới được chèn, gây trùng hoặc sót phần tử giữa các trang",
+        "Offset pagination buộc client phải biết tổng số bản ghi",
+        "Cursor luôn nhanh hơn vì hoàn toàn không đụng tới database",
+        "Cursor pagination chỉ hoạt động với Relay Connection spec của GraphQL"
+      ],
+      "explanation": "Với offset pagination, chèn một bản ghi mới vào vị trí 5 trong lúc client đang lấy trang 2 sẽ làm mọi bản ghi phía sau dịch đi một — client thấy một bản ghi trùng hoặc bỏ sót một phần tử. Cursor trỏ tới một vị trí bản ghi ổn định (sort key + ID), không xê dịch khi có chèn hay xóa."
+    },
+    {
+      "id": "q6",
+      "question": "Trong Protobuf (gRPC), vì sao bạn không bao giờ nên dùng lại một field number?",
+      "options": [
+        "Field number của Protobuf phải là duy nhất toàn cục trên mọi service trong một dự án",
+        "Client cũ giải mã byte theo field number — dùng lại một số với kiểu khác sẽ âm thầm làm hỏng việc deserialize",
+        "Các field number lớn hơn 15 đã được reserve và không gán lại được",
+        "Dùng lại field number gây lỗi biên dịch trong protoc"
+      ],
+      "explanation": "Protobuf mã hóa field theo số, không theo tên. Nếu bạn xóa field 3 (một string) và sau đó thêm một field 3 mới (một int64), các client cũ đã deploy vẫn mang schema cũ sẽ hiểu sai các byte, gây hỏng dữ liệu âm thầm — có thể còn tệ hơn một cú crash."
+    },
+    {
+      "id": "q7",
+      "question": "Vì sao server GraphQL thường trả HTTP 200 ngay cả khi một số field không resolve được?",
+      "options": [
+        "GraphQL đòi HTTP 200 để cho phép cache body của response",
+        "Mã lỗi HTTP được dành riêng cho lỗi tầng mạng trong GraphQL",
+        "GraphQL hỗ trợ thành công một phần — một số field có thể resolve thành công trong khi số khác thất bại, tất cả trả về trong một response",
+        "Trả lỗi trong body an toàn hơn dùng HTTP status code"
+      ],
+      "explanation": "GraphQL hỗ trợ thành công một phần: một query resolve năm field có thể thành công bốn và lỗi một. Response chứa cả dữ liệu thành công VÀ một array errors, nên một status 4xx/5xx sẽ mô tả sai một response thành công một phần. Lỗi ở mức request (ví dụ query không parse hoặc validate được) thì khác — spec GraphQL-over-HTTP trả 4xx cho những trường hợp đó. Dù thế nào, việc giám sát dựa trên HTTP status vẫn phải được bổ sung thêm bước kiểm tra array errors."
+    },
+    {
+      "id": "q8",
+      "question": "Một mobile app cần hiển thị dashboard gộp profile user, đơn hàng gần đây và điểm thưởng từ ba backend service riêng biệt trong một round-trip. Phong cách API nào phù hợp nhất?",
+      "options": [
+        "REST — gọi riêng từng endpoint của service và gộp ở phía client",
+        "gRPC — dùng bidirectional streaming để lấy cả ba cùng lúc",
+        "REST kèm polling mỗi 5 giây để giảm latency",
+        "GraphQL — một query mà graph resolver của nó tỏa ra cả ba service ở phía trong"
+      ],
+      "explanation": "Graph resolver của GraphQL có thể tỏa ra nhiều backend service và gộp kết quả thành một response duy nhất cho client. Mobile app chỉ gửi một HTTP request; tầng GraphQL tự xử lý cả ba lời gọi phía sau, trả về một payload duy nhất đúng hình dạng yêu cầu."
+    },
+    {
+      "id": "q9",
+      "question": "Vì sao request GET trong REST dễ được CDN cache, còn query GraphQL nhìn chung thì không?",
+      "options": [
+        "Query GraphQL thường được gửi dưới dạng body POST tới một URL duy nhất — HTTP cache dùng method và URL làm key và mặc định không cache response POST",
+        "Response REST luôn nhỏ hơn nên thân thiện với cache hơn",
+        "GraphQL dùng HTTP/2, thứ chủ động vô hiệu hóa caching của CDN",
+        "REST tự động đặt header Cache-Control; GraphQL thì không"
+      ],
+      "explanation": "HTTP cache (CDN, cache trình duyệt, Varnish) dùng method và URL của request (cộng các header Vary) làm key và mặc định không cache POST. REST GET /users/42 là duy nhất nên cache được. Query GraphQL thường dùng chung POST /graphql với body khác nhau, nên cache không phân biệt được chúng. Persisted query gửi dưới dạng GET /graphql?queryId=hash khôi phục khả năng cache."
+    },
+    {
+      "id": "q10",
+      "question": "Kiểu giao tiếp gRPC nào phù hợp nhất cho một client đăng ký nhận feed giá cổ phiếu trực tiếp từ server?",
+      "options": [
+        "Unary RPC — một request, một response, lặp lại bằng polling",
+        "Server streaming RPC — client gửi một request, server đẩy các cập nhật giá dưới dạng stream",
+        "Client streaming RPC — client đẩy một stream các đăng ký mã cổ phiếu",
+        "Bidirectional streaming — cả hai phía cùng stream đồng thời"
+      ],
+      "explanation": "Server streaming cho phép server đẩy nhiều message theo thời gian để đáp lại một request duy nhất của client — lý tưởng cho live feed, theo dõi log, hay bất kỳ tình huống nào server liên tục sinh dữ liệu. Client gửi một request (đăng ký AAPL), và server stream các cập nhật giá vô thời hạn mà client không cần polling."
+    }
+  ]
+}

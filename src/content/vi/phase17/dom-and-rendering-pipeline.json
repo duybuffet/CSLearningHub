@@ -1,0 +1,227 @@
+{
+  "sourceHash": "81c229a237ce",
+  "title": "DOM & Rendering Pipeline",
+  "tagline": "Trình duyệt biến HTML và CSS thành pixel ra sao: DOM, CSSOM, render tree, layout, paint, compositing, và cái giá thật sự của reflow.",
+  "sections": [
+    {
+      "type": "intro",
+      "content": "Mỗi lần tải một trang web, trình duyệt thực hiện một chuỗi biến đổi đáng kinh ngạc. Byte thô đi qua dây mạng, được giải mã thành ký tự, parse thành một tree các đối tượng, được gắn style theo các quy tắc cascade, được đo đạc và đặt vị trí trên một mặt phẳng hai chiều, được vẽ vào các pixel buffer, rồi cuối cùng được ghép lại và giao cho GPU để hiển thị lên màn hình — tất cả chỉ trong vài mili giây. Toàn bộ chuỗi này là **rendering pipeline**, và mọi kỹ sư front-end đều nên hiểu nó thật sâu.\n\nVì sao điều này quan trọng trong thực tế? Vì rendering pipeline quyết định chi phí hiệu năng của mọi thứ bạn làm trong JavaScript. Đọc `element.offsetWidth` ngay sau khi ghi vào DOM có thể âm thầm kích hoạt việc tính lại toàn bộ layout. Animate `width` thay vì `transform` buộc trình duyệt chạy lại ba giai đoạn tốn kém nhất sáu mươi lần mỗi giây. Thêm một `box-shadow` trông vô hại vào một phần tử hay bị vẽ lại có thể làm frame rate giảm một nửa. Pipeline chính là lý do những chuyện này xảy ra.\n\nTrình duyệt cũng rất khéo trong việc làm ít việc nhất có thể. Nó theo dõi DOM node nào bị dirty, chỉ vẽ lại những vùng đã thay đổi, chuyển một số animation sang compositor thread của GPU để chúng không bao giờ chặn JavaScript, và dùng các heuristic để nâng những phần tử hay di chuyển lên compositing layer riêng. Hiểu cả pipeline lẫn các tối ưu này cho bạn một mô hình tư duy chính xác để viết code hiệu năng cao.\n\nChương này dựng mô hình đó từ nền móng. Chúng ta bắt đầu từ byte thô và kết thúc ở pixel trên màn hình, xem kỹ từng giai đoạn: cái gì kích hoạt nó, nó tốn bao nhiêu, trình duyệt làm gì để bỏ qua nó khi có thể, và những pattern lập trình nào tận dụng — hoặc vô tình phá hỏng — các tối ưu đó."
+    },
+    {
+      "type": "diagram",
+      "caption": "Rendering pipeline. DOM và CSSOM được bước tính style (Recalculate Style) kết hợp thành Render Tree, từ đó dẫn tới Layout, Paint và Composite. JavaScript tác động ngược lại pipeline ở DOM và CSSOM, có thể kích hoạt lại toàn bộ các giai đoạn phía sau."
+    },
+    {
+      "type": "analogy",
+      "title": "Rendering như một xưởng in báo",
+      "content": "Hãy hình dung trình duyệt là một xưởng in báo hiện đại với sáu trạm riêng biệt:\n\n**Trạm 1 — DOM (kho lưu bài viết)**: Phóng viên nộp mọi bài viết, tiêu đề, ảnh và chú thích. Đây thuần túy là nội dung — chưa có quyết định nào về dàn trang. Biên tập viên có thể thêm, bỏ hoặc viết lại bài bất cứ lúc nào.\n\n**Trạm 2 — CSSOM (cẩm nang trình bày)**: Một nhóm khác giữ cẩm nang trình bày của tòa soạn: kiểu chữ, độ rộng cột, màu sắc, lề. Mọi tổ hợp loại phần tử và class đều có một quy tắc style đã được tính sẵn.\n\n**Trạm 3 — Render Tree (bản phác dàn trang)**: Nhóm dàn trang đối chiếu bài viết với cẩm nang và tạo ra bản phác chỉ gồm nội dung hiển thị — những mẩu rao vặt bị đánh dấu 'không in' (`display: none`) bị loại hẳn. Mỗi mục hiển thị được gắn style cuối cùng đã được xác định.\n\n**Trạm 4 — Layout (thợ sắp chữ)**: Một thợ sắp chữ lành nghề đo từng cột, ngắt từng dòng chữ, đặt từng khung ảnh, và ghi lại tọa độ chính xác của mọi phần tử trên trang. Đây là việc chậm và tỉ mỉ.\n\n**Trạm 5 — Paint (máy in)**: Máy in phủ mực lên giấy, rasterize chữ, viền, nền và bóng đổ thành pixel thật. Đồ họa phức tạp (gradient, drop shadow) tốn nhiều thời gian hơn để vẽ.\n\n**Trạm 6 — Composite (xếp các tờ)**: Các tờ in xong được xếp theo đúng thứ tự. Một số phần (quảng cáo, tờ rời) được in riêng và đặt chồng lên ở bước cuối — đó là các **compositor layer**.\n\nNếu một phóng viên sửa bài giữa lúc đang in (`DOM mutation`), xưởng phải cho thợ sắp chữ làm lại (`reflow`) và phủ mực lại những phần thay đổi (`repaint`). Nhưng nếu chỉ độ mờ (opacity) của một tờ quảng cáo đặt chồng thay đổi, xưởng chỉ cần chỉnh lại cách xếp mà không đụng tới trạm nào khác — compositor xử lý riêng phần đó, rẻ hơn nhiều bậc độ lớn."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 1: Dựng DOM",
+      "content": "Khi trình duyệt nhận được một response HTML, nó cho response đi qua một **byte stream decoder** (giải mã theo bảng mã ký tự như UTF-8), rồi tới một **tokeniser** nhận diện tag và attribute, và cuối cùng là một **tree constructor** dựng nên DOM.\n\n**Document Object Model** là một tree gồm các đối tượng node. Mỗi phần tử là một node `Element`, nội dung chữ là node `Text`, comment là node `Comment`, và ở gốc là node `Document`. Parser của HTML5 được thiết kế chủ ý để chịu lỗi tốt — spec định nghĩa chính xác các quy tắc khôi phục lỗi, để markup sai vẫn cho ra một DOM có thể đoán trước thay vì một trang báo lỗi.\n\nĐiều quan trọng là **DOM không phải là HTML**. DOM là một object graph sống trong bộ nhớ. JavaScript có thể thay đổi nó bất cứ lúc nào: thêm node con, đổi attribute, xóa node. Khi bạn gọi `document.createElement('div')` hoặc gán `innerHTML`, bạn đang trực tiếp sửa object graph này.\n\nDOM cũng không chứa thông tin hiển thị. Nó thuần túy về cấu trúc. Một node trong DOM không hề có khái niệm 'nó xuất hiện ở đâu trên màn hình' — việc tính toán đó diễn ra sau. Đây là một sự tách biệt kiến trúc quan trọng.\n\n**Script parser-blocking** làm việc dựng DOM phức tạp hơn. Khi HTML parser gặp thẻ `<script>` không có `async` hay `defer`, nó dừng dựng DOM, tải script, chạy nó (vì script có thể gọi `document.write` để sửa luồng HTML), rồi mới parse tiếp. Đó là lý do script đặt ở cuối `<body>` hoặc có `defer` tải nhanh hơn — chúng không chặn việc parse.\n\nCác trình duyệt hiện đại còn chạy một **speculative preload scanner** nhìn trước luồng HTML song song với parser, phát hiện sớm các resource như ảnh, stylesheet và script để chúng bắt đầu tải trước khi parser chính đi tới."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 2: Dựng CSSOM",
+      "content": "Byte CSS đi qua một pipeline y hệt: byte → ký tự → token → parse tree → CSSOM. **CSS Object Model** là dạng đối tượng đã parse của các stylesheet — gồm rule, selector và declaration — được expose cho JavaScript qua `document.styleSheets` và các đối tượng `CSSStyleRule`. Nó *không* phản chiếu DOM; kết quả cho từng phần tử được tạo ra sau đó, ở bước **tính style** (trong DevTools: \"Recalculate Style\"), khi mọi rule được so khớp với mọi phần tử và cascade được giải quyết.\n\nParse CSS có một đặc tính quan trọng mà parse HTML không có: nó là **render-blocking**. Trình duyệt sẽ không render một pixel nào cho tới khi mọi CSS trong thẻ `<link>` và `<style>` được tải và parse xong. Vì sao? Vì một stylesheet tải sau có thể thay đổi hoàn toàn diện mạo của những phần tử đã được parse. Render với CSS dở dang sẽ gây ra **flash of unstyled content (FOUC)** — một khoảnh khắc trang hiện ra khi chưa có style. Trình duyệt tránh điều này bằng cách chặn render cho tới khi CSSOM hoàn tất.\n\nĐiều này có nghĩa là các file CSS lớn, tải chậm sẽ trực tiếp làm chậm First Paint. Cách sửa không phải là tránh dùng CSS, mà là giữ critical CSS thật nhỏ, inline nó trong thẻ `<style>` ở phần head của tài liệu, và dùng attribute `media` trên thẻ `<link>` để đánh dấu CSS không quan trọng là non-blocking (trình duyệt vẫn tải nó, chỉ là không chặn render).\n\nViệc phân giải style (bước tính style) gồm **cascade** (rule nào thắng khi nhiều rule cùng khớp một phần tử), **specificity** (selector ID thắng selector class, selector class thắng selector tag) và **kế thừa** (nhiều thuộc tính như `color` và `font-size` được truyền từ cha xuống con). Đầu ra cho mỗi phần tử là một tập **computed value** — phần trăm được quy ra pixel, giá trị `em` được quy ra kích thước pixel tuyệt đối, `inherit` được thay bằng giá trị kế thừa thực tế, `initial` được thay bằng giá trị mặc định của thuộc tính.\n\nMột điểm tinh tế quan trọng: **JavaScript và CSSOM**. Gọi `getComputedStyle()` từ JS là đọc giá trị từ CSSOM. Nhưng nếu một `<script>` JS xuất hiện sau `<link rel=stylesheet>`, trình duyệt cũng phải đợi CSSOM xong rồi mới chạy script — vì script có thể gọi `getComputedStyle`. Vậy nên việc chạy script cũng bị style chặn, thêm một lý do nữa khiến `defer`/`async` quan trọng."
+    },
+    {
+      "type": "diagram",
+      "caption": "Các phụ thuộc khi parse: CSS chặn render và chặn việc chạy script; script (không có async/defer) chặn parse HTML. Cả hai tree phải sẵn sàng thì mới dựng được Render Tree."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 3: Render Tree — kết hợp DOM và CSSOM",
+      "content": "**Render Tree** được dựng bằng cách duyệt DOM tree và gắn thông tin đã tính từ CSSOM vào từng node hiển thị. Nó không phải DOM cũng không phải CSSOM — mà là một tree thứ ba, mới, biểu diễn chính xác những gì cần vẽ lên màn hình.\n\nQuy tắc quan trọng nhất: **phần tử display:none bị loại khỏi Render Tree**. Chúng tồn tại trong DOM, vẫn xuất hiện trong kết quả query của JavaScript, nhưng không có mặt trong Render Tree và không tốn chút chi phí nào cho layout và paint. Điều này khác căn bản với `visibility: hidden` — một phần tử bị ẩn nhưng vẫn \"hiển thị\" theo nghĩa đó **có** trong Render Tree; nó chiếm chỗ, tham gia layout, chỉ là được vẽ trong suốt.\n\nCó những thứ xuất hiện trong Render Tree nhưng không có trong DOM: **CSS pseudo-element** (`::before`, `::after`, `::first-line`). Chúng được sinh ra từ các rule CSS và chèn vào Render Tree như thể là node con, dù không có DOM node nào tương ứng. Bạn có thể gắn style cho chúng và chúng ảnh hưởng tới layout, nhưng bạn không thể chọn chúng bằng `querySelector`.\n\nRender Tree cũng phản ánh mô hình **stacking context** — phần tử nào xếp chồng lên phần tử nào, được quyết định bởi `z-index`, `position`, `opacity`, `filter`, `transform` và `will-change`. Stacking context là các subtree của Render Tree được vẽ như một khối. Một phần tử con có `z-index: 999` không thể thoát khỏi thứ tự vẽ của stacking context cha — một nguồn gây nhầm lẫn phổ biến về `z-index`.\n\nDựng Render Tree tương đối rẻ. Những bước tốn kém nằm ở phía sau."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 4: Layout (Reflow) — tính hình học",
+      "content": "**Layout** (còn gọi là **reflow**) là quá trình tính chính xác vị trí (x, y) và kích thước (width, height) của mọi node trong Render Tree theo hệ tọa độ của viewport. Với các tài liệu lớn và phức tạp, đây là giai đoạn tốn kém nhất của pipeline.\n\nLayout dùng **CSS box model**: mỗi phần tử là một hộp chữ nhật với các vùng content, padding, border và margin. Layout phải tính đến block formatting context, inline formatting context (ngắt dòng chữ), thuật toán flexbox, thuật toán đặt vị trí của grid, việc clear float, và định vị absolute/fixed/sticky.\n\nKhó khăn cốt lõi là **sự phụ thuộc lẫn nhau**. Kích thước của cha thường phụ thuộc vào kích thước của các con (ví dụ một `div` có `height: auto`). Kích thước của con có thể phụ thuộc vào width tính theo phần trăm so với cha. Các con trong flexbox thương lượng kích thước với anh em của chúng. Nghĩa là layout đôi khi cần **nhiều lượt** đi qua một số phần của tree (flex item và grid item có thể bị đo nhiều lần) — đây là chi phí nội tại của các thuật toán layout, đừng nhầm với layout thrashing do JavaScript gây ra mà ta sẽ bàn bên dưới.\n\n**Cái gì kích hoạt reflow toàn phần hoặc một phần?**\n- Thêm hoặc xóa một DOM node\n- Thay đổi nội dung chữ của một node\n- Thay đổi bất kỳ thuộc tính CSS nào ảnh hưởng tới hình học: `width`, `height`, `padding`, `margin`, `border`, `font-size`, `font-family`, `line-height`, `display`, `position`, `flex-*`, `grid-*`\n- Thay đổi kích thước viewport (kích hoạt reflow toàn cục)\n- Đọc một số thuộc tính layout từ JavaScript (forced synchronous layout)\n\nTrình duyệt tối ưu bằng cách duy trì một **dirty region** — chỉ đánh dấu những subtree cần layout lại. Một thay đổi nằm sâu trong một subtree định vị absolute, tách biệt, có thể không cần tính lại toàn bộ tài liệu. Nhưng thay đổi ở một phần tử nằm trong normal flow của tài liệu có thể lan rộng.\n\n**Forced Synchronous Layout (FSL)** là một khái niệm đặc biệt quan trọng. Trình duyệt gom các DOM mutation lại và hoãn layout tới frame kế tiếp. Nhưng nếu JavaScript đọc một thuộc tính phụ thuộc layout (`offsetWidth`, `getBoundingClientRect`, `scrollTop`, hoặc một giá trị hình học từ `getComputedStyle` — cái này luôn buộc ít nhất một lần tính lại style) trong khi vẫn còn mutation đang chờ, trình duyệt **buộc phải** flush và tính layout ngay lập tức — một cách đồng bộ — trước khi trả về giá trị. Đó gọi là forced synchronous layout. Đây không phải bug của trình duyệt; nó là đảm bảo cần thiết để giá trị bạn đọc là mới nhất. Vấn đề nảy sinh khi bạn đọc và ghi xen kẽ trong một vòng lặp: mỗi lần đọc sau một lần ghi lại buộc một lần layout mới, tạo ra N lượt layout thay vì một."
+    },
+    {
+      "type": "diagram",
+      "caption": "Vòng lặp Forced Synchronous Layout (FSL): mỗi chu kỳ đọc-rồi-ghi buộc một lần tính layout mới. Đây là layout thrashing — N lượt layout trong một JS task thay vì một lần layout vào thời điểm vẽ frame."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 5: Paint (Rasterisation) — biến hình học thành pixel",
+      "content": "**Paint** biến các layout box thành **paint record** (display list) — trên main thread — rồi **rasterisation** biến các record đó thành màu pixel thật, lưu trong các buffer bộ nhớ. (Hai bước này hay bị gộp chung là \"paint\", nhưng trong Chromium chúng là các bước riêng chạy trên các thread khác nhau.) Paint record của mỗi phần tử mô tả cách vẽ nó: tô hình chữ nhật, vẽ viền, render glyph chữ, áp box shadow, vẽ ảnh nền.\n\nTrình duyệt không vẽ toàn bộ trang vào một bitmap duy nhất. Nó chia trang thành các **tile** — thường là vùng 256×256 hoặc 512×512 pixel — và vẽ từng tile độc lập. Nhờ vậy trình duyệt có thể ưu tiên vẽ những tile gần viewport và bỏ qua những tile ở xa ngoài màn hình. Tile được render bởi các **raster thread** (thường có nhiều thread chạy song song) và dữ liệu pixel của chúng được upload lên GPU dưới dạng texture.\n\n**Cái gì kích hoạt repaint (mà không reflow)?**\nThay đổi bất kỳ thuộc tính CSS nào ảnh hưởng tới diện mạo nhưng không ảnh hưởng hình học:\n- `color`, `background-color`, `border-color`\n- `box-shadow`, `text-shadow`\n- `outline`\n- `visibility` (không phải `display` — đổi display sẽ kích hoạt reflow)\n- `background-image`\n\nChi phí paint tỷ lệ với **diện tích được vẽ** và **độ phức tạp của các hiệu ứng** cần render. Một phần tử lớn có gradient nhiều lớp phức tạp kèm drop shadow sẽ tốn kém khi vẽ. Đó là lý do `box-shadow` hay được nhắc tới như một mối lo về hiệu năng paint — rasterize nó tốn nhiều tính toán.\n\nTrình duyệt duy trì một **paint invalidation region** — chỉ những tile chứa pixel thay đổi mới được vẽ lại. Nếu một spinner nhỏ ở góc màn hình quay, chỉ những tile phủ lên spinner đó cần vẽ lại (trừ khi spinner được animate bằng một thuộc tính kích hoạt layout, khi đó chi phí cao hơn nhiều).\n\n**Paint và thứ tự xếp chồng**: các phần tử được vẽ theo **stacking order**, không phải theo thứ tự DOM. Nền, viền, phần tử float, phần tử inline và phần tử được định vị được vẽ theo một trình tự quy định trong spec CSS Painting Order. Nếu mô hình tư duy của bạn về stacking order bị sai, bạn sẽ bối rối vì sao `z-index` không chạy như mong đợi."
+    },
+    {
+      "type": "explanation",
+      "title": "Giai đoạn 6: Composite — GPU ghép frame",
+      "content": "**Compositing** là giai đoạn cuối: texture của các layer đã vẽ được gửi lên GPU, GPU ghép chúng theo đúng thứ tự và ghi frame cuối cùng vào frame buffer của màn hình. Giai đoạn này chạy trên **compositor thread** — một thread tách biệt với main thread của JavaScript — nên các thao tác chỉ dùng compositor vẫn mượt kể cả khi main thread đang bận.\n\nĐiểm mấu chốt: nếu một animation chỉ thay đổi **các thuộc tính composited** (`transform` và `opacity`), trình duyệt có thể composite lại các texture layer sẵn có ở mỗi frame mà không cần chạy lại layout hay paint chút nào. GPU áp một phép biến đổi ma trận lên một texture đã vẽ sẵn — thao tác chỉ tốn micro giây thay vì mili giây. Đây là lý do căn bản khiến animation dựa trên `transform` mượt còn animation dựa trên `width` thì không.\n\n**Compositor layer** được nâng lên khi trình duyệt xác định một phần tử sẽ di chuyển hoặc thay đổi thường xuyên. Các tiêu chí nâng layer gồm:\n- `will-change: transform` hoặc `will-change: opacity`\n- `transform: translateZ(0)` hoặc `transform: translate3d(0,0,0)` (mẹo tăng tốc phần cứng kiểu cũ)\n- `position: fixed` hoặc `position: sticky`\n- Các phần tử `<video>`, `<canvas>`, `<iframe>`\n- Phần tử có CSS animation hoặc transition liên quan tới `transform` hay `opacity`\n\nMỗi layer được nâng là một texture GPU độc lập. Khi compositing, GPU trộn các texture này với nhau, áp các transform cần thiết. Compositor thread duy trì layer tree và xử lý scroll — đó là lý do phần lớn việc scroll trên trình duyệt hiện đại đều mượt kể cả trên trang nặng JavaScript: vị trí scroll được cập nhật trên compositor thread mà không cần tới JS.\n\n**Trade-off về bộ nhớ GPU**: mỗi compositor layer tiêu tốn bộ nhớ texture của GPU. Một phần tử 1000×1000 pixel ở 32bpp dùng khoảng 4MB bộ nhớ GPU. Nâng quá nhiều phần tử sẽ làm cạn bộ nhớ GPU, buộc các layer bị đẩy ra rồi upload lại — việc này thực sự có thể gây jank. Quy tắc: chỉ nâng những phần tử thật sự cần, và gỡ `will-change` sau khi animation kết thúc bằng `el.style.willChange = 'auto'`.\n\n**`filter` và `backdrop-filter`** áp lên một phần tử đã có compositor layer cũng chạy trên GPU. Nhưng nếu phần tử chưa có layer riêng, một filter phức tạp có thể ép nó được nâng lên — và khi đó mọi phần tử chồng lên nó và được vẽ *phía trên* nó cũng phải được composite (nếu không thứ tự vẽ sẽ sai). Việc nâng layer ngầm do \"chồng lấn\" (overlap) này có thể lan thành **layer explosion** (bùng nổ số layer), một nguyên nhân khó thấy của những đợt tăng vọt bộ nhớ bất ngờ; panel Layers trong DevTools cho biết lý do mỗi layer tồn tại."
+    },
+    {
+      "type": "diagram",
+      "caption": "Thứ bậc chi phí. Thay đổi layout là đắt nhất, kích hoạt cả ba giai đoạn phía sau. Thay đổi chỉ dùng compositor (transform, opacity) bỏ qua hẳn layout và paint, chạy trên compositor thread."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Pattern xấu buộc N lần tính layout đồng bộ — mỗi phần tử một lần — vì lần đọc nào cũng theo sau một lần ghi. Pattern tốt gom các lần đọc lại trước khi ghi, cho phép trình duyệt chỉ layout một lần vào thời điểm vẽ frame. `requestAnimationFrame` đồng bộ code animation với vòng lặp render của trình duyệt. Dùng `transform` thay vì `left/top` giữ animation trên compositor thread. `will-change` nâng trước phần tử lên layer riêng để không có layout hay paint nào xảy ra trong lúc animate — nhưng luôn nhớ dọn nó sau đó để giải phóng bộ nhớ GPU, vào thời điểm bạn biết chắc animation đã thực sự kết thúc (ở đây là khi Promise của `animateBox` resolve; `transitionend` chỉ được kích hoạt cho CSS transition).",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Ngân sách 16ms mỗi frame và main thread",
+      "content": "Ở 60 frame mỗi giây, giữa hai frame trình duyệt có **16.67 mili giây** để làm xong mọi việc: chạy JavaScript, layout, vẽ các vùng thay đổi và composite frame. Lỡ khung thời gian này là một frame bị rớt — màn hình hiển thị lại frame trước đó, và người dùng cảm nhận thành **jank** (giật, khựng).\n\n**Main thread** là nơi JavaScript chạy, DOM được parse, style được tính lại và layout được tính. Paint cũng chạy trên main thread (ít nhất là phần ghi lại các lệnh vẽ). Rasterisation (các raster worker thread) và compositing (compositor thread) chạy ở nơi khác. Nghĩa là bất kỳ JavaScript task chạy lâu nào cũng chặn tất cả các giai đoạn trên.\n\n**Long task** — task chạy quá 50ms — bị coi là đặc biệt có hại vì có thể chặn tương tác của người dùng trong một khoảng thời gian dễ nhận thấy. Một task mất 200ms nghĩa là trang không phản hồi trong 200ms: click bị bỏ qua, gõ phím không hiện chữ, và nếu có frame nào đến hạn trong khoảng 200ms đó thì nó bị rớt.\n\n**Các nguồn gây jank trong thực tế**:\n1. Recalculate style tốn kém (selector phức tạp áp lên nhiều phần tử)\n2. Forced synchronous layout bên trong vòng lặp animation\n3. Repaint diện rộng do animate các thuộc tính CSS không thuộc compositor\n4. XHR đồng bộ hoặc parse JSON nặng trên main thread\n5. Quá nhiều DOM node (hàng chục nghìn node làm chậm mọi giai đoạn của pipeline)\n\n**Phân bổ ngân sách 16ms trong thực tế**: bản thân trình duyệt cần khoảng 6ms cho việc nội bộ (rasterisation, compositing, gửi frame). Còn lại khoảng 10ms cho JavaScript của bạn, việc tính lại style và layout. Con số này chật hơn bạn tưởng — chỉ một lần gọi `getComputedStyle()` trên một trang nhiều style có thể mất 2-3ms.\n\nLong task còn trực tiếp làm xấu **Interaction to Next Paint (INP)**, Core Web Vital về độ phản hồi: một input tới trong lúc đang chạy một task 200ms sẽ phải đợi task đó xong. Cách sửa là chia nhỏ công việc và **nhường main thread (yield)** giữa các phần — `await scheduler.yield()` (Chromium 129+, Firefox 142+; trên Safari thì fallback về `setTimeout(0)`) cho phép trình duyệt xử lý input và render một frame, rồi tiếp tục task của bạn với độ ưu tiên cao.\n\nCác trình duyệt hiện đại cung cấp `PerformanceObserver` với entry type `longtask` để phát hiện task vượt quá 50ms; API **Long Animation Frames** mới hơn của Chromium (`long-animation-frame`) báo cáo các frame chậm kèm theo những script gây ra chúng. Panel Performance trong Chrome DevTools trực quan hóa pipeline cho từng frame: màu vàng là scripting, tím là rendering (style và layout), xanh lá là painting, và tam giác đỏ đánh dấu long task."
+    },
+    {
+      "type": "diagram",
+      "caption": "Ngân sách 16ms cho 60fps. Mọi giai đoạn tranh nhau cùng những mili giây đó. Bỏ qua layout (animation chỉ dùng compositor) giải phóng khoảng 5ms mỗi frame — khác biệt giữa mượt và giật."
+    },
+    {
+      "type": "code_example",
+      "explanation": "Danh sách LAYOUT_TRIGGERS là nguồn tham chiếu chuẩn cho những gì gây ra forced synchronous layout. Đối tượng pipelineCost phân loại các thuộc tính CSS — hãy dùng nó làm tham chiếu trong đầu khi chọn cách triển khai animation hoặc thay đổi style động. ResizeObserver và IntersectionObserver là các API trình duyệt đúng đắn để phản ứng với sự kiện layout mà không phải polling trong vòng lặp, vốn sẽ kích hoạt forced layout lặp đi lặp lại.",
+      "label": "Ví dụ"
+    },
+    {
+      "type": "explanation",
+      "title": "Critical rendering path và tối ưu hiệu năng",
+      "content": "**Critical Rendering Path** là chuỗi bước trình duyệt phải hoàn tất trước khi vẽ được pixel có ý nghĩa đầu tiên: tải HTML, parse HTML, tải và parse CSS (blocking), có thể chạy JavaScript, dựng Render Tree, layout, paint. Tối ưu đường này cải thiện **First Contentful Paint (FCP)** và thường cả **Largest Contentful Paint (LCP)**. (Chỉ LCP là Core Web Vital — bộ ba là LCP, INP và CLS; FCP là chỉ số chẩn đoán bổ trợ.)\n\n**Các chiến lược tối ưu chính suy ra trực tiếp từ pipeline**:\n\n**Giảm thiểu CSS render-blocking**: Inline critical CSS (style cần cho nội dung above-the-fold) trực tiếp trong `<head>` bằng thẻ `<style>`. Tải CSS không quan trọng bằng attribute `media` hoặc nạp động sau khi tải trang. Trình duyệt vẫn tải CSS non-blocking, nhưng nó không chặn render.\n\n**Dùng `defer` hoặc `async` cho script**: `defer` tải script song song với việc parse HTML và chạy nó sau khi parse xong (nhưng trước `DOMContentLoaded`). `async` tải song song và chạy ngay khi tải xong, có thể chen ngang việc parse HTML. Cả hai đều tránh chặn parser; `defer` thường được ưu tiên cho script ứng dụng vì nó giữ đúng thứ tự chạy.\n\n**Animate các thuộc tính chỉ dùng compositor**: Như đã nói, animate `transform` và `opacity` giữ công việc ngoài main thread. CSS transition và animation trên các thuộc tính này cũng được trình duyệt tự động chuyển ra khỏi main thread khi có thể.\n\n**Tránh layout thrashing**: Profile trước, rồi áp dụng pattern gom đọc trước khi ghi. Các library như FastDOM cung cấp một lớp trừu tượng dạng queue tự động gom các thao tác đọc và ghi.\n\n**Dùng `content-visibility: auto`**: Một thuộc tính CSS hiện đại giúp bỏ qua layout và paint cho các phần tử ngoài màn hình, giảm đáng kể chi phí render cho các trang scroll dài. Khi ở ngoài màn hình, nội dung của phần tử bị bỏ qua hoàn toàn nên nó sẽ co về chiều cao 0; hãy kết hợp với `contain-intrinsic-size: auto 500px` (một kích thước ước lượng mà trình duyệt sẽ nhớ lại sau khi đã render) để thanh scroll không bị nhảy.\n\n**Giảm độ sâu và độ rộng của DOM**: Hiệu năng layout tăng theo độ phức tạp của DOM. Một trang có 50,000 node reflow lâu hơn thấy rõ so với trang có 5,000 node. Virtual scrolling và tái sử dụng DOM là thiết yếu cho các danh sách lớn.\n\n**Tránh selector CSS khớp với mọi thứ**: Những selector như `* { box-sizing: border-box }` thì không sao, nhưng selector hậu duệ phức tạp trên các phần tử hay bị đổi style sẽ làm tăng chi phí tính lại style. Trình duyệt khớp selector từ phải sang trái, nên `.container .item span em` được kiểm tra cho mọi `em` trên trang bằng cách đi ngược lên các tổ tiên để tìm một `span`, rồi một `.item`, rồi một `.container`."
+    },
+    {
+      "type": "explanation",
+      "title": "Hiểu lầm thường gặp và edge case",
+      "content": "**'Virtual DOM loại bỏ reflow'**: Virtual DOM của React là kỹ thuật gom các cập nhật DOM lại và áp dụng chúng dưới dạng một diff tối thiểu. Nó giảm số lần DOM mutation, nhờ đó giảm reflow. Nhưng rendering pipeline thật của trình duyệt vẫn chạy cho mỗi thay đổi DOM thực sự — Virtual DOM không bỏ qua layout hay paint; nó chỉ giảm thiểu những gì kích hoạt chúng. Với animation chỉ dùng compositor, Virtual DOM không mang lại gì hơn so với thao tác DOM trực tiếp bằng `transform`.\n\n**'opacity:0 cũng như display:none'**: `opacity: 0` làm phần tử trong suốt nhưng nó vẫn ở trong Render Tree, vẫn chiếm chỗ, tham gia layout, nhận pointer event (trừ khi đặt `pointer-events: none`), và vẫn được vẽ (chỉ là vẽ trong suốt). `display: none` loại nó khỏi Render Tree hoàn toàn — không chiếm chỗ, không vẽ, không nhận event. `visibility: hidden` nằm ở giữa: có trong Render Tree, chiếm chỗ, nhưng vô hình và không nhận pointer event.\n\n**'will-change làm mọi thứ nhanh hơn'**: `will-change` báo trước ý định cho trình duyệt, khiến nó nâng trước phần tử lên compositor layer. Việc này chỉ có lợi cho những phần tử thực sự sẽ animate — nó tốn bộ nhớ GPU. Lạm dụng nó (ví dụ `will-change: transform` trên hàng trăm item của một danh sách) có thể làm cạn bộ nhớ GPU và gây jank nhiều hơn là ngăn được.\n\n**'CSS animation luôn chạy ngoài main thread'**: Chỉ animation của `transform` và `opacity` trên các layer đã được nâng mới chạy được trên compositor thread. Một CSS animation của `width` hay `height` vẫn chạy trên main thread và kích hoạt layout mỗi frame. Cú pháp animation (CSS keyframes hay JS) không quyết định thread nào chạy — thuộc tính được animate mới là thứ quyết định.\n\n**'Inline style nhanh hơn class'**: Gán `el.style.color = 'red'` và gọi `el.classList.add('red')` đều kích hoạt tính lại style và có thể cả paint. Inline style có specificity cao hơn nhưng chi phí render tương tự. Chi phí thật nằm ở việc tính lại style bị kích hoạt, chứ không phải ở cơ chế áp style.\n\n**'Fixed positioning không tốn gì'**: Phần tử `position: fixed` bị đưa ra khỏi normal flow của tài liệu và được định vị theo viewport. Chúng đúng là có compositor layer riêng (hiệu quả cho việc scroll). Nhưng chúng vẫn tham gia vào việc vẽ của stacking context chứa chúng, và nếu chồng lên nội dung, chúng có thể làm mất hiệu lực những vùng repaint lớn ở mỗi frame scroll."
+    },
+    {
+      "type": "diagram",
+      "caption": "Bốn kỹ thuật 'ẩn' phần tử có tác động hoàn toàn khác nhau lên rendering pipeline. Chỉ display:none loại phần tử khỏi Render Tree hoàn toàn."
+    },
+    {
+      "type": "callout",
+      "content": "**Bối cảnh lịch sử**: Các trình duyệt đời đầu (Netscape, IE4) không có khái niệm incremental layout hay compositing — mọi thay đổi DOM đều kích hoạt vẽ lại toàn trang. Ý tưởng về một compositor thread riêng được đội WebKit của Apple tiên phong khoảng 2007-2010 cho Safari trên iOS, nơi GPU compositing là thiết yếu để scroll mượt trên phần cứng hạn chế. Chrome tiếp nhận và mở rộng mô hình này với threaded compositor của mình (khoảng 2012–2013), và giờ mọi engine lớn đều composite trên GPU — Firefox thì qua WebRender. Điểm mấu chốt — `transform` và `opacity` có thể animate mà không đụng tới layout hay paint — là hệ quả trực tiếp của việc composite texture trên GPU, và vẫn là nền tảng của animation web mượt mà."
+    },
+    {
+      "type": "callout",
+      "content": "**Kinh nghiệm cho interview và khi audit hiệu năng**: Khi được hỏi 'vì sao animation này bị giật?', câu trả lời gần như luôn là một trong số: (1) animate một thuộc tính kích hoạt layout thay vì `transform`; (2) layout thrashing — đọc và ghi xen kẽ; (3) một JavaScript task dài chặn main thread; hoặc (4) diện tích paint quá lớn do một `box-shadow` hay gradient lớn trên phần tử hay thay đổi. Bộ ba câu hỏi chẩn đoán: **thuộc tính CSS nào đang được animate? Trong vòng lặp animation có chỗ đọc-ghi xen kẽ không? JS task nặng nhất mất bao lâu?** Trong DevTools, panel Performance trả lời được cả ba: tìm các thanh Layout màu tím bên trong frame, các thanh JS màu vàng, và long task được tô đỏ. Đi sâu vào flame chart sẽ chỉ ra chính xác hàm gây nghẽn."
+    },
+    {
+      "type": "key_takeaways",
+      "items": [
+        "**Rendering pipeline**: DOM + CSSOM → **Style** (computed style / render tree) → **Layout** (reflow) → **Paint** (display list, rồi rasterisation) → **Composite**. Mỗi giai đoạn cấp dữ liệu cho giai đoạn sau, và các thay đổi JavaScript lên DOM hay CSS có thể kích hoạt lại các giai đoạn từ bất kỳ đâu trong pipeline.",
+        "**CSSOM là render-blocking**: trình duyệt sẽ không vẽ một pixel nào cho tới khi mọi CSS được tải và parse xong. Stylesheet lớn hoặc tải chậm trực tiếp làm chậm First Contentful Paint — hãy inline critical CSS và dùng attribute `media` để biến CSS không quan trọng thành non-blocking.",
+        "**Layout (reflow) là giai đoạn tốn kém nhất**: nó tính hình học cho mọi node bị ảnh hưởng theo kiểu đệ quy. Bất cứ thứ gì thay đổi kích thước hay vị trí phần tử đều kích hoạt nó. Giảm reflow bằng cách gom các lần ghi DOM lại và chỉ đọc thuộc tính layout một lần, trước mọi lần ghi.",
+        "**Layout thrashing** — đọc DOM (`offsetWidth`, `getBoundingClientRect`) và ghi xen kẽ trong vòng lặp — buộc N lần tính layout đồng bộ thay vì một lần layout được hoãn lại. Luôn gom mọi lần đọc trước mọi lần ghi, hoặc dùng `requestAnimationFrame` để khớp với vòng lặp render.",
+        "**`transform` và `opacity` chỉ dùng compositor**: animate các thuộc tính này trên một layer đã được nâng sẽ bỏ qua hoàn toàn layout và paint, chạy trên compositor thread với frame rate tối đa kể cả khi main thread đang bận. Chúng là lựa chọn mặc định cho animation mượt, không giật.",
+        "**`will-change` nâng trước một phần tử** lên compositor layer của GPU, loại bỏ layout và paint trong lúc animate — nhưng mỗi layer được nâng đều tiêu tốn bộ nhớ texture của GPU. Dùng nó tiết kiệm, chỉ cho những phần tử thực sự sẽ animate, và gỡ nó sau đó bằng `will-change: auto`.",
+        "**Ngân sách 16.67ms mỗi frame** (1000ms ÷ 60fps) được chia sẻ giữa JavaScript, tính lại style, layout, paint và composite. Long task (>50ms) chặn mọi việc render và khiến trang có cảm giác không phản hồi. Dùng `PerformanceObserver` với `type:'longtask'` (hoặc Long Animation Frames) và panel Performance của DevTools để chẩn đoán, và chia nhỏ công việc dài bằng `scheduler.yield()` để bảo vệ INP."
+      ]
+    }
+  ],
+  "quiz": [
+    {
+      "id": "q1",
+      "question": "Thay đổi thuộc tính CSS nào CHỈ kích hoạt giai đoạn Composite, khiến nó trở thành lựa chọn animation rẻ nhất?",
+      "options": [
+        "background-color",
+        "width",
+        "opacity",
+        "margin-top"
+      ],
+      "explanation": "`opacity` (cùng với `transform`) có thể được animate thuần túy trên compositor thread (cùng GPU) — không cần layout hay paint. `background-color` kích hoạt paint nhưng không kích hoạt layout. `width` và `margin-top` đều kích hoạt layout, paint và composite — con đường tốn kém nhất."
+    },
+    {
+      "id": "q2",
+      "question": "'Layout thrashing' là gì và vì sao nó xảy ra?",
+      "options": [
+        "Ghi DOM xen kẽ với đọc thuộc tính layout trong một vòng lặp, gây ra forced synchronous layout lặp đi lặp lại",
+        "Dùng quá nhiều CSS animation cùng lúc, làm GPU quá tải",
+        "Áp các selector CSS phức tạp cần nhiều lượt so khớp",
+        "Render quá nhiều compositor layer, làm cạn bộ nhớ GPU"
+      ],
+      "explanation": "Layout thrashing xảy ra khi JavaScript xen kẽ các lần ghi (thay đổi DOM) với các lần đọc thuộc tính layout như `offsetWidth` hay `getBoundingClientRect`. Mỗi lần đọc sau một lần ghi buộc trình duyệt hoàn tất đồng bộ phần layout đang chờ trước khi trả về giá trị. Lặp lại N lần trong vòng lặp gây ra N lần tính layout thay vì một. Cách sửa là gom mọi lần đọc trước mọi lần ghi."
+    },
+    {
+      "id": "q3",
+      "question": "Vì sao việc dựng CSSOM là render-blocking còn dựng DOM thì không?",
+      "options": [
+        "File CSS luôn lớn hơn và parse chậm hơn HTML",
+        "CSSOM cần một lõi CPU riêng để dựng",
+        "JavaScript luôn chạy trước khi CSS được áp dụng",
+        "Trình duyệt không thể render gì cho tới khi biết hết mọi style, vì một stylesheet tải sau có thể ghi đè style trước đó và gây hiển thị không nhất quán"
+      ],
+      "explanation": "Trình duyệt chặn render cho tới khi toàn bộ CSSOM được dựng xong vì bất kỳ file CSS nào tải sau cũng có thể thay đổi hoàn toàn diện mạo của các phần tử đã parse. Render với CSS dở dang sẽ gây ra flash of unstyled content. Ngược lại, parse HTML có thể diễn ra dần dần — một DOM dở dang vẫn hợp lệ. Đó là lý do các file CSS lớn không cần thiết làm xấu First Contentful Paint và LCP."
+    },
+    {
+      "id": "q4",
+      "question": "Thao tác đọc DOM nào buộc flush layout đồng bộ khi được gọi sau một lần ghi DOM?",
+      "options": [
+        "element.textContent",
+        "element.getAttribute('data-id')",
+        "element.getBoundingClientRect()",
+        "element.dataset.value"
+      ],
+      "explanation": "`getBoundingClientRect()` cần hình học layout mới nhất. Nếu còn DOM mutation đang chờ, trình duyệt phải hoàn tất layout một cách đồng bộ trước khi trả kết quả. `textContent`, `getAttribute` và `dataset` không cần thông tin layout nên đọc được mà không kích hoạt flush layout."
+    },
+    {
+      "id": "q5",
+      "question": "`will-change: transform` cải thiện hiệu năng animation như thế nào, và cái giá của nó là gì?",
+      "options": [
+        "Nó tính trước các keyframe của animation và cache lại, tiết kiệm thời gian CPU khi phát",
+        "Nó nâng phần tử lên compositor layer GPU riêng, nên thay đổi transform bỏ qua được layout và paint — đổi lại tốn bộ nhớ texture của GPU",
+        "Nó chuyển các event handler JavaScript của phần tử sang một worker thread",
+        "Nó tắt việc kế thừa style cho phần tử, giúp duyệt CSSOM nhanh hơn"
+      ],
+      "explanation": "`will-change: transform` gợi ý cho trình duyệt nâng trước phần tử lên compositor layer của GPU. Khi đó các thay đổi transform trên layer này chỉ cần bước compositing — không layout, không paint — giúp animation mượt. Cái giá là bộ nhớ texture của GPU: mỗi phần tử được nâng là một layer, khoảng 4 byte × diện tích pixel. Lạm dụng nó sẽ làm cạn bộ nhớ GPU và khiến hiệu năng tệ hơn."
+    },
+    {
+      "id": "q6",
+      "question": "Một phần tử có `display: none`. Nó xuất hiện ở đâu trong các tree nội bộ của trình duyệt?",
+      "options": [
+        "Chỉ trong DOM — nó bị loại khỏi Render Tree",
+        "Cả trong DOM và Render Tree",
+        "Chỉ trong Render Tree — DOM bỏ qua các phần tử vô hình",
+        "Không có trong DOM lẫn Render Tree"
+      ],
+      "explanation": "Phần tử `display: none` CÓ trong DOM — chúng tồn tại dưới dạng đối tượng, chọn được bằng `querySelector`, và có attribute cùng các node con. Nhưng chúng bị loại khỏi Render Tree vì không chiếm chỗ và không được vẽ. Phần tử `visibility: hidden` thì CÓ trong Render Tree — chúng chiếm chỗ nhưng được vẽ trong suốt."
+    },
+    {
+      "id": "q7",
+      "question": "Animate CSS `left` so với `transform: translateX()` — khác biệt hiệu năng chính là gì?",
+      "options": [
+        "`left` chạy trên GPU; `transform` chỉ chạy trên CPU nên chậm hơn",
+        "`transform: translateX()` chỉ hoạt động với phần tử block-level",
+        "Animate `left` kích hoạt tính lại layout mỗi frame; `transform: translateX()` chỉ kích hoạt compositing trên compositor thread",
+        "Chúng tương đương nhau vì CSS animation luôn chạy trên một thread animation riêng"
+      ],
+      "explanation": "Animate `left` thay đổi vị trí của phần tử trong document flow, kích hoạt Layout → Paint → Composite ở mỗi frame với 60fps. Animate `transform: translateX()` chỉ tác động ở giai đoạn Composite — nó áp một phép biến đổi ma trận trên GPU lên một texture đã vẽ sẵn. Đó là lý do di chuyển bằng transform thì mượt còn animation bằng `left/top` thì gây jank."
+    },
+    {
+      "id": "q8",
+      "question": "Ngân sách thời gian cho mỗi frame của trình duyệt khi render ở 60 frame mỗi giây là bao nhiêu?",
+      "options": [
+        "~8ms",
+        "~16.67ms",
+        "~33ms",
+        "~100ms"
+      ],
+      "explanation": "1000ms ÷ 60fps = 16.67ms mỗi frame. Trong ngân sách này trình duyệt phải làm xong việc chạy JavaScript, tính lại style, layout, paint và compositing. Bản thân trình duyệt cần khoảng 6ms cho việc nội bộ, còn lại khoảng 10ms cho JS của ứng dụng và layout. Task vượt quá 50ms được xếp vào loại 'long task' và khiến trang có cảm giác không phản hồi."
+    },
+    {
+      "id": "q9",
+      "question": "Một CSS pseudo-element (`::before`) đang hiển thị trên màn hình. Nó xuất hiện ở đâu trong các tree của trình duyệt?",
+      "options": [
+        "Trong DOM và Render Tree",
+        "Chỉ trong DOM",
+        "Trong Render Tree nhưng không có trong DOM",
+        "Không có trong tree nào — nó được giai đoạn paint xử lý trực tiếp"
+      ],
+      "explanation": "Pseudo-element như `::before` và `::after` được sinh ra từ các rule CSS và chèn vào Render Tree như thể là node con. Tuy nhiên chúng không có DOM node tương ứng — `document.querySelector('::before')` trả về null. Chúng ảnh hưởng tới layout và được vẽ bình thường, nhưng chỉ tồn tại trong mô hình render, không có trong DOM mà JavaScript truy cập được."
+    },
+    {
+      "id": "q10",
+      "question": "API nào phản ứng đúng cách với thay đổi kích thước phần tử mà không cần polling hay kích hoạt forced layout?",
+      "options": [
+        "MutationObserver với `subtree: true`",
+        "ResizeObserver",
+        "IntersectionObserver với `threshold: 0`",
+        "PerformanceObserver với `type: 'layout-shift'`"
+      ],
+      "explanation": "`ResizeObserver` gọi callback mỗi khi kích thước content box của phần tử được theo dõi thay đổi, cung cấp thông tin kích thước mà không cần vòng lặp polling. Callback của nó được gọi sau layout, nên đọc kích thước bên trong nó là an toàn. `MutationObserver` theo dõi thay đổi cấu trúc DOM và attribute. `IntersectionObserver` phát hiện việc hiển thị trong viewport. `PerformanceObserver` với `layout-shift` theo dõi metric Cumulative Layout Shift (CLS), không phải kích thước của từng phần tử."
+    }
+  ]
+}
