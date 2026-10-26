@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
 import type { QuizQuestion } from '@/types/content-schema-types';
 
 interface QuizQuestionCardProps {
@@ -9,103 +8,59 @@ interface QuizQuestionCardProps {
   onAnswered: (correct: boolean) => void;
 }
 
-export function QuizQuestionCard({
-  question,
-  questionNumber,
-  total,
-  onAnswered,
-}: QuizQuestionCardProps) {
+export function QuizQuestionCard({ question, questionNumber, total, onAnswered }: QuizQuestionCardProps) {
   const [selected, setSelected] = useState<number | null>(null);
   const answered = selected !== null;
+  const isLast = questionNumber === total;
 
-  function handleSelect(idx: number) {
-    if (answered) return;
-    setSelected(idx);
-  }
-
-  function getOptionStyle(idx: number): string {
+  function optionClass(idx: number): string {
     const base =
-      'w-full text-left px-4 py-3 rounded-btn border text-sm leading-relaxed transition-colors duration-150 ';
-    if (!answered) {
-      return base + 'border-border-subtle bg-bg-panel text-text-primary hover:border-accent-blue hover:bg-bg-code cursor-pointer';
-    }
-    if (idx === question.correct) {
-      return base + 'border-accent-green bg-accent-green/10 text-accent-green cursor-default';
-    }
-    if (idx === selected) {
-      return base + 'border-red-500 bg-red-500/10 text-red-400 cursor-default';
-    }
-    return base + 'border-border-subtle bg-bg-panel text-text-muted cursor-default opacity-50';
-  }
-
-  function getOptionLabel(idx: number): string {
-    if (!answered) return '';
-    if (idx === question.correct) return ' ✓';
-    if (idx === selected) return ' ✗';
-    return '';
+      'flex w-full gap-3 rounded-btn border px-4 py-3 text-left font-sans text-[15px] leading-snug transition-colors duration-150 ';
+    if (!answered) return base + 'border-border-subtle bg-bg-card text-text-primary hover:border-accent/60';
+    if (idx === question.correct) return base + 'border-success/70 bg-success/10 text-text-primary';
+    if (idx === selected) return base + 'border-danger/70 bg-danger/10 text-text-primary';
+    return base + 'border-border-subtle bg-bg-card text-text-muted';
   }
 
   return (
-    <motion.div
-      key={question.id}
-      initial={{ opacity: 0, x: 20 }}
-      animate={{ opacity: 1, x: 0 }}
-      exit={{ opacity: 0, x: -20 }}
-      transition={{ duration: 0.2 }}
-      className="flex flex-col gap-4"
-    >
-      <p className="text-xs text-text-muted font-mono">
-        Question {questionNumber} / {total}
-      </p>
-
-      <p className="text-text-primary text-base font-medium leading-relaxed">
+    <div className="flex flex-col gap-4">
+      <p id={`${question.id}-q`} className="font-serif text-[19px] leading-snug text-text-primary">
         {question.question}
       </p>
 
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-2" role="group" aria-labelledby={`${question.id}-q`}>
         {question.options.map((opt, idx) => (
           <button
             key={idx}
-            className={getOptionStyle(idx)}
-            onClick={() => handleSelect(idx)}
-            disabled={answered}
+            className={optionClass(idx)}
+            onClick={() => !answered && setSelected(idx)}
+            aria-disabled={answered}
           >
-            <span className="font-mono text-text-muted mr-2 text-xs">
-              {String.fromCharCode(65 + idx)}.
-            </span>
-            {opt}
-            {getOptionLabel(idx)}
+            <span className="w-4 shrink-0 text-text-muted">{String.fromCharCode(65 + idx)}</span>
+            <span className="min-w-0 flex-1">{opt}</span>
+            {answered && idx === question.correct && <span className="shrink-0 text-success">Correct</span>}
+            {answered && idx === selected && idx !== question.correct && (
+              <span className="shrink-0 text-danger">Your answer</span>
+            )}
           </button>
         ))}
       </div>
 
-      <AnimatePresence>
-        {answered && (
-          <motion.div
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="rounded-btn border border-accent-blue/30 bg-accent-blue/10 px-4 py-3 text-sm text-text-secondary"
-          >
-            <span className="font-semibold text-accent-blue">Explanation: </span>
-            {question.explanation}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {answered && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          className="flex justify-end"
-        >
-          <button
-            onClick={() => onAnswered(selected === question.correct)}
-            className="px-5 py-2.5 rounded-btn bg-accent-orange text-white font-semibold text-sm hover:opacity-90 transition-opacity"
-          >
-            Next →
-          </button>
-        </motion.div>
+        <>
+          <p aria-live="polite" className="border-l-2 border-accent/60 pl-4 font-serif text-[16px] leading-relaxed text-text-secondary">
+            {question.explanation}
+          </p>
+          <div className="flex justify-end">
+            <button
+              onClick={() => onAnswered(selected === question.correct)}
+              className="rounded-btn bg-accent px-5 py-2.5 font-sans text-sm font-medium text-bg-primary hover:bg-accent/90"
+            >
+              {isLast ? 'See results' : 'Next question'}
+            </button>
+          </div>
+        </>
       )}
-    </motion.div>
+    </div>
   );
 }

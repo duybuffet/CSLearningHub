@@ -6,63 +6,21 @@ interface VisualizerPanelProps {
   visualizer: VisualizerConfig;
 }
 
+// Interactive figure above the chapter text (custom widget or VisuAlgo embed).
 export function VisualizerPanel({ visualizer }: VisualizerPanelProps) {
-  return (
-    <div className="bg-bg-card rounded-card border border-border-subtle overflow-hidden flex flex-col">
-      <div className="flex-1">
-        <VisualizerContent visualizer={visualizer} />
-      </div>
+  if (visualizer.type === 'embed' && visualizer.url) {
+    return <VisualgoEmbedFrame url={visualizer.url} caption={visualizer.caption} />;
+  }
 
+  const Component = visualizer.type === 'custom' && visualizer.component ? getVisualizer(visualizer.component) : null;
+  if (!Component) return null;
+
+  return (
+    <figure className="-mx-4 border-y border-border-subtle bg-bg-card px-4 py-5 sm:mx-0 sm:rounded-card sm:border sm:px-6">
+      <Component />
       {visualizer.caption && (
-        <p className="px-4 py-3 text-xs text-text-muted border-t border-border-subtle text-center">
-          {visualizer.caption}
-        </p>
+        <figcaption className="mt-4 font-serif text-[15px] italic leading-snug text-text-muted">{visualizer.caption}</figcaption>
       )}
-    </div>
-  );
-}
-
-function VisualizerContent({ visualizer }: { visualizer: VisualizerConfig }) {
-  if (visualizer.type === 'embed') {
-    return (
-      <VisualgoEmbedFrame
-        url={visualizer.url!}
-        caption={visualizer.caption}
-      />
-    );
-  }
-
-  if (visualizer.type === 'custom') {
-    const Component = getVisualizer(visualizer.component!);
-    if (!Component) {
-      return (
-        <div className="flex items-center justify-center min-h-[200px] p-6">
-          <p className="text-text-muted text-sm text-center">
-            Visualizer{' '}
-            <span className="font-mono text-accent-orange">
-              {visualizer.component}
-            </span>{' '}
-            is not yet available.
-          </p>
-        </div>
-      );
-    }
-    return (
-      <div className="p-4">
-        <Component />
-      </div>
-    );
-  }
-
-  // type === 'none' — placeholder
-  return (
-    <div className="flex flex-col items-center justify-center min-h-[200px] p-6 gap-3">
-      <div className="w-16 h-16 rounded-full bg-bg-panel border border-border-subtle flex items-center justify-center">
-        <span className="text-2xl" aria-hidden="true">🖼️</span>
-      </div>
-      <p className="text-text-muted text-sm text-center">
-        Visual illustration coming soon.
-      </p>
-    </div>
+    </figure>
   );
 }

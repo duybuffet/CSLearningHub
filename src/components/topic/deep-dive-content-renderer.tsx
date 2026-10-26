@@ -1,13 +1,14 @@
 import type { ContentSection, CalloutVariant } from '@/types/content-schema-types';
 import { MermaidDiagramRenderer } from '@/components/ui/mermaid-diagram-renderer';
 import { SyntaxHighlightedCodeBlock } from '@/components/ui/syntax-highlighted-code-block';
+import { ProseMarkdownRenderer } from './prose-markdown-renderer';
 
 interface DeepDiveContentRendererProps {
   sections: ContentSection[];
   mode?: 'deep' | 'compact';
 }
 
-// Compact (interview cram) shows only the skimmable essentials.
+// Compact (quick review) shows only the skimmable essentials.
 const COMPACT_TYPES = new Set<string>([
   'intro',
   'diagram',
@@ -16,55 +17,15 @@ const COMPACT_TYPES = new Set<string>([
   'key_takeaways',
 ]);
 
-const CALLOUT_STYLES: Record<CalloutVariant, { border: string; bg: string; text: string; icon: string }> = {
-  tip: {
-    border: 'border-accent-green',
-    bg: 'bg-accent-green/10',
-    text: 'text-accent-green',
-    icon: '💡',
-  },
-  info: {
-    border: 'border-accent-blue',
-    bg: 'bg-accent-blue/10',
-    text: 'text-accent-blue',
-    icon: 'ℹ️',
-  },
-  warning: {
-    border: 'border-accent-orange',
-    bg: 'bg-accent-orange/10',
-    text: 'text-accent-orange',
-    icon: '⚠️',
-  },
+// Margin-note style asides: a colored rule plus a plain-language label.
+const CALLOUTS: Record<CalloutVariant, { rule: string; label: string; labelColor: string }> = {
+  tip: { rule: 'border-success', label: 'Tip', labelColor: 'text-success' },
+  info: { rule: 'border-accent', label: 'Note', labelColor: 'text-accent' },
+  warning: { rule: 'border-warn', label: 'Watch out', labelColor: 'text-warn' },
 };
 
-// Lightweight inline markdown: **bold** and `code`. Keeps content authoring natural.
-function InlineMarkdown({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean);
-  return (
-    <>
-      {parts.map((p, i) => {
-        if (p.startsWith('**') && p.endsWith('**')) {
-          return (
-            <strong key={i} className="text-text-primary font-semibold">
-              {p.slice(2, -2)}
-            </strong>
-          );
-        }
-        if (p.startsWith('`') && p.endsWith('`')) {
-          return (
-            <code
-              key={i}
-              className="font-mono text-accent-blue bg-bg-code px-1 py-0.5 rounded text-[0.9em]"
-            >
-              {p.slice(1, -1)}
-            </code>
-          );
-        }
-        return <span key={i}>{p}</span>;
-      })}
-    </>
-  );
-}
+// Reading text: serif, generous leading, ~68ch measure.
+const BODY = 'font-serif text-[17.5px] leading-[1.72] text-text-secondary sm:text-[18.5px]';
 
 export function DeepDiveContentRenderer({
   sections,
@@ -76,22 +37,22 @@ export function DeepDiveContentRenderer({
   if (visible.length === 0) return null;
 
   return (
-    <div className="max-w-3xl mx-auto space-y-6 py-6">
+    <article className="max-w-prose space-y-7 pb-6">
       {visible.map((section, i) => (
-        <SectionBlock key={i} section={section} />
+        <SectionBlock key={i} section={section} first={i === 0} />
       ))}
-    </div>
+    </article>
   );
 }
 
-function SectionBlock({ section }: { section: ContentSection }) {
+function SectionBlock({ section, first }: { section: ContentSection; first: boolean }) {
   switch (section.type) {
     case 'intro':
     case 'explanation':
-      return <ProseBlock section={section} />;
+      return <ProseBlock section={section} lead={first && section.type === 'intro'} />;
 
     case 'analogy':
-      return <AnalogyCard section={section} />;
+      return <AnalogyAside section={section} />;
 
     case 'diagram':
       return section.mermaid ? (
@@ -113,116 +74,90 @@ function SectionBlock({ section }: { section: ContentSection }) {
   }
 }
 
-function ProseBlock({ section }: { section: ContentSection }) {
-  const paragraphs = (section.content ?? '').split('\n\n').filter(Boolean);
+function SectionHeading({ children }: { children: React.ReactNode }) {
   return (
-    <div>
-      {section.title && (
-        <h2 className="text-xl font-semibold text-text-primary mb-3">
-          {section.title}
-        </h2>
-      )}
-      <div className="space-y-3">
-        {paragraphs.map((p, i) => (
-          <p key={i} className="text-text-secondary leading-relaxed">
-            <InlineMarkdown text={p} />
-          </p>
-        ))}
-      </div>
-    </div>
+    <h2 className="mb-3 pt-4 font-sans text-[21px] font-semibold leading-snug tracking-[-0.01em] text-text-primary sm:text-[23px]">
+      {children}
+    </h2>
   );
 }
 
-function AnalogyCard({ section }: { section: ContentSection }) {
-  const paragraphs = (section.content ?? '').split('\n\n').filter(Boolean);
+function ProseBlock({ section, lead }: { section: ContentSection; lead: boolean }) {
   return (
-    <div className="rounded-card border border-accent-purple/40 bg-accent-purple/10 p-5">
+    <section>
+      {section.title && <SectionHeading>{section.title}</SectionHeading>}
+      <ProseMarkdownRenderer
+        text={section.content ?? ''}
+        // Opening paragraph reads a touch larger, like a chapter lede
+        className={lead ? `${BODY} [&>p:first-child]:text-[1.06em] [&>p:first-child]:text-text-primary` : BODY}
+      />
+    </section>
+  );
+}
+
+function AnalogyAside({ section }: { section: ContentSection }) {
+  return (
+    <aside className="border-l-2 border-accent-purple/60 pl-5">
       {section.title && (
-        <h3 className="text-base font-semibold text-accent-purple mb-2 flex items-center gap-2">
-          <span aria-hidden="true">🧠</span>
-          {section.title}
-        </h3>
+        <p className="mb-1.5 font-sans text-sm font-semibold text-text-primary">{section.title}</p>
       )}
-      <div className="space-y-2">
-        {paragraphs.map((p, i) => (
-          <p key={i} className="text-text-secondary leading-relaxed text-sm">
-            <InlineMarkdown text={p} />
-          </p>
-        ))}
-      </div>
-    </div>
+      <ProseMarkdownRenderer
+        text={section.content ?? ''}
+        className="font-serif text-[16.5px] italic leading-[1.7] text-text-secondary sm:text-[17.5px]"
+      />
+    </aside>
   );
 }
 
 function CalloutBox({ section }: { section: ContentSection }) {
-  const variant = section.variant ?? 'info';
-  const styles = CALLOUT_STYLES[variant];
-  const paragraphs = (section.content ?? '').split('\n\n').filter(Boolean);
-
+  const style = CALLOUTS[section.variant ?? 'info'];
   return (
-    <div className={`rounded-card border-l-4 ${styles.border} ${styles.bg} p-4`}>
-      {section.title && (
-        <p className={`text-sm font-semibold ${styles.text} mb-1 flex items-center gap-2`}>
-          <span aria-hidden="true">{styles.icon}</span>
-          {section.title}
-        </p>
-      )}
-      {!section.title && (
-        <span className="text-lg mr-2" aria-hidden="true">{styles.icon}</span>
-      )}
-      <div className="space-y-2">
-        {paragraphs.map((p, i) => (
-          <p key={i} className="text-text-secondary text-sm leading-relaxed">
-            <InlineMarkdown text={p} />
-          </p>
-        ))}
-      </div>
-    </div>
+    <aside className={`rounded-r-btn border-l-[3px] ${style.rule} bg-bg-panel/60 py-3.5 pl-4 pr-4`}>
+      <p className="mb-1 font-sans text-sm">
+        <span className={`font-semibold ${style.labelColor}`}>{style.label}</span>
+        {section.title && <span className="font-semibold text-text-primary">: {section.title}</span>}
+      </p>
+      <ProseMarkdownRenderer
+        text={section.content ?? ''}
+        className="font-serif text-[16.5px] leading-[1.65] text-text-secondary"
+      />
+    </aside>
   );
 }
 
 function InlineCodeBlock({ section }: { section: ContentSection }) {
   if (!section.code) return null;
   return (
-    <div className="space-y-2">
-      {(section.title || section.label) && (
-        <div className="flex items-center gap-2">
-          {section.label && (
-            <span className="text-xs font-medium px-2 py-0.5 rounded-btn bg-accent-orange/15 text-accent-orange">
-              {section.label}
-            </span>
-          )}
-          {section.title && (
-            <h3 className="text-base font-semibold text-text-primary">{section.title}</h3>
-          )}
-        </div>
+    <section className="space-y-3">
+      {section.title && (
+        <h3 className="font-sans text-base font-semibold text-text-primary">{section.title}</h3>
       )}
       <SyntaxHighlightedCodeBlock code={section.code} language={section.language} />
       {section.explanation && (
-        <p className="text-text-secondary text-sm leading-relaxed">
-          <InlineMarkdown text={section.explanation} />
-        </p>
+        <ProseMarkdownRenderer text={section.explanation} className="font-serif text-[16.5px] leading-[1.65] text-text-secondary" />
       )}
-    </div>
+    </section>
   );
 }
 
 function KeyTakeaways({ section }: { section: ContentSection }) {
   return (
-    <div>
-      {section.title && (
-        <h2 className="text-xl font-semibold text-text-primary mb-3">
-          {section.title}
-        </h2>
-      )}
-      <ul className="space-y-2">
+    <section className="border-t border-border-subtle pt-6">
+      <h2 className="mb-4 font-sans text-[21px] font-semibold text-text-primary sm:text-[23px]">
+        {section.title || 'Key takeaways'}
+      </h2>
+      <ul className="space-y-3">
         {(section.items ?? []).map((item, i) => (
-          <li key={i} className="flex items-start gap-3 text-text-secondary text-sm leading-relaxed">
-            <span className="mt-0.5 text-accent-green shrink-0" aria-hidden="true">✓</span>
-            <span><InlineMarkdown text={item} /></span>
+          <li key={i} className="flex gap-3 font-serif text-[16.5px] leading-[1.6] text-text-secondary sm:text-[17.5px]">
+            <svg width="16" height="16" viewBox="0 0 16 16" className="mt-[0.35em] shrink-0 text-success" aria-hidden="true">
+              <path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span className="min-w-0 break-words">
+              <ProseMarkdownRenderer text={item} inline />
+            </span>
           </li>
         ))}
       </ul>
-    </div>
+    </section>
   );
 }

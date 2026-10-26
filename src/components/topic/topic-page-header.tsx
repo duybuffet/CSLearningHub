@@ -1,37 +1,35 @@
 import { Link } from 'react-router-dom';
 
 interface TopicPageHeaderProps {
+  number?: string;
+  partTitle: string;
   title: string;
   tagline: string;
   readTime: string;
 }
 
-export function TopicPageHeader({ title, tagline, readTime }: TopicPageHeaderProps) {
+// Chapter opening: chapter number + part link, title, one-line summary.
+export function TopicPageHeader({ number, partTitle, title, tagline, readTime }: TopicPageHeaderProps) {
   return (
-    <header className="text-center py-8 px-4">
-      <Link
-        to="/"
-        className="
-          inline-flex items-center gap-1 mb-6
-          text-sm text-text-muted hover:text-accent-blue
-          transition-colors duration-150
-        "
-      >
-        <span aria-hidden="true">←</span>
-        Back to all topics
-      </Link>
-
-      <h1 className="text-3xl sm:text-4xl font-bold text-text-primary mb-3 leading-tight">
-        {title}
-      </h1>
-
-      <p className="text-text-secondary text-lg max-w-xl mx-auto mb-4 leading-relaxed">
-        {tagline}
+    <header className="max-w-prose pb-6 pt-2 sm:pt-6">
+      <p className="mb-5 flex flex-wrap items-baseline gap-x-3 gap-y-1 font-sans text-sm text-text-muted">
+        <Link to="/" className="hover:text-accent">
+          Contents
+        </Link>
+        <span aria-hidden="true">/</span>
+        <span>{partTitle}</span>
       </p>
 
-      <span className="inline-block px-3 py-1 rounded-btn bg-bg-panel border border-border-subtle text-text-muted text-sm font-mono">
-        {readTime} read
-      </span>
+      {number && (
+        <p className="mb-1 font-serif text-[26px] leading-none text-accent sm:text-[30px]" aria-label={`Chapter ${number}`}>
+          {number}
+        </p>
+      )}
+      <h1 className="font-serif text-[34px] font-semibold leading-[1.12] tracking-[-0.015em] text-text-primary sm:text-[44px]">
+        {title}
+      </h1>
+      <p className="mt-4 font-sans text-[17px] leading-relaxed text-text-secondary sm:text-lg">{tagline}</p>
+      <p className="mt-3 font-sans text-sm text-text-muted">{readTime.replace(/^~/, 'About ')} read</p>
     </header>
   );
 }

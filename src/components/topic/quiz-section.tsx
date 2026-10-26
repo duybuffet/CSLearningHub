@@ -1,47 +1,29 @@
 import { useState } from 'react';
-import { AnimatePresence } from 'framer-motion';
 import type { QuizQuestion } from '@/types/content-schema-types';
+import type { NumberedTopic } from '@/lib/content-loader';
 import { useTopicProgress } from '@/hooks/use-topic-progress';
-import { flatTopicList } from '@/lib/content-loader';
 import { QuizQuestionCard } from './quiz-question-card';
 import { QuizResultSummary } from './quiz-result-summary';
 
 interface QuizSectionProps {
   topicId: string;
   quiz: QuizQuestion[];
+  next?: NumberedTopic;
 }
 
 type QuizState = 'idle' | 'answering' | 'done';
 
-function buildNextTopicHref(topicId: string): string | undefined {
-  const all = flatTopicList();
-  const currentIdx = all.findIndex(
-    (t) => `${t.phaseId}_${t.slug}` === topicId,
-  );
-  if (currentIdx === -1) return undefined;
-
-  for (let i = currentIdx + 1; i < all.length; i++) {
-    const next = all[i];
-    if (next.file) {
-      return `/phase/${next.phaseId}/${next.slug}`;
-    }
-  }
-  return undefined;
-}
-
-export function QuizSection({ topicId, quiz }: QuizSectionProps) {
+export function QuizSection({ topicId, quiz, next }: QuizSectionProps) {
   const [state, setState] = useState<QuizState>('idle');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [correctCount, setCorrectCount] = useState(0);
   const [finalScore, setFinalScore] = useState(0);
-
   const { progress, setQuizScore } = useTopicProgress(topicId);
 
   if (!quiz || quiz.length === 0) return null;
-
   const total = quiz.length;
 
-  function handleStart() {
+  function start() {
     setCurrentIndex(0);
     setCorrectCount(0);
     setFinalScore(0);
@@ -50,70 +32,57 @@ export function QuizSection({ topicId, quiz }: QuizSectionProps) {
 
   function handleAnswered(correct: boolean) {
     const newCorrect = correctCount + (correct ? 1 : 0);
-
+    setCorrectCount(newCorrect);
     if (currentIndex + 1 >= total) {
       const pct = Math.round((newCorrect / total) * 100);
-      setCorrectCount(newCorrect);
       setFinalScore(pct);
       setQuizScore(pct);
       setState('done');
     } else {
-      setCorrectCount(newCorrect);
       setCurrentIndex((i) => i + 1);
     }
   }
 
-  function handleRetry() {
-    setCurrentIndex(0);
-    setCorrectCount(0);
-    setFinalScore(0);
-    setState('answering');
-  }
-
-  const nextTopicHref = buildNextTopicHref(topicId);
-
   return (
-    <section className="bg-bg-card rounded-card border border-border-subtle p-6 flex flex-col gap-6">
-      <h2 className="text-text-primary font-semibold text-lg">Quiz</h2>
+    <section className="max-w-prose rounded-card border border-border-subtle bg-bg-card/60 p-5 sm:p-6" aria-labelledby="quiz-heading">
+      <div className="mb-4 flex items-baseline justify-between gap-3">
+        <h2 id="quiz-heading" className="font-sans text-[19px] font-semibold text-text-primary">
+          Check your understanding
+        </h2>
+        {state === 'answering' && (
+          <span className="shrink-0 font-sans text-sm text-text-muted">
+            {currentIndex + 1} of {total}
+          </span>
+        )}
+      </div>
 
       {state === 'idle' && (
-        <div className="flex flex-col items-center gap-4 py-4">
-          <p className="text-text-secondary text-sm">
-            Test your understanding with {total} question{total !== 1 ? 's' : ''}.
-          </p>
-          {progress.quizScore !== undefined && (
-            <p className="text-text-muted text-xs">
-              Best score: <span className="text-text-secondary font-semibold">{progress.quizScore}%</span>
-            </p>
-          )}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-3">
           <button
-            onClick={handleStart}
-            className="px-6 py-3 rounded-btn bg-accent-orange text-white font-semibold text-sm hover:opacity-90 transition-opacity"
+            onClick={start}
+            className="rounded-btn bg-accent px-5 py-2.5 font-sans text-sm font-medium text-bg-primary hover:bg-accent/90"
           >
-            Start Quiz — {total} question{total !== 1 ? 's' : ''}
+            {progress.quizScore !== undefined ? 'Retake quiz' : 'Start quiz'}
           </button>
+          <span className="font-sans text-sm text-text-muted">
+            {total} questions
+            {progress.quizScore !== undefined && `, best score ${progress.quizScore}%`}
+          </span>
         </div>
       )}
 
       {state === 'answering' && (
         <>
-          {/* Progress bar */}
-          <div className="w-full bg-bg-panel rounded-full h-1.5 overflow-hidden">
-            <div
-              className="bg-accent-orange h-1.5 rounded-full transition-all duration-300"
-              style={{ width: `${((currentIndex) / total) * 100}%` }}
-            />
+          <div className="mb-5 h-0.5 w-full bg-border-subtle" aria-hidden="true">
+            <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${(currentIndex / total) * 100}%` }} />
           </div>
-
-          <AnimatePresence mode="wait">
-            <QuizQuestionCard
-              key={quiz[currentIndex].id}
-              question={quiz[currentIndex]}
-              questionNumber={currentIndex + 1}
-              total={total}
-              onAnswered={handleAnswered}
-            />
-          </AnimatePresence>
+          <QuizQuestionCard
+            key={quiz[currentIndex].id}
+            question={quiz[currentIndex]}
+            questionNumber={currentIndex + 1}
+            total={total}
+            onAnswered={handleAnswered}
+          />
         </>
       )}
 
@@ -123,8 +92,8 @@ export function QuizSection({ topicId, quiz }: QuizSectionProps) {
           bestScore={progress.quizScore}
           correctCount={correctCount}
           total={total}
-          onRetry={handleRetry}
-          nextTopicHref={nextTopicHref}
+          onRetry={start}
+          next={next}
         />
       )}
     </section>

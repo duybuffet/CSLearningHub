@@ -1,109 +1,54 @@
 import { useState } from 'react';
-import { NavLink } from 'react-router-dom';
-import { getCurriculum, topicIdFor } from '@/lib/content-loader';
+import { Link, NavLink, useParams } from 'react-router-dom';
+import { getCurriculum, topicIdFor, topicsInPhase } from '@/lib/content-loader';
 import { overallCompletion } from '@/lib/completion-progress-helpers';
 import { useProgressStore } from '@/store/progress-store-with-persist';
-import { ProgressBar } from '@/components/ui/progress-bar';
 import type { CurriculumPhase } from '@/types/content-schema-types';
 
-function PhaseSection({
-  phase,
-  defaultOpen,
-}: {
-  phase: CurriculumPhase;
-  defaultOpen: boolean;
-}) {
+function PartSection({ phase, partNumber, defaultOpen }: { phase: CurriculumPhase; partNumber: number; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
   const progress = useProgressStore((s) => s.progress);
 
   return (
-    <div className="mb-1">
+    <div>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded-btn px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-text-muted transition-colors hover:text-text-secondary"
+        className="flex w-full items-baseline gap-2.5 rounded-btn px-3 py-2 text-left text-[14px] text-text-primary hover:bg-bg-panel"
         aria-expanded={open}
       >
-        <span className="text-base leading-none">{phase.icon}</span>
-        <span className="flex-1 truncate">{phase.title}</span>
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 12 12"
-          fill="none"
-          className={`shrink-0 transition-transform duration-200 ${open ? 'rotate-90' : ''}`}
-          aria-hidden="true"
-        >
-          <path
-            d="M4 2l4 4-4 4"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <span className="w-5 shrink-0 font-serif text-[15px] text-text-muted">{partNumber}</span>
+        <span className="flex-1 truncate font-medium" title={phase.title}>
+          {phase.title}
+        </span>
       </button>
 
       {open && (
-        <div className="mt-1 space-y-0.5">
-          {phase.weeks.map((week) => (
-            <div key={week.id}>
-              <p className="px-3 py-1 text-xs font-medium text-text-muted/70">{week.title}</p>
-              {week.topics.map((topic) => {
-                const topicId = topicIdFor(phase.id, topic.slug);
-                const isRead = progress[topicId]?.read ?? false;
-                const available = !!topic.file;
-
-                if (!available) {
-                  return (
-                    <div
-                      key={topic.slug}
-                      className="flex cursor-not-allowed items-center gap-2 rounded-btn px-3 py-1.5 text-sm text-text-muted/50"
-                      title="Coming soon"
-                    >
-                      <span className="flex-1 truncate">{topic.title}</span>
-                      <span className="text-xs opacity-50">soon</span>
-                    </div>
-                  );
-                }
-
-                return (
-                  <NavLink
-                    key={topic.slug}
-                    to={`/phase/${phase.id}/${topic.slug}`}
-                    className={({ isActive }) =>
-                      [
-                        'flex items-center gap-2 rounded-btn px-3 py-1.5 text-sm transition-colors',
-                        isActive
-                          ? 'border-l-2 border-accent-orange bg-accent-orange/10 pl-[10px] text-text-primary'
-                          : 'text-text-secondary hover:bg-bg-panel hover:text-text-primary',
-                      ].join(' ')
-                    }
-                  >
-                    <span className="flex-1 truncate">{topic.title}</span>
-                    {isRead && (
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 12 12"
-                        fill="none"
-                        className="shrink-0 text-accent-green"
-                        aria-label="Read"
-                      >
-                        <path
-                          d="M2 6l3 3 5-5"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    )}
-                  </NavLink>
-                );
-              })}
-            </div>
-          ))}
-        </div>
+        <ol className="mb-2 mt-0.5">
+          {topicsInPhase(phase.id).map((c) => {
+            const isRead = progress[topicIdFor(c.phaseId, c.slug)]?.read ?? false;
+            return (
+              <li key={c.slug}>
+                <NavLink
+                  to={c.href}
+                  className={({ isActive }) =>
+                    [
+                      'flex items-baseline gap-2.5 border-l-2 py-1.5 pl-[38px] pr-3 text-[13.5px] leading-snug',
+                      isActive
+                        ? 'border-accent bg-accent/[0.07] text-accent'
+                        : 'border-transparent text-text-secondary hover:text-text-primary',
+                    ].join(' ')
+                  }
+                >
+                  <span className="w-7 shrink-0 tabular-nums text-text-muted">{c.number}</span>
+                  <span className="flex-1 truncate" title={c.title}>
+                    {c.title}
+                  </span>
+                  {isRead && <span className="h-1.5 w-1.5 shrink-0 self-center rounded-full bg-marker" aria-label="Read" />}
+                </NavLink>
+              </li>
+            );
+          })}
+        </ol>
       )}
     </div>
   );
@@ -113,31 +58,35 @@ export function SidebarNavigationTree() {
   const curriculum = getCurriculum();
   const progress = useProgressStore((s) => s.progress);
   const { pct, read, total } = overallCompletion(curriculum, progress);
+  // Expand the part being read (fallback: first part on the home page)
+  const { phaseId } = useParams<{ phaseId?: string }>();
 
   return (
-    <nav className="flex h-full flex-col">
-      {/* Logo / brand */}
-      <div className="px-4 py-5">
-        <span className="text-lg font-bold text-text-primary">CS Learning Hub</span>
+    <nav className="flex h-full flex-col font-sans" aria-label="Contents">
+      <div className="px-5 pb-4 pr-12 pt-5">
+        <Link to="/" className="font-serif text-[19px] font-semibold text-text-primary hover:text-accent">
+          CS Learning Hub
+        </Link>
       </div>
 
-      {/* Phase tree — scrollable */}
-      <div className="flex-1 overflow-y-auto px-2 pb-4">
+      <div className="flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
         {curriculum.phases.map((phase, i) => (
-          <PhaseSection key={phase.id} phase={phase} defaultOpen={i === 0} />
+          <PartSection
+            key={phase.id}
+            phase={phase}
+            partNumber={i + 1}
+            defaultOpen={phaseId ? phase.id === phaseId : i === 0}
+          />
         ))}
       </div>
 
-      {/* Overall progress footer */}
-      <div className="border-t border-border-subtle px-4 py-4">
-        <div className="mb-2 flex items-center justify-between text-xs text-text-muted">
-          <span>Overall progress</span>
-          <span>
-            {read}/{total} topics
-          </span>
+      <div className="border-t border-border-subtle px-5 py-4">
+        <div className="h-[3px] w-full bg-border-subtle" aria-hidden="true">
+          <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
         </div>
-        <ProgressBar value={pct} />
-        <p className="mt-1 text-right text-xs text-text-muted">{pct}%</p>
+        <p className="mt-2 text-xs text-text-muted">
+          {read} of {total} chapters read
+        </p>
       </div>
     </nav>
   );

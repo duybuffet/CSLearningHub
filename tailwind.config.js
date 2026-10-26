@@ -1,30 +1,42 @@
 /** @type {import('tailwindcss').Config} */
-// Dark-theme tokens backed by CSS variables (see src/index.css).
+// Theme tokens are RGB channels defined in src/index.css (light + dark).
+const token = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
       colors: {
-        'bg-primary': 'var(--bg-primary)',
-        'bg-card': 'var(--bg-card)',
-        'bg-panel': 'var(--bg-panel)',
-        'bg-code': 'var(--bg-code)',
-        'text-primary': 'var(--text-primary)',
-        'text-secondary': 'var(--text-secondary)',
-        'text-muted': 'var(--text-muted)',
-        'accent-orange': 'var(--accent-orange)',
-        'accent-green': 'var(--accent-green)',
-        'accent-blue': 'var(--accent-blue)',
-        'accent-purple': 'var(--accent-purple)',
-        'border-subtle': 'var(--border)',
+        'bg-primary': token('bg-primary'),
+        'bg-card': token('bg-card'),
+        'bg-panel': token('bg-panel'),
+        'bg-code': token('bg-code'),
+        'text-primary': token('text-primary'),
+        'text-secondary': token('text-secondary'),
+        'text-muted': token('text-muted'),
+        'border-subtle': token('border'),
+        accent: token('accent'),
+        marker: token('marker'),
+        'marker-ink': token('marker-ink'),
+        success: token('success'),
+        danger: token('danger'),
+        warn: token('warn'),
+        'accent-orange': token('accent-orange'),
+        'accent-green': token('accent-green'),
+        'accent-blue': token('accent-blue'),
+        'accent-purple': token('accent-purple'),
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', '"Fira Code"', 'monospace'],
+        sans: ['"IBM Plex Sans"', 'system-ui', 'sans-serif'],
+        serif: ['"Source Serif 4"', 'Georgia', 'serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
       },
       borderRadius: {
-        card: '16px',
-        btn: '8px',
+        card: '10px',
+        btn: '6px',
+      },
+      maxWidth: {
+        prose: '68ch',
       },
     },
   },

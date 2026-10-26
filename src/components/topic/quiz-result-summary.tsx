@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom';
-import { motion } from 'framer-motion';
+import type { NumberedTopic } from '@/lib/content-loader';
 
 interface QuizResultSummaryProps {
   score: number;
@@ -7,73 +7,46 @@ interface QuizResultSummaryProps {
   correctCount: number;
   total: number;
   onRetry: () => void;
-  nextTopicHref?: string;
+  next?: NumberedTopic;
 }
 
-export function QuizResultSummary({
-  score,
-  bestScore,
-  correctCount,
-  total,
-  onRetry,
-  nextTopicHref,
-}: QuizResultSummaryProps) {
-  const isPerfect = score === 100;
-  const isPassing = score >= 70;
-
-  const scoreColor = isPerfect
-    ? 'text-accent-green'
-    : isPassing
-      ? 'text-accent-blue'
-      : 'text-accent-orange';
+export function QuizResultSummary({ score, bestScore, correctCount, total, onRetry, next }: QuizResultSummaryProps) {
+  const message =
+    score === 100
+      ? 'Every answer correct.'
+      : score >= 70
+        ? 'Solid. Skim the explanations for the ones you missed.'
+        : 'Re-read the sections behind the questions you missed, then try again.';
 
   return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.97 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ duration: 0.25 }}
-      className="flex flex-col items-center gap-6 py-6 text-center"
-    >
-      <div className="flex flex-col items-center gap-1">
-        <span className={`text-6xl font-bold font-mono ${scoreColor}`}>
-          {score}%
-        </span>
-        <span className="text-text-secondary text-sm">
-          {correctCount} / {total} correct
-        </span>
+    <div className="flex flex-col gap-5">
+      <div>
+        <p className="font-serif text-[40px] leading-none text-text-primary">
+          {correctCount}
+          <span className="text-text-muted"> / {total}</span>
+        </p>
+        <p className="mt-2 font-sans text-[15px] text-text-secondary">{message}</p>
+        {bestScore !== undefined && bestScore > score && (
+          <p className="mt-1 font-sans text-sm text-text-muted">Your best is {bestScore}%.</p>
+        )}
       </div>
 
-      {bestScore !== undefined && (
-        <p className="text-text-muted text-xs">
-          Best score: <span className="text-text-secondary font-semibold">{bestScore}%</span>
-        </p>
-      )}
-
-      <p className="text-text-secondary text-sm max-w-xs">
-        {isPerfect
-          ? 'Perfect score! Outstanding work.'
-          : isPassing
-            ? 'Good job! Keep reviewing to solidify your understanding.'
-            : 'Keep practicing — review the topic and try again.'}
-      </p>
-
-      <div className="flex flex-col sm:flex-row gap-3 w-full max-w-xs">
+      <div className="flex flex-col gap-2 sm:flex-row">
         <button
           onClick={onRetry}
-          className="flex-1 px-4 py-3 rounded-btn border border-border-subtle bg-bg-panel text-text-primary text-sm font-semibold hover:border-accent-blue transition-colors"
+          className="rounded-btn border border-border-subtle bg-bg-card px-4 py-2.5 font-sans text-sm font-medium text-text-primary hover:border-accent/60"
         >
-          Retry
+          Try again
         </button>
-
-        {nextTopicHref && (
+        {next && (
           <Link
-            to={nextTopicHref}
-            className="flex-1 px-4 py-3 rounded-btn bg-accent-orange text-white text-sm font-semibold hover:opacity-90 transition-opacity text-center"
+            to={next.href}
+            className="rounded-btn bg-accent px-4 py-2.5 text-center font-sans text-sm font-medium text-bg-primary hover:bg-accent/90"
           >
-            Next Topic →
+            Next: {next.number} {next.title}
           </Link>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
